@@ -1,4 +1,8 @@
 const std = @import("std");
+const math = @import("math.zig");
+const Vec3 = math.Vec3;
+const Mat4 = math.Mat4;
+const Camera = @import("camera.zig").Camera;
 
 // Import C headers
 const c = @cImport({
@@ -30,72 +34,6 @@ const fragment_shader_src =
     \\}
 ;
 
-// Matrix Helper
-const Mat4 = struct {
-    data: [4][4]f32,
-
-    fn identity() Mat4 {
-        return .{
-            .data = .{
-                .{ 1, 0, 0, 0 },
-                .{ 0, 1, 0, 0 },
-                .{ 0, 0, 1, 0 },
-                .{ 0, 0, 0, 1 },
-            },
-        };
-    }
-
-    fn multiply(a: Mat4, b: Mat4) Mat4 {
-        var res = Mat4.identity();
-        for (0..4) |r| {
-            for (0..4) |c_idx| {
-                res.data[r][c_idx] =
-                    a.data[r][0] * b.data[0][c_idx] +
-                    a.data[r][1] * b.data[1][c_idx] +
-                    a.data[r][2] * b.data[2][c_idx] +
-                    a.data[r][3] * b.data[3][c_idx];
-            }
-        }
-        return res;
-    }
-
-    fn perspective(fov: f32, aspect: f32, near: f32, far: f32) Mat4 {
-        const tan_half_fov = std.math.tan(fov / 2.0);
-        var res = Mat4.identity();
-        // Zero out diagonal first
-        res.data[0][0] = 0;
-        res.data[1][1] = 0;
-        res.data[2][2] = 0;
-        res.data[3][3] = 0;
-
-        res.data[0][0] = 1.0 / (aspect * tan_half_fov);
-        res.data[1][1] = 1.0 / tan_half_fov;
-        res.data[2][2] = -(far + near) / (far - near);
-        res.data[2][3] = -(2.0 * far * near) / (far - near);
-        res.data[3][2] = -1.0;
-        return res;
-    }
-
-    fn translate(x: f32, y: f32, z: f32) Mat4 {
-        var res = Mat4.identity();
-        res.data[0][3] = x;
-        res.data[1][3] = y;
-        res.data[2][3] = z;
-        return res;
-    }
-
-    fn rotateY(angle: f32) Mat4 {
-        var res = Mat4.identity();
-        const c_val = std.math.cos(angle);
-        const s_val = std.math.sin(angle);
-        res.data[0][0] = c_val;
-        res.data[0][2] = s_val;
-        res.data[2][0] = -s_val;
-        res.data[2][2] = c_val;
-        return res;
-    }
-};
-
 pub fn main() !void {
     // 1. Initialize SDL
     if (c.SDL_Init(c.SDL_INIT_VIDEO) == false) {
@@ -120,6 +58,7 @@ pub fn main() !void {
     defer _ = c.SDL_GL_DestroyContext(gl_context);
 
     _ = c.SDL_GL_MakeCurrent(window, gl_context);
+    _ = c.SDL_SetWindowRelativeMouseMode(window, true);
 
     // 5. Initialize GLEW (Must be done after Context creation)
     c.glewExperimental = c.GL_TRUE;
@@ -129,37 +68,58 @@ pub fn main() !void {
 
     // Enable Depth Test for 3D
     c.glEnable(c.GL_DEPTH_TEST);
+    // Enable Backface Culling
+    c.glEnable(c.GL_CULL_FACE);
 
-    // 6. Setup Tetrahedron Data (Position x,y,z | Color r,g,b)
+    // 6. Setup Cube Data (Position x,y,z | Color r,g,b)
     const vertices = [_]f32{
-        // Front Face (Red)
-        0.0,  0.5,  0.0,  1.0, 0.0, 0.0,
-        -0.5, -0.5, 0.5,  1.0, 0.0, 0.0,
-        0.5,  -0.5, 0.5,  1.0, 0.0, 0.0,
+        // Back Face
+        -0.5, -0.5, -0.5, 1.0, 0.0, 0.0,
+        0.5,  0.5,  -0.5, 1.0, 0.0, 0.0,
+        0.5,  -0.5, -0.5, 1.0, 0.0, 0.0,
+        0.5,  0.5,  -0.5, 1.0, 0.0, 0.0,
+        -0.5, -0.5, -0.5, 1.0, 0.0, 0.0,
+        -0.5, 0.5,  -0.5, 1.0, 0.0, 0.0,
 
-        // Right Face (Green)
-        0.0,  0.5,  0.0,  0.0, 1.0, 0.0,
+        // Front Face
+        -0.5, -0.5, 0.5,  0.0, 1.0, 0.0,
         0.5,  -0.5, 0.5,  0.0, 1.0, 0.0,
-        0.5,  -0.5, -0.5, 0.0, 1.0, 0.0,
+        0.5,  0.5,  0.5,  0.0, 1.0, 0.0,
+        0.5,  0.5,  0.5,  0.0, 1.0, 0.0,
+        -0.5, 0.5,  0.5,  0.0, 1.0, 0.0,
+        -0.5, -0.5, 0.5,  0.0, 1.0, 0.0,
 
-        // Back Face (Blue)
-        0.0,  0.5,  0.0,  0.0, 0.0, 1.0,
-        0.5,  -0.5, -0.5, 0.0, 0.0, 1.0,
+        // Left Face
+        -0.5, 0.5,  0.5,  0.0, 0.0, 1.0,
+        -0.5, 0.5,  -0.5, 0.0, 0.0, 1.0,
         -0.5, -0.5, -0.5, 0.0, 0.0, 1.0,
+        -0.5, -0.5, -0.5, 0.0, 0.0, 1.0,
+        -0.5, -0.5, 0.5,  0.0, 0.0, 1.0,
+        -0.5, 0.5,  0.5,  0.0, 0.0, 1.0,
 
-        // Left Face (Yellow)
-        0.0,  0.5,  0.0,  1.0, 1.0, 0.0,
-        -0.5, -0.5, -0.5, 1.0, 1.0, 0.0,
-        -0.5, -0.5, 0.5,  1.0, 1.0, 0.0,
+        // Right Face
+        0.5,  0.5,  0.5,  1.0, 1.0, 0.0,
+        0.5,  -0.5, -0.5, 1.0, 1.0, 0.0,
+        0.5,  0.5,  -0.5, 1.0, 1.0, 0.0,
+        0.5,  -0.5, -0.5, 1.0, 1.0, 0.0,
+        0.5,  0.5,  0.5,  1.0, 1.0, 0.0,
+        0.5,  -0.5, 0.5,  1.0, 1.0, 0.0,
 
-        // Bottom Face (Grey) - Optional, makes it a solid solid
-        -0.5, -0.5, 0.5,  0.5, 0.5, 0.5,
-        -0.5, -0.5, -0.5, 0.5, 0.5, 0.5,
-        0.5,  -0.5, -0.5, 0.5, 0.5, 0.5,
+        // Bottom Face
+        -0.5, -0.5, -0.5, 0.0, 1.0, 1.0,
+        0.5,  -0.5, -0.5, 0.0, 1.0, 1.0,
+        0.5,  -0.5, 0.5,  0.0, 1.0, 1.0,
+        0.5,  -0.5, 0.5,  0.0, 1.0, 1.0,
+        -0.5, -0.5, 0.5,  0.0, 1.0, 1.0,
+        -0.5, -0.5, -0.5, 0.0, 1.0, 1.0,
 
-        -0.5, -0.5, 0.5,  0.5, 0.5, 0.5,
-        0.5,  -0.5, -0.5, 0.5, 0.5, 0.5,
-        0.5,  -0.5, 0.5,  0.5, 0.5, 0.5,
+        // Top Face
+        -0.5, 0.5,  -0.5, 1.0, 0.0, 1.0,
+        -0.5, 0.5,  0.5,  1.0, 0.0, 1.0,
+        0.5,  0.5,  0.5,  1.0, 0.0, 1.0,
+        0.5,  0.5,  0.5,  1.0, 0.0, 1.0,
+        0.5,  0.5,  -0.5, 1.0, 0.0, 1.0,
+        -0.5, 0.5,  -0.5, 1.0, 0.0, 1.0,
     };
 
     var vao: c.GLuint = undefined;
@@ -181,45 +141,72 @@ pub fn main() !void {
     c.glEnableVertexAttribArray().?(1);
 
     // 7. Compile Shaders
-
     const shader_program = try createShaderProgram();
     defer c.glDeleteProgram().?(shader_program);
 
     const transform_loc = c.glGetUniformLocation().?(shader_program, "transform");
 
+    // Camera Setup
+    var camera = Camera.new(Vec3.new(0.0, 0.0, 3.0), Vec3.new(0.0, 1.0, 0.0), -90.0, 0.0);
+    var lastTime: u64 = c.SDL_GetTicks();
+
     // 8. Main Loop
     var running = true;
     while (running) {
+        // Calculate Delta Time
+        const currentTime = c.SDL_GetTicks();
+        const deltaTime = @as(f32, @floatFromInt(currentTime - lastTime)) / 1000.0;
+        lastTime = currentTime;
+
         var event: c.SDL_Event = undefined;
         while (c.SDL_PollEvent(&event)) {
             if (event.type == c.SDL_EVENT_QUIT) running = false;
             if (event.type == c.SDL_EVENT_KEY_DOWN and event.key.key == c.SDLK_ESCAPE) running = false;
+
+            if (event.type == c.SDL_EVENT_MOUSE_MOTION) {
+                camera.processMouseMovement(event.motion.xrel, event.motion.yrel, true);
+            }
+
+            if (event.type == c.SDL_EVENT_WINDOW_RESIZED) {
+                var w: c_int = 0;
+                var h: c_int = 0;
+                _ = c.SDL_GetWindowSize(window, &w, &h);
+                c.glViewport(0, 0, w, h);
+            }
         }
 
-        // Calculate Matrix
-        const time = @as(f32, @floatFromInt(c.SDL_GetTicks())) / 1000.0;
+        // Keyboard Input
+        const keys = c.SDL_GetKeyboardState(null);
 
-        // Projection (Aspect ratio 800/600)
-        const proj = Mat4.perspective(std.math.degreesToRadians(45.0), 800.0 / 600.0, 0.1, 100.0);
+        if (keys[c.SDL_SCANCODE_W]) camera.processKeyboard(.FORWARD, deltaTime);
+        if (keys[c.SDL_SCANCODE_S]) camera.processKeyboard(.BACKWARD, deltaTime);
+        if (keys[c.SDL_SCANCODE_A]) camera.processKeyboard(.LEFT, deltaTime);
+        if (keys[c.SDL_SCANCODE_D]) camera.processKeyboard(.RIGHT, deltaTime);
 
-        // View/Model (Push back -3 units, rotate)
-        const model_trans = Mat4.translate(0, 0, -3.0);
-        const model_rot = Mat4.rotateY(time);
-        const model = Mat4.multiply(model_trans, model_rot);
+        // Projection
+        var w: c_int = 0;
+        var h: c_int = 0;
+        _ = c.SDL_GetWindowSize(window, &w, &h);
+        const aspect = @as(f32, @floatFromInt(w)) / @as(f32, @floatFromInt(h));
+        const proj = Mat4.perspective(std.math.degreesToRadians(45.0), aspect, 0.1, 100.0);
+        // View (Camera)
+        const view = camera.getViewMatrix();
 
-        const mvp = Mat4.multiply(proj, model);
+        // Model (Identity)
+        const model = Mat4.identity();
+
+        const mvp = Mat4.multiply(proj, Mat4.multiply(view, model));
 
         // Render
-        c.glClearColor(0.1, 0.1, 0.1, 1.0);
+        c.glClearColor(0.2, 0.3, 0.3, 1.0);
         c.glClear(c.GL_COLOR_BUFFER_BIT | c.GL_DEPTH_BUFFER_BIT);
 
         c.glUseProgram().?(shader_program);
 
-        // Send Matrix (transpose = GL_TRUE because our matrix is row-major)
         c.glUniformMatrix4fv().?(transform_loc, 1, c.GL_TRUE, &mvp.data[0][0]);
 
         c.glBindVertexArray().?(vao);
-        c.glDrawArrays(c.GL_TRIANGLES, 0, 18); // 6 triangles * 3 vertices
+        c.glDrawArrays(c.GL_TRIANGLES, 0, 36);
 
         _ = c.SDL_GL_SwapWindow(window);
     }
