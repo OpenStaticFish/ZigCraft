@@ -1,166 +1,170 @@
-# Minecraft-Style Voxel Engine Roadmap
-Strictly following **SOLID principles** throughout development:
-- **S**ingle Responsibility: Each module and class performs exactly one conceptual job.
-- **O**pen/Closed: Systems designed to be extended (new blocks, biomes, UI components) without modification to core logic.
-- **L**iskov Substitution: Interfaces and abstract types allow interchangeable implementations (renderers, world generators, block types).
-- **I**nterface Segregation: Small, focused interfaces (e.g., `IMeshable`, `IUpdatable`, `IRenderable`, `IChunkSource`) instead of giant ones.
-- **D**ependency Inversion: Core engine depends on abstractions, not concrete implementations (e.g., world → IChunkProvider, renderer → IGraphicsBackend).
+# OpenGL Engine Roadmap
+
+This roadmap is derived from The Cherno’s OpenGL series and translated into **engine-level milestones**.  
+Use this as a checklist and progression guide while building your engine.
 
 ---
 
-## High-Level Goal
-A voxel engine similar to early Minecraft (2009–2010 era), built from scratch using **SDL3 + OpenGL + C++** with chunked voxel rendering, procedural worldgen, greedy meshing, player interaction, inventory, water, trees, and day/night cycle.
+## Phase 0 — Foundations
+**Goal:** Window + context + sanity
+
+- [ ] Window creation abstraction (GLFW / SDL)
+- [ ] OpenGL context creation (core profile)
+- [ ] Swap buffers
+- [ ] VSync enable / disable
+- [ ] OpenGL loader (GLAD / GLEW)
+- [ ] Runtime OpenGL version & capability checks
 
 ---
 
-## Phase Roadmap
+## Phase 1 — Modern OpenGL Basics
+**Goal:** Draw *something* correctly, the modern way
 
-### **Phase 1 – Engine Foundation**
-Goal: Base engine loop and camera movement.
-- SDL3 window + GL context setup
-- Main loop (input → update → render)
-- Depth test + backface culling
-- Basic math library (vec3, mat4, perspective, lookAt)
-- FPS camera (WASD + mouse look)
-- Render a single cube using a VAO/VBO + shader
-
-**Done when:** You can fly around a cube smoothly in 3D space.
+- [ ] Core-profile OpenGL only (no fixed pipeline)
+- [ ] Vertex Buffer (VBO) abstraction
+- [ ] Index Buffer (EBO / IBO) abstraction
+- [ ] Vertex Array Object (VAO) abstraction
+- [ ] Vertex attribute specification
+- [ ] Interleaved vertex layouts
+- [ ] Static vs dynamic buffer usage
 
 ---
 
-### **Phase 2 – Block & Chunk System (Naive Implementation)**
-Goal: A block world stored in chunks.
-- Block type enum
-- Chunk structure (16×256×16 recommended)
-- 3D block storage (flat array index or array)
-- World grid of chunks
-- Naive render: draw cube for every non-air block
+## Phase 2 — Shaders
+**Goal:** Full control of the GPU pipeline
 
-**Done when:** A visible world of blocks renders and navigation works.
-
----
-
-### **Phase 3 – Visible Face Culling + Chunk Meshes**
-Goal: Render only visible faces, not every cube.
-- For each block, emit face only if neighbor is air/transparent
-- Build **one mesh per chunk**
-- Rebuild chunk mesh only after modification
-
-**Done when:** High FPS and correct geometry using visible-face logic.
+- [ ] Shader compilation system
+- [ ] Shader linking & validation
+- [ ] Error reporting for shaders
+- [ ] Shader abstraction class
+- [ ] Uniform upload API
+- [ ] Uniform location caching
+- [ ] Shader source hot-reloading
+- [ ] Central shader library / registry
 
 ---
 
-### **Phase 4 – Greedy Meshing**
-Goal: Reduce vertex count by merging similar faces.
-- Implement greedy sweep for each face direction
-- Transparent blocks meshed separately
-- Opaque draw pass + transparent draw pass
+## Phase 3 — Error Handling & Debugging
+**Goal:** Fail loudly, debug easily
 
-**Done when:** Flat areas (e.g., plains) merge large surfaces into huge quads.
-
----
-
-### **Phase 5 – Procedural Terrain & World Streaming**
-Goal: Infinite terrain generation.
-- Perlin or simplex noise heightmap generation
-- Basic materials (grass/dirt/stone)
-- Chunk streaming based on player position
-- Chunk load/unload radius
-- Multi-threaded generation (later)
-
-**Done when:** Terrain generates dynamically as you move.
+- [ ] OpenGL debug context
+- [ ] KHR_debug callback
+- [ ] GL call error macros
+- [ ] Assertions around GPU calls
+- [ ] Engine-level logging system
 
 ---
 
-### **Phase 6 – Day/Night Cycle & Basic Lighting**
-Goal: Sun movement and lighting change.
-- World time variable
-- Directional lighting from sun
-- Ambient light curve across day
-- Sky gradient or skybox
+## Phase 4 — Renderer Architecture
+**Goal:** Hide OpenGL behind a clean engine API
 
-**Done when:** World visually transitions from day to night.
-
----
-
-### **Phase 7 – Water Rendering**
-Goal: Transparent water blocks.
-- Special water block type
-- Render after opaques
-- Semi-transparent color + slight wave shader
-
-**Done when:** Lakes/rivers appear realistic and render correctly.
+- [ ] Renderer API layer
+- [ ] Render command abstraction
+- [ ] Draw call encapsulation
+- [ ] Renderer statistics (draw calls, vertices)
+- [ ] Render state isolation
+- [ ] Multiple object rendering
 
 ---
 
-### **Phase 8 – Trees & World Decoration**
-Goal: Populate terrain.
-- Simple tree generator added during chunk generation
-- Logs & leaves placement
-- Probability-based distribution
+## Phase 5 — Textures & Materials
+**Goal:** Real assets, not hardcoded colors
 
-**Done when:** World feels alive with vegetation.
-
----
-
-### **Phase 9 – Player Physics + Block Interaction**
-Goal: Walk, jump, break, place blocks.
-- AABB collision & physics
-- Raycast block targeting
-- Destroy block (set AIR & rebuild chunk)
-- Place block (from inventory hotbar)
-
-**Done when:** Full creative construction loop works.
+- [ ] Texture loading system
+- [ ] Texture abstraction class
+- [ ] Texture parameter configuration
+- [ ] Texture unit / slot management
+- [ ] Multi-texture rendering
+- [ ] Texture atlases
+- [ ] Material system (shader + textures + params)
 
 ---
 
-### **Phase 10 – Inventory & Hotbar UI**
-Goal: Store and manage items.
-- Inventory structure
-- Block stacks
-- Hotbar selection via keys / mouse scroll
-- 2D UI overlay
+## Phase 6 — Blending & Transparency
+**Goal:** UI, sprites, and transparency
 
-**Done when:** You can collect blocks and choose what to place.
-
----
-
-### **Phase 11 – Saving & Loading**
-Goal: World persistence.
-- Serialize chunk data to disk per chunk
-- Load existing chunks before generating
-- Save player pos + inventory
-- Store seed & metadata
-
-**Done when:** World persists across sessions.
+- [ ] Alpha blending
+- [ ] Blend mode abstraction
+- [ ] Premultiplied alpha support
+- [ ] Transparent object ordering (basic)
 
 ---
 
-### **Phase 12 – Polish, Tools, Extensibility**
-Goal: Improve developer and gameplay experience.
-- Debug UI overlay (FPS, mesh stats, chunk borders)
-- Config system (FOV, render distance)
-- Toggle wireframe/debug visualizations
-- Data-driven block definitions
+## Phase 7 — Math & Transforms
+**Goal:** Cameras, movement, real scenes
 
-**Done when:** Engine becomes extendable and maintainable.
-
----
-
-## Final Expected Features
-| Feature | Delivered By |
-|---------|--------------|
-| Chunked voxel rendering | Phase 2–4 |
-| Infinite world | Phase 5 |
-| Day/night cycle | Phase 6 |
-| Water | Phase 7 |
-| Trees / world decoration | Phase 8 |
-| Block break/place | Phase 9 |
-| Inventory | Phase 10 |
-| Save/Load | Phase 11 |
-| Debug tools & extensibility | Phase 12 |
+- [ ] Math library (vec2/3/4, mat4)
+- [ ] Transform component
+- [ ] Projection matrices (ortho & perspective)
+- [ ] View matrices (camera)
+- [ ] Model matrices
+- [ ] MVP pipeline
+- [ ] Camera abstraction
 
 ---
 
-## Recommended Directory Structure (SOLID-Friendly)
+## Phase 8 — Batch Rendering (Performance)
+**Goal:** Reduce draw calls, scale scenes
 
+- [ ] Batch renderer architecture
+- [ ] Batched colored geometry
+- [ ] Batched textured geometry
+- [ ] Texture slot management
+- [ ] Dynamic geometry batching
+- [ ] Draw-call minimisation strategy
+
+---
+
+## Phase 9 — Uniform Optimisation
+**Goal:** Stop hammering the driver
+
+- [ ] Uniform Buffer Objects (UBOs)
+- [ ] Frame-level uniform buffers
+- [ ] Per-object vs per-frame separation
+- [ ] Persistent mapped buffers (optional)
+
+---
+
+## Phase 10 — Tooling & Engine UX
+**Goal:** Developer-friendly engine
+
+- [ ] ImGui integration
+- [ ] Debug panels
+- [ ] Renderer stats overlay
+- [ ] Live shader reload toggle
+- [ ] Runtime render mode toggles (wireframe, etc.)
+
+---
+
+## Phase 11 — Testing Framework
+**Goal:** Don’t break rendering accidentally
+
+- [ ] Render test framework
+- [ ] Isolated render tests
+- [ ] Texture rendering tests
+- [ ] Regression test scenes
+
+---
+
+## Engine v1 “Done” Definition
+You can call this a **real engine** when you have:
+
+- [ ] Clean renderer API
+- [ ] Shader + material system
+- [ ] Texture & asset loading
+- [ ] Camera & transform system
+- [ ] Batch renderer
+- [ ] Debug UI
+- [ ] Measured performance metrics
+
+---
+
+## Optional Future Directions
+- Vulkan backend
+- Deferred rendering
+- ECS integration
+- Scene graph
+- Asset pipeline
+- Editor tooling
+
+---
