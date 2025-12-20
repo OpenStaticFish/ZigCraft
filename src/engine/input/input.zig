@@ -7,9 +7,7 @@ const Key = interfaces.Key;
 const MouseButton = interfaces.MouseButton;
 const Modifiers = interfaces.Modifiers;
 
-const c = @cImport({
-    @cInclude("SDL3/SDL.h");
-});
+const c = @import("../../c.zig").c;
 
 pub const Input = struct {
     /// Currently pressed keys

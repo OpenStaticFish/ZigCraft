@@ -2,9 +2,7 @@
 //! Provides delta time, fixed timestep support, and FPS tracking.
 
 const std = @import("std");
-const c = @cImport({
-    @cInclude("SDL3/SDL.h");
-});
+const c = @import("../../c.zig").c;
 
 pub const Time = struct {
     /// Time since last frame in seconds

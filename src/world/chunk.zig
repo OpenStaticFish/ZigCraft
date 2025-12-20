@@ -9,6 +9,20 @@ pub const CHUNK_SIZE_Z = 16;
 pub const CHUNK_VOLUME = CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z;
 
 pub const Chunk = struct {
+    /// Chunk state for streaming
+    pub const State = enum {
+        missing,
+        queued_for_generation,
+        generating,
+        generated,
+        queued_for_mesh,
+        meshing,
+        mesh_ready,
+        uploading,
+        renderable,
+        unloading,
+    };
+
     /// Chunk position in chunk coordinates (multiply by 16 for world pos)
     chunk_x: i32,
     chunk_z: i32,
@@ -17,17 +31,29 @@ pub const Chunk = struct {
     /// Index = x + z * CHUNK_SIZE_X + y * CHUNK_SIZE_X * CHUNK_SIZE_Z
     blocks: [CHUNK_VOLUME]BlockType,
 
+    /// Current state in the streaming pipeline
+    state: State = .missing,
+
+    /// Job token to validate async results (increments on recycle)
+    job_token: u32 = 0,
+
     /// Is the mesh out of date?
     dirty: bool = true,
 
     /// Has this chunk been generated?
     generated: bool = false,
 
+    /// Number of active jobs referencing this chunk (prevents unloading)
+    pin_count: std.atomic.Value(u32),
+
     pub fn init(chunk_x: i32, chunk_z: i32) Chunk {
         return .{
             .chunk_x = chunk_x,
             .chunk_z = chunk_z,
             .blocks = [_]BlockType{.air} ** CHUNK_VOLUME,
+            .state = .missing,
+            .job_token = 0,
+            .pin_count = std.atomic.Value(u32).init(0),
         };
     }
 
@@ -69,6 +95,18 @@ pub const Chunk = struct {
     /// Get world Z coordinate of this chunk's origin
     pub fn getWorldZ(self: *const Chunk) i32 {
         return self.chunk_z * CHUNK_SIZE_Z;
+    }
+
+    pub fn pin(self: *Chunk) void {
+        _ = self.pin_count.fetchAdd(1, .monotonic);
+    }
+
+    pub fn unpin(self: *Chunk) void {
+        _ = self.pin_count.fetchSub(1, .monotonic);
+    }
+
+    pub fn isPinned(self: *const Chunk) bool {
+        return self.pin_count.load(.monotonic) > 0;
     }
 
     /// Fill entire chunk with a block type

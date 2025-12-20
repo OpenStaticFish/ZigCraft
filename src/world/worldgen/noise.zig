@@ -72,18 +72,60 @@ pub const Noise = struct {
         return lerp(x1, x2, v);
     }
 
+    /// 3D Perlin noise, returns value in range [-1, 1]
+    pub fn perlin3D(self: *const Noise, x: f32, y: f32, z: f32) f32 {
+        const xi: i32 = @intFromFloat(@floor(x));
+        const yi: i32 = @intFromFloat(@floor(y));
+        const zi: i32 = @intFromFloat(@floor(z));
+
+        const xf = x - @floor(x);
+        const yf = y - @floor(y);
+        const zf = z - @floor(z);
+
+        const u = fade(xf);
+        const v = fade(yf);
+        const w = fade(zf);
+
+        const a = self.perm[@intCast(@mod(xi, 256))] + @as(usize, @intCast(@mod(yi, 256)));
+        const aa = self.perm[@intCast(@mod(a, 256))] + @as(usize, @intCast(@mod(zi, 256)));
+        const ab = self.perm[@intCast(@mod(a + 1, 256))] + @as(usize, @intCast(@mod(zi, 256)));
+        const b = self.perm[@intCast(@mod(xi + 1, 256))] + @as(usize, @intCast(@mod(yi, 256)));
+        const ba = self.perm[@intCast(@mod(b, 256))] + @as(usize, @intCast(@mod(zi, 256)));
+        const bb = self.perm[@intCast(@mod(b + 1, 256))] + @as(usize, @intCast(@mod(zi, 256)));
+
+        // Gradients
+        const g1 = grad3D(self.perm[@intCast(@mod(aa, 256))], xf, yf, zf);
+        const g2 = grad3D(self.perm[@intCast(@mod(ba, 256))], xf - 1, yf, zf);
+        const g3 = grad3D(self.perm[@intCast(@mod(ab, 256))], xf, yf - 1, zf);
+        const g4 = grad3D(self.perm[@intCast(@mod(bb, 256))], xf - 1, yf - 1, zf);
+        const g5 = grad3D(self.perm[@intCast(@mod(aa + 1, 256))], xf, yf, zf - 1);
+        const g6 = grad3D(self.perm[@intCast(@mod(ba + 1, 256))], xf - 1, yf, zf - 1);
+        const g7 = grad3D(self.perm[@intCast(@mod(ab + 1, 256))], xf, yf - 1, zf - 1);
+        const g8 = grad3D(self.perm[@intCast(@mod(bb + 1, 256))], xf - 1, yf - 1, zf - 1);
+
+        const x1 = lerp(g1, g2, u);
+        const x2 = lerp(g3, g4, u);
+        const y1 = lerp(x1, x2, v);
+
+        const x3 = lerp(g5, g6, u);
+        const x4 = lerp(g7, g8, u);
+        const y2 = lerp(x3, x4, v);
+
+        return lerp(y1, y2, w);
+    }
+
     /// Fractal Brownian Motion - multiple octaves of noise
-    pub fn fbm2D(self: *const Noise, x: f32, y: f32, octaves: u32, lacunarity: f32, persistence: f32) f32 {
+    pub fn fbm2D(self: *const Noise, x: f32, y: f32, octaves: u32, lacunarity: f32, persistence: f32, frequency: f32) f32 {
         var total: f32 = 0;
-        var frequency: f32 = 1;
+        var current_frequency: f32 = frequency;
         var amplitude: f32 = 1;
         var max_value: f32 = 0;
 
         for (0..octaves) |_| {
-            total += self.perlin2D(x * frequency, y * frequency) * amplitude;
+            total += self.perlin2D(x * current_frequency, y * current_frequency) * amplitude;
             max_value += amplitude;
             amplitude *= persistence;
-            frequency *= lacunarity;
+            current_frequency *= lacunarity;
         }
 
         return total / max_value;
@@ -91,7 +133,7 @@ pub const Noise = struct {
 
     /// Get height value normalized to 0-1 range
     pub fn getHeight(self: *const Noise, x: f32, z: f32, scale: f32) f32 {
-        const noise_val = self.fbm2D(x / scale, z / scale, 4, 2.0, 0.5);
+        const noise_val = self.fbm2D(x, z, 4, 2.0, 0.5, 1.0 / scale);
         return (noise_val + 1.0) * 0.5; // Convert from [-1,1] to [0,1]
     }
 };
@@ -114,4 +156,12 @@ fn grad2D(hash: u8, x: f32, y: f32) f32 {
         3 => -x - y,
         else => unreachable,
     };
+}
+
+fn grad3D(hash: u8, x: f32, y: f32, z: f32) f32 {
+    // Convert low 4 bits of hash code into 12 gradient directions
+    const h = hash & 15;
+    const u = if (h < 8) x else y;
+    const v = if (h < 4) y else if (h == 12 or h == 14) x else z;
+    return (if ((h & 1) == 0) u else -u) + (if ((h & 2) == 0) v else -v);
 }

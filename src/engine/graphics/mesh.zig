@@ -1,9 +1,7 @@
 //! Mesh abstraction for VAO/VBO management.
 
 const std = @import("std");
-const c = @cImport({
-    @cInclude("GL/glew.h");
-});
+const c = @import("../../c.zig").c;
 
 pub const Mesh = struct {
     vao: c.GLuint,
