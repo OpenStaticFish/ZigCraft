@@ -29,6 +29,10 @@ pub const JobQueue = struct {
     cond: Condition,
     jobs: std.PriorityQueue(Job, void, compareJobs),
     stopped: bool,
+    allocator: std.mem.Allocator,
+    // Current player chunk for dynamic re-prioritization
+    player_cx: i32 = 0,
+    player_cz: i32 = 0,
 
     fn compareJobs(context: void, a: Job, b: Job) std.math.Order {
         _ = context;
@@ -41,6 +45,7 @@ pub const JobQueue = struct {
             .cond = Condition{},
             .jobs = std.PriorityQueue(Job, void, compareJobs).init(allocator, {}),
             .stopped = false,
+            .allocator = allocator,
         };
     }
 
@@ -65,6 +70,39 @@ pub const JobQueue = struct {
 
         if (self.stopped and self.jobs.count() == 0) return null;
         return self.jobs.removeOrNull();
+    }
+
+    /// Update player position and rebuild priority queue with new distances
+    pub fn updatePlayerPos(self: *JobQueue, cx: i32, cz: i32) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Only rebuild if player moved
+        if (cx == self.player_cx and cz == self.player_cz) return;
+        self.player_cx = cx;
+        self.player_cz = cz;
+
+        // Rebuild queue with updated priorities
+        const count = self.jobs.count();
+        if (count == 0) return;
+
+        var temp = std.ArrayListUnmanaged(Job).empty;
+        defer temp.deinit(self.allocator);
+
+        // Extract all jobs
+        while (self.jobs.removeOrNull()) |job| {
+            // Recalculate distance
+            const dx = job.chunk_x - cx;
+            const dz = job.chunk_z - cz;
+            var updated_job = job;
+            updated_job.dist_sq = dx * dx + dz * dz;
+            temp.append(self.allocator, updated_job) catch continue;
+        }
+
+        // Re-add with updated priorities
+        for (temp.items) |job| {
+            self.jobs.add(job) catch continue;
+        }
     }
 
     pub fn stop(self: *JobQueue) void {

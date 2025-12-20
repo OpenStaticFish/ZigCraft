@@ -408,7 +408,7 @@ pub fn main() !void {
                         if (settings.render_distance > 1) settings.render_distance -= 1;
                     }
                     if (drawButton(&ui, .{ .x = value_x + 100.0, .y = setting_y - 5.0, .width = 30.0, .height = 30.0 }, "+", 1.5, mouse_x, mouse_y, mouse_clicked)) {
-                        if (settings.render_distance < 32) settings.render_distance += 1;
+                        settings.render_distance += 1; // No upper limit for experiments
                     }
                     setting_y += 50.0;
 
