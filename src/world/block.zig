@@ -2,6 +2,55 @@
 
 const std = @import("std");
 
+/// Biome types for terrain generation
+pub const Biome = enum(u8) {
+    deep_ocean = 0,
+    ocean = 1,
+    beach = 2,
+    plains = 3,
+    forest = 4,
+    taiga = 5, // cold forest
+    desert = 6,
+    snow_tundra = 7,
+    mountains = 8,
+    snowy_mountains = 9,
+    river = 10,
+
+    /// Get surface block for this biome
+    pub fn getSurfaceBlock(self: Biome) BlockType {
+        return switch (self) {
+            .deep_ocean, .ocean => .gravel,
+            .beach => .sand,
+            .plains, .forest => .grass,
+            .taiga => .grass, // Could use podzol if we add it
+            .desert => .sand,
+            .snow_tundra, .snowy_mountains => .snow_block,
+            .mountains => .stone,
+            .river => .sand,
+        };
+    }
+
+    /// Get filler block (subsurface) for this biome
+    pub fn getFillerBlock(self: Biome) BlockType {
+        return switch (self) {
+            .deep_ocean => .gravel,
+            .ocean => .sand,
+            .beach, .desert, .river => .sand,
+            .plains, .forest, .taiga => .dirt,
+            .snow_tundra => .dirt,
+            .mountains, .snowy_mountains => .stone,
+        };
+    }
+
+    /// Get ocean floor block for this biome
+    pub fn getOceanFloorBlock(self: Biome, depth: f32) BlockType {
+        _ = self;
+        if (depth > 30) return .gravel; // Deep ocean floor
+        if (depth > 15) return .clay; // Mid-depth
+        return .sand; // Shallow
+    }
+};
+
 pub const BlockType = enum(u8) {
     air = 0,
     stone = 1,
@@ -20,6 +69,7 @@ pub const BlockType = enum(u8) {
     coal_ore = 14,
     iron_ore = 15,
     gold_ore = 16,
+    clay = 17,
 
     _,
 
@@ -71,6 +121,7 @@ pub const BlockType = enum(u8) {
             .coal_ore => .{ 0.1, 0.1, 0.1 },
             .iron_ore => .{ 0.6, 0.5, 0.4 },
             .gold_ore => .{ 0.9, 0.8, 0.2 },
+            .clay => .{ 0.6, 0.6, 0.7 },
             _ => .{ 1, 0, 1 }, // Magenta for unknown
         };
     }

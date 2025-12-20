@@ -1,6 +1,18 @@
 //! Simplex/Perlin noise implementation for terrain generation.
+//! Includes fBm, ridged noise, domain warping utilities per worldgen-spec2.
 
 const std = @import("std");
+
+/// Smoothstep function for smooth interpolation between edges
+pub fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
+    const t = std.math.clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+/// Clamp value to [0, 1] range
+pub fn clamp01(x: f32) f32 {
+    return std.math.clamp(x, 0.0, 1.0);
+}
 
 pub const Noise = struct {
     seed: u64,
@@ -114,7 +126,8 @@ pub const Noise = struct {
         return lerp(y1, y2, w);
     }
 
-    /// Fractal Brownian Motion - multiple octaves of noise
+    /// Fractal Brownian Motion 2D - multiple octaves of noise
+    /// Returns value normalized to approximately [-1, 1]
     pub fn fbm2D(self: *const Noise, x: f32, y: f32, octaves: u32, lacunarity: f32, persistence: f32, frequency: f32) f32 {
         var total: f32 = 0;
         var current_frequency: f32 = frequency;
@@ -131,12 +144,92 @@ pub const Noise = struct {
         return total / max_value;
     }
 
-    /// Get height value normalized to 0-1 range
+    /// Fractal Brownian Motion 3D - multiple octaves of 3D noise
+    /// Returns value normalized to approximately [-1, 1]
+    pub fn fbm3D(self: *const Noise, x: f32, y: f32, z: f32, octaves: u32, lacunarity: f32, persistence: f32, frequency: f32) f32 {
+        var total: f32 = 0;
+        var current_frequency: f32 = frequency;
+        var amplitude: f32 = 1;
+        var max_value: f32 = 0;
+
+        for (0..octaves) |_| {
+            total += self.perlin3D(
+                x * current_frequency,
+                y * current_frequency,
+                z * current_frequency,
+            ) * amplitude;
+            max_value += amplitude;
+            amplitude *= persistence;
+            current_frequency *= lacunarity;
+        }
+
+        return total / max_value;
+    }
+
+    /// Ridged noise 2D - creates ridge-like patterns (good for mountains, rivers)
+    /// Returns value in [0, 1] range where valleys are near 0
+    pub fn ridged2D(self: *const Noise, x: f32, y: f32, octaves: u32, lacunarity: f32, persistence: f32, frequency: f32) f32 {
+        var total: f32 = 0;
+        var current_frequency: f32 = frequency;
+        var amplitude: f32 = 1;
+        var weight: f32 = 1;
+        var max_value: f32 = 0;
+
+        for (0..octaves) |_| {
+            // Get absolute value of noise, invert it to create ridges
+            var signal = self.perlin2D(x * current_frequency, y * current_frequency);
+            signal = 1.0 - @abs(signal);
+            signal = signal * signal; // Square for sharper ridges
+
+            // Weight by previous octave
+            signal *= weight;
+            weight = std.math.clamp(signal * 2.0, 0.0, 1.0);
+
+            total += signal * amplitude;
+            max_value += amplitude;
+            amplitude *= persistence;
+            current_frequency *= lacunarity;
+        }
+
+        return total / max_value;
+    }
+
+    /// Sample 2D fBm and normalize to [0, 1] range
+    pub fn fbm2DNormalized(self: *const Noise, x: f32, y: f32, octaves: u32, lacunarity: f32, persistence: f32, frequency: f32) f32 {
+        const val = self.fbm2D(x, y, octaves, lacunarity, persistence, frequency);
+        return (val + 1.0) * 0.5;
+    }
+
+    /// Get height value normalized to 0-1 range (legacy compatibility)
     pub fn getHeight(self: *const Noise, x: f32, z: f32, scale: f32) f32 {
         const noise_val = self.fbm2D(x, z, 4, 2.0, 0.5, 1.0 / scale);
         return (noise_val + 1.0) * 0.5; // Convert from [-1,1] to [0,1]
     }
 };
+
+/// 2D domain warp offset
+pub const WarpOffset = struct {
+    x: f32,
+    z: f32,
+};
+
+/// Compute domain warp offsets from low-frequency noise
+/// Returns offsets to add to coordinates before sampling other noise fields
+pub fn computeDomainWarp(
+    warp_noise_x: *const Noise,
+    warp_noise_z: *const Noise,
+    x: f32,
+    z: f32,
+    warp_scale: f32,
+    warp_amplitude: f32,
+) WarpOffset {
+    const offset_x = warp_noise_x.fbm2D(x, z, 3, 2.0, 0.5, warp_scale) * warp_amplitude;
+    const offset_z = warp_noise_z.fbm2D(x, z, 3, 2.0, 0.5, warp_scale) * warp_amplitude;
+    return .{
+        .x = offset_x,
+        .z = offset_z,
+    };
+}
 
 fn fade(t: f32) f32 {
     // 6t^5 - 15t^4 + 10t^3

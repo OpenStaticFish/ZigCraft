@@ -154,9 +154,13 @@ pub const ChunkMesh = struct {
                 const y_min: i32 = @intCast(si * SUBCHUNK_SIZE);
                 const y_max: i32 = y_min + SUBCHUNK_SIZE;
 
-                if (isEmittingSubchunk(axis, s - 1, u, v, y_min, y_max) and b1.isSolid() and !b2.occludes(b1, axis)) {
+                // Check if b1 should emit a face (solid blocks OR water facing non-water)
+                const b1_emits = b1.isSolid() or (b1 == .water and b2 != .water);
+                const b2_emits = b2.isSolid() or (b2 == .water and b1 != .water);
+
+                if (isEmittingSubchunk(axis, s - 1, u, v, y_min, y_max) and b1_emits and !b2.occludes(b1, axis)) {
                     mask[u + v * du] = .{ .block = b1, .side = true };
-                } else if (isEmittingSubchunk(axis, s, u, v, y_min, y_max) and b2.isSolid() and !b1.occludes(b2, axis)) {
+                } else if (isEmittingSubchunk(axis, s, u, v, y_min, y_max) and b2_emits and !b1.occludes(b2, axis)) {
                     mask[u + v * du] = .{ .block = b2, .side = false };
                 }
             }
