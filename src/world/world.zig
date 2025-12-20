@@ -140,7 +140,10 @@ pub const World = struct {
             self.chunks_mutex.unlock();
             return;
         };
+        chunk_data.chunk.pin();
         self.chunks_mutex.unlock();
+
+        defer chunk_data.chunk.unpin();
 
         if (chunk_data.chunk.state == .generating and chunk_data.chunk.job_token == job.job_token) {
             self.generator.generate(&chunk_data.chunk);
@@ -158,13 +161,34 @@ pub const World = struct {
             return;
         };
 
+        chunk_data.chunk.pin();
         const neighbors = NeighborChunks{
-            .north = if (self.chunks.get(ChunkKey{ .x = job.chunk_x, .z = job.chunk_z - 1 })) |d| &d.chunk else null,
-            .south = if (self.chunks.get(ChunkKey{ .x = job.chunk_x, .z = job.chunk_z + 1 })) |d| &d.chunk else null,
-            .east = if (self.chunks.get(ChunkKey{ .x = job.chunk_x + 1, .z = job.chunk_z })) |d| &d.chunk else null,
-            .west = if (self.chunks.get(ChunkKey{ .x = job.chunk_x - 1, .z = job.chunk_z })) |d| &d.chunk else null,
+            .north = if (self.chunks.get(ChunkKey{ .x = job.chunk_x, .z = job.chunk_z - 1 })) |d| d: {
+                d.chunk.pin();
+                break :d &d.chunk;
+            } else null,
+            .south = if (self.chunks.get(ChunkKey{ .x = job.chunk_x, .z = job.chunk_z + 1 })) |d| d: {
+                d.chunk.pin();
+                break :d &d.chunk;
+            } else null,
+            .east = if (self.chunks.get(ChunkKey{ .x = job.chunk_x + 1, .z = job.chunk_z })) |d| d: {
+                d.chunk.pin();
+                break :d &d.chunk;
+            } else null,
+            .west = if (self.chunks.get(ChunkKey{ .x = job.chunk_x - 1, .z = job.chunk_z })) |d| d: {
+                d.chunk.pin();
+                break :d &d.chunk;
+            } else null,
         };
         self.chunks_mutex.unlock();
+
+        defer {
+            chunk_data.chunk.unpin();
+            if (neighbors.north) |n| @as(*Chunk, @constCast(n)).unpin();
+            if (neighbors.south) |s| @as(*Chunk, @constCast(s)).unpin();
+            if (neighbors.east) |e| @as(*Chunk, @constCast(e)).unpin();
+            if (neighbors.west) |w| @as(*Chunk, @constCast(w)).unpin();
+        }
 
         if (chunk_data.chunk.state == .meshing and chunk_data.chunk.job_token == job.job_token) {
             chunk_data.mesh.buildWithNeighbors(&chunk_data.chunk, neighbors) catch {};
@@ -310,8 +334,10 @@ pub const World = struct {
             const dz = key.z - pc.chunk_z;
             if (dx * dx + dz * dz > unload_dist_sq) {
                 // Only unload if not currently being processed by a worker or in the upload queue.
+                // ALSO check the pin_count to ensure no neighbor lookups are active.
                 if (data.chunk.state != .generating and data.chunk.state != .meshing and
-                    data.chunk.state != .mesh_ready and data.chunk.state != .uploading)
+                    data.chunk.state != .mesh_ready and data.chunk.state != .uploading and
+                    !data.chunk.isPinned())
                 {
                     try to_remove.append(self.allocator, key);
                 }
@@ -347,11 +373,30 @@ pub const World = struct {
             }
 
             self.last_render_stats.chunks_rendered += 1;
-            self.last_render_stats.vertices_rendered += data.mesh.vertex_count;
+            for (data.mesh.subchunks) |s| {
+                self.last_render_stats.vertices_rendered += s.count_solid;
+            }
 
             shader.setMat4("transform", &view_proj.data);
-            data.mesh.draw();
+            data.mesh.draw(.solid);
         }
+
+        // Fluid pass
+        iter = self.chunks.iterator();
+        while (iter.next()) |entry| {
+            const data = entry.value_ptr.*;
+            if (data.chunk.state != .renderable) continue;
+            const key = entry.key_ptr.*;
+            if (!frustum.intersectsChunk(key.x, key.z)) continue;
+
+            for (data.mesh.subchunks) |s| {
+                self.last_render_stats.vertices_rendered += s.count_fluid;
+            }
+
+            shader.setMat4("transform", &view_proj.data);
+            data.mesh.draw(.fluid);
+        }
+
         self.chunks_mutex.unlock();
     }
 
@@ -365,7 +410,9 @@ pub const World = struct {
         var total_verts: u64 = 0;
         var iter = self.chunks.iterator();
         while (iter.next()) |entry| {
-            total_verts += entry.value_ptr.*.mesh.vertex_count;
+            for (entry.value_ptr.*.mesh.subchunks) |s| {
+                total_verts += s.count_solid + s.count_fluid;
+            }
         }
 
         self.gen_queue.mutex.lock();

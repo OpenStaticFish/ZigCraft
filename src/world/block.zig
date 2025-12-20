@@ -41,8 +41,14 @@ pub const BlockType = enum(u8) {
         };
     }
 
-    pub fn isLiquid(self: BlockType) bool {
-        return self == .water;
+    pub fn occludes(self: BlockType, other: BlockType, face: Face) bool {
+        _ = face;
+        if (self.isAir()) return false;
+        // Same transparent types occlude each other (no internal water/glass faces)
+        if (self.isTransparent() and self == other) return true;
+        // Non-transparent solid blocks occlude everything
+        if (self.isSolid() and !self.isTransparent()) return true;
+        return false;
     }
 
     /// Get block color (RGB, 0-1 range)

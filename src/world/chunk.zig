@@ -43,6 +43,9 @@ pub const Chunk = struct {
     /// Has this chunk been generated?
     generated: bool = false,
 
+    /// Number of active jobs referencing this chunk (prevents unloading)
+    pin_count: std.atomic.Value(u32),
+
     pub fn init(chunk_x: i32, chunk_z: i32) Chunk {
         return .{
             .chunk_x = chunk_x,
@@ -50,6 +53,7 @@ pub const Chunk = struct {
             .blocks = [_]BlockType{.air} ** CHUNK_VOLUME,
             .state = .missing,
             .job_token = 0,
+            .pin_count = std.atomic.Value(u32).init(0),
         };
     }
 
@@ -91,6 +95,18 @@ pub const Chunk = struct {
     /// Get world Z coordinate of this chunk's origin
     pub fn getWorldZ(self: *const Chunk) i32 {
         return self.chunk_z * CHUNK_SIZE_Z;
+    }
+
+    pub fn pin(self: *Chunk) void {
+        _ = self.pin_count.fetchAdd(1, .monotonic);
+    }
+
+    pub fn unpin(self: *Chunk) void {
+        _ = self.pin_count.fetchSub(1, .monotonic);
+    }
+
+    pub fn isPinned(self: *const Chunk) bool {
+        return self.pin_count.load(.monotonic) > 0;
     }
 
     /// Fill entire chunk with a block type

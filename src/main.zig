@@ -30,15 +30,18 @@ const vertex_shader_src =
     \\layout (location = 1) in vec3 aColor;
     \\layout (location = 2) in vec3 aNormal;
     \\layout (location = 3) in vec2 aTexCoord;
+    \\layout (location = 4) in float aTileID;
     \\out vec3 vColor;
     \\out vec3 vNormal;
     \\out vec2 vTexCoord;
+    \\flat out int vTileID;
     \\uniform mat4 transform;
     \\void main() {
     \\    gl_Position = transform * vec4(aPos, 1.0);
     \\    vColor = aColor;
     \\    vNormal = aNormal;
     \\    vTexCoord = aTexCoord;
+    \\    vTileID = int(aTileID);
     \\}
 ;
 
@@ -47,17 +50,29 @@ const fragment_shader_src =
     \\in vec3 vColor;
     \\in vec3 vNormal;
     \\in vec2 vTexCoord;
+    \\flat in int vTileID;
     \\out vec4 FragColor;
     \\uniform sampler2D uTexture;
     \\uniform bool uUseTexture;
     \\void main() {
-    \\    // Simple directional lighting
     \\    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
     \\    float diff = max(dot(vNormal, lightDir), 0.0) * 0.4 + 0.6;
     \\    
     \\    vec3 color;
     \\    if (uUseTexture) {
-    \\        vec4 texColor = texture(uTexture, vTexCoord);
+    \\        // Tiled atlas sampling
+    \\        vec2 atlasSize = vec2(16.0, 16.0); // 16x16 tiles
+    \\        vec2 tileSize = 1.0 / atlasSize;
+    \\        vec2 tilePos = vec2(mod(float(vTileID), atlasSize.x), floor(float(vTileID) / atlasSize.x));
+    \\        
+    \\        // Apply fract to vTexCoord for greedy tiling, then inset to prevent bleeding
+    \\        vec2 tiledUV = fract(vTexCoord);
+    \\        // Clamp tiledUV slightly to avoid edge bleeding
+    \\        tiledUV = clamp(tiledUV, 0.001, 0.999);
+    \\        
+    \\        vec2 uv = (tilePos + tiledUV) * tileSize;
+    \\        vec4 texColor = texture(uTexture, uv);
+    \\        if (texColor.a < 0.1) discard;
     \\        color = texColor.rgb * vColor * diff;
     \\    } else {
     \\        color = vColor * diff;
