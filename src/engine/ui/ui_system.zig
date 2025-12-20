@@ -18,7 +18,6 @@ pub const UISystem = struct {
     vbo: c.GLuint,
     screen_width: f32,
     screen_height: f32,
-    allocator: std.mem.Allocator,
 
     const vertex_shader =
         \\#version 330 core
@@ -41,8 +40,8 @@ pub const UISystem = struct {
         \\}
     ;
 
-    pub fn init(allocator: std.mem.Allocator, width: u32, height: u32) !UISystem {
-        const shader = try Shader.init(vertex_shader, fragment_shader);
+    pub fn init(width: u32, height: u32) !UISystem {
+        const shader = try Shader.initSimple(vertex_shader, fragment_shader);
 
         var vao: c.GLuint = undefined;
         var vbo: c.GLuint = undefined;
@@ -71,7 +70,6 @@ pub const UISystem = struct {
             .vbo = vbo,
             .screen_width = @floatFromInt(width),
             .screen_height = @floatFromInt(height),
-            .allocator = allocator,
         };
     }
 

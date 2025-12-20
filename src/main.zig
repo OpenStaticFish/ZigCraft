@@ -6,11 +6,13 @@ const Mat4 = @import("engine/math/mat4.zig").Mat4;
 const Camera = @import("engine/graphics/camera.zig").Camera;
 const Shader = @import("engine/graphics/shader.zig").Shader;
 const Renderer = @import("engine/graphics/renderer.zig").Renderer;
+const setVSync = @import("engine/graphics/renderer.zig").setVSync;
 const Input = @import("engine/input/input.zig").Input;
 const Time = @import("engine/core/time.zig").Time;
 const UISystem = @import("engine/ui/ui_system.zig").UISystem;
 const Color = @import("engine/ui/ui_system.zig").Color;
 const Rect = @import("engine/core/interfaces.zig").Rect;
+const log = @import("engine/core/log.zig");
 
 // World imports
 const World = @import("world/world.zig").World;
@@ -92,11 +94,16 @@ pub fn main() !void {
     }
 
     // 6. Initialize Engine Systems
+    log.log.info("Initializing engine systems...", .{});
+
     var input = Input.init(allocator);
     defer input.deinit();
 
     var time = Time.init();
     var renderer = Renderer.init();
+
+    // Enable VSync
+    setVSync(true);
 
     // Start camera high above ground level, looking down
     var camera = Camera.init(.{
@@ -106,7 +113,7 @@ pub fn main() !void {
     });
 
     // 7. Create Shader
-    var shader = try Shader.init(vertex_shader_src, fragment_shader_src);
+    var shader = try Shader.initSimple(vertex_shader_src, fragment_shader_src);
     defer shader.deinit();
 
     // 8. Create World
@@ -115,22 +122,17 @@ pub fn main() !void {
     defer world.deinit();
 
     // 9. Create UI System for FPS display
-    var ui = try UISystem.init(allocator, 1280, 720);
+    var ui = try UISystem.init(1280, 720);
     defer ui.deinit();
 
     // Initial viewport
     renderer.setViewport(1280, 720);
 
-    std.debug.print("\n=== Zig Voxel Engine ===\n", .{});
-    std.debug.print("Controls:\n", .{});
-    std.debug.print("  WASD - Move\n", .{});
-    std.debug.print("  Space/Shift - Up/Down\n", .{});
-    std.debug.print("  Tab - Toggle mouse capture\n", .{});
-    std.debug.print("  F - Toggle wireframe\n", .{});
-    std.debug.print("  Escape - Quit\n", .{});
-    std.debug.print("========================\n\n", .{});
+    log.log.info("=== Zig Voxel Engine ===", .{});
+    log.log.info("Controls: WASD=Move, Space/Shift=Up/Down, Tab=Mouse, F=Wireframe, V=VSync, Esc=Quit", .{});
 
-    // 9. Main Loop
+    // 10. Main Loop
+    var vsync_enabled = true;
     while (!input.should_quit) {
         // Update time
         time.update();
@@ -154,6 +156,12 @@ pub fn main() !void {
         // Toggle wireframe with F
         if (input.isKeyPressed(.f)) {
             renderer.toggleWireframe();
+        }
+
+        // Toggle VSync with V
+        if (input.isKeyPressed(.v)) {
+            vsync_enabled = !vsync_enabled;
+            setVSync(vsync_enabled);
         }
 
         // Update camera
