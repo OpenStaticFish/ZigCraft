@@ -135,4 +135,11 @@ pub const Camera = struct {
     pub fn getViewProjectionMatrixOriginCentered(self: *const Camera, aspect_ratio: f32) Mat4 {
         return self.getProjectionMatrix(aspect_ratio).multiply(self.getViewMatrixOriginCentered());
     }
+
+    /// Get inverse view-projection matrix for sky rendering
+    /// Used to reconstruct world directions from clip space
+    pub fn getInvViewProjectionMatrix(self: *const Camera, aspect_ratio: f32) Mat4 {
+        const view_proj = self.getViewProjectionMatrixOriginCentered(aspect_ratio);
+        return view_proj.inverse();
+    }
 };

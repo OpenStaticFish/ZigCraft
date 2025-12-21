@@ -183,4 +183,95 @@ pub const Mat4 = struct {
     pub fn ptr(self: *const Mat4) [*]const f32 {
         return @ptrCast(&self.data);
     }
+
+    /// Compute the inverse of this matrix
+    /// Returns identity if matrix is singular (determinant near zero)
+    pub fn inverse(self: Mat4) Mat4 {
+        const m = self.data;
+
+        // Calculate cofactors for first row (used for determinant and first column of adjugate)
+        const c00 = m[1][1] * (m[2][2] * m[3][3] - m[3][2] * m[2][3]) -
+            m[2][1] * (m[1][2] * m[3][3] - m[3][2] * m[1][3]) +
+            m[3][1] * (m[1][2] * m[2][3] - m[2][2] * m[1][3]);
+
+        const c01 = -(m[1][0] * (m[2][2] * m[3][3] - m[3][2] * m[2][3]) -
+            m[2][0] * (m[1][2] * m[3][3] - m[3][2] * m[1][3]) +
+            m[3][0] * (m[1][2] * m[2][3] - m[2][2] * m[1][3]));
+
+        const c02 = m[1][0] * (m[2][1] * m[3][3] - m[3][1] * m[2][3]) -
+            m[2][0] * (m[1][1] * m[3][3] - m[3][1] * m[1][3]) +
+            m[3][0] * (m[1][1] * m[2][3] - m[2][1] * m[1][3]);
+
+        const c03 = -(m[1][0] * (m[2][1] * m[3][2] - m[3][1] * m[2][2]) -
+            m[2][0] * (m[1][1] * m[3][2] - m[3][1] * m[1][2]) +
+            m[3][0] * (m[1][1] * m[2][2] - m[2][1] * m[1][2]));
+
+        // Determinant using first row
+        const det = m[0][0] * c00 + m[0][1] * c01 + m[0][2] * c02 + m[0][3] * c03;
+
+        // Check for singular matrix
+        if (@abs(det) < 1e-10) {
+            return Mat4.identity;
+        }
+
+        const inv_det = 1.0 / det;
+
+        // Calculate remaining cofactors and build inverse (transposed adjugate / determinant)
+        var result: Mat4 = undefined;
+
+        result.data[0][0] = c00 * inv_det;
+        result.data[0][1] = c01 * inv_det;
+        result.data[0][2] = c02 * inv_det;
+        result.data[0][3] = c03 * inv_det;
+
+        result.data[1][0] = -(m[0][1] * (m[2][2] * m[3][3] - m[3][2] * m[2][3]) -
+            m[2][1] * (m[0][2] * m[3][3] - m[3][2] * m[0][3]) +
+            m[3][1] * (m[0][2] * m[2][3] - m[2][2] * m[0][3])) * inv_det;
+
+        result.data[1][1] = (m[0][0] * (m[2][2] * m[3][3] - m[3][2] * m[2][3]) -
+            m[2][0] * (m[0][2] * m[3][3] - m[3][2] * m[0][3]) +
+            m[3][0] * (m[0][2] * m[2][3] - m[2][2] * m[0][3])) * inv_det;
+
+        result.data[1][2] = -(m[0][0] * (m[2][1] * m[3][3] - m[3][1] * m[2][3]) -
+            m[2][0] * (m[0][1] * m[3][3] - m[3][1] * m[0][3]) +
+            m[3][0] * (m[0][1] * m[2][3] - m[2][1] * m[0][3])) * inv_det;
+
+        result.data[1][3] = (m[0][0] * (m[2][1] * m[3][2] - m[3][1] * m[2][2]) -
+            m[2][0] * (m[0][1] * m[3][2] - m[3][1] * m[0][2]) +
+            m[3][0] * (m[0][1] * m[2][2] - m[2][1] * m[0][2])) * inv_det;
+
+        result.data[2][0] = (m[0][1] * (m[1][2] * m[3][3] - m[3][2] * m[1][3]) -
+            m[1][1] * (m[0][2] * m[3][3] - m[3][2] * m[0][3]) +
+            m[3][1] * (m[0][2] * m[1][3] - m[1][2] * m[0][3])) * inv_det;
+
+        result.data[2][1] = -(m[0][0] * (m[1][2] * m[3][3] - m[3][2] * m[1][3]) -
+            m[1][0] * (m[0][2] * m[3][3] - m[3][2] * m[0][3]) +
+            m[3][0] * (m[0][2] * m[1][3] - m[1][2] * m[0][3])) * inv_det;
+
+        result.data[2][2] = (m[0][0] * (m[1][1] * m[3][3] - m[3][1] * m[1][3]) -
+            m[1][0] * (m[0][1] * m[3][3] - m[3][1] * m[0][3]) +
+            m[3][0] * (m[0][1] * m[1][3] - m[1][1] * m[0][3])) * inv_det;
+
+        result.data[2][3] = -(m[0][0] * (m[1][1] * m[3][2] - m[3][1] * m[1][2]) -
+            m[1][0] * (m[0][1] * m[3][2] - m[3][1] * m[0][2]) +
+            m[3][0] * (m[0][1] * m[1][2] - m[1][1] * m[0][2])) * inv_det;
+
+        result.data[3][0] = -(m[0][1] * (m[1][2] * m[2][3] - m[2][2] * m[1][3]) -
+            m[1][1] * (m[0][2] * m[2][3] - m[2][2] * m[0][3]) +
+            m[2][1] * (m[0][2] * m[1][3] - m[1][2] * m[0][3])) * inv_det;
+
+        result.data[3][1] = (m[0][0] * (m[1][2] * m[2][3] - m[2][2] * m[1][3]) -
+            m[1][0] * (m[0][2] * m[2][3] - m[2][2] * m[0][3]) +
+            m[2][0] * (m[0][2] * m[1][3] - m[1][2] * m[0][3])) * inv_det;
+
+        result.data[3][2] = -(m[0][0] * (m[1][1] * m[2][3] - m[2][1] * m[1][3]) -
+            m[1][0] * (m[0][1] * m[2][3] - m[2][1] * m[0][3]) +
+            m[2][0] * (m[0][1] * m[1][3] - m[1][1] * m[0][3])) * inv_det;
+
+        result.data[3][3] = (m[0][0] * (m[1][1] * m[2][2] - m[2][1] * m[1][2]) -
+            m[1][0] * (m[0][1] * m[2][2] - m[2][1] * m[0][2]) +
+            m[2][0] * (m[0][1] * m[1][2] - m[1][1] * m[0][2])) * inv_det;
+
+        return result;
+    }
 };
