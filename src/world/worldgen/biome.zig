@@ -198,6 +198,7 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .priority = 7,
         .surface = .{ .top = .sand, .filler = .sand, .depth_range = 4 },
         .vegetation = .{ .tree_types = &.{}, .tree_density = 0 },
+        .terrain = .{ .height_offset = -2.0 },
     },
 
     // === Land Biomes ===
@@ -250,7 +251,7 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .priority = 4,
         .surface = .{ .top = .sand, .filler = .sand, .depth_range = 6 },
         .vegetation = .{ .tree_types = &.{}, .tree_density = 0, .cactus_density = 0.015, .dead_bush_density = 0.02 },
-        .terrain = .{ .height_amplitude = 0.5, .smoothing = 0.4 }, // Flatter, smoother
+        .terrain = .{ .height_amplitude = 0.5, .smoothing = 0.4, .height_offset = -4.0 }, // Flatter, smoother, lowered
         .colors = .{ .grass = .{ 0.75, 0.70, 0.35 } },
     },
     .{
@@ -496,14 +497,27 @@ pub fn selectBiomeBlended(params: ClimateParams) BiomeSelection {
 
 /// Select blended biomes with river override
 pub fn selectBiomeWithRiverBlended(params: ClimateParams, river_mask: f32) BiomeSelection {
-    // If distinctly river, override primary
-    if (river_mask > 0.5 and params.elevation < 0.35) {
-        // We could blend river with land at edges, but for now strict river
-        return .{
-            .primary = .river,
-            .secondary = .river, // No blending
-            .blend_factor = 0.0,
-        };
+    const selection = selectBiomeBlended(params);
+
+    // If distinctly river, override primary with blending
+    if (params.elevation < 0.35) {
+        const river_edge0 = 0.45;
+        const river_edge1 = 0.55;
+
+        if (river_mask > river_edge0) {
+            const t = std.math.clamp((river_mask - river_edge0) / (river_edge1 - river_edge0), 0.0, 1.0);
+            const river_factor = t * t * (3.0 - 2.0 * t);
+
+            // Blend towards river:
+            // river_factor = 1.0 -> Pure River
+            // river_factor = 0.0 -> Pure Land (selection.primary)
+            // We set Primary=River, Secondary=Land, Blend=(1-river_factor)
+            return .{
+                .primary = .river,
+                .secondary = selection.primary,
+                .blend_factor = 1.0 - river_factor,
+            };
+        }
     }
-    return selectBiomeBlended(params);
+    return selection;
 }
