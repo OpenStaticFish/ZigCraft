@@ -231,6 +231,18 @@ pub fn computeDomainWarp(
     };
 }
 
+pub fn hash3(x: f32, y: f32, z: f32) f32 {
+    const xi: i32 = @intFromFloat(@floor(x));
+    const yi: i32 = @intFromFloat(@floor(y));
+    const zi: i32 = @intFromFloat(@floor(z));
+
+    var h: u32 = @bitCast(xi *% 374761393 +% yi *% 668265263 +% zi *% 432432431);
+    h = (h ^ (h >> 13)) *% 1274126177;
+    h = h ^ (h >> 16);
+
+    return @as(f32, @floatFromInt(h)) / 4294967295.0;
+}
+
 fn fade(t: f32) f32 {
     // 6t^5 - 15t^4 + 10t^3
     return t * t * t * (t * (t * 6 - 15) + 10);

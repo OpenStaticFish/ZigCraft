@@ -193,7 +193,7 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .name = "Beach",
         .temperature = .{ .min = 0.3, .max = 1.0 },
         .humidity = Range.any(),
-        .elevation = .{ .min = 0.2, .max = 0.35 },
+        .elevation = .{ .min = 0.2, .max = 0.315 }, // Reduced max from 0.35 to 0.315 (~4 blocks above sea)
         .continentalness = .{ .min = 0.40, .max = 0.55 },
         .priority = 7,
         .surface = .{ .top = .sand, .filler = .sand, .depth_range = 4 },
@@ -452,4 +452,58 @@ pub fn computeClimateParams(
         .continentalness = continentalness,
         .ruggedness = 1.0 - erosion, // Invert erosion: low erosion = high ruggedness
     };
+}
+
+/// Result of blended biome selection
+pub const BiomeSelection = struct {
+    primary: BiomeId,
+    secondary: BiomeId,
+    blend_factor: f32, // 0.0 = pure primary, up to 0.5 = mix of secondary
+};
+
+/// Select top 2 biomes for blending
+pub fn selectBiomeBlended(params: ClimateParams) BiomeSelection {
+    var best_score: f32 = -1.0;
+    var best_biome: BiomeId = .plains;
+    var second_score: f32 = -1.0;
+    var second_biome: BiomeId = .plains;
+
+    for (BIOME_REGISTRY) |biome| {
+        const s = biome.score(params);
+        if (s > best_score) {
+            second_score = best_score;
+            second_biome = best_biome;
+            best_score = s;
+            best_biome = biome.id;
+        } else if (s > second_score) {
+            second_score = s;
+            second_biome = biome.id;
+        }
+    }
+
+    var blend: f32 = 0.0;
+    const sum = best_score + second_score;
+    if (sum > 0.0001) {
+        blend = second_score / sum;
+    }
+
+    return .{
+        .primary = best_biome,
+        .secondary = second_biome,
+        .blend_factor = blend,
+    };
+}
+
+/// Select blended biomes with river override
+pub fn selectBiomeWithRiverBlended(params: ClimateParams, river_mask: f32) BiomeSelection {
+    // If distinctly river, override primary
+    if (river_mask > 0.5 and params.elevation < 0.35) {
+        // We could blend river with land at edges, but for now strict river
+        return .{
+            .primary = .river,
+            .secondary = .river, // No blending
+            .blend_factor = 0.0,
+        };
+    }
+    return selectBiomeBlended(params);
 }
