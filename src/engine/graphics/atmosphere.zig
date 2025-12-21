@@ -24,6 +24,7 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
 pub const Atmosphere = struct {
     // Time state
     world_ticks: u64 = 0,
+    tick_accumulator: f32 = 0.0,
     time_scale: f32 = 1.0,
 
     // Computed values (updated each frame)
@@ -70,9 +71,13 @@ pub const Atmosphere = struct {
 
     /// Update atmosphere state based on elapsed time
     pub fn update(self: *Atmosphere, delta_time: f32) void {
-        // Advance world time
-        const ticks_delta: u64 = @intFromFloat(delta_time * 20.0 * self.time_scale); // 20 ticks/sec base
-        self.world_ticks +%= ticks_delta;
+        // Advance world time with accumulator for sub-tick precision
+        self.tick_accumulator += delta_time * 20.0 * self.time_scale; // 20 ticks/sec base
+        if (self.tick_accumulator >= 1.0) {
+            const ticks_delta: u64 = @intFromFloat(self.tick_accumulator);
+            self.world_ticks +%= ticks_delta;
+            self.tick_accumulator -= @floatFromInt(ticks_delta);
+        }
 
         // Calculate time of day [0, 1)
         const day_ticks = self.world_ticks % TICKS_PER_DAY;
@@ -92,6 +97,7 @@ pub const Atmosphere = struct {
     pub fn setTimeOfDay(self: *Atmosphere, time: f32) void {
         self.world_ticks = @intFromFloat(time * @as(f32, @floatFromInt(TICKS_PER_DAY)));
         self.time_of_day = time;
+        self.tick_accumulator = 0;
         self.updateCelestialBodies();
         self.updateIntensities();
         self.updateColors();
@@ -104,6 +110,10 @@ pub const Atmosphere = struct {
 
     fn updateCelestialBodies(self: *Atmosphere) void {
         // Sun angle: 0 at midnight, π at noon
+        // We use standard trigonometric circle where 0 is right (East), PI/2 is Up.
+        // But we want 0.0 (Midnight) to be Down (-Y).
+        // Y = -cos(angle).
+        // X = sin(angle).
         const sun_angle = self.time_of_day * std.math.tau;
 
         // Sun direction with orbit tilt
@@ -115,10 +125,11 @@ pub const Atmosphere = struct {
 
         // Sun moves from east (sunrise) to west (sunset)
         // Y is up, Z is north
+        // We invert cos_angle so that at angle 0 (midnight), Y is -1 (Down)
         self.sun_dir = Vec3.init(
             sin_angle, // East-West
-            cos_angle * cos_tilt, // Up-Down (main)
-            cos_angle * sin_tilt, // North-South (tilt)
+            -cos_angle * cos_tilt, // Up-Down (main) - Inverted for correct phase
+            -cos_angle * sin_tilt, // North-South (tilt)
         ).normalize();
 
         // Moon is opposite
