@@ -205,6 +205,10 @@ pub const Key = enum(u32) {
     enter = 13,
     tab = 9,
     backspace = 8,
+    plus = '=',
+    minus = '-',
+    kp_plus = 0x40000057,
+    kp_minus = 0x40000056,
 
     // Arrow keys (using SDL scancodes offset)
     up = 0x40000052,

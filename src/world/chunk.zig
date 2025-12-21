@@ -200,6 +200,19 @@ pub const Chunk = struct {
         return self.chunk_z * CHUNK_SIZE_Z;
     }
 
+    /// Get the highest solid (non-air) Y coordinate in this column
+    /// Returns 0 if the column is entirely air
+    pub fn getHighestSolidY(self: *const Chunk, x: u32, z: u32) u32 {
+        var y: i32 = CHUNK_SIZE_Y - 1;
+        while (y >= 0) : (y -= 1) {
+            const block = self.getBlock(x, @intCast(y), z);
+            if (block != .air and block != .water) {
+                return @intCast(y);
+            }
+        }
+        return 0;
+    }
+
     pub fn pin(self: *Chunk) void {
         _ = self.pin_count.fetchAdd(1, .monotonic);
     }

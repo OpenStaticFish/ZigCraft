@@ -54,8 +54,9 @@ pub const Noise = struct {
     /// 2D Perlin noise, returns value in range [-1, 1]
     pub fn perlin2D(self: *const Noise, x: f32, y: f32) f32 {
         // Find unit grid cell
-        const xi: i32 = @intFromFloat(@floor(x));
-        const yi: i32 = @intFromFloat(@floor(y));
+        // Use i64 to avoid overflow panics at large coordinates
+        const xi: i64 = @intFromFloat(@floor(x));
+        const yi: i64 = @intFromFloat(@floor(y));
 
         // Get relative position in cell
         const xf = x - @floor(x);
@@ -65,11 +66,16 @@ pub const Noise = struct {
         const u = fade(xf);
         const v = fade(yf);
 
-        // Hash coordinates of corners
-        const aa = self.perm[@intCast(@mod(xi, 256) + self.perm[@intCast(@mod(yi, 256))])];
-        const ab = self.perm[@intCast(@mod(xi, 256) + self.perm[@intCast(@mod(yi + 1, 256))])];
-        const ba = self.perm[@intCast(@mod(xi + 1, 256) + self.perm[@intCast(@mod(yi, 256))])];
-        const bb = self.perm[@intCast(@mod(xi + 1, 256) + self.perm[@intCast(@mod(yi + 1, 256))])];
+        // Hash coordinates of corners using @mod for safe wrapping of negative coords
+        const xi_idx = @as(usize, @intCast(@mod(xi, 256)));
+        const yi_idx = @as(usize, @intCast(@mod(yi, 256)));
+        const xi_idx1 = @as(usize, @intCast(@mod(xi + 1, 256)));
+        const yi_idx1 = @as(usize, @intCast(@mod(yi + 1, 256)));
+
+        const aa = self.perm[xi_idx + self.perm[yi_idx]];
+        const ab = self.perm[xi_idx + self.perm[yi_idx1]];
+        const ba = self.perm[xi_idx1 + self.perm[yi_idx]];
+        const bb = self.perm[xi_idx1 + self.perm[yi_idx1]];
 
         // Gradient dot products
         const g1 = grad2D(aa, xf, yf);
@@ -86,9 +92,10 @@ pub const Noise = struct {
 
     /// 3D Perlin noise, returns value in range [-1, 1]
     pub fn perlin3D(self: *const Noise, x: f32, y: f32, z: f32) f32 {
-        const xi: i32 = @intFromFloat(@floor(x));
-        const yi: i32 = @intFromFloat(@floor(y));
-        const zi: i32 = @intFromFloat(@floor(z));
+        // Use i64 to avoid overflow panics at large coordinates
+        const xi: i64 = @intFromFloat(@floor(x));
+        const yi: i64 = @intFromFloat(@floor(y));
+        const zi: i64 = @intFromFloat(@floor(z));
 
         const xf = x - @floor(x);
         const yf = y - @floor(y);
@@ -98,22 +105,36 @@ pub const Noise = struct {
         const v = fade(yf);
         const w = fade(zf);
 
-        const a = self.perm[@intCast(@mod(xi, 256))] + @as(usize, @intCast(@mod(yi, 256)));
-        const aa = self.perm[@intCast(@mod(a, 256))] + @as(usize, @intCast(@mod(zi, 256)));
-        const ab = self.perm[@intCast(@mod(a + 1, 256))] + @as(usize, @intCast(@mod(zi, 256)));
-        const b = self.perm[@intCast(@mod(xi + 1, 256))] + @as(usize, @intCast(@mod(yi, 256)));
-        const ba = self.perm[@intCast(@mod(b, 256))] + @as(usize, @intCast(@mod(zi, 256)));
-        const bb = self.perm[@intCast(@mod(b + 1, 256))] + @as(usize, @intCast(@mod(zi, 256)));
+        const xi_idx = @as(usize, @intCast(@mod(xi, 256)));
+        const yi_idx = @as(usize, @intCast(@mod(yi, 256)));
+        const zi_idx = @as(usize, @intCast(@mod(zi, 256)));
+        const xi_idx1 = @as(usize, @intCast(@mod(xi + 1, 256)));
+        const yi_idx1 = @as(usize, @intCast(@mod(yi + 1, 256)));
+        const zi_idx1 = @as(usize, @intCast(@mod(zi + 1, 256)));
+
+        const a = self.perm[xi_idx] + yi_idx;
+        const aa = self.perm[a] + zi_idx;
+        const ab = self.perm[a] + zi_idx1;
+        const b = self.perm[xi_idx1] + yi_idx;
+        const ba = self.perm[b] + zi_idx;
+        const bb = self.perm[b] + zi_idx1;
+
+        const a1 = self.perm[xi_idx] + yi_idx1;
+        const aa1 = self.perm[a1] + zi_idx;
+        const ab1 = self.perm[a1] + zi_idx1;
+        const b1 = self.perm[xi_idx1] + yi_idx1;
+        const ba1 = self.perm[b1] + zi_idx;
+        const bb1 = self.perm[b1] + zi_idx1;
 
         // Gradients
-        const g1 = grad3D(self.perm[@intCast(@mod(aa, 256))], xf, yf, zf);
-        const g2 = grad3D(self.perm[@intCast(@mod(ba, 256))], xf - 1, yf, zf);
-        const g3 = grad3D(self.perm[@intCast(@mod(ab, 256))], xf, yf - 1, zf);
-        const g4 = grad3D(self.perm[@intCast(@mod(bb, 256))], xf - 1, yf - 1, zf);
-        const g5 = grad3D(self.perm[@intCast(@mod(aa + 1, 256))], xf, yf, zf - 1);
-        const g6 = grad3D(self.perm[@intCast(@mod(ba + 1, 256))], xf - 1, yf, zf - 1);
-        const g7 = grad3D(self.perm[@intCast(@mod(ab + 1, 256))], xf, yf - 1, zf - 1);
-        const g8 = grad3D(self.perm[@intCast(@mod(bb + 1, 256))], xf - 1, yf - 1, zf - 1);
+        const g1 = grad3D(self.perm[aa], xf, yf, zf);
+        const g2 = grad3D(self.perm[ba], xf - 1, yf, zf);
+        const g3 = grad3D(self.perm[ab], xf, yf - 1, zf);
+        const g4 = grad3D(self.perm[bb], xf - 1, yf - 1, zf);
+        const g5 = grad3D(self.perm[aa1], xf, yf, zf - 1);
+        const g6 = grad3D(self.perm[ba1], xf - 1, yf, zf - 1);
+        const g7 = grad3D(self.perm[ab1], xf, yf - 1, zf - 1);
+        const g8 = grad3D(self.perm[bb1], xf - 1, yf - 1, zf - 1);
 
         const x1 = lerp(g1, g2, u);
         const x2 = lerp(g3, g4, u);
@@ -195,9 +216,14 @@ pub const Noise = struct {
     }
 
     /// Sample 2D fBm and normalize to [0, 1] range
+    /// Uses stretch factor to account for Perlin noise not hitting full ±1 range
     pub fn fbm2DNormalized(self: *const Noise, x: f32, y: f32, octaves: u32, lacunarity: f32, persistence: f32, frequency: f32) f32 {
         const val = self.fbm2D(x, y, octaves, lacunarity, persistence, frequency);
-        return (val + 1.0) * 0.5;
+        // Perlin FBM typically ranges ~[-0.7, 0.7] not [-1, 1]
+        // Stretch by ~1.4x to fill [0, 1] range, then clamp
+        const stretched = val * 1.4;
+        const normalized = (stretched + 1.0) * 0.5;
+        return @min(1.0, @max(0.0, normalized));
     }
 
     /// Get height value normalized to 0-1 range (legacy compatibility)
