@@ -79,9 +79,13 @@ pub const ShadowMap = struct {
         // Snap position
         const snapped_pos = Vec3.init(@floor(cam_pos.x / world_units_per_texel) * world_units_per_texel, @floor(cam_pos.y / world_units_per_texel) * world_units_per_texel, @floor(cam_pos.z / world_units_per_texel) * world_units_per_texel);
 
+        // Calculate relative position for floating origin rendering
+        // The world is rendered relative to cam_pos, so we must shift our view matrix to match
+        const rel_snapped_pos = snapped_pos.sub(cam_pos);
+
         // Position light "far away" in sun direction
-        const light_pos = snapped_pos.add(sun_dir.scale(100.0));
-        const view = Mat4.lookAt(light_pos, snapped_pos, Vec3.init(0, 1, 0));
+        const light_pos = rel_snapped_pos.add(sun_dir.scale(100.0));
+        const view = Mat4.lookAt(light_pos, rel_snapped_pos, Vec3.init(0, 1, 0));
 
         self.light_space_matrix = projection.multiply(view);
 
@@ -107,10 +111,9 @@ const vertex_src =
     \\layout (location = 0) in vec3 aPos;
     \\// Other attributes ignored
     \\
-    \\uniform mat4 transform; // Chunk Model matrix (passed via World.render, actually MVP? No wait)
-    \\// In World.render for shadow pass, we pass 'light_space_matrix' as 'view_proj'.
-    \\// So 'transform' uniform set by World.render IS (LightSpace * Model).
-    \\// So we just output it.
+    \\uniform mat4 transform; // MVP matrix (LightProjection * LightView * Model)
+    \\// World.render sets 'transform' to (view_proj * model).
+    \\// Since we passed 'light_space_matrix' as 'view_proj', 'transform' computes the full transform.
     \\
     \\void main() {
     \\    gl_Position = transform * vec4(aPos, 1.0);

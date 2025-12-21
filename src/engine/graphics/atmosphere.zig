@@ -71,7 +71,8 @@ pub const Atmosphere = struct {
 
     /// Update atmosphere state based on elapsed time
     pub fn update(self: *Atmosphere, delta_time: f32) void {
-        // Advance world time with accumulator for sub-tick precision
+        // Advance world time with accumulator for sub-tick precision.
+        // We subtract integer parts to keep accumulator small (0-1 range), preventing float drift.
         self.tick_accumulator += delta_time * 20.0 * self.time_scale; // 20 ticks/sec base
         if (self.tick_accumulator >= 1.0) {
             const ticks_delta: u64 = @intFromFloat(self.tick_accumulator);

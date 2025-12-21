@@ -248,6 +248,8 @@ pub const TerrainGenerator = struct {
         self.computeSkylight(chunk);
 
         // Compute block light
+        // If this fails (e.g. OOM), we log and continue. The chunk will effectively have
+        // no propagated block light until a dynamic update occurs. This is a safe fallback.
         self.computeBlockLight(chunk) catch |err| {
             std.debug.print("Failed to compute block light: {}\n", .{err});
         };
@@ -305,6 +307,7 @@ pub const TerrainGenerator = struct {
         self.generateOres(chunk);
         self.generateFeatures(chunk);
         self.computeSkylight(chunk);
+        // Fallback: ignore error if block light calc fails (OOM safe)
         self.computeBlockLight(chunk) catch {};
         chunk.dirty = true;
     }
