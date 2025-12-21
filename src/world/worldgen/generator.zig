@@ -288,7 +288,8 @@ pub const TerrainGenerator = struct {
                 const primary_biome_id = biome_ids[idx];
                 const secondary_biome_id = secondary_biome_ids[idx];
                 const blend = biome_blends[idx];
-                const dither = self.detail_noise.perlin2D(wx * 0.1, wz * 0.1) * 0.5 + 0.5;
+                // Lower frequency for larger, more natural clumps (0.1 -> 0.02)
+                const dither = self.detail_noise.perlin2D(wx * 0.02, wz * 0.02) * 0.5 + 0.5;
                 const use_secondary = dither < blend;
                 const active_biome_id = if (use_secondary) secondary_biome_id else primary_biome_id;
                 const active_biome: Biome = @enumFromInt(@intFromEnum(active_biome_id));
@@ -393,7 +394,7 @@ pub const TerrainGenerator = struct {
                 const primary_biome_id = biome_ids[idx];
                 const secondary_biome_id = secondary_biome_ids[idx];
                 const blend = biome_blends[idx];
-                const dither = self.detail_noise.perlin2D(wx * 0.1, wz * 0.1) * 0.5 + 0.5;
+                const dither = self.detail_noise.perlin2D(wx * 0.02, wz * 0.02) * 0.5 + 0.5;
                 const use_secondary = dither < blend;
                 const active_biome_id = if (use_secondary) secondary_biome_id else primary_biome_id;
                 const active_biome: Biome = @enumFromInt(@intFromEnum(active_biome_id));
@@ -764,8 +765,9 @@ pub const TerrainGenerator = struct {
                 const prim_def = biome_mod.getBiomeDefinition(primary);
                 const sec_def = biome_mod.getBiomeDefinition(secondary);
 
-                // Probabilistically pick profile for types, but blend density
-                const active_def = if (random.float(f32) < blend) sec_def else prim_def;
+                // Use coherent noise for profile selection to match surface blocks
+                const dither = self.detail_noise.perlin2D(wx * 0.02, wz * 0.02) * 0.5 + 0.5;
+                const active_def = if (dither < blend) sec_def else prim_def;
                 const profile = active_def.vegetation;
 
                 const tree_density = std.math.lerp(prim_def.vegetation.tree_density, sec_def.vegetation.tree_density, blend) * tree_suppress;
