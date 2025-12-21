@@ -173,6 +173,10 @@ pub const ShadowMap = struct {
         c.glBindFramebuffer().?(c.GL_FRAMEBUFFER, self.fbos[cascade_index]);
         c.glClear(c.GL_DEPTH_BUFFER_BIT);
 
+        // Cull front faces to prevent self-shadowing (peter panning / acne trade-off)
+        // This effectively moves the shadow depth to the back of the object
+        c.glCullFace(c.GL_FRONT);
+
         self.shader.use();
         self.shader.setMat4("uLightSpaceMatrix", &self.light_space_matrices[cascade_index].data);
     }
@@ -180,6 +184,8 @@ pub const ShadowMap = struct {
     /// End shadow pass
     pub fn end(self: *ShadowMap, screen_width: u32, screen_height: u32) void {
         _ = self;
+        // Restore culling
+        c.glCullFace(c.GL_BACK);
         c.glBindFramebuffer().?(c.GL_FRAMEBUFFER, 0);
         c.glViewport(0, 0, @intCast(screen_width), @intCast(screen_height));
     }
