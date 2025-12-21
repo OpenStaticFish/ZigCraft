@@ -198,7 +198,6 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .priority = 7,
         .surface = .{ .top = .sand, .filler = .sand, .depth_range = 4 },
         .vegetation = .{ .tree_types = &.{}, .tree_density = 0 },
-        .terrain = .{ .height_offset = -2.0 },
     },
 
     // === Land Biomes ===
@@ -251,7 +250,7 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .priority = 4,
         .surface = .{ .top = .sand, .filler = .sand, .depth_range = 6 },
         .vegetation = .{ .tree_types = &.{}, .tree_density = 0, .cactus_density = 0.015, .dead_bush_density = 0.02 },
-        .terrain = .{ .height_amplitude = 0.5, .smoothing = 0.4, .height_offset = -4.0 }, // Flatter, smoother, lowered
+        .terrain = .{ .height_amplitude = 0.5, .smoothing = 0.4 }, // Flatter, smoother
         .colors = .{ .grass = .{ 0.75, 0.70, 0.35 } },
     },
     .{

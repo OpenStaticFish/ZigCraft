@@ -269,6 +269,17 @@ pub const TerrainGenerator = struct {
                 const wx: f32 = @floatFromInt(world_x + @as(i32, @intCast(local_x)));
                 const wz: f32 = @floatFromInt(world_z + @as(i32, @intCast(local_z)));
 
+                // Re-compute coastal status and slope for procedural beaches
+                const warp = self.computeWarp(wx, wz);
+                const c_val = self.getContinentalness(wx + warp.x, wz + warp.z);
+                const is_coastal_zone = c_val > 0.40 and c_val < 0.65;
+
+                var max_slope: i32 = 0;
+                if (local_x > 0) max_slope = @max(max_slope, @as(i32, @intCast(@abs(terrain_height_i - surface_heights[idx - 1]))));
+                if (local_x < CHUNK_SIZE_X - 1) max_slope = @max(max_slope, @as(i32, @intCast(@abs(terrain_height_i - surface_heights[idx + 1]))));
+                if (local_z > 0) max_slope = @max(max_slope, @as(i32, @intCast(@abs(terrain_height_i - surface_heights[idx - CHUNK_SIZE_X]))));
+                if (local_z < CHUNK_SIZE_Z - 1) max_slope = @max(max_slope, @as(i32, @intCast(@abs(terrain_height_i - surface_heights[idx + CHUNK_SIZE_X]))));
+
                 // Fill column
                 var y: i32 = 0;
 
@@ -283,6 +294,16 @@ pub const TerrainGenerator = struct {
 
                 while (y < CHUNK_SIZE_Y) : (y += 1) {
                     var block = self.getBlockAt(y, terrain_height_i, active_biome, filler_depth, is_ocean, sea);
+
+                    // Procedural Beach/Cliff rules
+                    if (block == active_biome.getSurfaceBlock()) {
+                        const sl = p.sea_level;
+                        if (is_coastal_zone and max_slope >= 3 and y >= sl) {
+                            block = .stone; // Cliff
+                        } else if (is_coastal_zone and max_slope <= 1 and y >= sl - 2 and y <= sl + 3) {
+                            block = .sand; // Beach
+                        }
+                    }
 
                     // Cave carving (worm caves + noise cavities)
                     if (block != .air and block != .water and block != .bedrock) {
@@ -357,6 +378,17 @@ pub const TerrainGenerator = struct {
                 const wx: f32 = @floatFromInt(world_x + @as(i32, @intCast(local_x)));
                 const wz: f32 = @floatFromInt(world_z + @as(i32, @intCast(local_z)));
 
+                // Re-compute coastal status and slope
+                const warp = self.computeWarp(wx, wz);
+                const c_val = self.getContinentalness(wx + warp.x, wz + warp.z);
+                const is_coastal_zone = c_val > 0.40 and c_val < 0.65;
+
+                var max_slope: i32 = 0;
+                if (local_x > 0) max_slope = @max(max_slope, @as(i32, @intCast(@abs(terrain_height_i - surface_heights[idx - 1]))));
+                if (local_x < CHUNK_SIZE_X - 1) max_slope = @max(max_slope, @as(i32, @intCast(@abs(terrain_height_i - surface_heights[idx + 1]))));
+                if (local_z > 0) max_slope = @max(max_slope, @as(i32, @intCast(@abs(terrain_height_i - surface_heights[idx - CHUNK_SIZE_X]))));
+                if (local_z < CHUNK_SIZE_Z - 1) max_slope = @max(max_slope, @as(i32, @intCast(@abs(terrain_height_i - surface_heights[idx + CHUNK_SIZE_X]))));
+
                 const primary_biome_id = biome_ids[idx];
                 const secondary_biome_id = secondary_biome_ids[idx];
                 const blend = biome_blends[idx];
@@ -368,6 +400,16 @@ pub const TerrainGenerator = struct {
                 var y: i32 = 0;
                 while (y < CHUNK_SIZE_Y) : (y += 1) {
                     var block = self.getBlockAt(y, terrain_height_i, active_biome, filler_depth, is_ocean, sea);
+
+                    // Procedural Beach/Cliff rules
+                    if (block == active_biome.getSurfaceBlock()) {
+                        const sl = p.sea_level;
+                        if (is_coastal_zone and max_slope >= 3 and y >= sl) {
+                            block = .stone;
+                        } else if (is_coastal_zone and max_slope <= 1 and y >= sl - 2 and y <= sl + 3) {
+                            block = .sand;
+                        }
+                    }
 
                     // Only noise cavities (no worm caves)
                     if (block != .air and block != .water and block != .bedrock) {
@@ -705,6 +747,14 @@ pub const TerrainGenerator = struct {
             var local_x: u32 = 0;
             while (local_x < CHUNK_SIZE_X) : (local_x += 1) {
                 const idx = local_x + local_z * CHUNK_SIZE_X;
+                const wx: f32 = @floatFromInt(chunk.getWorldX() + @as(i32, @intCast(local_x)));
+                const wz: f32 = @floatFromInt(chunk.getWorldZ() + @as(i32, @intCast(local_z)));
+
+                // Coastal suppression
+                const warp = self.computeWarp(wx, wz);
+                const c_val = self.getContinentalness(wx + warp.x, wz + warp.z);
+                const tree_suppress = smoothstep(0.55, 0.58, c_val);
+
                 const primary = biome_ids[idx];
                 const secondary = secondary_biome_ids[idx];
                 const blend = biome_blends[idx];
@@ -716,7 +766,7 @@ pub const TerrainGenerator = struct {
                 const active_def = if (random.float(f32) < blend) sec_def else prim_def;
                 const profile = active_def.vegetation;
 
-                const tree_density = std.math.lerp(prim_def.vegetation.tree_density, sec_def.vegetation.tree_density, blend);
+                const tree_density = std.math.lerp(prim_def.vegetation.tree_density, sec_def.vegetation.tree_density, blend) * tree_suppress;
                 const cactus_density = std.math.lerp(prim_def.vegetation.cactus_density, sec_def.vegetation.cactus_density, blend);
                 const bamboo_density = std.math.lerp(prim_def.vegetation.bamboo_density, sec_def.vegetation.bamboo_density, blend);
                 const melon_density = std.math.lerp(prim_def.vegetation.melon_density, sec_def.vegetation.melon_density, blend);
