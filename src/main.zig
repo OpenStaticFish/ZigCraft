@@ -22,6 +22,7 @@ const Clouds = @import("engine/graphics/clouds.zig").Clouds;
 // World imports
 const World = @import("world/world.zig").World;
 const worldToChunk = @import("world/chunk.zig").worldToChunk;
+const WorldMap = @import("world/worldgen/world_map.zig").WorldMap;
 
 // C imports
 const c = @import("c.zig").c;
@@ -425,6 +426,17 @@ pub fn main() !void {
     var world: ?*World = null;
     defer if (world) |active_world| active_world.deinit();
 
+    var world_map: ?WorldMap = null;
+    defer if (world_map) |*m| m.deinit();
+    var show_map = false;
+    var map_needs_update = true;
+    var map_zoom: f32 = 4.0;
+    var map_target_zoom: f32 = 4.0;
+    var map_pos_x: f32 = 0.0;
+    var map_pos_z: f32 = 0.0;
+    var last_mouse_x: f32 = 0.0;
+    var last_mouse_y: f32 = 0.0;
+
     // Initial viewport
     renderer.setViewport(1280, 720);
 
@@ -457,21 +469,28 @@ pub fn main() !void {
 
         // Global Escape Handling
         if (input.isKeyPressed(.escape)) {
-            switch (app_state) {
-                .home => input.should_quit = true,
-                .singleplayer => {
-                    app_state = .home;
-                    seed_focused = false;
-                },
-                .settings => app_state = last_state,
-                .world => {
-                    app_state = .paused;
-                    input.setMouseCapture(window, false);
-                },
-                .paused => {
-                    app_state = .world;
+            if (show_map) {
+                show_map = false;
+                if (app_state == .world) {
                     input.setMouseCapture(window, true);
-                },
+                }
+            } else {
+                switch (app_state) {
+                    .home => input.should_quit = true,
+                    .singleplayer => {
+                        app_state = .home;
+                        seed_focused = false;
+                    },
+                    .settings => app_state = last_state,
+                    .world => {
+                        app_state = .paused;
+                        input.setMouseCapture(window, false);
+                    },
+                    .paused => {
+                        app_state = .world;
+                        input.setMouseCapture(window, true);
+                    },
+                }
             }
         }
 
@@ -507,13 +526,99 @@ pub fn main() !void {
                 setVSync(settings.vsync);
             }
 
-            // Toggle Shadow Debug with M
-            if (input.isKeyPressed(.m)) {
+            // Toggle Shadow Debug with U
+            if (input.isKeyPressed(.u)) {
                 debug_shadows = !debug_shadows;
                 log.log.info("Debug Shadows: {}", .{debug_shadows});
             }
 
+            // Toggle World Map with M
+            if (input.isKeyPressed(.m)) {
+                show_map = !show_map;
+                if (show_map) {
+                    map_pos_x = camera.position.x;
+                    map_pos_z = camera.position.z;
+                    map_target_zoom = map_zoom;
+                    map_needs_update = true;
+                    input.setMouseCapture(window, false);
+                } else if (app_state == .world) {
+                    input.setMouseCapture(window, true);
+                }
+            }
+
+            if (show_map) {
+                const dt = @min(time.delta_time, 0.033); // Cap dt to prevent feedback loops
+
+                // Smooth Zoom using Scroll Wheel or Keys
+                const zoom_kb_speed: f32 = 1.2;
+                if (input.isKeyDown(.plus) or input.isKeyDown(.kp_plus)) {
+                    map_target_zoom /= @exp(zoom_kb_speed * dt);
+                    map_needs_update = true;
+                }
+                if (input.isKeyDown(.minus) or input.isKeyDown(.kp_minus)) {
+                    map_target_zoom *= @exp(zoom_kb_speed * dt);
+                    map_needs_update = true;
+                }
+
+                if (input.scroll_y != 0) {
+                    // Discrete scroll zoom is less prone to feedback
+                    map_target_zoom *= @exp(-input.scroll_y * 0.12);
+                    map_needs_update = true;
+                }
+
+                // Clamp zoom to prevent crashes/instability (0.05 to 128.0 blocks per pixel)
+                map_target_zoom = std.math.clamp(map_target_zoom, 0.05, 128.0);
+
+                const old_zoom = map_zoom;
+                // Faster lerp for snappier feel
+                map_zoom = std.math.lerp(map_zoom, map_target_zoom, 20.0 * dt);
+                if (@abs(map_zoom - old_zoom) > 0.001 * map_zoom) map_needs_update = true;
+
+                // Center on player with Space
+                if (input.isKeyPressed(.space)) {
+                    map_pos_x = camera.position.x;
+                    map_pos_z = camera.position.z;
+                    map_needs_update = true;
+                }
+
+                // Panning logic: Mouse Drag (Stable) or WASD
+                const map_size: f32 = @min(screen_w, screen_h) * 0.8;
+                const world_to_screen_ratio = if (world_map) |m| @as(f32, @floatFromInt(m.width)) / map_size else 1.0;
+
+                if (input.isMouseButtonPressed(.left)) {
+                    last_mouse_x = mouse_x;
+                    last_mouse_y = mouse_y;
+                }
+
+                if (input.isMouseButtonDown(.left)) {
+                    const drag_dx = mouse_x - last_mouse_x;
+                    const drag_dz = mouse_y - last_mouse_y;
+                    if (@abs(drag_dx) > 0.1 or @abs(drag_dz) > 0.1) {
+                        map_pos_x -= drag_dx * map_zoom * world_to_screen_ratio;
+                        map_pos_z -= drag_dz * map_zoom * world_to_screen_ratio;
+                        map_needs_update = true;
+                    }
+                    last_mouse_x = mouse_x;
+                    last_mouse_y = mouse_y;
+                } else {
+                    const pan_kb_speed = 800.0 * map_zoom;
+                    var dx: f32 = 0;
+                    var dz: f32 = 0;
+                    if (input.isKeyDown(.w)) dz -= 1;
+                    if (input.isKeyDown(.s)) dz += 1;
+                    if (input.isKeyDown(.a)) dx -= 1;
+                    if (input.isKeyDown(.d)) dx += 1;
+
+                    if (dx != 0 or dz != 0) {
+                        map_pos_x += dx * pan_kb_speed * dt;
+                        map_pos_z += dz * pan_kb_speed * dt;
+                        map_needs_update = true;
+                    }
+                }
+            }
+
             // Cycle shadow cascades in debug mode with K
+
             if (debug_shadows and input.isKeyPressed(.k)) {
                 debug_cascade_idx = (debug_cascade_idx + 1) % 3;
                 log.log.info("Debug Cascade: {}", .{debug_cascade_idx});
@@ -548,24 +653,29 @@ pub fn main() !void {
                 }
             }
 
-            // Update camera only if in world
+            // Update systems only if NOT in map or specifically allowed
             if (in_world) {
-                camera.move_speed = settings.mouse_sensitivity;
-                camera.update(&input, time.delta_time);
+                if (!show_map) {
+                    camera.move_speed = settings.mouse_sensitivity;
+                    camera.update(&input, time.delta_time);
 
-                // Update atmosphere (day/night cycle)
-                atmosphere.update(time.delta_time);
+                    // Update atmosphere (day/night cycle)
+                    atmosphere.update(time.delta_time);
 
-                // Update clouds (wind movement)
-                clouds.update(time.delta_time);
-            }
+                    // Update clouds (wind movement)
+                    clouds.update(time.delta_time);
+                }
 
-            if (world) |active_world| {
-                // Update world (load chunks around player)
-                active_world.render_distance = settings.render_distance;
-                try active_world.update(camera.position);
-            } else {
-                app_state = .home;
+                if (world) |active_world| {
+                    // Update world (load chunks around player) - always keep loading for background?
+                    // No, pause loading to save CPU for map gen
+                    if (!show_map) {
+                        active_world.render_distance = settings.render_distance;
+                        try active_world.update(camera.position);
+                    }
+                } else {
+                    app_state = .home;
+                }
             }
         } else {
             if (input.mouse_captured) {
@@ -675,8 +785,40 @@ pub fn main() !void {
                     c.glBindVertexArray().?(0);
                 }
 
-                // Render UI (FPS counter)
                 ui.begin();
+
+                if (show_map) {
+                    if (world_map) |*m| {
+                        if (map_needs_update) {
+                            try m.update(&active_world.generator, map_pos_x, map_pos_z, map_zoom);
+                            map_needs_update = false;
+                        }
+
+                        const map_size: f32 = @min(screen_w, screen_h) * 0.8;
+                        const map_x = (screen_w - map_size) * 0.5;
+                        const map_y = (screen_h - map_size) * 0.5;
+
+                        ui.drawRect(.{ .x = 0, .y = 0, .width = screen_w, .height = screen_h }, Color.rgba(0, 0, 0, 0.5));
+                        ui.drawTexture(m.texture.id, .{ .x = map_x, .y = map_y, .width = map_size, .height = map_size });
+                        ui.drawRectOutline(.{ .x = map_x, .y = map_y, .width = map_size, .height = map_size }, Color.white, 2.0);
+
+                        drawTextCentered(&ui, "WORLD MAP", screen_w * 0.5, map_y - 40.0, 3.0, Color.white);
+                        drawTextCentered(&ui, "DRAG TO PAN - SCROLL TO ZOOM - SPACE TO CENTER - M TO CLOSE", screen_w * 0.5, map_y + map_size + 20.0, 1.5, Color.rgba(0.8, 0.8, 0.8, 1.0));
+
+                        // Player position on map
+                        const rel_x = (camera.position.x - map_pos_x) / (map_zoom * @as(f32, @floatFromInt(m.width)));
+                        const rel_z = (camera.position.z - map_pos_z) / (map_zoom * @as(f32, @floatFromInt(m.height)));
+
+                        const px = map_x + (rel_x + 0.5) * map_size;
+                        const pz = map_y + (rel_z + 0.5) * map_size;
+
+                        if (px >= map_x and px <= map_x + map_size and pz >= map_y and pz <= map_y + map_size) {
+                            ui.drawRect(.{ .x = px - 5, .y = pz - 1, .width = 10, .height = 2 }, Color.red);
+                            ui.drawRect(.{ .x = px - 1, .y = pz - 5, .width = 2, .height = 10 }, Color.red);
+                        }
+                    }
+                }
+
                 ui.drawRect(.{ .x = 10, .y = 10, .width = 80, .height = 30 }, Color.rgba(0, 0, 0, 0.7));
                 drawNumber(&ui, @intFromFloat(time.fps), 15, 15, Color.white);
 
@@ -916,6 +1058,11 @@ pub fn main() !void {
                             world = null;
                         }
                         world = try World.init(allocator, 2, seed_value);
+                        if (world_map == null) {
+                            world_map = WorldMap.init(256, 256);
+                        }
+                        show_map = false;
+                        map_needs_update = true;
                         app_state = .world;
                         seed_focused = false;
                         camera = Camera.init(.{

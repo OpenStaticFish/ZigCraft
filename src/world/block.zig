@@ -5,6 +5,7 @@ const std = @import("std");
 /// Biome types for terrain generation
 /// NOTE: This enum is kept for compatibility. See worldgen/biome.zig for
 /// the data-driven BiomeDefinition system.
+/// Per worldgen-revamp.md: includes transition micro-biomes
 pub const Biome = enum(u8) {
     deep_ocean = 0,
     ocean = 1,
@@ -23,6 +24,11 @@ pub const Biome = enum(u8) {
     savanna = 14,
     badlands = 15,
     mushroom_fields = 16,
+    // Per worldgen-revamp.md Section 4.3: Transition micro-biomes
+    foothills = 17,
+    marsh = 18,
+    dry_plains = 19,
+    coastal_plains = 20,
 
     /// Get surface block for this biome
     /// Prefer using BiomeDefinition.surface from worldgen/biome.zig
@@ -30,7 +36,7 @@ pub const Biome = enum(u8) {
         return switch (self) {
             .deep_ocean, .ocean => .gravel,
             .beach => .sand,
-            .plains, .forest, .swamp, .jungle, .savanna => .grass,
+            .plains, .forest, .swamp, .jungle, .savanna, .foothills, .marsh, .dry_plains, .coastal_plains => .grass,
             .taiga => .grass,
             .desert => .sand,
             .snow_tundra, .snowy_mountains => .snow_block,
@@ -49,7 +55,7 @@ pub const Biome = enum(u8) {
             .deep_ocean => .gravel,
             .ocean => .sand,
             .beach, .desert, .river => .sand,
-            .plains, .forest, .taiga, .swamp, .jungle, .savanna => .dirt,
+            .plains, .forest, .taiga, .swamp, .jungle, .savanna, .foothills, .marsh, .dry_plains, .coastal_plains => .dirt,
             .snow_tundra => .dirt,
             .mountains, .snowy_mountains => .stone,
             .mangrove_swamp => .mud,
