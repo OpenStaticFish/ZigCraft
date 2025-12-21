@@ -12,6 +12,7 @@ const Chunk = @import("../chunk.zig").Chunk;
 const CHUNK_SIZE_X = @import("../chunk.zig").CHUNK_SIZE_X;
 const CHUNK_SIZE_Y = @import("../chunk.zig").CHUNK_SIZE_Y;
 const CHUNK_SIZE_Z = @import("../chunk.zig").CHUNK_SIZE_Z;
+const MAX_LIGHT = @import("../chunk.zig").MAX_LIGHT;
 const BlockType = @import("../block.zig").BlockType;
 const Biome = @import("../block.zig").Biome;
 
@@ -243,6 +244,16 @@ pub const TerrainGenerator = struct {
         // Features (trees, cacti, etc.)
         self.generateFeatures(chunk);
 
+        // Compute initial skylight
+        self.computeSkylight(chunk);
+
+        // Compute block light
+        // If this fails (e.g. OOM), we log and continue. The chunk will effectively have
+        // no propagated block light until a dynamic update occurs. This is a safe fallback.
+        self.computeBlockLight(chunk) catch |err| {
+            std.debug.print("Failed to compute block light: {}\n", .{err});
+        };
+
         chunk.dirty = true;
     }
 
@@ -295,6 +306,9 @@ pub const TerrainGenerator = struct {
         chunk.generated = true;
         self.generateOres(chunk);
         self.generateFeatures(chunk);
+        self.computeSkylight(chunk);
+        // Fallback: ignore error if block light calc fails (OOM safe)
+        self.computeBlockLight(chunk) catch {};
         chunk.dirty = true;
     }
 
@@ -522,6 +536,8 @@ pub const TerrainGenerator = struct {
         self.placeOreVeins(chunk, .coal_ore, 20, 6, 10, 128, random);
         self.placeOreVeins(chunk, .iron_ore, 10, 4, 5, 64, random);
         self.placeOreVeins(chunk, .gold_ore, 3, 3, 2, 32, random);
+        // Glowstone in deep caves
+        self.placeOreVeins(chunk, .glowstone, 8, 4, 5, 40, random);
     }
 
     fn placeOreVeins(
@@ -655,6 +671,124 @@ pub const TerrainGenerator = struct {
             const cy = y + @as(u32, @intCast(i));
             if (cy < CHUNK_SIZE_Y) {
                 chunk.setBlock(x, cy, z, .cactus);
+            }
+        }
+    }
+
+    /// Compute initial skylight for the chunk using vertical pass
+    /// Skylight starts at 15 from top of world and drops to 0 below opaque blocks
+    pub fn computeSkylight(self: *const TerrainGenerator, chunk: *Chunk) void {
+        _ = self;
+
+        // For each column, propagate skylight downward
+        var local_z: u32 = 0;
+        while (local_z < CHUNK_SIZE_Z) : (local_z += 1) {
+            var local_x: u32 = 0;
+            while (local_x < CHUNK_SIZE_X) : (local_x += 1) {
+                var sky_light: u4 = MAX_LIGHT;
+
+                // Start from top of world and go down
+                var y: i32 = CHUNK_SIZE_Y - 1;
+                while (y >= 0) : (y -= 1) {
+                    const uy: u32 = @intCast(y);
+                    const block = chunk.getBlock(local_x, uy, local_z);
+
+                    // Set current light level
+                    chunk.setSkyLight(local_x, uy, local_z, sky_light);
+
+                    // If block is opaque, skylight becomes 0 below
+                    if (block.isOpaque()) {
+                        sky_light = 0;
+                    }
+                    // Water reduces light by 1 per block (roughly)
+                    else if (block == .water and sky_light > 0) {
+                        sky_light -= 1;
+                    }
+                    // Transparent blocks (air, leaves) let light through
+                }
+            }
+        }
+    }
+
+    const LightNode = struct {
+        x: u8,
+        y: u16,
+        z: u8,
+        level: u4,
+    };
+
+    /// Compute initial block light using BFS
+    /// Finds all emissive blocks and propagates light
+    pub fn computeBlockLight(self: *const TerrainGenerator, chunk: *Chunk) !void {
+        var queue = std.ArrayListUnmanaged(LightNode){};
+        defer queue.deinit(self.allocator);
+
+        // 1. Find all light sources
+        var local_z: u32 = 0;
+        while (local_z < CHUNK_SIZE_Z) : (local_z += 1) {
+            var y: u32 = 0;
+            while (y < CHUNK_SIZE_Y) : (y += 1) {
+                var local_x: u32 = 0;
+                while (local_x < CHUNK_SIZE_X) : (local_x += 1) {
+                    const block = chunk.getBlock(local_x, y, local_z);
+                    const emission = block.getLightEmission();
+                    if (emission > 0) {
+                        chunk.setBlockLight(local_x, y, local_z, emission);
+                        try queue.append(self.allocator, .{
+                            .x = @intCast(local_x),
+                            .y = @intCast(y),
+                            .z = @intCast(local_z),
+                            .level = emission,
+                        });
+                    }
+                }
+            }
+        }
+
+        // 2. Propagate light (BFS)
+        var head: usize = 0;
+        while (head < queue.items.len) : (head += 1) {
+            const node = queue.items[head];
+            if (node.level <= 1) continue;
+
+            const neighbors = [6][3]i32{
+                .{ 1, 0, 0 }, .{ -1, 0, 0 },
+                .{ 0, 1, 0 }, .{ 0, -1, 0 },
+                .{ 0, 0, 1 }, .{ 0, 0, -1 },
+            };
+
+            for (neighbors) |offset| {
+                const nx = @as(i32, node.x) + offset[0];
+                const ny = @as(i32, node.y) + offset[1];
+                const nz = @as(i32, node.z) + offset[2];
+
+                // Check bounds (intra-chunk only for now)
+                if (nx >= 0 and nx < CHUNK_SIZE_X and
+                    ny >= 0 and ny < CHUNK_SIZE_Y and
+                    nz >= 0 and nz < CHUNK_SIZE_Z)
+                {
+                    const ux: u32 = @intCast(nx);
+                    const uy: u32 = @intCast(ny);
+                    const uz: u32 = @intCast(nz);
+
+                    const block = chunk.getBlock(ux, uy, uz);
+                    if (!block.isOpaque()) {
+                        const current_level = chunk.getBlockLight(ux, uy, uz);
+                        // Light decay: -1 normally, more for water?
+                        // Simple model: -1 per step
+                        const next_level = node.level - 1;
+
+                        if (next_level > current_level) {
+                            chunk.setBlockLight(ux, uy, uz, next_level);
+                            try queue.append(self.allocator, .{
+                                .x = @intCast(nx),
+                                .y = @intCast(ny),
+                                .z = @intCast(nz),
+                                .level = next_level,
+                            });
+                        }
+                    }
+                }
             }
         }
     }

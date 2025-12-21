@@ -4,6 +4,7 @@ const std = @import("std");
 const c = @import("../c.zig").c;
 
 const Chunk = @import("chunk.zig").Chunk;
+const PackedLight = @import("chunk.zig").PackedLight;
 const CHUNK_SIZE_X = @import("chunk.zig").CHUNK_SIZE_X;
 const CHUNK_SIZE_Y = @import("chunk.zig").CHUNK_SIZE_Y;
 const CHUNK_SIZE_Z = @import("chunk.zig").CHUNK_SIZE_Z;
@@ -134,6 +135,7 @@ pub const ChunkMesh = struct {
     const FaceKey = struct {
         block: BlockType,
         side: bool,
+        light: PackedLight, // Light of the block this face is exposed to
     };
 
     fn meshSlice(self: *ChunkMesh, chunk: *const Chunk, neighbors: NeighborChunks, axis: Face, s: i32, si: u32, solid_list: *std.ArrayListUnmanaged(f32), fluid_list: *std.ArrayListUnmanaged(f32)) !void {
@@ -159,9 +161,13 @@ pub const ChunkMesh = struct {
                 const b2_emits = b2.isSolid() or (b2 == .water and b1 != .water);
 
                 if (isEmittingSubchunk(axis, s - 1, u, v, y_min, y_max) and b1_emits and !b2.occludes(b1, axis)) {
-                    mask[u + v * du] = .{ .block = b1, .side = true };
+                    // Face of b1 exposed to b2 - sample light from b2's position
+                    const light = getLightAtBoundary(chunk, neighbors, axis, s, u, v, si);
+                    mask[u + v * du] = .{ .block = b1, .side = true, .light = light };
                 } else if (isEmittingSubchunk(axis, s, u, v, y_min, y_max) and b2_emits and !b1.occludes(b2, axis)) {
-                    mask[u + v * du] = .{ .block = b2, .side = false };
+                    // Face of b2 exposed to b1 - sample light from b1's position
+                    const light = getLightAtBoundary(chunk, neighbors, axis, s - 1, u, v, si);
+                    mask[u + v * du] = .{ .block = b2, .side = false, .light = light };
                 }
             }
         }
@@ -179,7 +185,12 @@ pub const ChunkMesh = struct {
                     const nxt_opt = mask[su + width + sv * du];
                     if (nxt_opt == null) break;
                     const nxt = nxt_opt.?;
+                    // Don't merge faces with different light levels (for smooth lighting)
                     if (nxt.block != k.block or nxt.side != k.side) break;
+                    // Allow small light differences for greedy merging efficiency
+                    const sky_diff = @as(i8, @intCast(nxt.light.sky_light)) - @as(i8, @intCast(k.light.sky_light));
+                    const block_diff = @as(i8, @intCast(nxt.light.block_light)) - @as(i8, @intCast(k.light.block_light));
+                    if (@abs(sky_diff) > 1 or @abs(block_diff) > 1) break;
                 }
                 var height: u32 = 1;
                 var dvh: u32 = 1;
@@ -190,12 +201,15 @@ pub const ChunkMesh = struct {
                         if (nxt_opt == null) break :outer;
                         const nxt = nxt_opt.?;
                         if (nxt.block != k.block or nxt.side != k.side) break :outer;
+                        const sky_diff = @as(i8, @intCast(nxt.light.sky_light)) - @as(i8, @intCast(k.light.sky_light));
+                        const block_diff = @as(i8, @intCast(nxt.light.block_light)) - @as(i8, @intCast(k.light.block_light));
+                        if (@abs(sky_diff) > 1 or @abs(block_diff) > 1) break :outer;
                     }
                     height += 1;
                 }
 
                 const target = if (k.block.isTransparent() and k.block != .leaves) fluid_list else solid_list;
-                try addGreedyFace(self.allocator, target, axis, s, su, sv, width, height, k.block, k.side, si);
+                try addGreedyFace(self.allocator, target, axis, s, su, sv, width, height, k.block, k.side, si, k.light);
 
                 var dy: u32 = 0;
                 while (dy < height) : (dy += 1) {
@@ -215,14 +229,14 @@ pub const ChunkMesh = struct {
         for (0..NUM_SUBCHUNKS) |si| {
             if (self.pending_solid[si]) |v| {
                 setupBuffers(&self.subchunks[si].vao_solid, &self.subchunks[si].vbo_solid, v);
-                self.subchunks[si].count_solid = @intCast(v.len / 12);
+                self.subchunks[si].count_solid = @intCast(v.len / 14);
                 self.allocator.free(v);
                 self.pending_solid[si] = null;
                 self.subchunks[si].ready = true;
             }
             if (self.pending_fluid[si]) |v| {
                 setupBuffers(&self.subchunks[si].vao_fluid, &self.subchunks[si].vbo_fluid, v);
-                self.subchunks[si].count_fluid = @intCast(v.len / 12);
+                self.subchunks[si].count_fluid = @intCast(v.len / 14);
                 self.allocator.free(v);
                 self.pending_fluid[si] = null;
                 self.subchunks[si].ready = true;
@@ -278,7 +292,31 @@ fn getBlockCross(chunk: *const Chunk, neighbors: NeighborChunks, x: i32, y: i32,
     return chunk.getBlockSafe(x, y, z);
 }
 
-fn addGreedyFace(allocator: std.mem.Allocator, verts: *std.ArrayListUnmanaged(f32), axis: Face, s: i32, u: u32, v: u32, w: u32, h: u32, block: BlockType, forward: bool, si: u32) !void {
+/// Get light at boundary position, sampling from neighboring chunks if needed
+fn getLightAtBoundary(chunk: *const Chunk, neighbors: NeighborChunks, axis: Face, s: i32, u: u32, v: u32, si: u32) PackedLight {
+    const y_off: i32 = @intCast(si * SUBCHUNK_SIZE);
+    return switch (axis) {
+        .top => chunk.getLightSafe(@intCast(u), s, @intCast(v)),
+        .east => getLightCross(chunk, neighbors, s, y_off + @as(i32, @intCast(u)), @intCast(v)),
+        .south => getLightCross(chunk, neighbors, @intCast(u), y_off + @as(i32, @intCast(v)), s),
+        else => unreachable,
+    };
+}
+
+fn getLightCross(chunk: *const Chunk, neighbors: NeighborChunks, x: i32, y: i32, z: i32) PackedLight {
+    const MAX_LIGHT = @import("chunk.zig").MAX_LIGHT;
+    // Above world = full skylight
+    if (y >= CHUNK_SIZE_Y) return PackedLight.init(MAX_LIGHT, 0);
+    if (y < 0) return PackedLight.init(0, 0);
+
+    if (x < 0) return if (neighbors.west) |w| w.getLightSafe(CHUNK_SIZE_X - 1, y, z) else PackedLight.init(MAX_LIGHT, 0);
+    if (x >= CHUNK_SIZE_X) return if (neighbors.east) |e| e.getLightSafe(0, y, z) else PackedLight.init(MAX_LIGHT, 0);
+    if (z < 0) return if (neighbors.north) |n| n.getLightSafe(x, y, CHUNK_SIZE_Z - 1) else PackedLight.init(MAX_LIGHT, 0);
+    if (z >= CHUNK_SIZE_Z) return if (neighbors.south) |s| s.getLightSafe(x, y, 0) else PackedLight.init(MAX_LIGHT, 0);
+    return chunk.getLightSafe(x, y, z);
+}
+
+fn addGreedyFace(allocator: std.mem.Allocator, verts: *std.ArrayListUnmanaged(f32), axis: Face, s: i32, u: u32, v: u32, w: u32, h: u32, block: BlockType, forward: bool, si: u32, light: PackedLight) !void {
     const face = if (forward) axis else switch (axis) {
         .top => Face.bottom,
         .east => Face.west,
@@ -351,6 +389,9 @@ fn addGreedyFace(allocator: std.mem.Allocator, verts: *std.ArrayListUnmanaged(f3
         }
     }
     const idxs = [_]usize{ 0, 1, 2, 0, 2, 3 };
+    const sky_norm = @as(f32, @floatFromInt(light.getSkyLight())) / 15.0;
+    const block_norm = @as(f32, @floatFromInt(light.getBlockLight())) / 15.0;
+
     for (idxs) |i| {
         try verts.append(allocator, p[i][0]);
         try verts.append(allocator, p[i][1]);
@@ -364,6 +405,8 @@ fn addGreedyFace(allocator: std.mem.Allocator, verts: *std.ArrayListUnmanaged(f3
         try verts.append(allocator, uv[i][0]);
         try verts.append(allocator, uv[i][1]);
         try verts.append(allocator, tid);
+        try verts.append(allocator, sky_norm);
+        try verts.append(allocator, block_norm);
     }
 }
 
@@ -373,16 +416,44 @@ fn setupBuffers(vao_ptr: *c.GLuint, vbo_ptr: *c.GLuint, vertices: []const f32) v
     c.glBindVertexArray().?(vao_ptr.*);
     c.glBindBuffer().?(c.GL_ARRAY_BUFFER, vbo_ptr.*);
     c.glBufferData().?(c.GL_ARRAY_BUFFER, @intCast(vertices.len * @sizeOf(f32)), vertices.ptr, c.GL_STATIC_DRAW);
-    const stride: c.GLsizei = 12 * @sizeOf(f32);
+
+    // Stride is now 14 floats:
+    // 0: pos (3)
+    // 1: color (3)
+    // 2: normal (3)
+    // 3: uv (2)
+    // 4: tile_id (1)
+    // 5: skylight (1)
+    // 6: blocklight (1)
+    const stride: c.GLsizei = 14 * @sizeOf(f32);
+
+    // Position
     c.glVertexAttribPointer().?(0, 3, c.GL_FLOAT, c.GL_FALSE, stride, null);
     c.glEnableVertexAttribArray().?(0);
+
+    // Color
     c.glVertexAttribPointer().?(1, 3, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(3 * @sizeOf(f32)));
     c.glEnableVertexAttribArray().?(1);
+
+    // Normal
     c.glVertexAttribPointer().?(2, 3, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(6 * @sizeOf(f32)));
     c.glEnableVertexAttribArray().?(2);
+
+    // UV
     c.glVertexAttribPointer().?(3, 2, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(9 * @sizeOf(f32)));
     c.glEnableVertexAttribArray().?(3);
+
+    // Tile ID
     c.glVertexAttribPointer().?(4, 1, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(11 * @sizeOf(f32)));
     c.glEnableVertexAttribArray().?(4);
+
+    // Skylight
+    c.glVertexAttribPointer().?(5, 1, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(12 * @sizeOf(f32)));
+    c.glEnableVertexAttribArray().?(5);
+
+    // Blocklight
+    c.glVertexAttribPointer().?(6, 1, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(13 * @sizeOf(f32)));
+    c.glEnableVertexAttribArray().?(6);
+
     c.glBindVertexArray().?(0);
 }

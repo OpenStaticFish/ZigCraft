@@ -15,6 +15,8 @@ const Rect = @import("engine/core/interfaces.zig").Rect;
 const Key = @import("engine/core/interfaces.zig").Key;
 const log = @import("engine/core/log.zig");
 const TextureAtlas = @import("engine/graphics/texture_atlas.zig").TextureAtlas;
+const Atmosphere = @import("engine/graphics/atmosphere.zig").Atmosphere;
+const ShadowMap = @import("engine/graphics/shadows.zig").ShadowMap;
 
 // World imports
 const World = @import("world/world.zig").World;
@@ -23,7 +25,7 @@ const worldToChunk = @import("world/chunk.zig").worldToChunk;
 // C imports
 const c = @import("c.zig").c;
 
-// Textured terrain shaders
+// Textured terrain shaders with fog and dynamic sun lighting
 const vertex_shader_src =
     \\#version 330 core
     \\layout (location = 0) in vec3 aPos;
@@ -31,17 +33,30 @@ const vertex_shader_src =
     \\layout (location = 2) in vec3 aNormal;
     \\layout (location = 3) in vec2 aTexCoord;
     \\layout (location = 4) in float aTileID;
+    \\layout (location = 5) in float aSkyLight;
+    \\layout (location = 6) in float aBlockLight;
     \\out vec3 vColor;
     \\flat out vec3 vNormal;
     \\out vec2 vTexCoord;
     \\flat out int vTileID;
+    \\out float vDistance;
+    \\out float vSkyLight;
+    \\out float vBlockLight;
+    \\out vec4 vFragPosLightSpace;
     \\uniform mat4 transform;
+    \\uniform mat4 uModel;
+    \\uniform mat4 uLightSpaceMatrix;
     \\void main() {
-    \\    gl_Position = transform * vec4(aPos, 1.0);
+    \\    vec4 clipPos = transform * vec4(aPos, 1.0);
+    \\    gl_Position = clipPos;
     \\    vColor = aColor;
     \\    vNormal = aNormal;
     \\    vTexCoord = aTexCoord;
     \\    vTileID = int(aTileID);
+    \\    vDistance = length(aPos);
+    \\    vSkyLight = aSkyLight;
+    \\    vBlockLight = aBlockLight;
+    \\    vFragPosLightSpace = uLightSpaceMatrix * uModel * vec4(aPos, 1.0);
     \\}
 ;
 
@@ -51,12 +66,72 @@ const fragment_shader_src =
     \\flat in vec3 vNormal;
     \\in vec2 vTexCoord;
     \\flat in int vTileID;
+    \\in float vDistance;
+    \\in float vSkyLight;
+    \\in float vBlockLight;
+    \\in vec4 vFragPosLightSpace;
     \\out vec4 FragColor;
     \\uniform sampler2D uTexture;
+    \\uniform sampler2D uShadowMap;
     \\uniform bool uUseTexture;
+    \\uniform vec3 uSunDir;
+    \\uniform float uSunIntensity;
+    \\uniform float uAmbient;
+    \\uniform vec3 uFogColor;
+    \\uniform float uFogDensity;
+    \\uniform bool uFogEnabled;
+    \\
+    \\float calculateShadow(vec4 fragPosLightSpace, float nDotL) {
+    \\    // Perspective divide
+    \\    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
+    \\    // Transform to [0,1] range
+    \\    projCoords = projCoords * 0.5 + 0.5;
+    \\    
+    \\    // Check if outside shadow map frustum
+    \\    if (projCoords.z > 1.0) return 0.0;
+    \\    
+    \\    float currentDepth = projCoords.z;
+    \\    // Bias to prevent shadow acne
+    \\    float bias = max(0.002 * (1.0 - nDotL), 0.0005);
+    \\    
+    \\    // PCF (Percentage-closer filtering)
+    \\    float shadow = 0.0;
+    \\    vec2 texelSize = 1.0 / textureSize(uShadowMap, 0);
+    \\    for(int x = -1; x <= 1; ++x) {
+    \\        for(int y = -1; y <= 1; ++y) {
+    \\            float pcfDepth = texture(uShadowMap, projCoords.xy + vec2(x, y) * texelSize).r;
+    \\            shadow += currentDepth - bias > pcfDepth ? 1.0 : 0.0;
+    \\        }
+    \\    }
+    \\    shadow /= 9.0;
+    \\    
+    \\    return shadow;
+    \\}
+    \\
     \\void main() {
-    \\    vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
-    \\    float diff = max(dot(vNormal, lightDir), 0.0) * 0.4 + 0.6;
+    \\    // Combined lighting = Ambient + (SkyLight * SunIntensity) + BlockLight
+    \\    // Directional sun contribution (diffuse) only affects skylight
+    \\    
+    \\    float nDotL = max(dot(vNormal, uSunDir), 0.0);
+    \\    
+    \\    // Calculate shadows
+    \\    // Only apply shadows to sunlight
+    \\    float shadow = calculateShadow(vFragPosLightSpace, nDotL);
+    \\    
+    \\    // Calculate light levels
+    \\    // Skylight affected by sun intensity, angle, and shadow
+    \\    float directLight = nDotL * uSunIntensity * (1.0 - shadow);
+    \\    float skyLight = vSkyLight * (uAmbient + directLight * 0.8);
+    \\    
+    \\    // Block light fades with distance (handled by propagation, here just 0-1)
+    \\    float blockLight = vBlockLight;
+    \\    
+    \\    // Combine lights (max or add, max usually looks better for voxels)
+    \\    float lightLevel = max(skyLight, blockLight);
+    \\    
+    \\    // Ensure minimum ambient
+    \\    lightLevel = max(lightLevel, uAmbient * 0.5);
+    \\    lightLevel = clamp(lightLevel, 0.0, 1.0);
     \\    
     \\    vec3 color;
     \\    if (uUseTexture) {
@@ -73,10 +148,18 @@ const fragment_shader_src =
     \\        vec2 uv = (tilePos + tiledUV) * tileSize;
     \\        vec4 texColor = texture(uTexture, uv);
     \\        if (texColor.a < 0.1) discard;
-    \\        color = texColor.rgb * vColor * diff;
+    \\        color = texColor.rgb * vColor * lightLevel;
     \\    } else {
-    \\        color = vColor * diff;
+    \\        color = vColor * lightLevel;
     \\    }
+    \\    
+    \\    // Apply fog
+    \\    if (uFogEnabled) {
+    \\        float fogFactor = 1.0 - exp(-vDistance * uFogDensity);
+    \\        fogFactor = clamp(fogFactor, 0.0, 1.0);
+    \\        color = mix(color, uFogColor, fogFactor);
+    \\    }
+    \\    
     \\    FragColor = vec4(color, 1.0);
     \\}
 ;
@@ -171,7 +254,15 @@ pub fn main() !void {
     var ui = try UISystem.init(1280, 720);
     defer ui.deinit();
 
-    // 10. Menu + world state
+    // 10. Create Atmosphere System for day/night cycle
+    var atmosphere = Atmosphere.init();
+    defer atmosphere.deinit();
+
+    // 11. Create Shadow Map
+    var shadow_map = try ShadowMap.init(4096);
+    defer shadow_map.deinit();
+
+    // 12. Menu + world state
     var app_state: AppState = .home;
     var last_state: AppState = .home; // For "Back" button in settings
     var settings = Settings{};
@@ -186,7 +277,8 @@ pub fn main() !void {
     renderer.setViewport(1280, 720);
 
     log.log.info("=== Zig Voxel Engine ===", .{});
-    log.log.info("Controls: WASD=Move, Space/Shift=Up/Down, Tab=Mouse, F=Wireframe, T=Textures, V=VSync, Esc=Quit", .{});
+    log.log.info("Controls: WASD=Move, Space/Shift=Up/Down, Tab=Mouse, F=Wireframe, T=Textures, V=VSync", .{});
+    log.log.info("Time: 1=Midnight, 2=Sunrise, 3=Noon, 4=Sunset, N=Freeze/Unfreeze", .{});
 
     // 11. Main Loop
     // Sync initial settings
@@ -257,10 +349,42 @@ pub fn main() !void {
                 setVSync(settings.vsync);
             }
 
+            // Time-of-day controls
+            // 1-4: Time presets (midnight, sunrise, noon, sunset)
+            if (input.isKeyPressed(.@"1")) {
+                atmosphere.setTimeOfDay(0.0); // Midnight
+                log.log.info("Time: Midnight", .{});
+            }
+            if (input.isKeyPressed(.@"2")) {
+                atmosphere.setTimeOfDay(0.25); // Sunrise
+                log.log.info("Time: Sunrise", .{});
+            }
+            if (input.isKeyPressed(.@"3")) {
+                atmosphere.setTimeOfDay(0.5); // Noon
+                log.log.info("Time: Noon", .{});
+            }
+            if (input.isKeyPressed(.@"4")) {
+                atmosphere.setTimeOfDay(0.75); // Sunset
+                log.log.info("Time: Sunset", .{});
+            }
+            // N: Toggle day/night cycle (freeze/unfreeze time)
+            if (input.isKeyPressed(.n)) {
+                if (atmosphere.time_scale > 0) {
+                    atmosphere.time_scale = 0;
+                    log.log.info("Time: Frozen", .{});
+                } else {
+                    atmosphere.time_scale = 1.0;
+                    log.log.info("Time: Running", .{});
+                }
+            }
+
             // Update camera only if in world
             if (in_world) {
                 camera.move_speed = settings.mouse_sensitivity;
                 camera.update(&input, time.delta_time);
+
+                // Update atmosphere (day/night cycle)
+                atmosphere.update(time.delta_time);
             }
 
             if (world) |active_world| {
@@ -276,7 +400,7 @@ pub fn main() !void {
             }
         }
 
-        renderer.setClearColor(if (in_world or in_pause) Vec3.init(0.5, 0.7, 1.0) else Vec3.init(0.07, 0.08, 0.1));
+        renderer.setClearColor(if (in_world or in_pause) atmosphere.fog_color else Vec3.init(0.07, 0.08, 0.1));
         renderer.beginFrame();
 
         if (in_world or in_pause) {
@@ -286,11 +410,55 @@ pub fn main() !void {
                 // TODO: Update camera FOV with settings.fov
                 const view_proj = camera.getViewProjectionMatrixOriginCentered(aspect);
 
+                // --- SHADOW PASS ---
+                // Only render shadows if sun is up or moon is bright enough
+                // Ideally we switch light source based on who is dominant
+                var light_dir = atmosphere.sun_dir;
+                if (atmosphere.sun_intensity < 0.05 and atmosphere.moon_intensity > 0.05) {
+                    light_dir = atmosphere.moon_dir;
+                }
+
+                // Only cast shadows if we have some light
+                const has_shadows = atmosphere.sun_intensity > 0.05 or atmosphere.moon_intensity > 0.05;
+
+                if (has_shadows) {
+                    shadow_map.begin(light_dir, camera.position);
+                    // Render world into shadow map
+                    // We use light space matrix which shadow_map.begin computed
+                    // We pass camera.position for floating origin calculation, but effective position is 0,0,0 relative to chunks?
+                    // No, world.render uses camera.position to offset chunks relative to camera.
+                    // For shadow map, we need consistent positioning.
+                    // The shadow map matrix was calculated using actual camera.position.
+                    // World.render subtracts camera.position from chunk position to get relative position.
+                    // So passing camera.position is correct.
+                    active_world.render(&shadow_map.shader, shadow_map.light_space_matrix, camera.position);
+                    shadow_map.end(input.window_width, input.window_height);
+                }
+
+                // --- MAIN PASS ---
+                renderer.setClearColor(if (in_world or in_pause) atmosphere.fog_color else Vec3.init(0.07, 0.08, 0.1));
+                renderer.beginFrame();
+
+                // Render sky first (before terrain, with depth write disabled)
+                atmosphere.renderSky(camera.forward, camera.right, camera.up, aspect, camera.fov);
+
                 // Bind texture atlas and set uniforms
                 shader.use();
                 atlas.bind(0);
+                shadow_map.depth_map.bind(1); // Bind shadow map to slot 1
+
                 shader.setInt("uTexture", 0);
+                shader.setInt("uShadowMap", 1);
                 shader.setBool("uUseTexture", settings.textures_enabled);
+                shader.setMat4("uLightSpaceMatrix", &shadow_map.light_space_matrix.data);
+
+                // Set atmosphere/lighting uniforms
+                shader.setVec3("uSunDir", atmosphere.sun_dir.x, atmosphere.sun_dir.y, atmosphere.sun_dir.z);
+                shader.setFloat("uSunIntensity", atmosphere.sun_intensity);
+                shader.setFloat("uAmbient", atmosphere.ambient_intensity);
+                shader.setVec3("uFogColor", atmosphere.fog_color.x, atmosphere.fog_color.y, atmosphere.fog_color.z);
+                shader.setFloat("uFogDensity", atmosphere.fog_density);
+                shader.setBool("uFogEnabled", atmosphere.fog_enabled);
 
                 // Pass camera position for floating origin chunk rendering
                 active_world.render(&shader, view_proj, camera.position);
@@ -305,7 +473,7 @@ pub fn main() !void {
                 const rs = active_world.getRenderStats();
                 const player_chunk = worldToChunk(@intFromFloat(camera.position.x), @intFromFloat(camera.position.z));
                 const hud_y: f32 = 50.0;
-                ui.drawRect(.{ .x = 10, .y = hud_y, .width = 220, .height = 130 }, Color.rgba(0, 0, 0, 0.6));
+                ui.drawRect(.{ .x = 10, .y = hud_y, .width = 220, .height = 170 }, Color.rgba(0, 0, 0, 0.6));
 
                 drawText(&ui, "POS:", 15, hud_y + 5, 1.5, Color.white);
                 drawNumber(&ui, player_chunk.chunk_x, 120, hud_y + 5, Color.white);
@@ -325,6 +493,20 @@ pub fn main() !void {
 
                 drawText(&ui, "PENDING UP:", 15, hud_y + 105, 1.5, Color.white);
                 drawNumber(&ui, @intCast(stats.upload_queue), 140, hud_y + 105, Color.white);
+
+                // Time display
+                const hours = atmosphere.getHours();
+                const hour_int: i32 = @intFromFloat(hours);
+                const mins: i32 = @intFromFloat((hours - @as(f32, @floatFromInt(hour_int))) * 60.0);
+                drawText(&ui, "TIME:", 15, hud_y + 125, 1.5, Color.white);
+                drawNumber(&ui, hour_int, 100, hud_y + 125, Color.white);
+                drawText(&ui, ":", 125, hud_y + 125, 1.5, Color.white);
+                drawNumber(&ui, mins, 140, hud_y + 125, Color.white);
+
+                // Sun intensity indicator
+                drawText(&ui, "SUN:", 15, hud_y + 145, 1.5, Color.white);
+                const sun_pct: i32 = @intFromFloat(atmosphere.sun_intensity * 100.0);
+                drawNumber(&ui, sun_pct, 100, hud_y + 145, Color.white);
 
                 if (in_pause) {
                     // Darken background

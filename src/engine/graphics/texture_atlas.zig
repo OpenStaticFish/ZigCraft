@@ -48,6 +48,7 @@ pub const TextureAtlas = struct {
     pub const TILE_LEAVES: u8 = 10;
     pub const TILE_WATER: u8 = 11;
     pub const TILE_GLASS: u8 = 12;
+    pub const TILE_GLOWSTONE: u8 = 13;
 
     /// Block type to tile mapping
     pub fn getTilesForBlock(block_id: u8) BlockTiles {
@@ -64,6 +65,7 @@ pub const TextureAtlas = struct {
             9 => BlockTiles.uniform(TILE_BEDROCK), // Bedrock
             10 => BlockTiles.uniform(TILE_GRAVEL), // Gravel
             11 => BlockTiles.uniform(TILE_GLASS), // Glass
+            18 => BlockTiles.uniform(TILE_GLOWSTONE), // Glowstone
             else => BlockTiles.uniform(0),
         };
     }
@@ -114,6 +116,7 @@ pub const TextureAtlas = struct {
         generateTile(pixels, TILE_LEAVES, .{ 50, 128, 38 }, .leaves);
         generateTile(pixels, TILE_WATER, .{ 50, 100, 200 }, .water);
         generateTile(pixels, TILE_GLASS, .{ 200, 230, 240 }, .glass);
+        generateTile(pixels, TILE_GLOWSTONE, .{ 255, 220, 100 }, .glowstone);
 
         // Create OpenGL texture
         const texture = Texture.init(ATLAS_SIZE, ATLAS_SIZE, pixels.ptr, .rgba, .{
@@ -154,6 +157,7 @@ pub const TextureAtlas = struct {
         leaves,
         water,
         glass,
+        glowstone,
     };
 
     fn generateTile(pixels: []u8, tile_index: u8, base_color: [3]u8, pattern: TilePattern) void {
@@ -272,6 +276,19 @@ pub const TextureAtlas = struct {
                     break :blk .{ 255, 255, 255 };
                 }
                 break :blk base;
+            },
+
+            .glowstone => blk: {
+                // Bright center, darker edges, noisy
+                const dist_x = @abs(@as(i32, @intCast(px)) - 8);
+                const dist_y = @abs(@as(i32, @intCast(py)) - 8);
+                const dist = dist_x * dist_x + dist_y * dist_y;
+                const noise = simpleHash(x * 4, y * 4) % 40;
+
+                // Brighter in center
+                const center_boost: i8 = if (dist < 16) 20 else -10;
+
+                break :blk adjustBrightness(base, @as(i8, @intCast(noise)) - 20 + center_boost);
             },
         };
     }

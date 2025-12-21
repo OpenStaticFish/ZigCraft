@@ -435,6 +435,7 @@ pub const World = struct {
             const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
             const mvp = view_proj.multiply(model);
             shader.setMat4("transform", &mvp.data);
+            shader.setMat4("uModel", &model.data);
             data.mesh.draw(.solid);
         }
 
@@ -459,6 +460,7 @@ pub const World = struct {
             const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
             const mvp = view_proj.multiply(model);
             shader.setMat4("transform", &mvp.data);
+            shader.setMat4("uModel", &model.data);
             data.mesh.draw(.fluid);
         }
 

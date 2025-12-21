@@ -70,6 +70,7 @@ pub const BlockType = enum(u8) {
     iron_ore = 15,
     gold_ore = 16,
     clay = 17,
+    glowstone = 18,
 
     _,
 
@@ -88,6 +89,14 @@ pub const BlockType = enum(u8) {
         return switch (self) {
             .air, .water, .glass, .leaves => true,
             else => false,
+        };
+    }
+
+    /// Returns true if block completely blocks light propagation
+    pub fn isOpaque(self: BlockType) bool {
+        return switch (self) {
+            .air, .water, .glass, .leaves => false,
+            else => true,
         };
     }
 
@@ -122,7 +131,21 @@ pub const BlockType = enum(u8) {
             .iron_ore => .{ 0.6, 0.5, 0.4 },
             .gold_ore => .{ 0.9, 0.8, 0.2 },
             .clay => .{ 0.6, 0.6, 0.7 },
+            .glowstone => .{ 1.0, 0.9, 0.5 },
             _ => .{ 1, 0, 1 }, // Magenta for unknown
+        };
+    }
+
+    /// Get light emission level (0-15)
+    pub fn getLightEmission(self: BlockType) u4 {
+        return switch (self) {
+            .water => 0, // Water doesn't emit light
+            .cactus => 0,
+            .coal_ore => 0,
+            .iron_ore => 0,
+            .gold_ore => 0,
+            .glowstone => 15,
+            else => 0,
         };
     }
 

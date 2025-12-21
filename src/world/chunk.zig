@@ -1,4 +1,4 @@
-//! Chunk data structure - 16x256x16 block storage.
+//! Chunk data structure - 16x256x16 block storage with lighting.
 
 const std = @import("std");
 const BlockType = @import("block.zig").BlockType;
@@ -7,6 +7,45 @@ pub const CHUNK_SIZE_X = 16;
 pub const CHUNK_SIZE_Y = 256;
 pub const CHUNK_SIZE_Z = 16;
 pub const CHUNK_VOLUME = CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z;
+
+/// Maximum light level (0-15)
+pub const MAX_LIGHT: u4 = 15;
+
+/// Packed light value: upper 4 bits = skylight, lower 4 bits = blocklight
+pub const PackedLight = packed struct {
+    block_light: u4 = 0,
+    sky_light: u4 = 0,
+
+    pub fn init(sky: u4, block: u4) PackedLight {
+        return .{ .sky_light = sky, .block_light = block };
+    }
+
+    pub fn getSkyLight(self: PackedLight) u4 {
+        return self.sky_light;
+    }
+
+    pub fn getBlockLight(self: PackedLight) u4 {
+        return self.block_light;
+    }
+
+    pub fn setSkyLight(self: *PackedLight, val: u4) void {
+        self.sky_light = val;
+    }
+
+    pub fn setBlockLight(self: *PackedLight, val: u4) void {
+        self.block_light = val;
+    }
+
+    /// Get maximum of sky and block light
+    pub fn getMaxLight(self: PackedLight) u4 {
+        return @max(self.sky_light, self.block_light);
+    }
+
+    /// Get normalized brightness (0.0 - 1.0)
+    pub fn getBrightness(self: PackedLight) f32 {
+        return @as(f32, @floatFromInt(self.getMaxLight())) / 15.0;
+    }
+};
 
 pub const Chunk = struct {
     /// Chunk state for streaming
@@ -31,6 +70,9 @@ pub const Chunk = struct {
     /// Index = x + z * CHUNK_SIZE_X + y * CHUNK_SIZE_X * CHUNK_SIZE_Z
     blocks: [CHUNK_VOLUME]BlockType,
 
+    /// Light data: packed skylight (4 bits) + blocklight (4 bits) per block
+    light: [CHUNK_VOLUME]PackedLight,
+
     /// Current state in the streaming pipeline
     state: State = .missing,
 
@@ -51,6 +93,7 @@ pub const Chunk = struct {
             .chunk_x = chunk_x,
             .chunk_z = chunk_z,
             .blocks = [_]BlockType{.air} ** CHUNK_VOLUME,
+            .light = [_]PackedLight{PackedLight.init(0, 0)} ** CHUNK_VOLUME,
             .state = .missing,
             .job_token = 0,
             .pin_count = std.atomic.Value(u32).init(0),
@@ -85,6 +128,50 @@ pub const Chunk = struct {
             return .air;
         }
         return self.getBlock(@intCast(x), @intCast(y), @intCast(z));
+    }
+
+    /// Get light at local coordinates
+    pub fn getLight(self: *const Chunk, x: u32, y: u32, z: u32) PackedLight {
+        return self.light[getIndex(x, y, z)];
+    }
+
+    /// Set light at local coordinates
+    pub fn setLight(self: *Chunk, x: u32, y: u32, z: u32, light_val: PackedLight) void {
+        self.light[getIndex(x, y, z)] = light_val;
+    }
+
+    /// Get skylight at local coordinates
+    pub fn getSkyLight(self: *const Chunk, x: u32, y: u32, z: u32) u4 {
+        return self.light[getIndex(x, y, z)].getSkyLight();
+    }
+
+    /// Set skylight at local coordinates
+    pub fn setSkyLight(self: *Chunk, x: u32, y: u32, z: u32, val: u4) void {
+        self.light[getIndex(x, y, z)].setSkyLight(val);
+    }
+
+    /// Get blocklight at local coordinates
+    pub fn getBlockLight(self: *const Chunk, x: u32, y: u32, z: u32) u4 {
+        return self.light[getIndex(x, y, z)].getBlockLight();
+    }
+
+    /// Set blocklight at local coordinates
+    pub fn setBlockLight(self: *Chunk, x: u32, y: u32, z: u32, val: u4) void {
+        self.light[getIndex(x, y, z)].setBlockLight(val);
+    }
+
+    /// Get light with bounds checking (returns 0 if out of bounds, 15 if above world)
+    pub fn getLightSafe(self: *const Chunk, x: i32, y: i32, z: i32) PackedLight {
+        if (x < 0 or x >= CHUNK_SIZE_X or z < 0 or z >= CHUNK_SIZE_Z) {
+            return PackedLight.init(0, 0);
+        }
+        if (y >= CHUNK_SIZE_Y) {
+            return PackedLight.init(MAX_LIGHT, 0); // Full skylight above world
+        }
+        if (y < 0) {
+            return PackedLight.init(0, 0);
+        }
+        return self.getLight(@intCast(x), @intCast(y), @intCast(z));
     }
 
     /// Get world X coordinate of this chunk's origin

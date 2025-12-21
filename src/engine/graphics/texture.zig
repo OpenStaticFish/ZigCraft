@@ -60,6 +60,7 @@ pub const Texture = struct {
         // Upload texture data
         const gl_format = formatToGL(format);
         const internal_format = formatToInternalGL(format);
+        const data_type: c.GLenum = if (format == .depth) c.GL_FLOAT else c.GL_UNSIGNED_BYTE;
 
         c.glTexImage2D(
             c.GL_TEXTURE_2D,
@@ -69,9 +70,14 @@ pub const Texture = struct {
             @intCast(height),
             0,
             gl_format,
-            c.GL_UNSIGNED_BYTE,
+            data_type,
             data,
         );
+
+        if (config.wrap_s == .clamp_to_border or config.wrap_t == .clamp_to_border) {
+            const border_color = [_]f32{ 1.0, 1.0, 1.0, 1.0 };
+            c.glTexParameterfv(c.GL_TEXTURE_2D, c.GL_TEXTURE_BORDER_COLOR, &border_color);
+        }
 
         if (config.generate_mipmaps and data != null) {
             c.glGenerateMipmap().?(c.GL_TEXTURE_2D);
