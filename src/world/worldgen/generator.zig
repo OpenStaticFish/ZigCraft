@@ -243,6 +243,9 @@ pub const TerrainGenerator = struct {
             }
         }
 
+        // Relax terrain to prevent vertical cliffs
+        self.relaxTerrain(&surface_heights);
+
         // Generate worm caves (crosses chunk boundaries)
         var worm_carve_map = self.cave_system.generateWormCaves(chunk, &surface_heights, self.allocator) catch {
             // If allocation fails, continue without worm caves
@@ -425,12 +428,13 @@ pub const TerrainGenerator = struct {
 
     // ========== Section 5: Height Function ==========
 
-    fn getMountainMask(self: *const TerrainGenerator, pv: f32, e: f32) f32 {
+    fn getMountainMask(self: *const TerrainGenerator, pv: f32, e: f32, c: f32) f32 {
         _ = self;
-        // Mountains where peaks are high AND erosion is low (rugged)
-        const peak_factor = smoothstep(0.55, 0.85, pv);
-        const rugged_factor = 1.0 - smoothstep(0.45, 0.80, e);
-        return peak_factor * rugged_factor;
+        // Mountains require: Inland, High Peaks, Rugged (low erosion)
+        const inland = smoothstep(0.48, 0.70, c);
+        const peak_factor = smoothstep(0.60, 0.90, pv);
+        const rugged_factor = 1.0 - smoothstep(0.45, 0.85, e);
+        return inland * peak_factor * rugged_factor;
     }
 
     fn computeHeight(self: *const TerrainGenerator, c: f32, e: f32, pv: f32, x: f32, z: f32) f32 {
@@ -441,9 +445,11 @@ pub const TerrainGenerator = struct {
         const land_factor = smoothstep(0.35, 0.75, c);
         var base_height = std.math.lerp(sea - 55.0, sea + 70.0, land_factor);
 
-        // Section 5.2: Mountain lift
-        const m_mask = self.getMountainMask(pv, e);
-        const mount = std.math.pow(f32, m_mask, 1.7) * p.mount_amp;
+        // Section 5.2: Mountain lift with soft cap
+        const m_mask = self.getMountainMask(pv, e, c);
+        var mount = std.math.pow(f32, m_mask, 1.6) * p.mount_amp;
+        const mount_cap = 200.0;
+        mount = mount / (1.0 + mount / mount_cap);
         base_height += mount;
 
         // ATTENUATION: Reduce detail noise at higher altitudes to avoid jagged peaks
@@ -534,6 +540,89 @@ pub const TerrainGenerator = struct {
 
         // Stone below
         return .stone;
+    }
+
+    fn relaxTerrain(self: *const TerrainGenerator, heights: *[CHUNK_SIZE_X * CHUNK_SIZE_Z]i32) void {
+        _ = self;
+        const max_diff = 2;
+        const iterations = 4;
+
+        for (0..iterations) |_| {
+            var changed = false;
+
+            // Forward pass
+            var i: usize = 0;
+            while (i < heights.len) : (i += 1) {
+                var h = heights[i];
+                const x = i % CHUNK_SIZE_X;
+                const z = i / CHUNK_SIZE_X;
+
+                // West
+                if (x > 0) {
+                    const n = heights[i - 1];
+                    if (h - n > max_diff) {
+                        h = n + max_diff;
+                        heights[i] = h;
+                        changed = true;
+                    } else if (n - h > max_diff) {
+                        h = n - max_diff;
+                        heights[i] = h;
+                        changed = true;
+                    }
+                }
+                // North
+                if (z > 0) {
+                    const n = heights[i - CHUNK_SIZE_X];
+                    if (h - n > max_diff) {
+                        h = n + max_diff;
+                        heights[i] = h;
+                        changed = true;
+                    } else if (n - h > max_diff) {
+                        h = n - max_diff;
+                        heights[i] = h;
+                        changed = true;
+                    }
+                }
+            }
+
+            // Backward pass
+            var j: usize = heights.len;
+            while (j > 0) {
+                j -= 1;
+                var h = heights[j];
+                const x = j % CHUNK_SIZE_X;
+                const z = j / CHUNK_SIZE_X;
+
+                // East
+                if (x < CHUNK_SIZE_X - 1) {
+                    const n = heights[j + 1];
+                    if (h - n > max_diff) {
+                        h = n + max_diff;
+                        heights[j] = h;
+                        changed = true;
+                    } else if (n - h > max_diff) {
+                        h = n - max_diff;
+                        heights[j] = h;
+                        changed = true;
+                    }
+                }
+                // South
+                if (z < CHUNK_SIZE_Z - 1) {
+                    const n = heights[j + CHUNK_SIZE_X];
+                    if (h - n > max_diff) {
+                        h = n + max_diff;
+                        heights[j] = h;
+                        changed = true;
+                    } else if (n - h > max_diff) {
+                        h = n - max_diff;
+                        heights[j] = h;
+                        changed = true;
+                    }
+                }
+            }
+
+            if (!changed) break;
+        }
     }
 
     // ========== Ores ==========
