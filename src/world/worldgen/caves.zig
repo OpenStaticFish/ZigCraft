@@ -15,30 +15,30 @@ const BlockType = @import("../block.zig").BlockType;
 /// Cave system parameters
 pub const CaveParams = struct {
     // Section 3: Cave Region Mask (2D)
-    region_scale: f32 = 1.0 / 1200.0, // Large scale for regional control
-    region_threshold: f32 = 0.55, // Below this = no caves
+    region_scale: f32 = 1.0 / 900.0, // Smaller scale = more variation
+    region_threshold: f32 = 0.42, // Lower = more areas have caves
 
     // Section 4: Surface Protection
-    min_surface_depth: i32 = 10, // No caves within N blocks of surface
+    min_surface_depth: i32 = 8, // No caves within N blocks of surface
 
     // Section 5: Worm Caves
-    worms_per_chunk_min: u32 = 0,
-    worms_per_chunk_max: u32 = 2,
-    worm_y_min: i32 = 20,
-    worm_y_max: i32 = 100,
+    worms_per_chunk_min: u32 = 1,
+    worms_per_chunk_max: u32 = 3,
+    worm_y_min: i32 = 15,
+    worm_y_max: i32 = 110,
     worm_radius_min: f32 = 2.5,
-    worm_radius_max: f32 = 4.5,
-    worm_length_min: u32 = 50,
-    worm_length_max: u32 = 120,
-    worm_step_size: f32 = 1.5,
-    worm_turn_strength: f32 = 0.15,
-    worm_branch_chance: f32 = 0.02,
+    worm_radius_max: f32 = 5.0,
+    worm_length_min: u32 = 80,
+    worm_length_max: u32 = 180,
+    worm_step_size: f32 = 1.2,
+    worm_turn_strength: f32 = 0.12,
+    worm_branch_chance: f32 = 0.03,
 
     // Section 6: Noise Cavities
-    cavity_scale: f32 = 1.0 / 55.0,
-    cavity_y_scale: f32 = 1.0 / 45.0, // Slightly stretched vertically
-    cavity_threshold: f32 = 0.68,
-    cavity_y_min: i32 = 20,
+    cavity_scale: f32 = 1.0 / 50.0,
+    cavity_y_scale: f32 = 1.0 / 40.0, // Slightly stretched vertically
+    cavity_threshold: f32 = 0.62, // Lower = more cavities
+    cavity_y_min: i32 = 15,
     cavity_y_max: i32 = 140,
 
     // Sea level for underwater cave handling
@@ -124,8 +124,8 @@ pub const CaveSystem = struct {
         const world_z = chunk.getWorldZ();
 
         // Check this chunk and neighbors for worm spawns that might affect us
-        // Worms can travel ~120 blocks, so check a 2-chunk radius
-        const check_radius: i32 = 2;
+        // Worms can travel ~180 blocks, so check a 3-chunk radius
+        const check_radius: i32 = 3;
 
         var cz = chunk_z - check_radius;
         while (cz <= chunk_z + check_radius) : (cz += 1) {
@@ -170,11 +170,9 @@ pub const CaveSystem = struct {
         var prng = std.Random.DefaultPrng.init(chunk_seed);
         const random = prng.random();
 
-        // Determine number of worms (biased low)
+        // Determine number of worms
         const range = p.worms_per_chunk_max - p.worms_per_chunk_min + 1;
-        var num_worms = p.worms_per_chunk_min + random.uintLessThan(u32, range);
-        // Bias toward fewer worms
-        if (random.float(f32) < 0.4) num_worms = @max(num_worms, 1) - 1;
+        const num_worms = p.worms_per_chunk_min + random.uintLessThan(u32, range);
 
         for (0..num_worms) |_| {
             self.carveWorm(
