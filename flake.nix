@@ -38,6 +38,9 @@
           pkgs.sdl3
           pkgs.glew
           pkgs.libGL
+          pkgs.vulkan-loader
+          pkgs.vulkan-headers
+          pkgs.vulkan-validation-layers
         ];
 
         dontConfigure = true;
@@ -49,9 +52,9 @@
         '';
 
         postFixup = ''
-          patchelf --add-rpath ${pkgs.lib.makeLibraryPath [ pkgs.glew pkgs.libGL pkgs.sdl3 pkgs.stdenv.cc.cc.lib ]} $out/bin/zig-triangle
+          patchelf --add-rpath ${pkgs.lib.makeLibraryPath [ pkgs.glew pkgs.libGL pkgs.sdl3 pkgs.vulkan-loader pkgs.stdenv.cc.cc.lib ]} $out/bin/zig-triangle
           wrapProgram $out/bin/zig-triangle \
-            --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib ]}
+            --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.vulkan-loader ]}
         '';
       };
 
@@ -65,6 +68,9 @@
           pkgs.sdl3
           pkgs.glew    # For GL extension loading
           pkgs.libGL   # Base OpenGL driver support
+          pkgs.vulkan-loader
+          pkgs.vulkan-headers
+          pkgs.vulkan-validation-layers
         ];
 
         shellHook = ''

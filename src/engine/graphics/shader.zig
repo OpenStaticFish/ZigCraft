@@ -80,6 +80,46 @@ pub const Shader = struct {
         };
     }
 
+    pub fn initFromFile(allocator: std.mem.Allocator, vert_path: []const u8, frag_path: []const u8) !Shader {
+        var dir = std.fs.cwd();
+        // Swapped args: allocator, sub_path (or sub_path, allocator depending on Zig version)
+        // The error `expected type 'Io.Limit', found 'comptime_int'` means the size limit is now wrapped in an enum/struct or not simply a usize.
+        // It seems typically it is passed as a usize, but here it expects `Io.Limit`.
+        // Wait, checking the error message again: `expected type 'Io.Limit', found 'comptime_int'`.
+        // This suggests `limit: Io.Limit`.
+        // I will try to use the raw usize if I can find the way to construct it, or look for `.unlimited` or similar if appropriate, but standard is to pass a size.
+        // Actually, maybe `readFileAlloc` signature changed significantly.
+        // Let's assume the error is correct and it wants `std.io.Limit`.
+        // But usually standard library functions take `max_bytes: usize`.
+        // Ah, this is Zig Nightly/Dev (0.16). Things change fast.
+
+        // Let's try `std.fs.cwd().readFileAlloc(allocator, path, 1024*1024)` again but maybe I got the argument order wrong *again* or the error message was misleading?
+        // First error: expected []const u8 found Allocator. -> Means 1st arg should be path.
+        // My fix: `readFileAlloc(path, allocator, size)`.
+        // Second error: expected Io.Limit found int. -> Means 3rd arg is Io.Limit.
+
+        // Let's look at `std.fs.Dir.readFileAlloc` usage in recent Zig.
+        // It seems `std.fs.Dir.readFileAlloc` now takes `limit: std.io.Limit`.
+        // `std.io.Limit` is an enum(usize)? No, the error says `enum(usize)`.
+        // So I can probably cast it or use `.none` / `.max`.
+
+        // Let's try `@enumFromInt(1024 * 1024)`.
+
+        const vert_src = try dir.readFileAlloc(vert_path, allocator, @enumFromInt(1024 * 1024));
+        defer allocator.free(vert_src);
+
+        const frag_src = try dir.readFileAlloc(frag_path, allocator, @enumFromInt(1024 * 1024));
+        defer allocator.free(frag_src);
+
+        // Ensure null termination for C API
+        const vert_c = try allocator.dupeZ(u8, vert_src);
+        defer allocator.free(vert_c);
+        const frag_c = try allocator.dupeZ(u8, frag_src);
+        defer allocator.free(frag_c);
+
+        return init(allocator, vert_c, frag_c);
+    }
+
     pub fn deinit(self: *Shader) void {
         c.glDeleteProgram().?(self.program);
         if (@TypeOf(self.uniform_cache) != @TypeOf(undefined)) {

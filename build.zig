@@ -21,6 +21,7 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("sdl3");
     exe.linkSystemLibrary("glew");
     exe.linkSystemLibrary("gl");
+    exe.linkSystemLibrary("vulkan");
 
     b.installArtifact(exe);
 

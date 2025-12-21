@@ -1,7 +1,6 @@
 //! Chunk mesh generation with Greedy Meshing and Subchunks.
 
 const std = @import("std");
-const c = @import("../c.zig").c;
 
 const Chunk = @import("chunk.zig").Chunk;
 const PackedLight = @import("chunk.zig").PackedLight;
@@ -13,6 +12,10 @@ const Face = @import("block.zig").Face;
 const ALL_FACES = @import("block.zig").ALL_FACES;
 const TextureAtlas = @import("../engine/graphics/texture_atlas.zig").TextureAtlas;
 const biome_mod = @import("worldgen/biome.zig");
+const rhi_mod = @import("../engine/graphics/rhi.zig");
+const RHI = rhi_mod.RHI;
+const Vertex = rhi_mod.Vertex;
+const BufferHandle = rhi_mod.BufferHandle;
 
 pub const SUBCHUNK_SIZE = 16;
 pub const NUM_SUBCHUNKS = 16;
@@ -37,21 +40,17 @@ pub const NeighborChunks = struct {
 };
 
 pub const SubChunkMesh = struct {
-    vao_solid: c.GLuint = 0,
-    vbo_solid: c.GLuint = 0,
+    solid_handle: BufferHandle = 0,
     count_solid: u32 = 0,
 
-    vao_fluid: c.GLuint = 0,
-    vbo_fluid: c.GLuint = 0,
+    fluid_handle: BufferHandle = 0,
     count_fluid: u32 = 0,
 
     ready: bool = false,
 
-    pub fn deinit(self: *SubChunkMesh) void {
-        if (self.vao_solid != 0) c.glDeleteVertexArrays().?(1, &self.vao_solid);
-        if (self.vbo_solid != 0) c.glDeleteBuffers().?(1, &self.vbo_solid);
-        if (self.vao_fluid != 0) c.glDeleteVertexArrays().?(1, &self.vao_fluid);
-        if (self.vbo_fluid != 0) c.glDeleteBuffers().?(1, &self.vbo_fluid);
+    pub fn deinit(self: *SubChunkMesh, rhi: RHI) void {
+        if (self.solid_handle != 0) rhi.destroyBuffer(self.solid_handle);
+        if (self.fluid_handle != 0) rhi.destroyBuffer(self.fluid_handle);
     }
 };
 
@@ -60,24 +59,22 @@ pub const ChunkMesh = struct {
     allocator: std.mem.Allocator,
     mutex: std.Thread.Mutex,
 
-    pending_solid: [NUM_SUBCHUNKS]?[]f32,
-    pending_fluid: [NUM_SUBCHUNKS]?[]f32,
+    pending_solid: [NUM_SUBCHUNKS]?[]Vertex,
+    pending_fluid: [NUM_SUBCHUNKS]?[]Vertex,
 
     pub fn init(allocator: std.mem.Allocator) ChunkMesh {
         var self: ChunkMesh = .{
             .subchunks = undefined,
             .allocator = allocator,
             .mutex = .{},
-            .pending_solid = [_]?[]f32{null} ** NUM_SUBCHUNKS,
-            .pending_fluid = [_]?[]f32{null} ** NUM_SUBCHUNKS,
+            .pending_solid = [_]?[]Vertex{null} ** NUM_SUBCHUNKS,
+            .pending_fluid = [_]?[]Vertex{null} ** NUM_SUBCHUNKS,
         };
         for (0..NUM_SUBCHUNKS) |i| {
             self.subchunks[i] = .{
-                .vao_solid = 0,
-                .vbo_solid = 0,
+                .solid_handle = 0,
                 .count_solid = 0,
-                .vao_fluid = 0,
-                .vbo_fluid = 0,
+                .fluid_handle = 0,
                 .count_fluid = 0,
                 .ready = false,
             };
@@ -85,11 +82,12 @@ pub const ChunkMesh = struct {
         return self;
     }
 
-    pub fn deinit(self: *ChunkMesh) void {
+    // Must be called on main thread or wherever RHI context is valid
+    pub fn deinit(self: *ChunkMesh, rhi: RHI) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         for (0..NUM_SUBCHUNKS) |i| {
-            self.subchunks[i].deinit();
+            self.subchunks[i].deinit(rhi);
             if (self.pending_solid[i]) |p| self.allocator.free(p);
             if (self.pending_fluid[i]) |p| self.allocator.free(p);
         }
@@ -102,15 +100,13 @@ pub const ChunkMesh = struct {
     }
 
     fn buildSubchunk(self: *ChunkMesh, chunk: *const Chunk, neighbors: NeighborChunks, si: u32) !void {
-        var solid_verts = std.ArrayListUnmanaged(f32).empty;
+        var solid_verts = std.ArrayListUnmanaged(Vertex).empty;
         defer solid_verts.deinit(self.allocator);
-        var fluid_verts = std.ArrayListUnmanaged(f32).empty;
+        var fluid_verts = std.ArrayListUnmanaged(Vertex).empty;
         defer fluid_verts.deinit(self.allocator);
 
         const y0: i32 = @intCast(si * SUBCHUNK_SIZE);
         const y1: i32 = y0 + SUBCHUNK_SIZE;
-        // Meshes now use chunk-local coordinates (0-16 range)
-        // World offset is applied at render time via model matrix for floating origin
 
         var sy: i32 = y0;
         while (sy <= y1) : (sy += 1) {
@@ -129,18 +125,18 @@ pub const ChunkMesh = struct {
         defer self.mutex.unlock();
         if (self.pending_solid[si]) |p| self.allocator.free(p);
         if (self.pending_fluid[si]) |p| self.allocator.free(p);
-        self.pending_solid[si] = if (solid_verts.items.len > 0) try self.allocator.dupe(f32, solid_verts.items) else null;
-        self.pending_fluid[si] = if (fluid_verts.items.len > 0) try self.allocator.dupe(f32, fluid_verts.items) else null;
+        self.pending_solid[si] = if (solid_verts.items.len > 0) try self.allocator.dupe(Vertex, solid_verts.items) else null;
+        self.pending_fluid[si] = if (fluid_verts.items.len > 0) try self.allocator.dupe(Vertex, fluid_verts.items) else null;
     }
 
     const FaceKey = struct {
         block: BlockType,
         side: bool,
-        light: PackedLight, // Light of the block this face is exposed to
+        light: PackedLight,
         color: [3]f32,
     };
 
-    fn meshSlice(self: *ChunkMesh, chunk: *const Chunk, neighbors: NeighborChunks, axis: Face, s: i32, si: u32, solid_list: *std.ArrayListUnmanaged(f32), fluid_list: *std.ArrayListUnmanaged(f32)) !void {
+    fn meshSlice(self: *ChunkMesh, chunk: *const Chunk, neighbors: NeighborChunks, axis: Face, s: i32, si: u32, solid_list: *std.ArrayListUnmanaged(Vertex), fluid_list: *std.ArrayListUnmanaged(Vertex)) !void {
         const du: u32 = 16;
         const dv: u32 = 16;
         var mask = try self.allocator.alloc(?FaceKey, du * dv);
@@ -158,20 +154,15 @@ pub const ChunkMesh = struct {
                 const y_min: i32 = @intCast(si * SUBCHUNK_SIZE);
                 const y_max: i32 = y_min + SUBCHUNK_SIZE;
 
-                // Check if b1 should emit a face (solid blocks OR water facing non-water)
                 const b1_emits = b1.isSolid() or (b1 == .water and b2 != .water);
                 const b2_emits = b2.isSolid() or (b2 == .water and b1 != .water);
 
                 if (isEmittingSubchunk(axis, s - 1, u, v, y_min, y_max) and b1_emits and !b2.occludes(b1, axis)) {
-                    // Face of b1 exposed to b2 - sample light from b2's position
                     const light = getLightAtBoundary(chunk, neighbors, axis, s, u, v, si);
-                    // Use b1's position for color
                     const color = getBlockColor(chunk, neighbors, axis, s - 1, u, v, si, b1);
                     mask[u + v * du] = .{ .block = b1, .side = true, .light = light, .color = color };
                 } else if (isEmittingSubchunk(axis, s, u, v, y_min, y_max) and b2_emits and !b1.occludes(b2, axis)) {
-                    // Face of b2 exposed to b1 - sample light from b1's position
                     const light = getLightAtBoundary(chunk, neighbors, axis, s - 1, u, v, si);
-                    // Use b2's position for color
                     const color = getBlockColor(chunk, neighbors, axis, s, u, v, si, b2);
                     mask[u + v * du] = .{ .block = b2, .side = false, .light = light, .color = color };
                 }
@@ -191,14 +182,11 @@ pub const ChunkMesh = struct {
                     const nxt_opt = mask[su + width + sv * du];
                     if (nxt_opt == null) break;
                     const nxt = nxt_opt.?;
-                    // Don't merge faces with different light levels (for smooth lighting)
                     if (nxt.block != k.block or nxt.side != k.side) break;
-                    // Allow small light differences for greedy merging efficiency
                     const sky_diff = @as(i8, @intCast(nxt.light.sky_light)) - @as(i8, @intCast(k.light.sky_light));
                     const block_diff = @as(i8, @intCast(nxt.light.block_light)) - @as(i8, @intCast(k.light.block_light));
                     if (@abs(sky_diff) > 1 or @abs(block_diff) > 1) break;
 
-                    // Color check
                     const diff_r = @abs(nxt.color[0] - k.color[0]);
                     const diff_g = @abs(nxt.color[1] - k.color[1]);
                     const diff_b = @abs(nxt.color[2] - k.color[2]);
@@ -217,7 +205,6 @@ pub const ChunkMesh = struct {
                         const block_diff = @as(i8, @intCast(nxt.light.block_light)) - @as(i8, @intCast(k.light.block_light));
                         if (@abs(sky_diff) > 1 or @abs(block_diff) > 1) break :outer;
 
-                        // Color check
                         const diff_r = @abs(nxt.color[0] - k.color[0]);
                         const diff_g = @abs(nxt.color[1] - k.color[1]);
                         const diff_b = @abs(nxt.color[2] - k.color[2]);
@@ -241,20 +228,32 @@ pub const ChunkMesh = struct {
         }
     }
 
-    pub fn upload(self: *ChunkMesh) void {
+    pub fn upload(self: *ChunkMesh, rhi: RHI) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         for (0..NUM_SUBCHUNKS) |si| {
             if (self.pending_solid[si]) |v| {
-                setupBuffers(&self.subchunks[si].vao_solid, &self.subchunks[si].vbo_solid, v);
-                self.subchunks[si].count_solid = @intCast(v.len / 14);
+                if (self.subchunks[si].solid_handle != 0) {
+                    rhi.destroyBuffer(self.subchunks[si].solid_handle);
+                }
+                const bytes = std.mem.sliceAsBytes(v);
+                self.subchunks[si].solid_handle = rhi.createBuffer(bytes.len, .vertex);
+                rhi.uploadBuffer(self.subchunks[si].solid_handle, bytes);
+
+                self.subchunks[si].count_solid = @intCast(v.len);
                 self.allocator.free(v);
                 self.pending_solid[si] = null;
                 self.subchunks[si].ready = true;
             }
             if (self.pending_fluid[si]) |v| {
-                setupBuffers(&self.subchunks[si].vao_fluid, &self.subchunks[si].vbo_fluid, v);
-                self.subchunks[si].count_fluid = @intCast(v.len / 14);
+                if (self.subchunks[si].fluid_handle != 0) {
+                    rhi.destroyBuffer(self.subchunks[si].fluid_handle);
+                }
+                const bytes = std.mem.sliceAsBytes(v);
+                self.subchunks[si].fluid_handle = rhi.createBuffer(bytes.len, .vertex);
+                rhi.uploadBuffer(self.subchunks[si].fluid_handle, bytes);
+
+                self.subchunks[si].count_fluid = @intCast(v.len);
                 self.allocator.free(v);
                 self.pending_fluid[si] = null;
                 self.subchunks[si].ready = true;
@@ -262,15 +261,13 @@ pub const ChunkMesh = struct {
         }
     }
 
-    pub fn draw(self: *const ChunkMesh, pass: Pass) void {
+    pub fn draw(self: *const ChunkMesh, rhi: RHI, pass: Pass) void {
         for (self.subchunks) |s| {
             if (!s.ready) continue;
             if (pass == .solid and s.count_solid > 0) {
-                c.glBindVertexArray().?(s.vao_solid);
-                c.glDrawArrays(c.GL_TRIANGLES, 0, @intCast(s.count_solid));
+                rhi.draw(s.solid_handle, s.count_solid, .triangles);
             } else if (pass == .fluid and s.count_fluid > 0) {
-                c.glBindVertexArray().?(s.vao_fluid);
-                c.glDrawArrays(c.GL_TRIANGLES, 0, @intCast(s.count_fluid));
+                rhi.draw(s.fluid_handle, s.count_fluid, .triangles);
             }
         }
     }
@@ -310,7 +307,6 @@ fn getBlockCross(chunk: *const Chunk, neighbors: NeighborChunks, x: i32, y: i32,
     return chunk.getBlockSafe(x, y, z);
 }
 
-/// Get light at boundary position, sampling from neighboring chunks if needed
 fn getLightAtBoundary(chunk: *const Chunk, neighbors: NeighborChunks, axis: Face, s: i32, u: u32, v: u32, si: u32) PackedLight {
     const y_off: i32 = @intCast(si * SUBCHUNK_SIZE);
     return switch (axis) {
@@ -323,7 +319,6 @@ fn getLightAtBoundary(chunk: *const Chunk, neighbors: NeighborChunks, axis: Face
 
 fn getLightCross(chunk: *const Chunk, neighbors: NeighborChunks, x: i32, y: i32, z: i32) PackedLight {
     const MAX_LIGHT = @import("chunk.zig").MAX_LIGHT;
-    // Above world = full skylight
     if (y >= CHUNK_SIZE_Y) return PackedLight.init(MAX_LIGHT, 0);
     if (y < 0) return PackedLight.init(0, 0);
 
@@ -334,7 +329,7 @@ fn getLightCross(chunk: *const Chunk, neighbors: NeighborChunks, x: i32, y: i32,
     return chunk.getLightSafe(x, y, z);
 }
 
-fn addGreedyFace(allocator: std.mem.Allocator, verts: *std.ArrayListUnmanaged(f32), axis: Face, s: i32, u: u32, v: u32, w: u32, h: u32, block: BlockType, forward: bool, si: u32, light: PackedLight, tint: [3]f32) !void {
+fn addGreedyFace(allocator: std.mem.Allocator, verts: *std.ArrayListUnmanaged(Vertex), axis: Face, s: i32, u: u32, v: u32, w: u32, h: u32, block: BlockType, forward: bool, si: u32, light: PackedLight, tint: [3]f32) !void {
     const face = if (forward) axis else switch (axis) {
         .top => Face.bottom,
         .east => Face.west,
@@ -356,7 +351,7 @@ fn addGreedyFace(allocator: std.mem.Allocator, verts: *std.ArrayListUnmanaged(f3
     const sf: f32 = @floatFromInt(s);
     const uf: f32 = @floatFromInt(u);
     const vf: f32 = @floatFromInt(v);
-    // Use chunk-local coordinates (0-16 range) for floating origin rendering
+
     var p: [4][3]f32 = undefined;
     var uv: [4][2]f32 = undefined;
     if (axis == .top) {
@@ -412,69 +407,16 @@ fn addGreedyFace(allocator: std.mem.Allocator, verts: *std.ArrayListUnmanaged(f3
     const block_norm = @as(f32, @floatFromInt(light.getBlockLight())) / 15.0;
 
     for (idxs) |i| {
-        try verts.append(allocator, p[i][0]);
-        try verts.append(allocator, p[i][1]);
-        try verts.append(allocator, p[i][2]);
-        try verts.append(allocator, col[0]);
-        try verts.append(allocator, col[1]);
-        try verts.append(allocator, col[2]);
-        try verts.append(allocator, nf[0]);
-        try verts.append(allocator, nf[1]);
-        try verts.append(allocator, nf[2]);
-        try verts.append(allocator, uv[i][0]);
-        try verts.append(allocator, uv[i][1]);
-        try verts.append(allocator, tid);
-        try verts.append(allocator, sky_norm);
-        try verts.append(allocator, block_norm);
+        try verts.append(allocator, Vertex{
+            .pos = p[i],
+            .color = col,
+            .normal = nf,
+            .uv = uv[i],
+            .tile_id = tid,
+            .skylight = sky_norm,
+            .blocklight = block_norm,
+        });
     }
-}
-
-fn setupBuffers(vao_ptr: *c.GLuint, vbo_ptr: *c.GLuint, vertices: []const f32) void {
-    if (vao_ptr.* == 0) c.glGenVertexArrays().?(1, vao_ptr);
-    if (vbo_ptr.* == 0) c.glGenBuffers().?(1, vbo_ptr);
-    c.glBindVertexArray().?(vao_ptr.*);
-    c.glBindBuffer().?(c.GL_ARRAY_BUFFER, vbo_ptr.*);
-    c.glBufferData().?(c.GL_ARRAY_BUFFER, @intCast(vertices.len * @sizeOf(f32)), vertices.ptr, c.GL_STATIC_DRAW);
-
-    // Stride is now 14 floats:
-    // 0: pos (3)
-    // 1: color (3)
-    // 2: normal (3)
-    // 3: uv (2)
-    // 4: tile_id (1)
-    // 5: skylight (1)
-    // 6: blocklight (1)
-    const stride: c.GLsizei = 14 * @sizeOf(f32);
-
-    // Position
-    c.glVertexAttribPointer().?(0, 3, c.GL_FLOAT, c.GL_FALSE, stride, null);
-    c.glEnableVertexAttribArray().?(0);
-
-    // Color
-    c.glVertexAttribPointer().?(1, 3, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(3 * @sizeOf(f32)));
-    c.glEnableVertexAttribArray().?(1);
-
-    // Normal
-    c.glVertexAttribPointer().?(2, 3, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(6 * @sizeOf(f32)));
-    c.glEnableVertexAttribArray().?(2);
-
-    // UV
-    c.glVertexAttribPointer().?(3, 2, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(9 * @sizeOf(f32)));
-    c.glEnableVertexAttribArray().?(3);
-
-    // Tile ID
-    c.glVertexAttribPointer().?(4, 1, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(11 * @sizeOf(f32)));
-    c.glEnableVertexAttribArray().?(4);
-
-    // Skylight
-    c.glVertexAttribPointer().?(5, 1, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(12 * @sizeOf(f32)));
-    c.glEnableVertexAttribArray().?(5);
-
-    // Blocklight
-    c.glVertexAttribPointer().?(6, 1, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(13 * @sizeOf(f32)));
-    c.glEnableVertexAttribArray().?(6);
-
-    c.glBindVertexArray().?(0);
 }
 
 fn getBiomeAt(chunk: *const Chunk, neighbors: NeighborChunks, x: i32, z: i32) biome_mod.BiomeId {
@@ -506,7 +448,6 @@ fn getBlockColor(chunk: *const Chunk, neighbors: NeighborChunks, axis: Face, s: 
 
     var x: i32 = 0;
     var z: i32 = 0;
-    // Unused for now but good for context
     _ = si;
 
     switch (axis) {
@@ -528,7 +469,6 @@ fn getBlockColor(chunk: *const Chunk, neighbors: NeighborChunks, axis: Face, s: 
         },
     }
 
-    // 3x3 Blur for smooth biome transitions
     var r: f32 = 0;
     var g: f32 = 0;
     var b: f32 = 0;

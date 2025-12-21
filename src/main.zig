@@ -24,6 +24,10 @@ const World = @import("world/world.zig").World;
 const worldToChunk = @import("world/chunk.zig").worldToChunk;
 const WorldMap = @import("world/worldgen/world_map.zig").WorldMap;
 
+const RHI = @import("engine/graphics/rhi.zig").RHI;
+const rhi_opengl = @import("engine/graphics/rhi_opengl.zig");
+const rhi_vulkan = @import("engine/graphics/rhi_vulkan.zig");
+
 // C imports
 const c = @import("c.zig").c;
 
@@ -314,9 +318,37 @@ pub fn main() !void {
 
     // 5. Initialize GLEW
     c.glewExperimental = c.GL_TRUE;
-    if (c.glewInit() != c.GLEW_OK) {
-        return error.GLEWInitFailed;
+
+    // Check arguments for --backend vulkan
+    var use_vulkan = false;
+    var args_iter = try std.process.argsWithAllocator(allocator);
+    defer args_iter.deinit();
+    _ = args_iter.skip();
+    while (args_iter.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--backend") and std.mem.eql(u8, args_iter.next() orelse "", "vulkan")) {
+            use_vulkan = true;
+        }
     }
+
+    var rhi: RHI = undefined;
+    if (use_vulkan) {
+        log.log.info("Attempting to initialize Vulkan backend...", .{});
+        if (rhi_vulkan.createRHI(allocator)) |vulkan_rhi| {
+            rhi = vulkan_rhi;
+        } else |err| {
+            log.log.err("Failed to initialize Vulkan: {}. Falling back to OpenGL.", .{err});
+            if (c.glewInit() != c.GLEW_OK) return error.GLEWInitFailed;
+            rhi = try rhi_opengl.createRHI(allocator);
+            use_vulkan = false;
+        }
+    } else {
+        log.log.info("Initializing OpenGL backend...", .{});
+        if (c.glewInit() != c.GLEW_OK) {
+            return error.GLEWInitFailed;
+        }
+        rhi = try rhi_opengl.createRHI(allocator);
+    }
+    defer rhi.deinit();
 
     // 6. Initialize Engine Systems
     log.log.info("Initializing engine systems...", .{});
@@ -327,10 +359,15 @@ pub fn main() !void {
     input.window_height = 720;
 
     var time = Time.init();
-    var renderer = Renderer.init();
+    var renderer: ?Renderer = null;
+    if (!use_vulkan) {
+        renderer = Renderer.init();
+    }
 
     // Enable VSync
-    setVSync(true);
+    if (!use_vulkan) {
+        setVSync(true);
+    }
 
     // Start camera high above ground level, looking down
     var camera = Camera.init(.{
@@ -340,79 +377,100 @@ pub fn main() !void {
     });
 
     // 7. Create Shader
-    var shader = try Shader.initSimple(vertex_shader_src, fragment_shader_src);
-    defer shader.deinit();
-
-    // Debug shader for shadow map
-    const debug_vs =
-        \\#version 330 core
-        \\layout (location = 0) in vec2 aPos;
-        \\layout (location = 1) in vec2 aTexCoord;
-        \\out vec2 vTexCoord;
-        \\void main() {
-        \\    gl_Position = vec4(aPos, 0.0, 1.0);
-        \\    vTexCoord = aTexCoord;
-        \\}
-    ;
-    const debug_fs =
-        \\#version 330 core
-        \\out vec4 FragColor;
-        \\in vec2 vTexCoord;
-        \\uniform sampler2D uDepthMap;
-        \\void main() {
-        \\    float depth = texture(uDepthMap, vTexCoord).r;
-        \\    // Linearize? No, ortho depth is linear.
-        \\    FragColor = vec4(vec3(depth), 1.0);
-        \\}
-    ;
-    var debug_shader = try Shader.initSimple(debug_vs, debug_fs);
-    defer debug_shader.deinit();
-
+    var shader: ?Shader = null;
+    var debug_shader: ?Shader = null;
     var debug_quad_vao: c.GLuint = 0;
     var debug_quad_vbo: c.GLuint = 0;
-    {
-        const quad_vertices = [_]f32{
-            // pos, tex
-            -1.0, 1.0,  0.0, 1.0,
-            -1.0, -1.0, 0.0, 0.0,
-            1.0,  -1.0, 1.0, 0.0,
 
-            -1.0, 1.0,  0.0, 1.0,
-            1.0,  -1.0, 1.0, 0.0,
-            1.0,  1.0,  1.0, 1.0,
-        };
-        c.glGenVertexArrays().?(1, &debug_quad_vao);
-        c.glGenBuffers().?(1, &debug_quad_vbo);
-        c.glBindVertexArray().?(debug_quad_vao);
-        c.glBindBuffer().?(c.GL_ARRAY_BUFFER, debug_quad_vbo);
-        c.glBufferData().?(c.GL_ARRAY_BUFFER, quad_vertices.len * @sizeOf(f32), &quad_vertices, c.GL_STATIC_DRAW);
-        c.glEnableVertexAttribArray().?(0);
-        c.glVertexAttribPointer().?(0, 2, c.GL_FLOAT, c.GL_FALSE, 4 * @sizeOf(f32), null);
-        c.glEnableVertexAttribArray().?(1);
-        c.glVertexAttribPointer().?(1, 2, c.GL_FLOAT, c.GL_FALSE, 4 * @sizeOf(f32), @ptrFromInt(2 * @sizeOf(f32)));
+    if (!use_vulkan) {
+        shader = try Shader.initFromFile(allocator, "assets/shaders/terrain.vert", "assets/shaders/terrain.frag");
+
+        // Debug shader for shadow map
+        const debug_vs =
+            \\#version 330 core
+            \\layout (location = 0) in vec2 aPos;
+            \\layout (location = 1) in vec2 aTexCoord;
+            \\out vec2 vTexCoord;
+            \\void main() {
+            \\    gl_Position = vec4(aPos, 0.0, 1.0);
+            \\    vTexCoord = aTexCoord;
+            \\}
+        ;
+        const debug_fs =
+            \\#version 330 core
+            \\out vec4 FragColor;
+            \\in vec2 vTexCoord;
+            \\uniform sampler2D uDepthMap;
+            \\void main() {
+            \\    float depth = texture(uDepthMap, vTexCoord).r;
+            \\    // Linearize? No, ortho depth is linear.
+            \\    FragColor = vec4(vec3(depth), 1.0);
+            \\}
+        ;
+        debug_shader = try Shader.initSimple(debug_vs, debug_fs);
+
+        // Debug Quad
+        {
+            const quad_vertices = [_]f32{
+                // pos, tex
+                -1.0, 1.0,  0.0, 1.0,
+                -1.0, -1.0, 0.0, 0.0,
+                1.0,  -1.0, 1.0, 0.0,
+
+                -1.0, 1.0,  0.0, 1.0,
+                1.0,  -1.0, 1.0, 0.0,
+                1.0,  1.0,  1.0, 1.0,
+            };
+            c.glGenVertexArrays().?(1, &debug_quad_vao);
+            c.glGenBuffers().?(1, &debug_quad_vbo);
+            c.glBindVertexArray().?(debug_quad_vao);
+            c.glBindBuffer().?(c.GL_ARRAY_BUFFER, debug_quad_vbo);
+            c.glBufferData().?(c.GL_ARRAY_BUFFER, quad_vertices.len * @sizeOf(f32), &quad_vertices, c.GL_STATIC_DRAW);
+            c.glEnableVertexAttribArray().?(0);
+            c.glVertexAttribPointer().?(0, 2, c.GL_FLOAT, c.GL_FALSE, 4 * @sizeOf(f32), null);
+            c.glEnableVertexAttribArray().?(1);
+            c.glVertexAttribPointer().?(1, 2, c.GL_FLOAT, c.GL_FALSE, 4 * @sizeOf(f32), @ptrFromInt(2 * @sizeOf(f32)));
+        }
     }
+    defer if (shader) |*s| s.deinit();
+    defer if (debug_shader) |*s| s.deinit();
 
     // 8. Create Texture Atlas
-    var atlas = TextureAtlas.init(allocator);
-    defer atlas.deinit();
+    var atlas: ?TextureAtlas = null;
+    if (!use_vulkan) {
+        atlas = TextureAtlas.init(allocator);
+    }
+    defer if (atlas) |*a| a.deinit();
 
     // 9. Create UI System for menus/FPS display
-    var ui = try UISystem.init(1280, 720);
-    defer ui.deinit();
+    var ui: ?UISystem = null;
+    if (!use_vulkan) {
+        ui = try UISystem.init(1280, 720);
+    }
+    defer if (ui) |*u| u.deinit();
 
     // 10. Create Atmosphere System for day/night cycle
-    var atmosphere = Atmosphere.init();
-    defer atmosphere.deinit();
+    var atmosphere: ?Atmosphere = null;
+    if (!use_vulkan) {
+        atmosphere = Atmosphere.init();
+    }
+    defer if (atmosphere) |*a| a.deinit();
 
     // 10b. Create Cloud System
-    var clouds = try Clouds.init();
-    defer clouds.deinit();
+    var clouds: ?Clouds = null;
+    if (!use_vulkan) {
+        clouds = try Clouds.init();
+    }
+    defer if (clouds) |*cl| cl.deinit();
 
     var settings = Settings{};
 
     // 11. Create Shadow Map (CSM with configurable resolution)
-    var shadow_map = try ShadowMap.init(settings.shadow_resolution);
-    defer shadow_map.deinit();
+    var shadow_map: ?ShadowMap = null;
+    if (!use_vulkan) {
+        shadow_map = try ShadowMap.init(settings.shadow_resolution);
+    }
+    defer if (shadow_map) |*sm| sm.deinit();
 
     // 12. Menu + world state
     var app_state: AppState = .home;
@@ -438,7 +496,7 @@ pub fn main() !void {
     var last_mouse_y: f32 = 0.0;
 
     // Initial viewport
-    renderer.setViewport(1280, 720);
+    if (renderer) |*r| r.setViewport(1280, 720);
 
     log.log.info("=== Zig Voxel Engine ===", .{});
     log.log.info("Controls: WASD=Move, Space/Shift=Up/Down, Tab=Mouse, F=Wireframe, T=Textures, V=VSync, C=Clouds", .{});
@@ -457,8 +515,8 @@ pub fn main() !void {
         input.pollEvents();
 
         // Handle window resize
-        renderer.setViewport(input.window_width, input.window_height);
-        ui.resize(input.window_width, input.window_height);
+        if (renderer) |*r| r.setViewport(input.window_width, input.window_height);
+        if (ui) |*u| u.resize(input.window_width, input.window_height);
 
         const screen_w: f32 = @floatFromInt(input.window_width);
         const screen_h: f32 = @floatFromInt(input.window_height);
@@ -505,13 +563,15 @@ pub fn main() !void {
 
             // Toggle clouds with C
             if (input.isKeyPressed(.c)) {
-                clouds.enabled = !clouds.enabled;
-                log.log.info("Clouds: {}", .{clouds.enabled});
+                if (clouds) |*cl| {
+                    cl.enabled = !cl.enabled;
+                    log.log.info("Clouds: {}", .{cl.enabled});
+                }
             }
 
             // Toggle wireframe with F
             if (input.isKeyPressed(.f)) {
-                renderer.toggleWireframe();
+                if (renderer) |*r| r.toggleWireframe();
             }
 
             // Toggle textures with T
@@ -523,7 +583,7 @@ pub fn main() !void {
             // Toggle VSync with V
             if (input.isKeyPressed(.v)) {
                 settings.vsync = !settings.vsync;
-                setVSync(settings.vsync);
+                if (!use_vulkan) setVSync(settings.vsync);
             }
 
             // Toggle Shadow Debug with U
@@ -627,29 +687,39 @@ pub fn main() !void {
             // Time-of-day controls
             // 1-4: Time presets (midnight, sunrise, noon, sunset)
             if (input.isKeyPressed(.@"1")) {
-                atmosphere.setTimeOfDay(0.0); // Midnight
-                log.log.info("Time: Midnight", .{});
+                if (atmosphere) |*a| {
+                    a.setTimeOfDay(0.0); // Midnight
+                    log.log.info("Time: Midnight", .{});
+                }
             }
             if (input.isKeyPressed(.@"2")) {
-                atmosphere.setTimeOfDay(0.25); // Sunrise
-                log.log.info("Time: Sunrise", .{});
+                if (atmosphere) |*a| {
+                    a.setTimeOfDay(0.25); // Sunrise
+                    log.log.info("Time: Sunrise", .{});
+                }
             }
             if (input.isKeyPressed(.@"3")) {
-                atmosphere.setTimeOfDay(0.5); // Noon
-                log.log.info("Time: Noon", .{});
+                if (atmosphere) |*a| {
+                    a.setTimeOfDay(0.5); // Noon
+                    log.log.info("Time: Noon", .{});
+                }
             }
             if (input.isKeyPressed(.@"4")) {
-                atmosphere.setTimeOfDay(0.75); // Sunset
-                log.log.info("Time: Sunset", .{});
+                if (atmosphere) |*a| {
+                    a.setTimeOfDay(0.75); // Sunset
+                    log.log.info("Time: Sunset", .{});
+                }
             }
             // N: Toggle day/night cycle (freeze/unfreeze time)
             if (input.isKeyPressed(.n)) {
-                if (atmosphere.time_scale > 0) {
-                    atmosphere.time_scale = 0;
-                    log.log.info("Time: Frozen", .{});
-                } else {
-                    atmosphere.time_scale = 1.0;
-                    log.log.info("Time: Running", .{});
+                if (atmosphere) |*a| {
+                    if (a.time_scale > 0) {
+                        a.time_scale = 0;
+                        log.log.info("Time: Frozen", .{});
+                    } else {
+                        a.time_scale = 1.0;
+                        log.log.info("Time: Running", .{});
+                    }
                 }
             }
 
@@ -660,10 +730,10 @@ pub fn main() !void {
                     camera.update(&input, time.delta_time);
 
                     // Update atmosphere (day/night cycle)
-                    atmosphere.update(time.delta_time);
+                    if (atmosphere) |*a| a.update(time.delta_time);
 
                     // Update clouds (wind movement)
-                    clouds.update(time.delta_time);
+                    if (clouds) |*cl| cl.update(time.delta_time);
                 }
 
                 if (world) |active_world| {
@@ -683,8 +753,10 @@ pub fn main() !void {
             }
         }
 
-        renderer.setClearColor(if (in_world or in_pause) atmosphere.fog_color else Vec3.init(0.07, 0.08, 0.1));
-        renderer.beginFrame();
+        if (renderer) |*r| {
+            r.setClearColor(if (in_world or in_pause) (if (atmosphere) |a| a.fog_color else Vec3.init(0.5, 0.7, 1.0)) else Vec3.init(0.07, 0.08, 0.1));
+            r.beginFrame();
+        }
 
         if (in_world or in_pause) {
             if (world) |active_world| {
@@ -694,389 +766,431 @@ pub fn main() !void {
                 const view_proj = camera.getViewProjectionMatrixOriginCentered(aspect);
 
                 // --- SHADOW PASS ---
-                // Only render shadows if sun is up or moon is bright enough
-                var light_dir = atmosphere.sun_dir;
-                if (atmosphere.sun_intensity < 0.05 and atmosphere.moon_intensity > 0.05) {
-                    light_dir = atmosphere.moon_dir;
-                }
+                if (shadow_map) |*sm| {
+                    if (atmosphere) |atmo| {
+                        // Only render shadows if sun is up or moon is bright enough
+                        var light_dir = atmo.sun_dir;
+                        if (atmo.sun_intensity < 0.05 and atmo.moon_intensity > 0.05) {
+                            light_dir = atmo.moon_dir;
+                        }
 
-                // Only cast shadows if we have some light
-                const has_shadows = atmosphere.sun_intensity > 0.05 or atmosphere.moon_intensity > 0.05;
+                        // Only cast shadows if we have some light
+                        const has_shadows = atmo.sun_intensity > 0.05 or atmo.moon_intensity > 0.05;
 
-                if (has_shadows) {
-                    // Update cascades (splits and matrices)
-                    // Shadow distance from settings
-                    shadow_map.update(camera.fov, aspect, 0.1, settings.shadow_distance, light_dir, camera.position, camera.getViewMatrixOriginCentered());
+                        if (has_shadows) {
+                            // Update cascades (splits and matrices)
+                            // Shadow distance from settings
+                            sm.update(camera.fov, aspect, 0.1, settings.shadow_distance, light_dir, camera.position, camera.getViewMatrixOriginCentered());
 
-                    // Render each cascade
-                    for (0..3) |i| {
-                        shadow_map.begin(i);
-                        // Render world into shadow map
-                        // We use the cascade's light space matrix
-                        active_world.renderShadowPass(&shadow_map.shader, shadow_map.light_space_matrices[i], camera.position);
+                            // Render each cascade
+                            for (0..3) |i| {
+                                sm.begin(i);
+                                // Render world into shadow map
+                                // We use the cascade's light space matrix
+                                active_world.renderShadowPass(&sm.shader, sm.light_space_matrices[i], camera.position);
+                            }
+                            sm.end(input.window_width, input.window_height);
+                        }
                     }
-                    shadow_map.end(input.window_width, input.window_height);
                 }
 
                 // --- MAIN PASS ---
-                renderer.setClearColor(if (in_world or in_pause) atmosphere.fog_color else Vec3.init(0.07, 0.08, 0.1));
-                renderer.beginFrame();
+                if (renderer) |*r| {
+                    r.setClearColor(if (in_world or in_pause) (if (atmosphere) |a| a.fog_color else Vec3.init(0.5, 0.7, 1.0)) else Vec3.init(0.07, 0.08, 0.1));
+                    r.beginFrame();
+                }
 
                 // Render sky first (before terrain, with depth write disabled)
-                atmosphere.renderSky(camera.forward, camera.right, camera.up, aspect, camera.fov);
-
-                // Bind texture atlas and set uniforms
-                shader.use();
-                atlas.bind(0);
-                shader.setInt("uTexture", 0);
-                shader.setBool("uUseTexture", settings.textures_enabled);
-
-                // Bind CSM textures and uniforms
-                for (0..3) |i| {
-                    shadow_map.depth_maps[i].bind(@intCast(1 + i));
-
-                    var name_buf: [64]u8 = undefined;
-
-                    const tex_name = std.fmt.bufPrintZ(&name_buf, "uShadowMap{}", .{i}) catch "uShadowMap0";
-                    shader.setInt(tex_name, @intCast(1 + i));
-
-                    const mat_name = std.fmt.bufPrintZ(&name_buf, "uLightSpaceMatrices[{}]", .{i}) catch unreachable;
-                    shader.setMat4(mat_name, &shadow_map.light_space_matrices[i].data);
-
-                    const split_name = std.fmt.bufPrintZ(&name_buf, "uCascadeSplits[{}]", .{i}) catch unreachable;
-                    shader.setFloat(split_name, shadow_map.cascade_splits[i]);
-
-                    const size_name = std.fmt.bufPrintZ(&name_buf, "uShadowTexelSizes[{}]", .{i}) catch unreachable;
-                    shader.setFloat(size_name, shadow_map.texel_sizes[i]);
+                if (!use_vulkan) {
+                    if (atmosphere) |*a| a.renderSky(camera.forward, camera.right, camera.up, aspect, camera.fov);
                 }
 
-                // Set atmosphere/lighting uniforms
-                shader.setVec3("uSunDir", atmosphere.sun_dir.x, atmosphere.sun_dir.y, atmosphere.sun_dir.z);
-                shader.setFloat("uSunIntensity", atmosphere.sun_intensity);
-                shader.setFloat("uAmbient", atmosphere.ambient_intensity);
-                shader.setVec3("uFogColor", atmosphere.fog_color.x, atmosphere.fog_color.y, atmosphere.fog_color.z);
-                shader.setFloat("uFogDensity", atmosphere.fog_density);
-                shader.setBool("uFogEnabled", atmosphere.fog_enabled);
+                if (shader) |*s| {
+                    // Bind texture atlas and set uniforms
+                    s.use();
+                    if (atlas) |*a| a.bind(0);
+                    s.setInt("uTexture", 0);
+                    s.setBool("uUseTexture", settings.textures_enabled);
 
-                // Set cloud shadow uniforms
-                const shadow_params = clouds.getCloudShadowParams();
-                shader.setFloat("uCloudWindOffsetX", shadow_params.wind_offset_x);
-                shader.setFloat("uCloudWindOffsetZ", shadow_params.wind_offset_z);
-                shader.setFloat("uCloudScale", shadow_params.cloud_scale);
-                shader.setFloat("uCloudCoverage", shadow_params.cloud_coverage);
-                shader.setFloat("uCloudShadowStrength", 0.15);
-                shader.setFloat("uCloudHeight", shadow_params.cloud_height);
+                    // Bind CSM textures and uniforms
+                    if (shadow_map) |*sm| {
+                        for (0..3) |i| {
+                            sm.depth_maps[i].bind(@intCast(1 + i));
 
-                // Pass camera position for floating origin chunk rendering
-                active_world.render(&shader, view_proj, camera.position);
+                            var name_buf: [64]u8 = undefined;
+
+                            const tex_name = std.fmt.bufPrintZ(&name_buf, "uShadowMap{}", .{i}) catch "uShadowMap0";
+                            s.setInt(tex_name, @intCast(1 + i));
+
+                            const mat_name = std.fmt.bufPrintZ(&name_buf, "uLightSpaceMatrices[{}]", .{i}) catch unreachable;
+                            s.setMat4(mat_name, &sm.light_space_matrices[i].data);
+
+                            const split_name = std.fmt.bufPrintZ(&name_buf, "uCascadeSplits[{}]", .{i}) catch unreachable;
+                            s.setFloat(split_name, sm.cascade_splits[i]);
+
+                            const size_name = std.fmt.bufPrintZ(&name_buf, "uShadowTexelSizes[{}]", .{i}) catch unreachable;
+                            s.setFloat(size_name, sm.texel_sizes[i]);
+                        }
+                    }
+
+                    // Set atmosphere/lighting uniforms
+                    if (atmosphere) |atmo| {
+                        s.setVec3("uSunDir", atmo.sun_dir.x, atmo.sun_dir.y, atmo.sun_dir.z);
+                        s.setFloat("uSunIntensity", atmo.sun_intensity);
+                        s.setFloat("uAmbient", atmo.ambient_intensity);
+                        s.setVec3("uFogColor", atmo.fog_color.x, atmo.fog_color.y, atmo.fog_color.z);
+                        s.setFloat("uFogDensity", atmo.fog_density);
+                        s.setBool("uFogEnabled", atmo.fog_enabled);
+                    } else {
+                        // Fallback defaults
+                        s.setVec3("uSunDir", 0.5, 0.8, 0.2);
+                        s.setFloat("uSunIntensity", 1.0);
+                        s.setFloat("uAmbient", 0.2);
+                        s.setVec3("uFogColor", 0.5, 0.7, 1.0);
+                        s.setFloat("uFogDensity", 0.0);
+                        s.setBool("uFogEnabled", false);
+                    }
+
+                    // Set cloud shadow uniforms
+                    if (clouds) |*cl| {
+                        const shadow_params = cl.getCloudShadowParams();
+                        s.setFloat("uCloudWindOffsetX", shadow_params.wind_offset_x);
+                        s.setFloat("uCloudWindOffsetZ", shadow_params.wind_offset_z);
+                        s.setFloat("uCloudScale", shadow_params.cloud_scale);
+                        s.setFloat("uCloudCoverage", shadow_params.cloud_coverage);
+                        s.setFloat("uCloudShadowStrength", 0.15);
+                        s.setFloat("uCloudHeight", shadow_params.cloud_height);
+                    }
+
+                    // Pass camera position for floating origin chunk rendering
+                    active_world.render(s, view_proj, camera.position);
+                }
 
                 // Render clouds (after terrain, with depth test enabled)
-                clouds.render(camera.position, &view_proj.data, atmosphere.sun_dir, atmosphere.sun_intensity, atmosphere.fog_color, atmosphere.fog_density);
-
-                if (debug_shadows) {
-                    debug_shader.use();
-                    c.glActiveTexture().?(c.GL_TEXTURE0);
-                    // Visualize selected cascade
-                    c.glBindTexture(c.GL_TEXTURE_2D, shadow_map.depth_maps[debug_cascade_idx].id);
-                    debug_shader.setInt("uDepthMap", 0);
-
-                    c.glBindVertexArray().?(debug_quad_vao);
-                    c.glDrawArrays(c.GL_TRIANGLES, 0, 6);
-                    c.glBindVertexArray().?(0);
-                }
-
-                ui.begin();
-
-                if (show_map) {
-                    if (world_map) |*m| {
-                        if (map_needs_update) {
-                            try m.update(&active_world.generator, map_pos_x, map_pos_z, map_zoom);
-                            map_needs_update = false;
-                        }
-
-                        const map_size: f32 = @min(screen_w, screen_h) * 0.8;
-                        const map_x = (screen_w - map_size) * 0.5;
-                        const map_y = (screen_h - map_size) * 0.5;
-
-                        ui.drawRect(.{ .x = 0, .y = 0, .width = screen_w, .height = screen_h }, Color.rgba(0, 0, 0, 0.5));
-                        ui.drawTexture(m.texture.id, .{ .x = map_x, .y = map_y, .width = map_size, .height = map_size });
-                        ui.drawRectOutline(.{ .x = map_x, .y = map_y, .width = map_size, .height = map_size }, Color.white, 2.0);
-
-                        drawTextCentered(&ui, "WORLD MAP", screen_w * 0.5, map_y - 40.0, 3.0, Color.white);
-                        drawTextCentered(&ui, "DRAG TO PAN - SCROLL TO ZOOM - SPACE TO CENTER - M TO CLOSE", screen_w * 0.5, map_y + map_size + 20.0, 1.5, Color.rgba(0.8, 0.8, 0.8, 1.0));
-
-                        // Player position on map
-                        const rel_x = (camera.position.x - map_pos_x) / (map_zoom * @as(f32, @floatFromInt(m.width)));
-                        const rel_z = (camera.position.z - map_pos_z) / (map_zoom * @as(f32, @floatFromInt(m.height)));
-
-                        const px = map_x + (rel_x + 0.5) * map_size;
-                        const pz = map_y + (rel_z + 0.5) * map_size;
-
-                        if (px >= map_x and px <= map_x + map_size and pz >= map_y and pz <= map_y + map_size) {
-                            ui.drawRect(.{ .x = px - 5, .y = pz - 1, .width = 10, .height = 2 }, Color.red);
-                            ui.drawRect(.{ .x = px - 1, .y = pz - 5, .width = 2, .height = 10 }, Color.red);
-                        }
+                if (clouds) |*cl| {
+                    if (atmosphere) |atmo| {
+                        cl.render(camera.position, &view_proj.data, atmo.sun_dir, atmo.sun_intensity, atmo.fog_color, atmo.fog_density);
                     }
                 }
 
-                ui.drawRect(.{ .x = 10, .y = 10, .width = 80, .height = 30 }, Color.rgba(0, 0, 0, 0.7));
-                drawNumber(&ui, @intFromFloat(time.fps), 15, 15, Color.white);
+                if (debug_shadows and debug_shader != null and shadow_map != null) {
+                    if (debug_shader) |*ds| {
+                        ds.use();
+                        c.glActiveTexture().?(c.GL_TEXTURE0);
+                        // Visualize selected cascade
+                        c.glBindTexture(c.GL_TEXTURE_2D, shadow_map.?.depth_maps[debug_cascade_idx].id);
+                        ds.setInt("uDepthMap", 0);
 
-                // Streaming HUD
-                const stats = active_world.getStats();
-                const rs = active_world.getRenderStats();
-                const player_chunk = worldToChunk(@intFromFloat(camera.position.x), @intFromFloat(camera.position.z));
-                const hud_y: f32 = 50.0;
-                ui.drawRect(.{ .x = 10, .y = hud_y, .width = 220, .height = 170 }, Color.rgba(0, 0, 0, 0.6));
-
-                drawText(&ui, "POS:", 15, hud_y + 5, 1.5, Color.white);
-                drawNumber(&ui, player_chunk.chunk_x, 120, hud_y + 5, Color.white);
-                drawNumber(&ui, player_chunk.chunk_z, 170, hud_y + 5, Color.white);
-
-                drawText(&ui, "CHUNKS:", 15, hud_y + 25, 1.5, Color.white);
-                drawNumber(&ui, @intCast(stats.chunks_loaded), 140, hud_y + 25, Color.white);
-
-                drawText(&ui, "VISIBLE:", 15, hud_y + 45, 1.5, Color.white);
-                drawNumber(&ui, @intCast(rs.chunks_rendered), 140, hud_y + 45, Color.white);
-
-                drawText(&ui, "QUEUED GEN:", 15, hud_y + 65, 1.5, Color.white);
-                drawNumber(&ui, @intCast(stats.gen_queue), 140, hud_y + 65, Color.white);
-
-                drawText(&ui, "QUEUED MESH:", 15, hud_y + 85, 1.5, Color.white);
-                drawNumber(&ui, @intCast(stats.mesh_queue), 140, hud_y + 85, Color.white);
-
-                drawText(&ui, "PENDING UP:", 15, hud_y + 105, 1.5, Color.white);
-                drawNumber(&ui, @intCast(stats.upload_queue), 140, hud_y + 105, Color.white);
-
-                // Time display
-                const hours = atmosphere.getHours();
-                const hour_int: i32 = @intFromFloat(hours);
-                const mins: i32 = @intFromFloat((hours - @as(f32, @floatFromInt(hour_int))) * 60.0);
-                drawText(&ui, "TIME:", 15, hud_y + 125, 1.5, Color.white);
-                drawNumber(&ui, hour_int, 100, hud_y + 125, Color.white);
-                drawText(&ui, ":", 125, hud_y + 125, 1.5, Color.white);
-                drawNumber(&ui, mins, 140, hud_y + 125, Color.white);
-
-                // Sun intensity indicator
-                drawText(&ui, "SUN:", 15, hud_y + 145, 1.5, Color.white);
-                const sun_pct: i32 = @intFromFloat(atmosphere.sun_intensity * 100.0);
-                drawNumber(&ui, sun_pct, 100, hud_y + 145, Color.white);
-
-                if (in_pause) {
-                    // Darken background
-                    ui.drawRect(.{ .x = 0, .y = 0, .width = screen_w, .height = screen_h }, Color.rgba(0, 0, 0, 0.5));
-
-                    const pause_w: f32 = 300.0;
-                    const pause_h: f32 = 48.0;
-                    const pause_x: f32 = (screen_w - pause_w) * 0.5;
-                    var pause_y: f32 = screen_h * 0.35;
-
-                    drawTextCentered(&ui, "PAUSED", screen_w * 0.5, pause_y - 60.0, 3.0, Color.white);
-
-                    if (drawButton(&ui, .{ .x = pause_x, .y = pause_y, .width = pause_w, .height = pause_h }, "RESUME", 2.0, mouse_x, mouse_y, mouse_clicked)) {
-                        app_state = .world;
-                        input.setMouseCapture(window, true);
-                    }
-                    pause_y += pause_h + 16.0;
-
-                    if (drawButton(&ui, .{ .x = pause_x, .y = pause_y, .width = pause_w, .height = pause_h }, "SETTINGS", 2.0, mouse_x, mouse_y, mouse_clicked)) {
-                        last_state = .paused;
-                        app_state = .settings;
-                    }
-                    pause_y += pause_h + 16.0;
-
-                    if (drawButton(&ui, .{ .x = pause_x, .y = pause_y, .width = pause_w, .height = pause_h }, "QUIT TO TITLE", 2.0, mouse_x, mouse_y, mouse_clicked)) {
-                        app_state = .home;
-                        if (world) |w| {
-                            w.deinit();
-                            world = null;
-                        }
+                        c.glBindVertexArray().?(debug_quad_vao);
+                        c.glDrawArrays(c.GL_TRIANGLES, 0, 6);
+                        c.glBindVertexArray().?(0);
                     }
                 }
 
-                ui.end();
+                if (ui) |*u| {
+                    u.begin();
+
+                    if (show_map) {
+                        if (world_map) |*m| {
+                            if (map_needs_update) {
+                                try m.update(&active_world.generator, map_pos_x, map_pos_z, map_zoom);
+                                map_needs_update = false;
+                            }
+
+                            const map_size: f32 = @min(screen_w, screen_h) * 0.8;
+                            const map_x = (screen_w - map_size) * 0.5;
+                            const map_y = (screen_h - map_size) * 0.5;
+
+                            u.drawRect(.{ .x = 0, .y = 0, .width = screen_w, .height = screen_h }, Color.rgba(0, 0, 0, 0.5));
+                            u.drawTexture(m.texture.id, .{ .x = map_x, .y = map_y, .width = map_size, .height = map_size });
+                            u.drawRectOutline(.{ .x = map_x, .y = map_y, .width = map_size, .height = map_size }, Color.white, 2.0);
+
+                            drawTextCentered(u, "WORLD MAP", screen_w * 0.5, map_y - 40.0, 3.0, Color.white);
+                            drawTextCentered(u, "DRAG TO PAN - SCROLL TO ZOOM - SPACE TO CENTER - M TO CLOSE", screen_w * 0.5, map_y + map_size + 20.0, 1.5, Color.rgba(0.8, 0.8, 0.8, 1.0));
+
+                            // Player position on map
+                            const rel_x = (camera.position.x - map_pos_x) / (map_zoom * @as(f32, @floatFromInt(m.width)));
+                            const rel_z = (camera.position.z - map_pos_z) / (map_zoom * @as(f32, @floatFromInt(m.height)));
+
+                            const px = map_x + (rel_x + 0.5) * map_size;
+                            const pz = map_y + (rel_z + 0.5) * map_size;
+
+                            if (px >= map_x and px <= map_x + map_size and pz >= map_y and pz <= map_y + map_size) {
+                                u.drawRect(.{ .x = px - 5, .y = pz - 1, .width = 10, .height = 2 }, Color.red);
+                                u.drawRect(.{ .x = px - 1, .y = pz - 5, .width = 2, .height = 10 }, Color.red);
+                            }
+                        }
+                    }
+
+                    u.drawRect(.{ .x = 10, .y = 10, .width = 80, .height = 30 }, Color.rgba(0, 0, 0, 0.7));
+                    drawNumber(u, @intFromFloat(time.fps), 15, 15, Color.white);
+
+                    // Streaming HUD
+                    const stats = active_world.getStats();
+                    const rs = active_world.getRenderStats();
+                    const player_chunk = worldToChunk(@intFromFloat(camera.position.x), @intFromFloat(camera.position.z));
+                    const hud_y: f32 = 50.0;
+                    u.drawRect(.{ .x = 10, .y = hud_y, .width = 220, .height = 170 }, Color.rgba(0, 0, 0, 0.6));
+
+                    drawText(u, "POS:", 15, hud_y + 5, 1.5, Color.white);
+                    drawNumber(u, player_chunk.chunk_x, 120, hud_y + 5, Color.white);
+                    drawNumber(u, player_chunk.chunk_z, 170, hud_y + 5, Color.white);
+
+                    drawText(u, "CHUNKS:", 15, hud_y + 25, 1.5, Color.white);
+                    drawNumber(u, @intCast(stats.chunks_loaded), 140, hud_y + 25, Color.white);
+
+                    drawText(u, "VISIBLE:", 15, hud_y + 45, 1.5, Color.white);
+                    drawNumber(u, @intCast(rs.chunks_rendered), 140, hud_y + 45, Color.white);
+
+                    drawText(u, "QUEUED GEN:", 15, hud_y + 65, 1.5, Color.white);
+                    drawNumber(u, @intCast(stats.gen_queue), 140, hud_y + 65, Color.white);
+
+                    drawText(u, "QUEUED MESH:", 15, hud_y + 85, 1.5, Color.white);
+                    drawNumber(u, @intCast(stats.mesh_queue), 140, hud_y + 85, Color.white);
+
+                    drawText(u, "PENDING UP:", 15, hud_y + 105, 1.5, Color.white);
+                    drawNumber(u, @intCast(stats.upload_queue), 140, hud_y + 105, Color.white);
+
+                    // Time display
+                    var hour_int: i32 = 0;
+                    var mins: i32 = 0;
+                    var sun_intensity: f32 = 1.0;
+
+                    if (atmosphere) |atmo| {
+                        const hours = atmo.getHours();
+                        hour_int = @intFromFloat(hours);
+                        mins = @intFromFloat((hours - @as(f32, @floatFromInt(hour_int))) * 60.0);
+                        sun_intensity = atmo.sun_intensity;
+                    }
+
+                    drawText(u, "TIME:", 15, hud_y + 125, 1.5, Color.white);
+                    drawNumber(u, hour_int, 100, hud_y + 125, Color.white);
+                    drawText(u, ":", 125, hud_y + 125, 1.5, Color.white);
+                    drawNumber(u, mins, 140, hud_y + 125, Color.white);
+
+                    // Sun intensity indicator
+                    drawText(u, "SUN:", 15, hud_y + 145, 1.5, Color.white);
+                    const sun_pct: i32 = @intFromFloat(sun_intensity * 100.0);
+                    drawNumber(u, sun_pct, 100, hud_y + 145, Color.white);
+
+                    if (in_pause) {
+                        // Darken background
+                        u.drawRect(.{ .x = 0, .y = 0, .width = screen_w, .height = screen_h }, Color.rgba(0, 0, 0, 0.5));
+
+                        const pause_w: f32 = 300.0;
+                        const pause_h: f32 = 48.0;
+                        const pause_x: f32 = (screen_w - pause_w) * 0.5;
+                        var pause_y: f32 = screen_h * 0.35;
+
+                        drawTextCentered(u, "PAUSED", screen_w * 0.5, pause_y - 60.0, 3.0, Color.white);
+
+                        if (drawButton(u, .{ .x = pause_x, .y = pause_y, .width = pause_w, .height = pause_h }, "RESUME", 2.0, mouse_x, mouse_y, mouse_clicked)) {
+                            app_state = .world;
+                            input.setMouseCapture(window, true);
+                        }
+                        pause_y += pause_h + 16.0;
+
+                        if (drawButton(u, .{ .x = pause_x, .y = pause_y, .width = pause_w, .height = pause_h }, "SETTINGS", 2.0, mouse_x, mouse_y, mouse_clicked)) {
+                            last_state = .paused;
+                            app_state = .settings;
+                        }
+                        pause_y += pause_h + 16.0;
+
+                        if (drawButton(u, .{ .x = pause_x, .y = pause_y, .width = pause_w, .height = pause_h }, "QUIT TO TITLE", 2.0, mouse_x, mouse_y, mouse_clicked)) {
+                            app_state = .home;
+                            if (world) |w| {
+                                w.deinit();
+                                world = null;
+                            }
+                        }
+                    }
+
+                    u.end();
+                }
             }
         } else {
-            ui.begin();
+            if (ui) |*u| {
+                u.begin();
 
-            switch (app_state) {
-                .home => {
-                    const title_scale: f32 = 4.0;
-                    drawTextCentered(&ui, "ZIG VOXEL ENGINE", screen_w * 0.5, screen_h * 0.16, title_scale, Color.rgba(0.95, 0.96, 0.98, 1.0));
+                switch (app_state) {
+                    .home => {
+                        const title_scale: f32 = 4.0;
+                        drawTextCentered(u, "ZIG VOXEL ENGINE", screen_w * 0.5, screen_h * 0.16, title_scale, Color.rgba(0.95, 0.96, 0.98, 1.0));
 
-                    const button_w: f32 = @min(screen_w * 0.5, 360.0);
-                    const button_h: f32 = 48.0;
-                    const button_x: f32 = (screen_w - button_w) * 0.5;
-                    var button_y: f32 = screen_h * 0.4;
+                        const button_w: f32 = @min(screen_w * 0.5, 360.0);
+                        const button_h: f32 = 48.0;
+                        const button_x: f32 = (screen_w - button_w) * 0.5;
+                        var button_y: f32 = screen_h * 0.4;
 
-                    if (drawButton(&ui, .{ .x = button_x, .y = button_y, .width = button_w, .height = button_h }, "SINGLEPLAYER", 2.2, mouse_x, mouse_y, mouse_clicked)) {
-                        app_state = .singleplayer;
-                        seed_focused = true;
-                    }
-                    button_y += button_h + 14.0;
-
-                    if (drawButton(&ui, .{ .x = button_x, .y = button_y, .width = button_w, .height = button_h }, "SETTINGS", 2.2, mouse_x, mouse_y, mouse_clicked)) {
-                        last_state = .home;
-                        app_state = .settings;
-                    }
-                    button_y += button_h + 14.0;
-
-                    if (drawButton(&ui, .{ .x = button_x, .y = button_y, .width = button_w, .height = button_h }, "QUIT", 2.2, mouse_x, mouse_y, mouse_clicked)) {
-                        input.should_quit = true;
-                    }
-                },
-                .settings => {
-                    const panel_w: f32 = @min(screen_w * 0.7, 600.0);
-                    const panel_h: f32 = 400.0;
-                    const panel_x: f32 = (screen_w - panel_w) * 0.5;
-                    const panel_y: f32 = (screen_h - panel_h) * 0.5;
-
-                    ui.drawRect(.{ .x = panel_x, .y = panel_y, .width = panel_w, .height = panel_h }, Color.rgba(0.12, 0.14, 0.18, 0.95));
-                    ui.drawRectOutline(.{ .x = panel_x, .y = panel_y, .width = panel_w, .height = panel_h }, Color.rgba(0.28, 0.33, 0.42, 1.0), 2.0);
-
-                    drawTextCentered(&ui, "SETTINGS", screen_w * 0.5, panel_y + 20.0, 2.8, Color.white);
-
-                    var setting_y: f32 = panel_y + 80.0;
-                    const label_x: f32 = panel_x + 40.0;
-                    const value_x: f32 = panel_x + panel_w - 200.0;
-
-                    // Render Distance
-                    drawText(&ui, "RENDER DISTANCE", label_x, setting_y, 2.0, Color.white);
-                    drawNumber(&ui, @intCast(settings.render_distance), value_x + 60.0, setting_y, Color.white);
-                    if (drawButton(&ui, .{ .x = value_x, .y = setting_y - 5.0, .width = 30.0, .height = 30.0 }, "-", 1.5, mouse_x, mouse_y, mouse_clicked)) {
-                        if (settings.render_distance > 1) settings.render_distance -= 1;
-                    }
-                    if (drawButton(&ui, .{ .x = value_x + 100.0, .y = setting_y - 5.0, .width = 30.0, .height = 30.0 }, "+", 1.5, mouse_x, mouse_y, mouse_clicked)) {
-                        settings.render_distance += 1; // No upper limit for experiments
-                    }
-                    setting_y += 50.0;
-
-                    // Mouse Sensitivity
-                    drawText(&ui, "SENSITIVITY", label_x, setting_y, 2.0, Color.white);
-                    drawNumber(&ui, @intFromFloat(settings.mouse_sensitivity), value_x + 60.0, setting_y, Color.white);
-                    if (drawButton(&ui, .{ .x = value_x, .y = setting_y - 5.0, .width = 30.0, .height = 30.0 }, "-", 1.5, mouse_x, mouse_y, mouse_clicked)) {
-                        if (settings.mouse_sensitivity > 10.0) settings.mouse_sensitivity -= 5.0;
-                    }
-                    if (drawButton(&ui, .{ .x = value_x + 100.0, .y = setting_y - 5.0, .width = 30.0, .height = 30.0 }, "+", 1.5, mouse_x, mouse_y, mouse_clicked)) {
-                        if (settings.mouse_sensitivity < 200.0) settings.mouse_sensitivity += 5.0;
-                    }
-                    setting_y += 50.0;
-
-                    // FOV
-                    drawText(&ui, "FOV", label_x, setting_y, 2.0, Color.white);
-                    drawNumber(&ui, @intFromFloat(settings.fov), value_x + 60.0, setting_y, Color.white);
-                    if (drawButton(&ui, .{ .x = value_x, .y = setting_y - 5.0, .width = 30.0, .height = 30.0 }, "-", 1.5, mouse_x, mouse_y, mouse_clicked)) {
-                        if (settings.fov > 30.0) settings.fov -= 5.0;
-                    }
-                    if (drawButton(&ui, .{ .x = value_x + 100.0, .y = setting_y - 5.0, .width = 30.0, .height = 30.0 }, "+", 1.5, mouse_x, mouse_y, mouse_clicked)) {
-                        if (settings.fov < 120.0) settings.fov += 5.0;
-                    }
-                    setting_y += 50.0;
-
-                    // VSync
-                    drawText(&ui, "VSYNC", label_x, setting_y, 2.0, Color.white);
-                    if (drawButton(&ui, .{ .x = value_x, .y = setting_y - 5.0, .width = 130.0, .height = 30.0 }, if (settings.vsync) "ENABLED" else "DISABLED", 1.5, mouse_x, mouse_y, mouse_clicked)) {
-                        settings.vsync = !settings.vsync;
-                        setVSync(settings.vsync);
-                    }
-                    setting_y += 50.0;
-
-                    // Shadow Distance
-                    drawText(&ui, "SHADOW DISTANCE", label_x, setting_y, 2.0, Color.white);
-                    drawNumber(&ui, @intFromFloat(settings.shadow_distance), value_x + 60.0, setting_y, Color.white);
-                    if (drawButton(&ui, .{ .x = value_x, .y = setting_y - 5.0, .width = 30.0, .height = 30.0 }, "-", 1.5, mouse_x, mouse_y, mouse_clicked)) {
-                        if (settings.shadow_distance > 50.0) settings.shadow_distance -= 50.0;
-                    }
-                    if (drawButton(&ui, .{ .x = value_x + 100.0, .y = setting_y - 5.0, .width = 30.0, .height = 30.0 }, "+", 1.5, mouse_x, mouse_y, mouse_clicked)) {
-                        if (settings.shadow_distance < 1000.0) settings.shadow_distance += 50.0;
-                    }
-                    setting_y += 50.0;
-
-                    // Back Button
-                    if (drawButton(&ui, .{ .x = panel_x + (panel_w - 120.0) * 0.5, .y = panel_y + panel_h - 60.0, .width = 120.0, .height = 40.0 }, "BACK", 2.0, mouse_x, mouse_y, mouse_clicked)) {
-                        app_state = last_state;
-                    }
-                },
-                .singleplayer => {
-                    const panel_w: f32 = @min(screen_w * 0.7, 520.0);
-                    const panel_h: f32 = 260.0;
-                    const panel_x: f32 = (screen_w - panel_w) * 0.5;
-                    const panel_y: f32 = screen_h * 0.24;
-
-                    ui.drawRect(.{ .x = panel_x, .y = panel_y, .width = panel_w, .height = panel_h }, Color.rgba(0.12, 0.14, 0.18, 0.92));
-                    ui.drawRectOutline(.{ .x = panel_x, .y = panel_y, .width = panel_w, .height = panel_h }, Color.rgba(0.28, 0.33, 0.42, 1.0), 2.0);
-
-                    drawTextCentered(&ui, "CREATE WORLD", screen_w * 0.5, panel_y + 18.0, 2.8, Color.rgba(0.92, 0.94, 0.97, 1.0));
-
-                    const label_y: f32 = panel_y + 78.0;
-                    drawText(&ui, "SEED", panel_x + 24.0, label_y, 2.0, Color.rgba(0.72, 0.78, 0.86, 1.0));
-
-                    const input_h: f32 = 42.0;
-                    const input_y: f32 = label_y + 22.0;
-                    const random_w: f32 = 120.0;
-                    const input_w: f32 = panel_w - 24.0 - random_w - 12.0 - 24.0;
-                    const input_x: f32 = panel_x + 24.0;
-                    const random_x: f32 = input_x + input_w + 12.0;
-
-                    const seed_rect = Rect{ .x = input_x, .y = input_y, .width = input_w, .height = input_h };
-                    const random_rect = Rect{ .x = random_x, .y = input_y, .width = random_w, .height = input_h };
-
-                    if (mouse_clicked) {
-                        seed_focused = seed_rect.contains(mouse_x, mouse_y);
-                    }
-
-                    const caret_on = @as(u32, @intFromFloat(time.elapsed * 2.0)) % 2 == 0;
-                    drawTextInput(&ui, seed_rect, seed_input.items, "LEAVE BLANK FOR RANDOM", 2.0, seed_focused, caret_on);
-
-                    if (drawButton(&ui, random_rect, "RANDOM", 1.8, mouse_x, mouse_y, mouse_clicked)) {
-                        const generated = randomSeedValue();
-                        try setSeedInput(&seed_input, allocator, generated);
-                        seed_focused = true;
-                    }
-
-                    if (seed_focused) {
-                        try handleSeedTyping(&seed_input, allocator, &input, 32);
-                    }
-
-                    const button_y: f32 = panel_y + panel_h - 64.0;
-                    const half_w: f32 = (panel_w - 24.0 - 12.0 - 24.0) / 2.0;
-                    const back_rect = Rect{ .x = panel_x + 24.0, .y = button_y, .width = half_w, .height = 40.0 };
-                    const create_rect = Rect{ .x = panel_x + 24.0 + half_w + 12.0, .y = button_y, .width = half_w, .height = 40.0 };
-
-                    if (drawButton(&ui, back_rect, "BACK", 1.9, mouse_x, mouse_y, mouse_clicked)) {
-                        app_state = .home;
-                        seed_focused = false;
-                    }
-
-                    const create_clicked = drawButton(&ui, create_rect, "CREATE", 1.9, mouse_x, mouse_y, mouse_clicked);
-                    const create_pressed = input.isKeyPressed(.enter);
-
-                    if (create_clicked or create_pressed) {
-                        const seed_value = try resolveSeed(&seed_input, allocator);
-                        if (world) |active_world| {
-                            active_world.deinit();
-                            world = null;
+                        if (drawButton(u, .{ .x = button_x, .y = button_y, .width = button_w, .height = button_h }, "SINGLEPLAYER", 2.2, mouse_x, mouse_y, mouse_clicked)) {
+                            app_state = .singleplayer;
+                            seed_focused = true;
                         }
-                        world = try World.init(allocator, 2, seed_value);
-                        if (world_map == null) {
-                            world_map = WorldMap.init(256, 256);
+                        button_y += button_h + 14.0;
+
+                        if (drawButton(u, .{ .x = button_x, .y = button_y, .width = button_w, .height = button_h }, "SETTINGS", 2.2, mouse_x, mouse_y, mouse_clicked)) {
+                            last_state = .home;
+                            app_state = .settings;
                         }
-                        show_map = false;
-                        map_needs_update = true;
-                        app_state = .world;
-                        seed_focused = false;
-                        camera = Camera.init(.{
-                            .position = Vec3.init(8, 100, 8),
-                            .pitch = -0.3,
-                            .move_speed = 50.0,
-                        });
-                        log.log.info("World seed: {}", .{seed_value});
-                    }
-                },
-                .world, .paused => {},
+                        button_y += button_h + 14.0;
+
+                        if (drawButton(u, .{ .x = button_x, .y = button_y, .width = button_w, .height = button_h }, "QUIT", 2.2, mouse_x, mouse_y, mouse_clicked)) {
+                            input.should_quit = true;
+                        }
+                    },
+                    .settings => {
+                        const panel_w: f32 = @min(screen_w * 0.7, 600.0);
+                        const panel_h: f32 = 400.0;
+                        const panel_x: f32 = (screen_w - panel_w) * 0.5;
+                        const panel_y: f32 = (screen_h - panel_h) * 0.5;
+
+                        u.drawRect(.{ .x = panel_x, .y = panel_y, .width = panel_w, .height = panel_h }, Color.rgba(0.12, 0.14, 0.18, 0.95));
+                        u.drawRectOutline(.{ .x = panel_x, .y = panel_y, .width = panel_w, .height = panel_h }, Color.rgba(0.28, 0.33, 0.42, 1.0), 2.0);
+
+                        drawTextCentered(u, "SETTINGS", screen_w * 0.5, panel_y + 20.0, 2.8, Color.white);
+
+                        var setting_y: f32 = panel_y + 80.0;
+                        const label_x: f32 = panel_x + 40.0;
+                        const value_x: f32 = panel_x + panel_w - 200.0;
+
+                        // Render Distance
+                        drawText(u, "RENDER DISTANCE", label_x, setting_y, 2.0, Color.white);
+                        drawNumber(u, @intCast(settings.render_distance), value_x + 60.0, setting_y, Color.white);
+                        if (drawButton(u, .{ .x = value_x, .y = setting_y - 5.0, .width = 30.0, .height = 30.0 }, "-", 1.5, mouse_x, mouse_y, mouse_clicked)) {
+                            if (settings.render_distance > 1) settings.render_distance -= 1;
+                        }
+                        if (drawButton(u, .{ .x = value_x + 100.0, .y = setting_y - 5.0, .width = 30.0, .height = 30.0 }, "+", 1.5, mouse_x, mouse_y, mouse_clicked)) {
+                            settings.render_distance += 1; // No upper limit for experiments
+                        }
+                        setting_y += 50.0;
+
+                        // Mouse Sensitivity
+                        drawText(u, "SENSITIVITY", label_x, setting_y, 2.0, Color.white);
+                        drawNumber(u, @intFromFloat(settings.mouse_sensitivity), value_x + 60.0, setting_y, Color.white);
+                        if (drawButton(u, .{ .x = value_x, .y = setting_y - 5.0, .width = 30.0, .height = 30.0 }, "-", 1.5, mouse_x, mouse_y, mouse_clicked)) {
+                            if (settings.mouse_sensitivity > 10.0) settings.mouse_sensitivity -= 5.0;
+                        }
+                        if (drawButton(u, .{ .x = value_x + 100.0, .y = setting_y - 5.0, .width = 30.0, .height = 30.0 }, "+", 1.5, mouse_x, mouse_y, mouse_clicked)) {
+                            if (settings.mouse_sensitivity < 200.0) settings.mouse_sensitivity += 5.0;
+                        }
+                        setting_y += 50.0;
+
+                        // FOV
+                        drawText(u, "FOV", label_x, setting_y, 2.0, Color.white);
+                        drawNumber(u, @intFromFloat(settings.fov), value_x + 60.0, setting_y, Color.white);
+                        if (drawButton(u, .{ .x = value_x, .y = setting_y - 5.0, .width = 30.0, .height = 30.0 }, "-", 1.5, mouse_x, mouse_y, mouse_clicked)) {
+                            if (settings.fov > 30.0) settings.fov -= 5.0;
+                        }
+                        if (drawButton(u, .{ .x = value_x + 100.0, .y = setting_y - 5.0, .width = 30.0, .height = 30.0 }, "+", 1.5, mouse_x, mouse_y, mouse_clicked)) {
+                            if (settings.fov < 120.0) settings.fov += 5.0;
+                        }
+                        setting_y += 50.0;
+
+                        // VSync
+                        drawText(u, "VSYNC", label_x, setting_y, 2.0, Color.white);
+                        if (drawButton(u, .{ .x = value_x, .y = setting_y - 5.0, .width = 130.0, .height = 30.0 }, if (settings.vsync) "ENABLED" else "DISABLED", 1.5, mouse_x, mouse_y, mouse_clicked)) {
+                            settings.vsync = !settings.vsync;
+                            setVSync(settings.vsync);
+                        }
+                        setting_y += 50.0;
+
+                        // Shadow Distance
+                        drawText(u, "SHADOW DISTANCE", label_x, setting_y, 2.0, Color.white);
+                        drawNumber(u, @intFromFloat(settings.shadow_distance), value_x + 60.0, setting_y, Color.white);
+                        if (drawButton(u, .{ .x = value_x, .y = setting_y - 5.0, .width = 30.0, .height = 30.0 }, "-", 1.5, mouse_x, mouse_y, mouse_clicked)) {
+                            if (settings.shadow_distance > 50.0) settings.shadow_distance -= 50.0;
+                        }
+                        if (drawButton(u, .{ .x = value_x + 100.0, .y = setting_y - 5.0, .width = 30.0, .height = 30.0 }, "+", 1.5, mouse_x, mouse_y, mouse_clicked)) {
+                            if (settings.shadow_distance < 1000.0) settings.shadow_distance += 50.0;
+                        }
+                        setting_y += 50.0;
+
+                        // Back Button
+                        if (drawButton(u, .{ .x = panel_x + (panel_w - 120.0) * 0.5, .y = panel_y + panel_h - 60.0, .width = 120.0, .height = 40.0 }, "BACK", 2.0, mouse_x, mouse_y, mouse_clicked)) {
+                            app_state = last_state;
+                        }
+                    },
+                    .singleplayer => {
+                        const panel_w: f32 = @min(screen_w * 0.7, 520.0);
+                        const panel_h: f32 = 260.0;
+                        const panel_x: f32 = (screen_w - panel_w) * 0.5;
+                        const panel_y: f32 = screen_h * 0.24;
+
+                        u.drawRect(.{ .x = panel_x, .y = panel_y, .width = panel_w, .height = panel_h }, Color.rgba(0.12, 0.14, 0.18, 0.92));
+                        u.drawRectOutline(.{ .x = panel_x, .y = panel_y, .width = panel_w, .height = panel_h }, Color.rgba(0.28, 0.33, 0.42, 1.0), 2.0);
+
+                        drawTextCentered(u, "CREATE WORLD", screen_w * 0.5, panel_y + 18.0, 2.8, Color.rgba(0.92, 0.94, 0.97, 1.0));
+
+                        const label_y: f32 = panel_y + 78.0;
+                        drawText(u, "SEED", panel_x + 24.0, label_y, 2.0, Color.rgba(0.72, 0.78, 0.86, 1.0));
+
+                        const input_h: f32 = 42.0;
+                        const input_y: f32 = label_y + 22.0;
+                        const random_w: f32 = 120.0;
+                        const input_w: f32 = panel_w - 24.0 - random_w - 12.0 - 24.0;
+                        const input_x: f32 = panel_x + 24.0;
+                        const random_x: f32 = input_x + input_w + 12.0;
+
+                        const seed_rect = Rect{ .x = input_x, .y = input_y, .width = input_w, .height = input_h };
+                        const random_rect = Rect{ .x = random_x, .y = input_y, .width = random_w, .height = input_h };
+
+                        if (mouse_clicked) {
+                            seed_focused = seed_rect.contains(mouse_x, mouse_y);
+                        }
+
+                        const caret_on = @as(u32, @intFromFloat(time.elapsed * 2.0)) % 2 == 0;
+                        drawTextInput(u, seed_rect, seed_input.items, "LEAVE BLANK FOR RANDOM", 2.0, seed_focused, caret_on);
+
+                        if (drawButton(u, random_rect, "RANDOM", 1.8, mouse_x, mouse_y, mouse_clicked)) {
+                            const generated = randomSeedValue();
+                            try setSeedInput(&seed_input, allocator, generated);
+                            seed_focused = true;
+                        }
+
+                        if (seed_focused) {
+                            try handleSeedTyping(&seed_input, allocator, &input, 32);
+                        }
+
+                        const button_y: f32 = panel_y + panel_h - 64.0;
+                        const half_w: f32 = (panel_w - 24.0 - 12.0 - 24.0) / 2.0;
+                        const back_rect = Rect{ .x = panel_x + 24.0, .y = button_y, .width = half_w, .height = 40.0 };
+                        const create_rect = Rect{ .x = panel_x + 24.0 + half_w + 12.0, .y = button_y, .width = half_w, .height = 40.0 };
+
+                        if (drawButton(u, back_rect, "BACK", 1.9, mouse_x, mouse_y, mouse_clicked)) {
+                            app_state = .home;
+                            seed_focused = false;
+                        }
+
+                        const create_clicked = drawButton(u, create_rect, "CREATE", 1.9, mouse_x, mouse_y, mouse_clicked);
+                        const create_pressed = input.isKeyPressed(.enter);
+
+                        if (create_clicked or create_pressed) {
+                            const seed_value = try resolveSeed(&seed_input, allocator);
+                            if (world) |active_world| {
+                                active_world.deinit();
+                                world = null;
+                            }
+                            world = try World.init(allocator, 2, seed_value, rhi);
+                            if (world_map == null) {
+                                world_map = WorldMap.init(256, 256);
+                            }
+                            show_map = false;
+                            map_needs_update = true;
+                            app_state = .world;
+                            seed_focused = false;
+                            camera = Camera.init(.{
+                                .position = Vec3.init(8, 100, 8),
+                                .pitch = -0.3,
+                                .move_speed = 50.0,
+                            });
+                            log.log.info("World seed: {}", .{seed_value});
+                        }
+                    },
+                    .world, .paused => {},
+                }
+
+                u.end();
             }
-
-            ui.end();
         }
 
         // Swap buffers
@@ -1104,13 +1218,13 @@ pub fn main() !void {
 }
 
 // Simple digit drawing using rectangles (7-segment style)
-fn drawNumber(ui: *UISystem, num: i32, x: f32, y: f32, color: Color) void {
+fn drawNumber(u: *UISystem, num: i32, x: f32, y: f32, color: Color) void {
     var buffer: [12]u8 = undefined;
     const text = std.fmt.bufPrint(&buffer, "{d}", .{num}) catch return;
-    drawText(ui, text, x, y, 2.0, color);
+    drawText(u, text, x, y, 2.0, color);
 }
 
-fn drawDigit(ui: *UISystem, digit: u4, x: f32, y: f32, color: Color) void {
+fn drawDigit(u: *UISystem, digit: u4, x: f32, y: f32, color: Color) void {
     const w: f32 = 10;
     const h: f32 = 16;
     const t: f32 = 2; // thickness
@@ -1131,13 +1245,13 @@ fn drawDigit(ui: *UISystem, digit: u4, x: f32, y: f32, color: Color) void {
 
     const seg = segments[digit];
 
-    if (seg[0]) ui.drawRect(.{ .x = x, .y = y, .width = w, .height = t }, color); // top
-    if (seg[1]) ui.drawRect(.{ .x = x, .y = y, .width = t, .height = h / 2 }, color); // top-left
-    if (seg[2]) ui.drawRect(.{ .x = x + w - t, .y = y, .width = t, .height = h / 2 }, color); // top-right
-    if (seg[3]) ui.drawRect(.{ .x = x, .y = y + h / 2 - t / 2, .width = w, .height = t }, color); // middle
-    if (seg[4]) ui.drawRect(.{ .x = x, .y = y + h / 2, .width = t, .height = h / 2 }, color); // bottom-left
-    if (seg[5]) ui.drawRect(.{ .x = x + w - t, .y = y + h / 2, .width = t, .height = h / 2 }, color); // bottom-right
-    if (seg[6]) ui.drawRect(.{ .x = x, .y = y + h - t, .width = w, .height = t }, color); // bottom
+    if (seg[0]) u.drawRect(.{ .x = x, .y = y, .width = w, .height = t }, color); // top
+    if (seg[1]) u.drawRect(.{ .x = x, .y = y, .width = t, .height = h / 2 }, color); // top-left
+    if (seg[2]) u.drawRect(.{ .x = x + w - t, .y = y, .width = t, .height = h / 2 }, color); // top-right
+    if (seg[3]) u.drawRect(.{ .x = x, .y = y + h / 2 - t / 2, .width = w, .height = t }, color); // middle
+    if (seg[4]) u.drawRect(.{ .x = x, .y = y + h / 2, .width = t, .height = h / 2 }, color); // bottom-left
+    if (seg[5]) u.drawRect(.{ .x = x + w - t, .y = y + h / 2, .width = t, .height = h / 2 }, color); // bottom-right
+    if (seg[6]) u.drawRect(.{ .x = x, .y = y + h - t, .width = w, .height = t }, color); // bottom
 }
 
 const font_letters = [_][7]u8{
@@ -1198,7 +1312,7 @@ fn glyphForChar(ch: u8) [7]u8 {
     };
 }
 
-fn drawGlyph(ui: *UISystem, glyph: [7]u8, x: f32, y: f32, scale: f32, color: Color) void {
+fn drawGlyph(u: *UISystem, glyph: [7]u8, x: f32, y: f32, scale: f32, color: Color) void {
     var row: usize = 0;
     while (row < 7) : (row += 1) {
         const row_bits = glyph[row];
@@ -1207,7 +1321,7 @@ fn drawGlyph(ui: *UISystem, glyph: [7]u8, x: f32, y: f32, scale: f32, color: Col
             const shift: u3 = @intCast(4 - col);
             const mask: u8 = @as(u8, 1) << shift;
             if ((row_bits & mask) != 0) {
-                ui.drawRect(.{
+                u.drawRect(.{
                     .x = x + @as(f32, @floatFromInt(col)) * scale,
                     .y = y + @as(f32, @floatFromInt(row)) * scale,
                     .width = scale,
@@ -1218,14 +1332,14 @@ fn drawGlyph(ui: *UISystem, glyph: [7]u8, x: f32, y: f32, scale: f32, color: Col
     }
 }
 
-fn drawText(ui: *UISystem, text: []const u8, x: f32, y: f32, scale: f32, color: Color) void {
+fn drawText(u: *UISystem, text: []const u8, x: f32, y: f32, scale: f32, color: Color) void {
     var cursor_x = x;
     for (text) |raw| {
         var ch = raw;
         if (ch >= 'a' and ch <= 'z') {
             ch = std.ascii.toUpper(ch);
         }
-        drawGlyph(ui, glyphForChar(ch), cursor_x, y, scale, color);
+        drawGlyph(u, glyphForChar(ch), cursor_x, y, scale, color);
         cursor_x += (5.0 + 1.0) * scale;
     }
 }
@@ -1235,43 +1349,43 @@ fn measureTextWidth(text: []const u8, scale: f32) f32 {
     return @as(f32, @floatFromInt(text.len)) * (5.0 + 1.0) * scale - scale;
 }
 
-fn drawTextCentered(ui: *UISystem, text: []const u8, center_x: f32, y: f32, scale: f32, color: Color) void {
+fn drawTextCentered(u: *UISystem, text: []const u8, center_x: f32, y: f32, scale: f32, color: Color) void {
     const width = measureTextWidth(text, scale);
-    drawText(ui, text, center_x - width * 0.5, y, scale, color);
+    drawText(u, text, center_x - width * 0.5, y, scale, color);
 }
 
-fn drawButton(ui: *UISystem, rect: Rect, label: []const u8, scale: f32, mouse_x: f32, mouse_y: f32, clicked: bool) bool {
+fn drawButton(u: *UISystem, rect: Rect, label: []const u8, scale: f32, mouse_x: f32, mouse_y: f32, clicked: bool) bool {
     const hovered = rect.contains(mouse_x, mouse_y);
     const fill = if (hovered) Color.rgba(0.2, 0.26, 0.36, 0.95) else Color.rgba(0.13, 0.17, 0.24, 0.92);
     const border = if (hovered) Color.rgba(0.55, 0.7, 0.9, 1.0) else Color.rgba(0.29, 0.35, 0.45, 1.0);
 
-    ui.drawRect(rect, fill);
-    ui.drawRectOutline(rect, border, 2.0);
+    u.drawRect(rect, fill);
+    u.drawRectOutline(rect, border, 2.0);
 
     const text_y = rect.y + (rect.height - 7.0 * scale) * 0.5;
-    drawTextCentered(ui, label, rect.x + rect.width * 0.5, text_y, scale, Color.rgba(0.95, 0.96, 0.98, 1.0));
+    drawTextCentered(u, label, rect.x + rect.width * 0.5, text_y, scale, Color.rgba(0.95, 0.96, 0.98, 1.0));
 
     return hovered and clicked;
 }
 
-fn drawTextInput(ui: *UISystem, rect: Rect, text: []const u8, placeholder: []const u8, scale: f32, focused: bool, caret_on: bool) void {
+fn drawTextInput(u: *UISystem, rect: Rect, text: []const u8, placeholder: []const u8, scale: f32, focused: bool, caret_on: bool) void {
     const background = Color.rgba(0.07, 0.09, 0.13, 0.95);
     const border = if (focused) Color.rgba(0.5, 0.75, 0.95, 1.0) else Color.rgba(0.25, 0.3, 0.38, 1.0);
 
-    ui.drawRect(rect, background);
-    ui.drawRectOutline(rect, border, 2.0);
+    u.drawRect(rect, background);
+    u.drawRectOutline(rect, border, 2.0);
 
     const padding: f32 = 8.0;
     const text_y = rect.y + (rect.height - 7.0 * scale) * 0.5;
     if (text.len > 0) {
-        drawText(ui, text, rect.x + padding, text_y, scale, Color.rgba(0.92, 0.95, 0.98, 1.0));
+        drawText(u, text, rect.x + padding, text_y, scale, Color.rgba(0.92, 0.95, 0.98, 1.0));
     } else {
-        drawText(ui, placeholder, rect.x + padding, text_y, scale, Color.rgba(0.5, 0.56, 0.65, 1.0));
+        drawText(u, placeholder, rect.x + padding, text_y, scale, Color.rgba(0.5, 0.56, 0.65, 1.0));
     }
 
     if (focused and caret_on) {
         const caret_x = rect.x + padding + measureTextWidth(text, scale);
-        ui.drawRect(.{
+        u.drawRect(.{
             .x = caret_x,
             .y = rect.y + 8.0,
             .width = 2.0,

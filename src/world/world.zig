@@ -10,6 +10,7 @@ const worldToLocal = @import("chunk.zig").worldToLocal;
 const CHUNK_SIZE_X = @import("chunk.zig").CHUNK_SIZE_X;
 const CHUNK_SIZE_Z = @import("chunk.zig").CHUNK_SIZE_Z;
 const TerrainGenerator = @import("worldgen/generator.zig").TerrainGenerator;
+const RHI = @import("../engine/graphics/rhi.zig").RHI;
 
 const Mat4 = @import("../engine/math/mat4.zig").Mat4;
 const Vec3 = @import("../engine/math/vec3.zig").Vec3;
@@ -82,8 +83,9 @@ pub const World = struct {
     upload_queue: std.ArrayListUnmanaged(*ChunkData),
     next_job_token: u32,
     last_pc: ChunkPos,
+    rhi: RHI,
 
-    pub fn init(allocator: std.mem.Allocator, render_distance: i32, seed: u64) !*World {
+    pub fn init(allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI) !*World {
         const world = try allocator.create(World);
 
         const gen_queue = try allocator.create(JobQueue);
@@ -106,6 +108,7 @@ pub const World = struct {
             .upload_queue = .empty,
             .next_job_token = 1,
             .last_pc = .{ .x = 9999, .z = 9999 },
+            .rhi = rhi,
         };
 
         world.gen_pool = try WorkerPool.init(allocator, 4, gen_queue, world, processGenJob);
@@ -130,7 +133,7 @@ pub const World = struct {
 
         var iter = self.chunks.iterator();
         while (iter.next()) |entry| {
-            entry.value_ptr.*.mesh.deinit();
+            entry.value_ptr.*.mesh.deinit(self.rhi);
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.chunks.deinit();
@@ -357,7 +360,7 @@ pub const World = struct {
         var uploads: usize = 0;
         while (self.upload_queue.items.len > 0 and uploads < max_uploads) {
             const data = self.upload_queue.orderedRemove(0);
-            data.mesh.upload();
+            data.mesh.upload(self.rhi);
             if (data.chunk.state == .uploading) {
                 data.chunk.state = .renderable;
             }
@@ -389,7 +392,7 @@ pub const World = struct {
 
         for (to_remove.items) |key| {
             if (self.chunks.get(key)) |data| {
-                data.mesh.deinit();
+                data.mesh.deinit(self.rhi);
                 self.allocator.destroy(data);
                 _ = self.chunks.remove(key);
             }
@@ -436,7 +439,7 @@ pub const World = struct {
             const mvp = view_proj.multiply(model);
             shader.setMat4("transform", &mvp.data);
             shader.setMat4("uModel", &model.data);
-            data.mesh.draw(.solid);
+            data.mesh.draw(self.rhi, .solid);
         }
 
         // Fluid pass
@@ -461,7 +464,7 @@ pub const World = struct {
             const mvp = view_proj.multiply(model);
             shader.setMat4("transform", &mvp.data);
             shader.setMat4("uModel", &model.data);
-            data.mesh.draw(.fluid);
+            data.mesh.draw(self.rhi, .fluid);
         }
 
         self.chunks_mutex.unlock();
@@ -502,7 +505,7 @@ pub const World = struct {
             shader.setMat4("transform", &mvp.data);
 
             // Only render solid mesh (terrain + trees) for shadows
-            data.mesh.draw(.solid);
+            data.mesh.draw(self.rhi, .solid);
         }
     }
 
