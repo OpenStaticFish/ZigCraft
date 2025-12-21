@@ -13,6 +13,7 @@ pub const Clouds = struct {
     cloud_thickness: f32 = 12.0,
     cloud_coverage: f32 = 0.5,
     cloud_scale: f32 = 1.0 / 64.0,
+    mesh_size: f32 = 10000.0,
 
     // Wind
     wind_dir: [2]f32 = .{ 1.0, 0.2 },
@@ -30,12 +31,10 @@ pub const Clouds = struct {
     base_color: Vec3 = Vec3.init(1.0, 1.0, 1.0),
     shadow_color: Vec3 = Vec3.init(0.8, 0.8, 0.85),
 
-    pub fn init() Clouds {
+    pub fn init() !Clouds {
         var clouds = Clouds{};
-        clouds.initCloudMesh();
-        clouds.initCloudShader() catch |err| {
-            std.debug.print("[ERROR] Cloud shader init failed: {}\n", .{err});
-        };
+        try clouds.initCloudMesh();
+        try clouds.initCloudShader();
         return clouds;
     }
 
@@ -51,8 +50,8 @@ pub const Clouds = struct {
         self.wind_offset[1] += self.wind_dir[1] * self.wind_speed * delta_time;
     }
 
-    fn initCloudMesh(self: *Clouds) void {
-        const size: f32 = 10000.0; // Large quad for horizon-to-horizon coverage
+    fn initCloudMesh(self: *Clouds) !void {
+        const size = self.mesh_size;
 
         const vertices = [_]f32{
             -size, -size,
@@ -66,6 +65,8 @@ pub const Clouds = struct {
         c.glGenVertexArrays().?(1, &self.cloud_vao);
         c.glGenBuffers().?(1, &self.cloud_vbo);
         c.glGenBuffers().?(1, &self.cloud_ebo);
+
+        if (self.cloud_vao == 0 or self.cloud_vbo == 0 or self.cloud_ebo == 0) return error.OpenGLInitializationFailed;
 
         c.glBindVertexArray().?(self.cloud_vao);
 

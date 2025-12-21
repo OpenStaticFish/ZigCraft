@@ -404,7 +404,7 @@ pub fn main() !void {
     defer atmosphere.deinit();
 
     // 10b. Create Cloud System
-    var clouds = Clouds.init();
+    var clouds = try Clouds.init();
     defer clouds.deinit();
 
     var settings = Settings{};
