@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const BlockType = @import("block.zig").BlockType;
+const BiomeId = @import("worldgen/biome.zig").BiomeId;
 
 pub const CHUNK_SIZE_X = 16;
 pub const CHUNK_SIZE_Y = 256;
@@ -73,6 +74,9 @@ pub const Chunk = struct {
     /// Light data: packed skylight (4 bits) + blocklight (4 bits) per block
     light: [CHUNK_VOLUME]PackedLight,
 
+    /// Biome data for each column (X, Z)
+    biomes: [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId,
+
     /// Current state in the streaming pipeline
     state: State = .missing,
 
@@ -94,6 +98,7 @@ pub const Chunk = struct {
             .chunk_z = chunk_z,
             .blocks = [_]BlockType{.air} ** CHUNK_VOLUME,
             .light = [_]PackedLight{PackedLight.init(0, 0)} ** CHUNK_VOLUME,
+            .biomes = [_]BiomeId{.plains} ** (CHUNK_SIZE_X * CHUNK_SIZE_Z),
             .state = .missing,
             .job_token = 0,
             .pin_count = std.atomic.Value(u32).init(0),
@@ -128,6 +133,17 @@ pub const Chunk = struct {
             return .air;
         }
         return self.getBlock(@intCast(x), @intCast(y), @intCast(z));
+    }
+
+    /// Get biome at local coordinates (y is ignored as biomes are column-based)
+    pub fn getBiome(self: *const Chunk, x: u32, z: u32) BiomeId {
+        return self.biomes[x + z * CHUNK_SIZE_X];
+    }
+
+    /// Set biome at local coordinates
+    pub fn setBiome(self: *Chunk, x: u32, z: u32, biome: BiomeId) void {
+        self.biomes[x + z * CHUNK_SIZE_X] = biome;
+        self.dirty = true;
     }
 
     /// Get light at local coordinates

@@ -3,6 +3,8 @@
 const std = @import("std");
 
 /// Biome types for terrain generation
+/// NOTE: This enum is kept for compatibility. See worldgen/biome.zig for
+/// the data-driven BiomeDefinition system.
 pub const Biome = enum(u8) {
     deep_ocean = 0,
     ocean = 1,
@@ -15,13 +17,15 @@ pub const Biome = enum(u8) {
     mountains = 8,
     snowy_mountains = 9,
     river = 10,
+    swamp = 11, // Added per biomes.md spec
 
     /// Get surface block for this biome
+    /// Prefer using BiomeDefinition.surface from worldgen/biome.zig
     pub fn getSurfaceBlock(self: Biome) BlockType {
         return switch (self) {
             .deep_ocean, .ocean => .gravel,
             .beach => .sand,
-            .plains, .forest => .grass,
+            .plains, .forest, .swamp => .grass,
             .taiga => .grass, // Could use podzol if we add it
             .desert => .sand,
             .snow_tundra, .snowy_mountains => .snow_block,
@@ -31,12 +35,13 @@ pub const Biome = enum(u8) {
     }
 
     /// Get filler block (subsurface) for this biome
+    /// Prefer using BiomeDefinition.surface from worldgen/biome.zig
     pub fn getFillerBlock(self: Biome) BlockType {
         return switch (self) {
             .deep_ocean => .gravel,
             .ocean => .sand,
             .beach, .desert, .river => .sand,
-            .plains, .forest, .taiga => .dirt,
+            .plains, .forest, .taiga, .swamp => .dirt,
             .snow_tundra => .dirt,
             .mountains, .snowy_mountains => .stone,
         };
