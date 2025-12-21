@@ -25,7 +25,7 @@ const worldToChunk = @import("world/chunk.zig").worldToChunk;
 // C imports
 const c = @import("c.zig").c;
 
-// Textured terrain shaders with fog and dynamic sun lighting
+// Textured terrain shaders with fog, dynamic sun lighting and CSM
 const vertex_shader_src =
     \\#version 330 core
     \\layout (location = 0) in vec3 aPos;
@@ -42,10 +42,12 @@ const vertex_shader_src =
     \\out float vDistance;
     \\out float vSkyLight;
     \\out float vBlockLight;
-    \\out vec4 vFragPosLightSpace;
-    \\uniform mat4 transform;
+    \\out vec3 vFragPosWorld;
+    \\out float vViewDepth;
+    \\
+    \\uniform mat4 transform; // MVP
     \\uniform mat4 uModel;
-    \\uniform mat4 uLightSpaceMatrix;
+    \\
     \\void main() {
     \\    vec4 clipPos = transform * vec4(aPos, 1.0);
     \\    gl_Position = clipPos;
@@ -56,7 +58,9 @@ const vertex_shader_src =
     \\    vDistance = length(aPos);
     \\    vSkyLight = aSkyLight;
     \\    vBlockLight = aBlockLight;
-    \\    vFragPosLightSpace = uLightSpaceMatrix * uModel * vec4(aPos, 1.0);
+    \\    
+    \\    vFragPosWorld = (uModel * vec4(aPos, 1.0)).xyz;
+    \\    vViewDepth = clipPos.w;
     \\}
 ;
 
@@ -69,10 +73,11 @@ const fragment_shader_src =
     \\in float vDistance;
     \\in float vSkyLight;
     \\in float vBlockLight;
-    \\in vec4 vFragPosLightSpace;
+    \\in vec3 vFragPosWorld;
+    \\in float vViewDepth;
     \\out vec4 FragColor;
+    \\
     \\uniform sampler2D uTexture;
-    \\uniform sampler2D uShadowMap;
     \\uniform bool uUseTexture;
     \\uniform vec3 uSunDir;
     \\uniform float uSunIntensity;
@@ -81,70 +86,68 @@ const fragment_shader_src =
     \\uniform float uFogDensity;
     \\uniform bool uFogEnabled;
     \\
-    \\float calculateShadow(vec4 fragPosLightSpace, float nDotL) {
-    \\    // Perspective divide
+    \\// CSM
+    \\uniform sampler2D uShadowMap0;
+    \\uniform sampler2D uShadowMap1;
+    \\uniform sampler2D uShadowMap2;
+    \\uniform mat4 uLightSpaceMatrices[3];
+    \\uniform float uCascadeSplits[3];
+    \\
+    \\float calculateShadow(vec3 fragPosWorld, float nDotL, int layer) {
+    \\    vec4 fragPosLightSpace = uLightSpaceMatrices[layer] * vec4(fragPosWorld, 1.0);
     \\    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
-    \\    // Transform to [0,1] range
     \\    projCoords = projCoords * 0.5 + 0.5;
     \\    
-    \\    // Check if outside shadow map frustum
     \\    if (projCoords.z > 1.0) return 0.0;
     \\    
     \\    float currentDepth = projCoords.z;
-    \\    // Bias to prevent shadow acne
     \\    float bias = max(0.002 * (1.0 - nDotL), 0.0005);
-    \\    
-    \\    // PCF (Percentage-closer filtering)
+    \\    if (layer == 1) bias *= 0.5;
+    \\    if (layer == 2) bias *= 0.5;
+    \\
     \\    float shadow = 0.0;
-    \\    vec2 texelSize = 1.0 / textureSize(uShadowMap, 0);
+    \\    vec2 texelSize = 1.0 / vec2(2048.0);
+    \\    
     \\    for(int x = -1; x <= 1; ++x) {
     \\        for(int y = -1; y <= 1; ++y) {
-    \\            float pcfDepth = texture(uShadowMap, projCoords.xy + vec2(x, y) * texelSize).r;
+    \\            float pcfDepth;
+    \\            if (layer == 0) pcfDepth = texture(uShadowMap0, projCoords.xy + vec2(x, y) * texelSize).r;
+    \\            else if (layer == 1) pcfDepth = texture(uShadowMap1, projCoords.xy + vec2(x, y) * texelSize).r;
+    \\            else pcfDepth = texture(uShadowMap2, projCoords.xy + vec2(x, y) * texelSize).r;
+    \\            
     \\            shadow += currentDepth - bias > pcfDepth ? 1.0 : 0.0;
     \\        }
     \\    }
     \\    shadow /= 9.0;
-    \\    
     \\    return shadow;
     \\}
     \\
     \\void main() {
-    \\    // Combined lighting = Ambient + (SkyLight * SunIntensity) + BlockLight
-    \\    // Directional sun contribution (diffuse) only affects skylight
-    \\    
     \\    float nDotL = max(dot(vNormal, uSunDir), 0.0);
     \\    
-    \\    // Calculate shadows
-    \\    // Only apply shadows to sunlight
-    \\    float shadow = calculateShadow(vFragPosLightSpace, nDotL);
+    \\    // Select cascade layer
+    \\    int layer = 2;
+    \\    if (vViewDepth < uCascadeSplits[0]) layer = 0;
+    \\    else if (vViewDepth < uCascadeSplits[1]) layer = 1;
     \\    
-    \\    // Calculate light levels
-    \\    // Skylight affected by sun intensity, angle, and shadow
+    \\    float shadow = calculateShadow(vFragPosWorld, nDotL, layer);
+    \\    
     \\    float directLight = nDotL * uSunIntensity * (1.0 - shadow);
     \\    float skyLight = vSkyLight * (uAmbient + directLight * 0.8);
     \\    
-    \\    // Block light fades with distance (handled by propagation, here just 0-1)
     \\    float blockLight = vBlockLight;
-    \\    
-    \\    // Combine lights (max or add, max usually looks better for voxels)
     \\    float lightLevel = max(skyLight, blockLight);
     \\    
-    \\    // Ensure minimum ambient
     \\    lightLevel = max(lightLevel, uAmbient * 0.5);
     \\    lightLevel = clamp(lightLevel, 0.0, 1.0);
     \\    
     \\    vec3 color;
     \\    if (uUseTexture) {
-    \\        // Tiled atlas sampling
-    \\        vec2 atlasSize = vec2(16.0, 16.0); // 16x16 tiles
+    \\        vec2 atlasSize = vec2(16.0, 16.0);
     \\        vec2 tileSize = 1.0 / atlasSize;
     \\        vec2 tilePos = vec2(mod(float(vTileID), atlasSize.x), floor(float(vTileID) / atlasSize.x));
-    \\        
-    \\        // Apply fract to vTexCoord for greedy tiling, then inset to prevent bleeding
     \\        vec2 tiledUV = fract(vTexCoord);
-    \\        // Clamp tiledUV slightly to avoid edge bleeding
     \\        tiledUV = clamp(tiledUV, 0.001, 0.999);
-    \\        
     \\        vec2 uv = (tilePos + tiledUV) * tileSize;
     \\        vec4 texColor = texture(uTexture, uv);
     \\        if (texColor.a < 0.1) discard;
@@ -153,7 +156,6 @@ const fragment_shader_src =
     \\        color = vColor * lightLevel;
     \\    }
     \\    
-    \\    // Apply fog
     \\    if (uFogEnabled) {
     \\        float fogFactor = 1.0 - exp(-vDistance * uFogDensity);
     \\        fogFactor = clamp(fogFactor, 0.0, 1.0);
@@ -258,8 +260,8 @@ pub fn main() !void {
     var atmosphere = Atmosphere.init();
     defer atmosphere.deinit();
 
-    // 11. Create Shadow Map
-    var shadow_map = try ShadowMap.init(4096);
+    // 11. Create Shadow Map (CSM with 2048 resolution per cascade)
+    var shadow_map = try ShadowMap.init(2048);
     defer shadow_map.deinit();
 
     // 12. Menu + world state
@@ -412,7 +414,6 @@ pub fn main() !void {
 
                 // --- SHADOW PASS ---
                 // Only render shadows if sun is up or moon is bright enough
-                // Ideally we switch light source based on who is dominant
                 var light_dir = atmosphere.sun_dir;
                 if (atmosphere.sun_intensity < 0.05 and atmosphere.moon_intensity > 0.05) {
                     light_dir = atmosphere.moon_dir;
@@ -422,16 +423,18 @@ pub fn main() !void {
                 const has_shadows = atmosphere.sun_intensity > 0.05 or atmosphere.moon_intensity > 0.05;
 
                 if (has_shadows) {
-                    shadow_map.begin(light_dir, camera.position);
-                    // Render world into shadow map
-                    // We use light space matrix which shadow_map.begin computed
-                    // We pass camera.position for floating origin calculation, but effective position is 0,0,0 relative to chunks?
-                    // No, world.render uses camera.position to offset chunks relative to camera.
-                    // For shadow map, we need consistent positioning.
-                    // The shadow map matrix was calculated using actual camera.position.
-                    // World.render subtracts camera.position from chunk position to get relative position.
-                    // So passing camera.position is correct.
-                    active_world.render(&shadow_map.shader, shadow_map.light_space_matrix, camera.position);
+                    // Update cascades (splits and matrices)
+                    // Shadow distance 250 blocks (covers most of render distance)
+                    const shadow_dist = 250.0;
+                    shadow_map.update(camera.fov * std.math.pi / 180.0, aspect, 0.1, shadow_dist, light_dir, camera.position, camera.getViewMatrixOriginCentered());
+
+                    // Render each cascade
+                    for (0..3) |i| {
+                        shadow_map.begin(i);
+                        // Render world into shadow map
+                        // We use the cascade's light space matrix
+                        active_world.render(&shadow_map.shader, shadow_map.light_space_matrices[i], camera.position);
+                    }
                     shadow_map.end(input.window_width, input.window_height);
                 }
 
@@ -445,12 +448,24 @@ pub fn main() !void {
                 // Bind texture atlas and set uniforms
                 shader.use();
                 atlas.bind(0);
-                shadow_map.depth_map.bind(1); // Bind shadow map to slot 1
-
                 shader.setInt("uTexture", 0);
-                shader.setInt("uShadowMap", 1);
                 shader.setBool("uUseTexture", settings.textures_enabled);
-                shader.setMat4("uLightSpaceMatrix", &shadow_map.light_space_matrix.data);
+
+                // Bind CSM textures and uniforms
+                for (0..3) |i| {
+                    shadow_map.depth_maps[i].bind(@intCast(1 + i));
+
+                    var name_buf: [64]u8 = undefined;
+
+                    const tex_name = std.fmt.bufPrintZ(&name_buf, "uShadowMap{}", .{i}) catch "uShadowMap0";
+                    shader.setInt(tex_name, @intCast(1 + i));
+
+                    const mat_name = std.fmt.bufPrintZ(&name_buf, "uLightSpaceMatrices[{}]", .{i}) catch unreachable;
+                    shader.setMat4(mat_name, &shadow_map.light_space_matrices[i].data);
+
+                    const split_name = std.fmt.bufPrintZ(&name_buf, "uCascadeSplits[{}]", .{i}) catch unreachable;
+                    shader.setFloat(split_name, shadow_map.cascade_splits[i]);
+                }
 
                 // Set atmosphere/lighting uniforms
                 shader.setVec3("uSunDir", atmosphere.sun_dir.x, atmosphere.sun_dir.y, atmosphere.sun_dir.z);
