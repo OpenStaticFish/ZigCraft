@@ -96,14 +96,16 @@ const fragment_shader_src =
     \\float calculateShadow(vec3 fragPosWorld, float nDotL, int layer) {
     \\    vec4 fragPosLightSpace = uLightSpaceMatrices[layer] * vec4(fragPosWorld, 1.0);
     \\    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
-    \\    projCoords = projCoords * 0.5 + 0.5;
+    \\
+    \\    // XY [-1,1]->[0,1]. Z is already [0,1] due to glClipControl + Correct Matrix.
+    \\    projCoords.xy = projCoords.xy * 0.5 + 0.5;
     \\    
-    \\    if (projCoords.z > 1.0) return 0.0;
+    \\    if (projCoords.z > 1.0 || projCoords.z < 0.0) return 0.0;
     \\    
     \\    float currentDepth = projCoords.z;
-    \\    float bias = max(0.002 * (1.0 - nDotL), 0.0005);
-    \\    if (layer == 1) bias *= 0.5;
-    \\    if (layer == 2) bias *= 0.5;
+    \\    // Debug: set bias very small to see if anything appears
+    \\    float biasScale = (layer == 0) ? 1.0 : (layer == 1 ? 4.0 : 8.0);
+    \\    float bias = max(0.0005 * biasScale * (1.0 - nDotL), 0.0001 * biasScale);
     \\
     \\    float shadow = 0.0;
     \\    vec2 texelSize = 1.0 / vec2(2048.0);
@@ -115,7 +117,7 @@ const fragment_shader_src =
     \\            else if (layer == 1) pcfDepth = texture(uShadowMap1, projCoords.xy + vec2(x, y) * texelSize).r;
     \\            else pcfDepth = texture(uShadowMap2, projCoords.xy + vec2(x, y) * texelSize).r;
     \\            
-    \\            shadow += currentDepth - bias > pcfDepth ? 1.0 : 0.0;
+    \\            shadow += currentDepth > pcfDepth + bias ? 1.0 : 0.0;
     \\        }
     \\    }
     \\    shadow /= 9.0;
@@ -125,12 +127,35 @@ const fragment_shader_src =
     \\void main() {
     \\    float nDotL = max(dot(vNormal, uSunDir), 0.0);
     \\    
-    \\    // Select cascade layer
+    \\    // Select cascade layer using VIEW-SPACE depth (vViewDepth is clipPos.w = linear depth)
     \\    int layer = 2;
-    \\    if (vViewDepth < uCascadeSplits[0]) layer = 0;
-    \\    else if (vViewDepth < uCascadeSplits[1]) layer = 1;
+    \\    float depth = vViewDepth;
+    \\    if (depth < uCascadeSplits[0]) layer = 0;
+    \\    else if (depth < uCascadeSplits[1]) layer = 1;
     \\    
     \\    float shadow = calculateShadow(vFragPosWorld, nDotL, layer);
+    \\
+    \\    // Cascade Blending
+    \\    float blendThreshold = 0.9; // Start blending at 90% of cascade range
+    \\    if (layer < 2) {
+    \\        float splitDist = uCascadeSplits[layer];
+    \\        float prevSplit = (layer == 0) ? 0.0 : uCascadeSplits[layer-1];
+    \\        float range = splitDist - prevSplit;
+    \\        float distInto = depth - prevSplit;
+    \\        float normDist = distInto / range;
+    \\
+    \\        if (normDist > blendThreshold) {
+    \\            float blend = (normDist - blendThreshold) / (1.0 - blendThreshold);
+    \\            float nextShadow = calculateShadow(vFragPosWorld, nDotL, layer + 1);
+    \\            shadow = mix(shadow, nextShadow, blend);
+    \\        }
+    \\    }
+    \\    
+    \\    // DEBUG: Visualize cascades if shadows are missing
+    \\    // if (layer == 0) FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+    \\    // else if (layer == 1) FragColor = vec4(0.0, 1.0, 0.0, 1.0);
+    \\    // else FragColor = vec4(0.0, 0.0, 1.0, 1.0);
+    \\    // return;
     \\    
     \\    float directLight = nDotL * uSunIntensity * (1.0 - shadow);
     \\    float skyLight = vSkyLight * (uAmbient + directLight * 0.8);
@@ -248,6 +273,55 @@ pub fn main() !void {
     var shader = try Shader.initSimple(vertex_shader_src, fragment_shader_src);
     defer shader.deinit();
 
+    // Debug shader for shadow map
+    const debug_vs =
+        \\#version 330 core
+        \\layout (location = 0) in vec2 aPos;
+        \\layout (location = 1) in vec2 aTexCoord;
+        \\out vec2 vTexCoord;
+        \\void main() {
+        \\    gl_Position = vec4(aPos, 0.0, 1.0);
+        \\    vTexCoord = aTexCoord;
+        \\}
+    ;
+    const debug_fs =
+        \\#version 330 core
+        \\out vec4 FragColor;
+        \\in vec2 vTexCoord;
+        \\uniform sampler2D uDepthMap;
+        \\void main() {
+        \\    float depth = texture(uDepthMap, vTexCoord).r;
+        \\    // Linearize? No, ortho depth is linear.
+        \\    FragColor = vec4(vec3(depth), 1.0);
+        \\}
+    ;
+    var debug_shader = try Shader.initSimple(debug_vs, debug_fs);
+    defer debug_shader.deinit();
+
+    var debug_quad_vao: c.GLuint = 0;
+    var debug_quad_vbo: c.GLuint = 0;
+    {
+        const quad_vertices = [_]f32{
+            // pos, tex
+            -1.0, 1.0,  0.0, 1.0,
+            -1.0, -1.0, 0.0, 0.0,
+            1.0,  -1.0, 1.0, 0.0,
+
+            -1.0, 1.0,  0.0, 1.0,
+            1.0,  -1.0, 1.0, 0.0,
+            1.0,  1.0,  1.0, 1.0,
+        };
+        c.glGenVertexArrays().?(1, &debug_quad_vao);
+        c.glGenBuffers().?(1, &debug_quad_vbo);
+        c.glBindVertexArray().?(debug_quad_vao);
+        c.glBindBuffer().?(c.GL_ARRAY_BUFFER, debug_quad_vbo);
+        c.glBufferData().?(c.GL_ARRAY_BUFFER, quad_vertices.len * @sizeOf(f32), &quad_vertices, c.GL_STATIC_DRAW);
+        c.glEnableVertexAttribArray().?(0);
+        c.glVertexAttribPointer().?(0, 2, c.GL_FLOAT, c.GL_FALSE, 4 * @sizeOf(f32), null);
+        c.glEnableVertexAttribArray().?(1);
+        c.glVertexAttribPointer().?(1, 2, c.GL_FLOAT, c.GL_FALSE, 4 * @sizeOf(f32), @ptrFromInt(2 * @sizeOf(f32)));
+    }
+
     // 8. Create Texture Atlas
     var atlas = TextureAtlas.init(allocator);
     defer atlas.deinit();
@@ -268,6 +342,7 @@ pub fn main() !void {
     var app_state: AppState = .home;
     var last_state: AppState = .home; // For "Back" button in settings
     var settings = Settings{};
+    var debug_shadows = false;
     var seed_input = std.ArrayList(u8).empty;
     defer seed_input.deinit(allocator);
     var seed_focused = false;
@@ -351,6 +426,12 @@ pub fn main() !void {
                 setVSync(settings.vsync);
             }
 
+            // Toggle Shadow Debug with M
+            if (input.isKeyPressed(.m)) {
+                debug_shadows = !debug_shadows;
+                log.log.info("Debug Shadows: {}", .{debug_shadows});
+            }
+
             // Time-of-day controls
             // 1-4: Time presets (midnight, sunrise, noon, sunset)
             if (input.isKeyPressed(.@"1")) {
@@ -426,14 +507,15 @@ pub fn main() !void {
                     // Update cascades (splits and matrices)
                     // Shadow distance 250 blocks (covers most of render distance)
                     const shadow_dist = 250.0;
-                    shadow_map.update(camera.fov * std.math.pi / 180.0, aspect, 0.1, shadow_dist, light_dir, camera.position, camera.getViewMatrixOriginCentered());
+                    // camera.fov is already in radians
+                    shadow_map.update(camera.fov, aspect, 0.1, shadow_dist, light_dir, camera.position, camera.getViewMatrixOriginCentered());
 
                     // Render each cascade
                     for (0..3) |i| {
                         shadow_map.begin(i);
                         // Render world into shadow map
                         // We use the cascade's light space matrix
-                        active_world.render(&shadow_map.shader, shadow_map.light_space_matrices[i], camera.position);
+                        active_world.renderShadowPass(&shadow_map.shader, shadow_map.light_space_matrices[i], camera.position);
                     }
                     shadow_map.end(input.window_width, input.window_height);
                 }
@@ -477,6 +559,18 @@ pub fn main() !void {
 
                 // Pass camera position for floating origin chunk rendering
                 active_world.render(&shader, view_proj, camera.position);
+
+                if (debug_shadows) {
+                    debug_shader.use();
+                    c.glActiveTexture().?(c.GL_TEXTURE0);
+                    // Visualize Cascade 0 (closest)
+                    c.glBindTexture(c.GL_TEXTURE_2D, shadow_map.depth_maps[0].id);
+                    debug_shader.setInt("uDepthMap", 0);
+
+                    c.glBindVertexArray().?(debug_quad_vao);
+                    c.glDrawArrays(c.GL_TRIANGLES, 0, 6);
+                    c.glBindVertexArray().?(0);
+                }
 
                 // Render UI (FPS counter)
                 ui.begin();

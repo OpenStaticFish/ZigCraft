@@ -467,6 +467,45 @@ pub const World = struct {
         self.chunks_mutex.unlock();
     }
 
+    /// Render scene for shadow mapping (only opaque geometry)
+    pub fn renderShadowPass(self: *World, shader: *const Shader, view_proj: Mat4, camera_pos: Vec3) void {
+        const frustum = Frustum.fromViewProj(view_proj);
+
+        self.chunks_mutex.lock();
+        defer self.chunks_mutex.unlock();
+
+        var iter = self.chunks.iterator();
+        while (iter.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const data = entry.value_ptr.*;
+
+            if (data.chunk.state != .renderable) continue;
+
+            // Use a more generous intersection check for shadows
+            // This prevents shadows from "popping" at the edge of the cascade
+            const chunk_world_x: f32 = @floatFromInt(key.x * CHUNK_SIZE_X);
+            const chunk_world_z: f32 = @floatFromInt(key.z * CHUNK_SIZE_Z);
+
+            // Check if chunk is near the shadow frustum (using a large sphere check for stability)
+            if (!frustum.intersectsSphere(.{ .x = chunk_world_x - camera_pos.x + 8, .y = 128 - camera_pos.y, .z = chunk_world_z - camera_pos.z + 8 }, 150.0)) {
+                continue;
+            }
+
+            // Camera-relative chunk position (floating origin)
+            const rel_x = chunk_world_x - camera_pos.x;
+            const rel_z = chunk_world_z - camera_pos.z;
+            const rel_y = -camera_pos.y;
+
+            const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
+            const mvp = view_proj.multiply(model);
+
+            shader.setMat4("transform", &mvp.data);
+
+            // Only render solid mesh (terrain + trees) for shadows
+            data.mesh.draw(.solid);
+        }
+    }
+
     pub fn getRenderStats(self: *const World) RenderStats {
         return self.last_render_stats;
     }

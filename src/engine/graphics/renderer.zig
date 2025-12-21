@@ -81,6 +81,13 @@ pub const Renderer = struct {
 
     pub fn beginFrame(self: *Renderer) void {
         self.stats.reset();
+
+        // Ensure main pass depth state (Reverse-Z)
+        c.glEnable(c.GL_DEPTH_TEST);
+        c.glDepthMask(c.GL_TRUE);
+        c.glClearDepth(0.0);
+        c.glDepthFunc(c.GL_GEQUAL);
+
         c.glClearColor(self.clear_color.x, self.clear_color.y, self.clear_color.z, 1.0);
         c.glClear(c.GL_COLOR_BUFFER_BIT | c.GL_DEPTH_BUFFER_BIT);
 
