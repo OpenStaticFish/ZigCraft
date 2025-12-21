@@ -13,6 +13,12 @@ const CHUNK_SIZE_Z = @import("../chunk.zig").CHUNK_SIZE_Z;
 const BlockType = @import("../block.zig").BlockType;
 
 /// Cave system parameters
+/// These values are tuned for natural-looking caves that don't overwhelm the terrain.
+///
+/// Future enhancements:
+/// - TODO: Make worm_branch_chance configurable per biome (more caves in mountains)
+/// - TODO: Add debug visualization toggles (show cave regions, worm paths)
+/// - TODO: Consider sparse representation for CaveCarveMap in very large worlds
 pub const CaveParams = struct {
     // Section 3: Cave Region Mask (2D)
     region_scale: f32 = 1.0 / 900.0, // Smaller scale = more variation
@@ -45,9 +51,16 @@ pub const CaveParams = struct {
     sea_level: i32 = 64,
 };
 
-/// Cave carving data for a chunk
-/// Stores which blocks should be carved as air
-/// Memory usage: CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z bytes (currently 65KB)
+/// Cave carving data for a chunk.
+/// Stores a boolean per block indicating whether it should be carved as air.
+///
+/// Memory usage: CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z bytes (currently 65KB per chunk)
+/// This is allocated per-chunk during generation and freed immediately after.
+///
+/// For very large worlds with bigger chunks, consider:
+/// - Sparse representation (hashmap of carved positions)
+/// - Run-length encoding for vertical spans
+/// - Bitpacking (8 blocks per byte)
 pub const CaveCarveMap = struct {
     // Comptime safety check: ensure carve map doesn't exceed reasonable memory
     comptime {
@@ -196,7 +209,9 @@ pub const CaveSystem = struct {
         }
     }
 
-    /// Carve a single worm tunnel
+    /// Carve a single worm tunnel using sphere-marching algorithm.
+    /// The worm moves forward while its direction is perturbed by 3D Perlin noise,
+    /// creating natural, winding cave tunnels.
     fn carveWorm(
         self: *const CaveSystem,
         source_chunk_x: i32,
@@ -209,17 +224,18 @@ pub const CaveSystem = struct {
     ) void {
         const p = self.params;
 
-        // Starting position (within source chunk)
+        // Starting position (random point within source chunk)
         var pos_x: f32 = @floatFromInt(source_chunk_x * 16 + @as(i32, @intCast(random.uintLessThan(u32, 16))));
         var pos_y: f32 = @floatFromInt(p.worm_y_min + @as(i32, @intCast(random.uintLessThan(u32, @intCast(p.worm_y_max - p.worm_y_min)))));
         var pos_z: f32 = @floatFromInt(source_chunk_z * 16 + @as(i32, @intCast(random.uintLessThan(u32, 16))));
 
-        // Random initial direction
+        // Random initial direction vector
+        // Y component scaled by 0.3 to bias toward horizontal movement
         var dir_x: f32 = random.float(f32) * 2.0 - 1.0;
-        var dir_y: f32 = (random.float(f32) * 2.0 - 1.0) * 0.3; // Bias horizontal
+        var dir_y: f32 = (random.float(f32) * 2.0 - 1.0) * 0.3;
         var dir_z: f32 = random.float(f32) * 2.0 - 1.0;
 
-        // Normalize direction
+        // Normalize to unit vector
         const len = @sqrt(dir_x * dir_x + dir_y * dir_y + dir_z * dir_z);
         if (len > 0.001) {
             dir_x /= len;
@@ -227,15 +243,15 @@ pub const CaveSystem = struct {
             dir_z /= len;
         }
 
-        // Worm parameters
+        // Randomize worm length and initial radius within configured ranges
         const length_range = p.worm_length_max - p.worm_length_min;
         const worm_length = p.worm_length_min + random.uintLessThan(u32, length_range + 1);
         var radius = p.worm_radius_min + random.float(f32) * (p.worm_radius_max - p.worm_radius_min);
 
-        // Carve the worm
+        // Main worm carving loop - each step carves a sphere and moves forward
         var step: u32 = 0;
         while (step < worm_length) : (step += 1) {
-            // Carve sphere at current position
+            // Carve spherical cavity at current position
             self.carveSphere(
                 pos_x,
                 pos_y,
@@ -247,24 +263,27 @@ pub const CaveSystem = struct {
                 carve_map,
             );
 
-            // Move forward
+            // Advance position along direction vector
             pos_x += dir_x * p.worm_step_size;
             pos_y += dir_y * p.worm_step_size;
             pos_z += dir_z * p.worm_step_size;
 
-            // Perturb direction using noise
+            // === Direction Perturbation using 3D Perlin Noise ===
+            // Sample noise at current position (scaled by 0.05 for smooth, large-scale curves)
+            // Offset samples by 100 units to get uncorrelated values for each axis
             const noise_x = self.worm_noise.perlin3D(pos_x * 0.05, pos_y * 0.05, pos_z * 0.05);
             const noise_y = self.worm_noise.perlin3D(pos_x * 0.05 + 100, pos_y * 0.05, pos_z * 0.05);
             const noise_z = self.worm_noise.perlin3D(pos_x * 0.05, pos_y * 0.05 + 100, pos_z * 0.05);
 
+            // Apply noise to direction (Y scaled by 0.5 for less vertical wandering)
             dir_x += noise_x * p.worm_turn_strength;
-            dir_y += noise_y * p.worm_turn_strength * 0.5; // Less vertical turning
+            dir_y += noise_y * p.worm_turn_strength * 0.5;
             dir_z += noise_z * p.worm_turn_strength;
 
-            // Keep direction somewhat horizontal
+            // Dampen vertical component to keep caves mostly horizontal
             dir_y *= 0.95;
 
-            // Re-normalize
+            // Re-normalize direction to unit length
             const new_len = @sqrt(dir_x * dir_x + dir_y * dir_y + dir_z * dir_z);
             if (new_len > 0.001) {
                 dir_x /= new_len;
@@ -272,7 +291,7 @@ pub const CaveSystem = struct {
                 dir_z /= new_len;
             }
 
-            // Occasionally vary radius
+            // Occasionally vary tunnel radius for natural width variation
             if (random.float(f32) < 0.1) {
                 radius += (random.float(f32) - 0.5) * 0.5;
                 radius = std.math.clamp(radius, p.worm_radius_min, p.worm_radius_max);
