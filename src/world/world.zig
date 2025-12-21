@@ -386,7 +386,9 @@ pub const World = struct {
         self.chunks_mutex.unlock();
     }
 
-    pub fn render(self: *World, shader: *const Shader, view_proj: Mat4) void {
+    /// Render all visible chunks using camera-relative coordinates (floating origin)
+    /// This prevents floating-point precision issues at large world coordinates
+    pub fn render(self: *World, shader: *const Shader, view_proj: Mat4, camera_pos: Vec3) void {
         const frustum = Frustum.fromViewProj(view_proj);
         self.last_render_stats = .{};
 
@@ -399,7 +401,8 @@ pub const World = struct {
             if (data.chunk.state != .renderable) continue;
 
             self.last_render_stats.chunks_total += 1;
-            if (!frustum.intersectsChunk(key.x, key.z)) {
+            // Use camera-relative frustum culling
+            if (!frustum.intersectsChunkRelative(key.x, key.z, camera_pos.x, camera_pos.y, camera_pos.z)) {
                 self.last_render_stats.chunks_culled += 1;
                 continue;
             }
@@ -409,7 +412,18 @@ pub const World = struct {
                 self.last_render_stats.vertices_rendered += s.count_solid;
             }
 
-            shader.setMat4("transform", &view_proj.data);
+            // Camera-relative chunk position (floating origin)
+            // Chunk mesh vertices are in local coords (0-16), we translate them
+            // relative to camera position to keep values small for GPU precision
+            const chunk_world_x: f32 = @floatFromInt(key.x * CHUNK_SIZE_X);
+            const chunk_world_z: f32 = @floatFromInt(key.z * CHUNK_SIZE_Z);
+            const rel_x = chunk_world_x - camera_pos.x;
+            const rel_z = chunk_world_z - camera_pos.z;
+            const rel_y = -camera_pos.y; // Y=0 in chunk space maps to -camera_y in view space
+
+            const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
+            const mvp = view_proj.multiply(model);
+            shader.setMat4("transform", &mvp.data);
             data.mesh.draw(.solid);
         }
 
@@ -419,13 +433,21 @@ pub const World = struct {
             const data = entry.value_ptr.*;
             if (data.chunk.state != .renderable) continue;
             const key = entry.key_ptr.*;
-            if (!frustum.intersectsChunk(key.x, key.z)) continue;
+            if (!frustum.intersectsChunkRelative(key.x, key.z, camera_pos.x, camera_pos.y, camera_pos.z)) continue;
 
             for (data.mesh.subchunks) |s| {
                 self.last_render_stats.vertices_rendered += s.count_fluid;
             }
 
-            shader.setMat4("transform", &view_proj.data);
+            const chunk_world_x: f32 = @floatFromInt(key.x * CHUNK_SIZE_X);
+            const chunk_world_z: f32 = @floatFromInt(key.z * CHUNK_SIZE_Z);
+            const rel_x = chunk_world_x - camera_pos.x;
+            const rel_z = chunk_world_z - camera_pos.z;
+            const rel_y = -camera_pos.y;
+
+            const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
+            const mvp = view_proj.multiply(model);
+            shader.setMat4("transform", &mvp.data);
             data.mesh.draw(.fluid);
         }
 

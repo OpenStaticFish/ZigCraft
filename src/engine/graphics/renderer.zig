@@ -51,9 +51,14 @@ pub const Renderer = struct {
         log.log.info("OpenGL Version: {s}", .{version});
         log.log.info("GLSL Version: {s}", .{glsl_version});
 
-        // Enable depth testing
+        // Enable depth testing with reverse-Z for better precision at distance
         c.glEnable(c.GL_DEPTH_TEST);
-        c.glDepthFunc(c.GL_LESS);
+        c.glDepthFunc(c.GL_GEQUAL); // Reverse-Z: greater values are closer
+        c.glClearDepth(0.0); // Clear to 0 (far plane in reverse-Z)
+        // glClipControl for [0,1] depth range - use function pointer from GLEW
+        if (c.glClipControl()) |clip_fn| {
+            clip_fn(c.GL_LOWER_LEFT, c.GL_ZERO_TO_ONE);
+        }
 
         // Enable backface culling
         c.glEnable(c.GL_CULL_FACE);

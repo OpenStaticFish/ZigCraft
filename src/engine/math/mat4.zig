@@ -51,6 +51,23 @@ pub const Mat4 = struct {
         return result;
     }
 
+    /// Perspective projection with reverse-Z for better depth precision at distance
+    /// Maps near plane to z=1 and far plane to z=0 (reversed from standard)
+    /// Use with glDepthFunc(GL_GEQUAL) and glClearDepth(0.0)
+    pub fn perspectiveReverseZ(fov_radians: f32, aspect: f32, near: f32, far: f32) Mat4 {
+        const tan_half_fov = std.math.tan(fov_radians / 2.0);
+        var result = Mat4.zero;
+
+        result.data[0][0] = 1.0 / (aspect * tan_half_fov);
+        result.data[1][1] = 1.0 / tan_half_fov;
+        // Reverse-Z: swap near and far in depth calculation
+        result.data[2][2] = near / (far - near);
+        result.data[2][3] = -1.0;
+        result.data[3][2] = (far * near) / (far - near);
+
+        return result;
+    }
+
     pub fn orthographic(left: f32, right_val: f32, bottom: f32, top: f32, near: f32, far: f32) Mat4 {
         var result = Mat4.zero;
 

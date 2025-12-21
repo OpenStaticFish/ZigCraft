@@ -32,7 +32,7 @@ const vertex_shader_src =
     \\layout (location = 3) in vec2 aTexCoord;
     \\layout (location = 4) in float aTileID;
     \\out vec3 vColor;
-    \\out vec3 vNormal;
+    \\flat out vec3 vNormal;
     \\out vec2 vTexCoord;
     \\flat out int vTileID;
     \\uniform mat4 transform;
@@ -48,7 +48,7 @@ const vertex_shader_src =
 const fragment_shader_src =
     \\#version 330 core
     \\in vec3 vColor;
-    \\in vec3 vNormal;
+    \\flat in vec3 vNormal;
     \\in vec2 vTexCoord;
     \\flat in int vTileID;
     \\out vec4 FragColor;
@@ -113,6 +113,8 @@ pub fn main() !void {
     _ = c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     _ = c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_MINOR_VERSION, 3);
     _ = c.SDL_GL_SetAttribute(c.SDL_GL_CONTEXT_PROFILE_MASK, c.SDL_GL_CONTEXT_PROFILE_CORE);
+    // Request 24-bit depth buffer (32-bit may not be available on all drivers)
+    _ = c.SDL_GL_SetAttribute(c.SDL_GL_DEPTH_SIZE, 24);
 
     // 3. Create Window
     const window = c.SDL_CreateWindow(
@@ -279,10 +281,10 @@ pub fn main() !void {
 
         if (in_world or in_pause) {
             if (world) |active_world| {
-                // Calculate matrices
+                // Calculate matrices using origin-centered view for floating origin rendering
                 const aspect = screen_w / screen_h;
                 // TODO: Update camera FOV with settings.fov
-                const view_proj = camera.getViewProjectionMatrix(aspect);
+                const view_proj = camera.getViewProjectionMatrixOriginCentered(aspect);
 
                 // Bind texture atlas and set uniforms
                 shader.use();
@@ -290,7 +292,8 @@ pub fn main() !void {
                 shader.setInt("uTexture", 0);
                 shader.setBool("uUseTexture", settings.textures_enabled);
 
-                active_world.render(&shader, view_proj);
+                // Pass camera position for floating origin chunk rendering
+                active_world.render(&shader, view_proj, camera.position);
 
                 // Render UI (FPS counter)
                 ui.begin();

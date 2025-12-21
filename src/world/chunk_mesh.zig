@@ -107,20 +107,20 @@ pub const ChunkMesh = struct {
 
         const y0: i32 = @intCast(si * SUBCHUNK_SIZE);
         const y1: i32 = y0 + SUBCHUNK_SIZE;
-        const wx: f32 = @floatFromInt(chunk.getWorldX());
-        const wz: f32 = @floatFromInt(chunk.getWorldZ());
+        // Meshes now use chunk-local coordinates (0-16 range)
+        // World offset is applied at render time via model matrix for floating origin
 
         var sy: i32 = y0;
         while (sy <= y1) : (sy += 1) {
-            try self.meshSlice(chunk, neighbors, .top, sy, wx, wz, si, &solid_verts, &fluid_verts);
+            try self.meshSlice(chunk, neighbors, .top, sy, si, &solid_verts, &fluid_verts);
         }
         var sx: i32 = 0;
         while (sx <= CHUNK_SIZE_X) : (sx += 1) {
-            try self.meshSlice(chunk, neighbors, .east, sx, wx, wz, si, &solid_verts, &fluid_verts);
+            try self.meshSlice(chunk, neighbors, .east, sx, si, &solid_verts, &fluid_verts);
         }
         var sz: i32 = 0;
         while (sz <= CHUNK_SIZE_Z) : (sz += 1) {
-            try self.meshSlice(chunk, neighbors, .south, sz, wx, wz, si, &solid_verts, &fluid_verts);
+            try self.meshSlice(chunk, neighbors, .south, sz, si, &solid_verts, &fluid_verts);
         }
 
         self.mutex.lock();
@@ -136,7 +136,7 @@ pub const ChunkMesh = struct {
         side: bool,
     };
 
-    fn meshSlice(self: *ChunkMesh, chunk: *const Chunk, neighbors: NeighborChunks, axis: Face, s: i32, wx: f32, wz: f32, si: u32, solid_list: *std.ArrayListUnmanaged(f32), fluid_list: *std.ArrayListUnmanaged(f32)) !void {
+    fn meshSlice(self: *ChunkMesh, chunk: *const Chunk, neighbors: NeighborChunks, axis: Face, s: i32, si: u32, solid_list: *std.ArrayListUnmanaged(f32), fluid_list: *std.ArrayListUnmanaged(f32)) !void {
         const du: u32 = 16;
         const dv: u32 = 16;
         var mask = try self.allocator.alloc(?FaceKey, du * dv);
@@ -195,7 +195,7 @@ pub const ChunkMesh = struct {
                 }
 
                 const target = if (k.block.isTransparent() and k.block != .leaves) fluid_list else solid_list;
-                try addGreedyFace(self.allocator, target, axis, s, su, sv, width, height, k.block, k.side, wx, wz, si);
+                try addGreedyFace(self.allocator, target, axis, s, su, sv, width, height, k.block, k.side, si);
 
                 var dy: u32 = 0;
                 while (dy < height) : (dy += 1) {
@@ -278,7 +278,7 @@ fn getBlockCross(chunk: *const Chunk, neighbors: NeighborChunks, x: i32, y: i32,
     return chunk.getBlockSafe(x, y, z);
 }
 
-fn addGreedyFace(allocator: std.mem.Allocator, verts: *std.ArrayListUnmanaged(f32), axis: Face, s: i32, u: u32, v: u32, w: u32, h: u32, block: BlockType, forward: bool, wx: f32, wz: f32, si: u32) !void {
+fn addGreedyFace(allocator: std.mem.Allocator, verts: *std.ArrayListUnmanaged(f32), axis: Face, s: i32, u: u32, v: u32, w: u32, h: u32, block: BlockType, forward: bool, si: u32) !void {
     const face = if (forward) axis else switch (axis) {
         .top => Face.bottom,
         .east => Face.west,
@@ -299,53 +299,54 @@ fn addGreedyFace(allocator: std.mem.Allocator, verts: *std.ArrayListUnmanaged(f3
     const sf: f32 = @floatFromInt(s);
     const uf: f32 = @floatFromInt(u);
     const vf: f32 = @floatFromInt(v);
+    // Use chunk-local coordinates (0-16 range) for floating origin rendering
     var p: [4][3]f32 = undefined;
     var uv: [4][2]f32 = undefined;
     if (axis == .top) {
         const y = sf;
         if (forward) {
-            p[0] = .{ wx + uf, y, wz + vf + hf };
-            p[1] = .{ wx + uf + wf, y, wz + vf + hf };
-            p[2] = .{ wx + uf + wf, y, wz + vf };
-            p[3] = .{ wx + uf, y, wz + vf };
+            p[0] = .{ uf, y, vf + hf };
+            p[1] = .{ uf + wf, y, vf + hf };
+            p[2] = .{ uf + wf, y, vf };
+            p[3] = .{ uf, y, vf };
             uv = [4][2]f32{ .{ 0, hf }, .{ wf, hf }, .{ wf, 0 }, .{ 0, 0 } };
         } else {
-            p[0] = .{ wx + uf, y, wz + vf };
-            p[1] = .{ wx + uf + wf, y, wz + vf };
-            p[2] = .{ wx + uf + wf, y, wz + vf + hf };
-            p[3] = .{ wx + uf, y, wz + vf + hf };
+            p[0] = .{ uf, y, vf };
+            p[1] = .{ uf + wf, y, vf };
+            p[2] = .{ uf + wf, y, vf + hf };
+            p[3] = .{ uf, y, vf + hf };
             uv = [4][2]f32{ .{ 0, 0 }, .{ wf, 0 }, .{ wf, hf }, .{ 0, hf } };
         }
     } else if (axis == .east) {
-        const x = wx + sf;
+        const x = sf;
         const y0: f32 = @floatFromInt(si * SUBCHUNK_SIZE);
         if (forward) {
-            p[0] = .{ x, y0 + uf, wz + vf + hf };
-            p[1] = .{ x, y0 + uf, wz + vf };
-            p[2] = .{ x, y0 + uf + wf, wz + vf };
-            p[3] = .{ x, y0 + uf + wf, wz + vf + hf };
+            p[0] = .{ x, y0 + uf, vf + hf };
+            p[1] = .{ x, y0 + uf, vf };
+            p[2] = .{ x, y0 + uf + wf, vf };
+            p[3] = .{ x, y0 + uf + wf, vf + hf };
             uv = [4][2]f32{ .{ hf, 0 }, .{ 0, 0 }, .{ 0, wf }, .{ hf, wf } };
         } else {
-            p[0] = .{ x, y0 + uf, wz + vf };
-            p[1] = .{ x, y0 + uf, wz + vf + hf };
-            p[2] = .{ x, y0 + uf + wf, wz + vf + hf };
-            p[3] = .{ x, y0 + uf + wf, wz + vf };
+            p[0] = .{ x, y0 + uf, vf };
+            p[1] = .{ x, y0 + uf, vf + hf };
+            p[2] = .{ x, y0 + uf + wf, vf + hf };
+            p[3] = .{ x, y0 + uf + wf, vf };
             uv = [4][2]f32{ .{ 0, 0 }, .{ hf, 0 }, .{ hf, wf }, .{ 0, wf } };
         }
     } else {
-        const z = wz + sf;
+        const z = sf;
         const y0: f32 = @floatFromInt(si * SUBCHUNK_SIZE);
         if (forward) {
-            p[0] = .{ wx + uf, y0 + vf, z };
-            p[1] = .{ wx + uf + wf, y0 + vf, z };
-            p[2] = .{ wx + uf + wf, y0 + vf + hf, z };
-            p[3] = .{ wx + uf, y0 + vf + hf, z };
+            p[0] = .{ uf, y0 + vf, z };
+            p[1] = .{ uf + wf, y0 + vf, z };
+            p[2] = .{ uf + wf, y0 + vf + hf, z };
+            p[3] = .{ uf, y0 + vf + hf, z };
             uv = [4][2]f32{ .{ 0, 0 }, .{ wf, 0 }, .{ wf, hf }, .{ 0, hf } };
         } else {
-            p[0] = .{ wx + uf + wf, y0 + vf, z };
-            p[1] = .{ wx + uf, y0 + vf, z };
-            p[2] = .{ wx + uf, y0 + vf + hf, z };
-            p[3] = .{ wx + uf + wf, y0 + vf + hf, z };
+            p[0] = .{ uf + wf, y0 + vf, z };
+            p[1] = .{ uf, y0 + vf, z };
+            p[2] = .{ uf, y0 + vf + hf, z };
+            p[3] = .{ uf + wf, y0 + vf + hf, z };
             uv = [4][2]f32{ .{ wf, 0 }, .{ 0, 0 }, .{ 0, hf }, .{ wf, hf } };
         }
     }

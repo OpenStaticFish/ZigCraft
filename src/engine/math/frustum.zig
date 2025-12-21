@@ -132,17 +132,25 @@ pub const Frustum = struct {
 
     /// Check if a chunk (given by chunk coordinates) intersects the frustum
     /// Chunks are 16x256x16 blocks
+    /// For floating origin rendering, pass camera position to compute relative coordinates
     pub fn intersectsChunk(self: Frustum, chunk_x: i32, chunk_z: i32) bool {
+        return self.intersectsChunkRelative(chunk_x, chunk_z, 0, 0, 0);
+    }
+
+    /// Check if a chunk intersects the frustum using camera-relative coordinates
+    pub fn intersectsChunkRelative(self: Frustum, chunk_x: i32, chunk_z: i32, cam_x: f32, cam_y: f32, cam_z: f32) bool {
         const CHUNK_SIZE_X: f32 = 16.0;
         const CHUNK_SIZE_Y: f32 = 256.0;
         const CHUNK_SIZE_Z: f32 = 16.0;
 
-        const world_x: f32 = @floatFromInt(chunk_x * 16);
-        const world_z: f32 = @floatFromInt(chunk_z * 16);
+        // Chunk world position relative to camera
+        const world_x: f32 = @as(f32, @floatFromInt(chunk_x * 16)) - cam_x;
+        const world_z: f32 = @as(f32, @floatFromInt(chunk_z * 16)) - cam_z;
+        const world_y: f32 = -cam_y; // Y=0 in chunk space
 
         const aabb = AABB.init(
-            Vec3.init(world_x, 0, world_z),
-            Vec3.init(world_x + CHUNK_SIZE_X, CHUNK_SIZE_Y, world_z + CHUNK_SIZE_Z),
+            Vec3.init(world_x, world_y, world_z),
+            Vec3.init(world_x + CHUNK_SIZE_X, world_y + CHUNK_SIZE_Y, world_z + CHUNK_SIZE_Z),
         );
 
         return self.intersectsAABB(aabb);

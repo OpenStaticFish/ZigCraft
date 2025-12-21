@@ -40,8 +40,8 @@ pub const Camera = struct {
         yaw: f32 = -std.math.pi / 2.0, // Looking toward -Z
         pitch: f32 = 0,
         fov: f32 = std.math.degreesToRadians(70.0),
-        near: f32 = 0.1,
-        far: f32 = 1000.0,
+        near: f32 = 0.5, // Pushed out for better depth precision with reverse-Z
+        far: f32 = 10000.0, // Increased for large render distances
         move_speed: f32 = 5.0,
         sensitivity: f32 = 0.002,
     };
@@ -117,13 +117,22 @@ pub const Camera = struct {
         return Mat4.lookAt(self.position, target, Vec3.up);
     }
 
-    /// Get projection matrix
+    /// Get projection matrix with reverse-Z for better depth precision
     pub fn getProjectionMatrix(self: *const Camera, aspect_ratio: f32) Mat4 {
-        return Mat4.perspective(self.fov, aspect_ratio, self.near, self.far);
+        return Mat4.perspectiveReverseZ(self.fov, aspect_ratio, self.near, self.far);
     }
 
-    /// Get combined view-projection matrix
-    pub fn getViewProjectionMatrix(self: *const Camera, aspect_ratio: f32) Mat4 {
-        return self.getProjectionMatrix(aspect_ratio).multiply(self.getViewMatrix());
+    /// Get view matrix centered at origin (for floating origin rendering)
+    /// Camera is conceptually at origin looking in the forward direction
+    pub fn getViewMatrixOriginCentered(self: *const Camera) Mat4 {
+        // View matrix with camera at origin - just rotation, no translation
+        const target = self.forward;
+        return Mat4.lookAt(Vec3.zero, target, Vec3.up);
+    }
+
+    /// Get combined view-projection matrix for floating origin rendering
+    /// Use this with camera-relative chunk positions
+    pub fn getViewProjectionMatrixOriginCentered(self: *const Camera, aspect_ratio: f32) Mat4 {
+        return self.getProjectionMatrix(aspect_ratio).multiply(self.getViewMatrixOriginCentered());
     }
 };
