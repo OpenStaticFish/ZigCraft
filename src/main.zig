@@ -16,6 +16,7 @@ const Key = @import("engine/core/interfaces.zig").Key;
 const log = @import("engine/core/log.zig");
 const TextureAtlas = @import("engine/graphics/texture_atlas.zig").TextureAtlas;
 const Atmosphere = @import("engine/graphics/atmosphere.zig").Atmosphere;
+const ShadowMap = @import("engine/graphics/shadows.zig").ShadowMap;
 
 // World imports
 const World = @import("world/world.zig").World;
@@ -41,7 +42,10 @@ const vertex_shader_src =
     \\out float vDistance;
     \\out float vSkyLight;
     \\out float vBlockLight;
+    \\out vec4 vFragPosLightSpace;
     \\uniform mat4 transform;
+    \\uniform mat4 uModel;
+    \\uniform mat4 uLightSpaceMatrix;
     \\void main() {
     \\    vec4 clipPos = transform * vec4(aPos, 1.0);
     \\    gl_Position = clipPos;
@@ -52,6 +56,7 @@ const vertex_shader_src =
     \\    vDistance = length(aPos);
     \\    vSkyLight = aSkyLight;
     \\    vBlockLight = aBlockLight;
+    \\    vFragPosLightSpace = uLightSpaceMatrix * uModel * vec4(aPos, 1.0);
     \\}
 ;
 
@@ -64,8 +69,10 @@ const fragment_shader_src =
     \\in float vDistance;
     \\in float vSkyLight;
     \\in float vBlockLight;
+    \\in vec4 vFragPosLightSpace;
     \\out vec4 FragColor;
     \\uniform sampler2D uTexture;
+    \\uniform sampler2D uShadowMap;
     \\uniform bool uUseTexture;
     \\uniform vec3 uSunDir;
     \\uniform float uSunIntensity;
@@ -73,15 +80,48 @@ const fragment_shader_src =
     \\uniform vec3 uFogColor;
     \\uniform float uFogDensity;
     \\uniform bool uFogEnabled;
+    \\
+    \\float calculateShadow(vec4 fragPosLightSpace, float nDotL) {
+    \\    // Perspective divide
+    \\    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
+    \\    // Transform to [0,1] range
+    \\    projCoords = projCoords * 0.5 + 0.5;
+    \\    
+    \\    // Check if outside shadow map frustum
+    \\    if (projCoords.z > 1.0) return 0.0;
+    \\    
+    \\    float currentDepth = projCoords.z;
+    \\    // Bias to prevent shadow acne
+    \\    float bias = max(0.002 * (1.0 - nDotL), 0.0005);
+    \\    
+    \\    // PCF (Percentage-closer filtering)
+    \\    float shadow = 0.0;
+    \\    vec2 texelSize = 1.0 / textureSize(uShadowMap, 0);
+    \\    for(int x = -1; x <= 1; ++x) {
+    \\        for(int y = -1; y <= 1; ++y) {
+    \\            float pcfDepth = texture(uShadowMap, projCoords.xy + vec2(x, y) * texelSize).r;
+    \\            shadow += currentDepth - bias > pcfDepth ? 1.0 : 0.0;
+    \\        }
+    \\    }
+    \\    shadow /= 9.0;
+    \\    
+    \\    return shadow;
+    \\}
+    \\
     \\void main() {
     \\    // Combined lighting = Ambient + (SkyLight * SunIntensity) + BlockLight
     \\    // Directional sun contribution (diffuse) only affects skylight
     \\    
-    \\    float sunDiff = max(dot(vNormal, uSunDir), 0.0);
+    \\    float nDotL = max(dot(vNormal, uSunDir), 0.0);
+    \\    
+    \\    // Calculate shadows
+    \\    // Only apply shadows to sunlight
+    \\    float shadow = calculateShadow(vFragPosLightSpace, nDotL);
     \\    
     \\    // Calculate light levels
-    \\    // Skylight affected by sun intensity and angle
-    \\    float skyLight = vSkyLight * (uAmbient + sunDiff * uSunIntensity * 0.8);
+    \\    // Skylight affected by sun intensity, angle, and shadow
+    \\    float directLight = nDotL * uSunIntensity * (1.0 - shadow);
+    \\    float skyLight = vSkyLight * (uAmbient + directLight * 0.8);
     \\    
     \\    // Block light fades with distance (handled by propagation, here just 0-1)
     \\    float blockLight = vBlockLight;
@@ -218,7 +258,11 @@ pub fn main() !void {
     var atmosphere = Atmosphere.init();
     defer atmosphere.deinit();
 
-    // 11. Menu + world state
+    // 11. Create Shadow Map
+    var shadow_map = try ShadowMap.init(4096);
+    defer shadow_map.deinit();
+
+    // 12. Menu + world state
     var app_state: AppState = .home;
     var last_state: AppState = .home; // For "Back" button in settings
     var settings = Settings{};
@@ -366,14 +410,47 @@ pub fn main() !void {
                 // TODO: Update camera FOV with settings.fov
                 const view_proj = camera.getViewProjectionMatrixOriginCentered(aspect);
 
+                // --- SHADOW PASS ---
+                // Only render shadows if sun is up or moon is bright enough
+                // Ideally we switch light source based on who is dominant
+                var light_dir = atmosphere.sun_dir;
+                if (atmosphere.sun_intensity < 0.05 and atmosphere.moon_intensity > 0.05) {
+                    light_dir = atmosphere.moon_dir;
+                }
+
+                // Only cast shadows if we have some light
+                const has_shadows = atmosphere.sun_intensity > 0.05 or atmosphere.moon_intensity > 0.05;
+
+                if (has_shadows) {
+                    shadow_map.begin(light_dir, camera.position);
+                    // Render world into shadow map
+                    // We use light space matrix which shadow_map.begin computed
+                    // We pass camera.position for floating origin calculation, but effective position is 0,0,0 relative to chunks?
+                    // No, world.render uses camera.position to offset chunks relative to camera.
+                    // For shadow map, we need consistent positioning.
+                    // The shadow map matrix was calculated using actual camera.position.
+                    // World.render subtracts camera.position from chunk position to get relative position.
+                    // So passing camera.position is correct.
+                    active_world.render(&shadow_map.shader, shadow_map.light_space_matrix, camera.position);
+                    shadow_map.end(input.window_width, input.window_height);
+                }
+
+                // --- MAIN PASS ---
+                renderer.setClearColor(if (in_world or in_pause) atmosphere.fog_color else Vec3.init(0.07, 0.08, 0.1));
+                renderer.beginFrame();
+
                 // Render sky first (before terrain, with depth write disabled)
                 atmosphere.renderSky(camera.forward, camera.right, camera.up, aspect, camera.fov);
 
                 // Bind texture atlas and set uniforms
                 shader.use();
                 atlas.bind(0);
+                shadow_map.depth_map.bind(1); // Bind shadow map to slot 1
+
                 shader.setInt("uTexture", 0);
+                shader.setInt("uShadowMap", 1);
                 shader.setBool("uUseTexture", settings.textures_enabled);
+                shader.setMat4("uLightSpaceMatrix", &shadow_map.light_space_matrix.data);
 
                 // Set atmosphere/lighting uniforms
                 shader.setVec3("uSunDir", atmosphere.sun_dir.x, atmosphere.sun_dir.y, atmosphere.sun_dir.z);
