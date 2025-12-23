@@ -935,7 +935,7 @@ pub fn main() !void {
                             world = null;
                         }
                         world = try World.init(allocator, settings.render_distance, seed, rhi);
-                        if (world_map == null) world_map = WorldMap.init(rhi, 256, 256);
+                        if (world_map == null) world_map = WorldMap.init(rhi, 256, 256, use_vulkan);
                         show_map = false;
                         map_needs_update = true;
                         app_state = .world;
