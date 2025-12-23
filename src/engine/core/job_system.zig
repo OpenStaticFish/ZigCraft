@@ -118,6 +118,8 @@ pub const JobQueue = struct {
     pub fn stop(self: *JobQueue) void {
         self.mutex.lock();
         self.stopped = true;
+        // Clear all pending jobs to allow workers to exit immediately
+        while (self.jobs.removeOrNull()) |_| {}
         self.mutex.unlock();
         self.cond.broadcast();
     }
