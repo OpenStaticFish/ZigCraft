@@ -98,7 +98,7 @@ const VulkanContext = struct {
     queue: c.VkQueue,
     graphics_family: u32,
     command_pool: c.VkCommandPool,
-    command_buffer: c.VkCommandBuffer,
+    command_buffers: [MAX_FRAMES_IN_FLIGHT]c.VkCommandBuffer,
     transfer_command_pool: c.VkCommandPool,
     transfer_command_buffer: c.VkCommandBuffer,
 
@@ -123,12 +123,12 @@ const VulkanContext = struct {
     depth_image_view: c.VkImageView,
 
     // Uniforms
-    global_ubo: VulkanBuffer,
+    global_ubos: [MAX_FRAMES_IN_FLIGHT]VulkanBuffer,
     model_ubo: VulkanBuffer,
-    shadow_ubo: VulkanBuffer,
+    shadow_ubos: [MAX_FRAMES_IN_FLIGHT]VulkanBuffer,
     descriptor_pool: c.VkDescriptorPool,
     descriptor_set_layout: c.VkDescriptorSetLayout,
-    descriptor_set: c.VkDescriptorSet,
+    descriptor_sets: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorSet,
 
     // Pipeline
     pipeline_layout: c.VkPipelineLayout,
@@ -321,12 +321,14 @@ fn deinit(ctx_ptr: *anyopaque) void {
         if (ctx.transfer_command_pool != null) c.vkDestroyCommandPool(ctx.device, ctx.transfer_command_pool, null);
 
         // Clean up UBOS
-        if (ctx.global_ubo.buffer != null) c.vkDestroyBuffer(ctx.device, ctx.global_ubo.buffer, null);
-        if (ctx.global_ubo.memory != null) c.vkFreeMemory(ctx.device, ctx.global_ubo.memory, null);
+        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+            if (ctx.global_ubos[i].buffer != null) c.vkDestroyBuffer(ctx.device, ctx.global_ubos[i].buffer, null);
+            if (ctx.global_ubos[i].memory != null) c.vkFreeMemory(ctx.device, ctx.global_ubos[i].memory, null);
+            if (ctx.shadow_ubos[i].buffer != null) c.vkDestroyBuffer(ctx.device, ctx.shadow_ubos[i].buffer, null);
+            if (ctx.shadow_ubos[i].memory != null) c.vkFreeMemory(ctx.device, ctx.shadow_ubos[i].memory, null);
+        }
         if (ctx.model_ubo.buffer != null) c.vkDestroyBuffer(ctx.device, ctx.model_ubo.buffer, null);
         if (ctx.model_ubo.memory != null) c.vkFreeMemory(ctx.device, ctx.model_ubo.memory, null);
-        if (ctx.shadow_ubo.buffer != null) c.vkDestroyBuffer(ctx.device, ctx.shadow_ubo.buffer, null);
-        if (ctx.shadow_ubo.memory != null) c.vkFreeMemory(ctx.device, ctx.shadow_ubo.memory, null);
 
         if (ctx.descriptor_pool != null) c.vkDestroyDescriptorPool(ctx.device, ctx.descriptor_pool, null);
         if (ctx.descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(ctx.device, ctx.descriptor_set_layout, null);
@@ -626,19 +628,71 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
     ctx.image_index = image_index;
 
     _ = c.vkResetFences(ctx.device, 1, &fence);
-    _ = c.vkResetCommandBuffer(ctx.command_buffer, 0);
+
+    const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
+    _ = c.vkResetCommandBuffer(command_buffer, 0);
 
     var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
     begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
-    _ = c.vkBeginCommandBuffer(ctx.command_buffer, &begin_info);
+    _ = c.vkBeginCommandBuffer(command_buffer, &begin_info);
 
     ctx.frame_in_progress = true;
 }
 
+fn endFrame(ctx_ptr: *anyopaque) void {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    if (!ctx.frame_in_progress) return;
+
+    if (ctx.main_pass_active) {
+        endMainPass(ctx_ptr);
+    }
+
+    const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
+    _ = c.vkEndCommandBuffer(command_buffer);
+
+    var submit_info = std.mem.zeroes(c.VkSubmitInfo);
+    submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+    const wait_semaphores = [_]c.VkSemaphore{ctx.image_available_semaphores[ctx.current_sync_frame]};
+    const wait_stages = [_]c.VkPipelineStageFlags{c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+    submit_info.waitSemaphoreCount = 1;
+    submit_info.pWaitSemaphores = &wait_semaphores;
+    submit_info.pWaitDstStageMask = &wait_stages;
+
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &command_buffer;
+
+    const signal_semaphores = [_]c.VkSemaphore{ctx.render_finished_semaphores[ctx.current_sync_frame]};
+    submit_info.signalSemaphoreCount = 1;
+    submit_info.pSignalSemaphores = &signal_semaphores;
+
+    _ = c.vkQueueSubmit(ctx.queue, 1, &submit_info, ctx.in_flight_fences[ctx.current_sync_frame]);
+
+    var present_info = std.mem.zeroes(c.VkPresentInfoKHR);
+    present_info.sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    present_info.waitSemaphoreCount = 1;
+    present_info.pWaitSemaphores = &signal_semaphores;
+
+    const swapchains = [_]c.VkSwapchainKHR{ctx.swapchain};
+    present_info.swapchainCount = 1;
+    present_info.pSwapchains = &swapchains;
+    present_info.pImageIndices = &ctx.image_index;
+
+    const result = c.vkQueuePresentKHR(ctx.queue, &present_info);
+
+    if (result == c.VK_ERROR_OUT_OF_DATE_KHR or result == c.VK_SUBOPTIMAL_KHR or ctx.framebuffer_resized) {
+        ctx.framebuffer_resized = false;
+        recreateSwapchain(ctx);
+    }
+
+    ctx.current_sync_frame = (ctx.current_sync_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+    ctx.frame_index += 1;
+    ctx.frame_in_progress = false;
+}
+
 fn setClearColor(ctx_ptr: *anyopaque, color: Vec3) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
-    // Robustness: ensure values are not NaN or Inf
     const r = if (std.math.isFinite(color.x)) color.x else 0.0;
     const g = if (std.math.isFinite(color.y)) color.y else 0.0;
     const b = if (std.math.isFinite(color.z)) color.z else 0.0;
@@ -685,7 +739,8 @@ fn transitionShadowImage(ctx: *VulkanContext, cascade_index: u32, new_layout: c.
         dst_stage = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     }
 
-    c.vkCmdPipelineBarrier(ctx.command_buffer, src_stage, dst_stage, 0, 0, null, 0, null, 1, &barrier);
+    const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
+    c.vkCmdPipelineBarrier(command_buffer, src_stage, dst_stage, 0, 0, null, 0, null, 1, &barrier);
     ctx.shadow_image_layouts[cascade_index] = new_layout;
 }
 
@@ -697,7 +752,6 @@ fn beginMainPass(ctx_ptr: *anyopaque) void {
         endShadowPass(ctx_ptr);
     }
 
-    // Reset pipeline state when switching passes
     ctx.terrain_pipeline_bound = false;
 
     var render_pass_info = std.mem.zeroes(c.VkRenderPassBeginInfo);
@@ -707,16 +761,16 @@ fn beginMainPass(ctx_ptr: *anyopaque) void {
     render_pass_info.renderArea.offset = .{ .x = 0, .y = 0 };
     render_pass_info.renderArea.extent = ctx.swapchain_extent;
 
-    var clear_values: [2]c.VkClearValue = undefined;
-    clear_values[0].color.float32 = ctx.clear_color;
-    clear_values[1].depthStencil = .{ .depth = 0.0, .stencil = 0 }; // Reverse-Z
+    var clear_values = [_]c.VkClearValue{
+        .{ .color = .{ .float32 = ctx.clear_color } },
+        .{ .depthStencil = .{ .depth = 0.0, .stencil = 0 } },
+    };
     render_pass_info.clearValueCount = 2;
     render_pass_info.pClearValues = &clear_values[0];
 
-    c.vkCmdBeginRenderPass(ctx.command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
-    ctx.main_pass_active = true;
+    const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
+    c.vkCmdBeginRenderPass(command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
 
-    // Set dynamic viewport and scissor
     var viewport = std.mem.zeroes(c.VkViewport);
     viewport.x = 0.0;
     viewport.y = 0.0;
@@ -724,73 +778,22 @@ fn beginMainPass(ctx_ptr: *anyopaque) void {
     viewport.height = @floatFromInt(ctx.swapchain_extent.height);
     viewport.minDepth = 0.0;
     viewport.maxDepth = 1.0;
-    c.vkCmdSetViewport(ctx.command_buffer, 0, 1, &viewport);
+    c.vkCmdSetViewport(command_buffer, 0, 1, &viewport);
 
     var scissor = std.mem.zeroes(c.VkRect2D);
     scissor.offset = .{ .x = 0, .y = 0 };
     scissor.extent = ctx.swapchain_extent;
-    c.vkCmdSetScissor(ctx.command_buffer, 0, 1, &scissor);
+    c.vkCmdSetScissor(command_buffer, 0, 1, &scissor);
+
+    ctx.main_pass_active = true;
 }
 
 fn endMainPass(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.main_pass_active) return;
-    if (ctx.command_buffer == null) {
-        ctx.main_pass_active = false;
-        return;
-    }
-    c.vkCmdEndRenderPass(ctx.command_buffer);
+    const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
+    c.vkCmdEndRenderPass(command_buffer);
     ctx.main_pass_active = false;
-}
-
-fn endFrame(ctx_ptr: *anyopaque) void {
-    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
-    if (!ctx.frame_in_progress) return;
-
-    if (ctx.main_pass_active) {
-        endMainPass(ctx_ptr);
-    }
-
-    _ = c.vkEndCommandBuffer(ctx.command_buffer);
-
-    var submit_info = std.mem.zeroes(c.VkSubmitInfo);
-    submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
-
-    const wait_semaphores = [_]c.VkSemaphore{ctx.image_available_semaphores[ctx.current_sync_frame]};
-    const wait_stages = [_]c.VkPipelineStageFlags{c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-    submit_info.waitSemaphoreCount = 1;
-    submit_info.pWaitSemaphores = &wait_semaphores;
-    submit_info.pWaitDstStageMask = &wait_stages;
-
-    submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &ctx.command_buffer;
-
-    const signal_semaphores = [_]c.VkSemaphore{ctx.render_finished_semaphores[ctx.current_sync_frame]};
-    submit_info.signalSemaphoreCount = 1;
-    submit_info.pSignalSemaphores = &signal_semaphores;
-
-    _ = c.vkQueueSubmit(ctx.queue, 1, &submit_info, ctx.in_flight_fences[ctx.current_sync_frame]);
-
-    var present_info = std.mem.zeroes(c.VkPresentInfoKHR);
-    present_info.sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    present_info.waitSemaphoreCount = 1;
-    present_info.pWaitSemaphores = &signal_semaphores;
-
-    const swapchains = [_]c.VkSwapchainKHR{ctx.swapchain};
-    present_info.swapchainCount = 1;
-    present_info.pSwapchains = &swapchains;
-    present_info.pImageIndices = &ctx.image_index;
-
-    const result = c.vkQueuePresentKHR(ctx.queue, &present_info);
-
-    if (result == c.VK_ERROR_OUT_OF_DATE_KHR or result == c.VK_SUBOPTIMAL_KHR or ctx.framebuffer_resized) {
-        ctx.framebuffer_resized = false;
-        recreateSwapchain(ctx);
-    }
-
-    ctx.current_sync_frame = (ctx.current_sync_frame + 1) % MAX_FRAMES_IN_FLIGHT;
-    ctx.frame_index += 1;
-    ctx.frame_in_progress = false;
 }
 
 fn waitIdle(ctx_ptr: *anyopaque) void {
@@ -803,9 +806,6 @@ fn waitIdle(ctx_ptr: *anyopaque) void {
 fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
-
-    // We don't start the render pass here because updateGlobalUniforms
-    // might be called for shadow passes too.
 
     const uniforms = GlobalUniforms{
         .view_proj = view_proj,
@@ -822,10 +822,11 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
     };
 
     var map_ptr: ?*anyopaque = null;
-    if (c.vkMapMemory(ctx.device, ctx.global_ubo.memory, 0, @sizeOf(GlobalUniforms), 0, &map_ptr) == c.VK_SUCCESS) {
+    const global_ubo = ctx.global_ubos[ctx.current_sync_frame];
+    if (c.vkMapMemory(ctx.device, global_ubo.memory, 0, @sizeOf(GlobalUniforms), 0, &map_ptr) == c.VK_SUCCESS) {
         const mapped: *GlobalUniforms = @ptrCast(@alignCast(map_ptr));
         mapped.* = uniforms;
-        c.vkUnmapMemory(ctx.device, ctx.global_ubo.memory);
+        c.vkUnmapMemory(ctx.device, global_ubo.memory);
     }
 }
 
@@ -1154,8 +1155,9 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
         if (use_shadow) {
             if (!ctx.shadow_pipeline_bound) {
                 if (ctx.shadow_pipeline == null) return;
-                c.vkCmdBindPipeline(ctx.command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.shadow_pipeline);
-                c.vkCmdBindDescriptorSets(ctx.command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_layout, 0, 1, &ctx.descriptor_set, 0, null);
+                const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
+                c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.shadow_pipeline);
+                c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_layout, 0, 1, &ctx.descriptor_sets[ctx.current_sync_frame], 0, null);
                 ctx.shadow_pipeline_bound = true;
             }
         } else {
@@ -1166,7 +1168,8 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
                 else
                     ctx.pipeline;
                 if (selected_pipeline == null) return;
-                c.vkCmdBindPipeline(ctx.command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, selected_pipeline);
+                const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
+                c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, selected_pipeline);
 
                 // Update descriptors if they haven't been updated this frame, or if the texture changed
                 if (!ctx.descriptors_updated or ctx.current_texture != ctx.bound_texture) {
@@ -1184,7 +1187,7 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
 
                         var write = std.mem.zeroes(c.VkWriteDescriptorSet);
                         write.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                        write.dstSet = ctx.descriptor_set;
+                        write.dstSet = ctx.descriptor_sets[ctx.current_sync_frame];
                         write.dstBinding = 1;
                         write.descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                         write.descriptorCount = 1;
@@ -1211,7 +1214,7 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
                             };
                             var write = std.mem.zeroes(c.VkWriteDescriptorSet);
                             write.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                            write.dstSet = ctx.descriptor_set;
+                            write.dstSet = ctx.descriptor_sets[ctx.current_sync_frame];
                             write.dstBinding = @intCast(3 + i);
                             write.descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                             write.descriptorCount = 1;
@@ -1224,18 +1227,19 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
                     ctx.bound_texture = ctx.current_texture;
                 }
 
-                c.vkCmdBindDescriptorSets(ctx.command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_layout, 0, 1, &ctx.descriptor_set, 0, null);
+                c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_layout, 0, 1, &ctx.descriptor_sets[ctx.current_sync_frame], 0, null);
                 ctx.terrain_pipeline_bound = true;
             }
         }
 
+        const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
         // Push constants are cheap, always update per-draw
         const uniforms = ModelUniforms{ .model = ctx.current_model };
-        c.vkCmdPushConstants(ctx.command_buffer, ctx.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf(ModelUniforms), &uniforms);
+        c.vkCmdPushConstants(command_buffer, ctx.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf(ModelUniforms), &uniforms);
 
         const offset: c.VkDeviceSize = 0;
-        c.vkCmdBindVertexBuffers(ctx.command_buffer, 0, 1, &vbo.buffer, &offset);
-        c.vkCmdDraw(ctx.command_buffer, count, 1, 0, 0);
+        c.vkCmdBindVertexBuffers(command_buffer, 0, 1, &vbo.buffer, &offset);
+        c.vkCmdDraw(command_buffer, count, 1, 0, 0);
     }
 }
 
@@ -1257,11 +1261,12 @@ fn beginUI(ctx_ptr: *anyopaque, screen_width: f32, screen_height: f32) void {
     }
 
     // Bind UI pipeline
-    c.vkCmdBindPipeline(ctx.command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.ui_pipeline);
+    const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
+    c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.ui_pipeline);
 
     // Set orthographic projection
     const proj = Mat4.orthographic(0, ctx.ui_screen_width, ctx.ui_screen_height, 0, -1, 1);
-    c.vkCmdPushConstants(ctx.command_buffer, ctx.ui_pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf(Mat4), &proj.data);
+    c.vkCmdPushConstants(command_buffer, ctx.ui_pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf(Mat4), &proj.data);
 }
 
 fn endUI(ctx_ptr: *anyopaque) void {
@@ -1275,9 +1280,10 @@ fn endUI(ctx_ptr: *anyopaque) void {
 
     if (ctx.ui_vertex_offset > 0) {
         const offset: c.VkDeviceSize = 0;
-        c.vkCmdBindVertexBuffers(ctx.command_buffer, 0, 1, &ctx.ui_vbo.buffer, &offset);
+        const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
+        c.vkCmdBindVertexBuffers(command_buffer, 0, 1, &ctx.ui_vbo.buffer, &offset);
         const vertex_count: u32 = @intCast(ctx.ui_vertex_offset / (6 * @sizeOf(f32)));
-        c.vkCmdDraw(ctx.command_buffer, vertex_count, 1, 0, 0);
+        c.vkCmdDraw(command_buffer, vertex_count, 1, 0, 0);
     }
 
     ctx.ui_in_progress = false;
@@ -1352,7 +1358,8 @@ fn beginShadowPass(ctx_ptr: *anyopaque, cascade_index: u32) void {
     render_pass_info.clearValueCount = 1;
     render_pass_info.pClearValues = &clear_value;
 
-    c.vkCmdBeginRenderPass(ctx.command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
+    const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
+    c.vkCmdBeginRenderPass(command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
 
     ctx.shadow_pass_active = true;
     ctx.shadow_pass_index = cascade_index;
@@ -1364,23 +1371,20 @@ fn beginShadowPass(ctx_ptr: *anyopaque, cascade_index: u32) void {
     viewport.height = @floatFromInt(ctx.shadow_extent.height);
     viewport.minDepth = 0.0;
     viewport.maxDepth = 1.0;
-    c.vkCmdSetViewport(ctx.command_buffer, 0, 1, &viewport);
+    c.vkCmdSetViewport(command_buffer, 0, 1, &viewport);
 
     var scissor = std.mem.zeroes(c.VkRect2D);
     scissor.offset = .{ .x = 0, .y = 0 };
     scissor.extent = ctx.shadow_extent;
-    c.vkCmdSetScissor(ctx.command_buffer, 0, 1, &scissor);
+    c.vkCmdSetScissor(command_buffer, 0, 1, &scissor);
 }
 
 fn endShadowPass(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.shadow_pass_active) return;
-    if (ctx.command_buffer == null) {
-        ctx.shadow_pass_active = false;
-        return;
-    }
+    const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
 
-    c.vkCmdEndRenderPass(ctx.command_buffer);
+    c.vkCmdEndRenderPass(command_buffer);
     const cascade_index = ctx.shadow_pass_index;
     ctx.shadow_pass_active = false;
 
@@ -1389,7 +1393,6 @@ fn endShadowPass(ctx_ptr: *anyopaque) void {
 
 fn updateShadowUniforms(ctx_ptr: *anyopaque, params: rhi.ShadowParams) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
-    if (!ctx.frame_in_progress) return;
 
     const shadow_uniforms = ShadowUniforms{
         .light_space_matrices = params.light_space_matrices,
@@ -1398,10 +1401,11 @@ fn updateShadowUniforms(ctx_ptr: *anyopaque, params: rhi.ShadowParams) void {
     };
 
     var map_ptr: ?*anyopaque = null;
-    if (c.vkMapMemory(ctx.device, ctx.shadow_ubo.memory, 0, @sizeOf(ShadowUniforms), 0, &map_ptr) == c.VK_SUCCESS) {
+    const shadow_ubo = ctx.shadow_ubos[ctx.current_sync_frame];
+    if (c.vkMapMemory(ctx.device, shadow_ubo.memory, 0, @sizeOf(ShadowUniforms), 0, &map_ptr) == c.VK_SUCCESS) {
         const mapped: *ShadowUniforms = @ptrCast(@alignCast(map_ptr));
         mapped.* = shadow_uniforms;
-        c.vkUnmapMemory(ctx.device, ctx.shadow_ubo.memory);
+        c.vkUnmapMemory(ctx.device, shadow_ubo.memory);
     }
 }
 
@@ -1423,9 +1427,10 @@ fn drawSky(ctx_ptr: *anyopaque, params: rhi.SkyParams) void {
         .time = .{ params.time, 0.0, 0.0, 0.0 },
     };
 
-    c.vkCmdBindPipeline(ctx.command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.sky_pipeline);
-    c.vkCmdPushConstants(ctx.command_buffer, ctx.sky_pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(SkyPushConstants), &pc);
-    c.vkCmdDraw(ctx.command_buffer, 3, 1, 0, 0);
+    const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
+    c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.sky_pipeline);
+    c.vkCmdPushConstants(command_buffer, ctx.sky_pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(SkyPushConstants), &pc);
+    c.vkCmdDraw(command_buffer, 3, 1, 0, 0);
 }
 
 const vtable = rhi.RHI.VTable{
@@ -1501,12 +1506,9 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window) !rhi.RHI {
     ctx.vsync_enabled = true;
     ctx.present_mode = c.VK_PRESENT_MODE_FIFO_KHR; // VSync on by default
 
-    // Explicitly null out pointers that are not yet initialized
-    ctx.instance = null;
-    ctx.surface = null;
-    ctx.device = null;
-    ctx.physical_device = null;
-    ctx.command_buffer = null;
+    for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+        ctx.command_buffers[i] = null;
+    }
     ctx.command_pool = null;
     ctx.transfer_command_buffer = null;
     ctx.transfer_command_pool = null;
@@ -1535,7 +1537,11 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window) !rhi.RHI {
         ctx.image_available_semaphores[i] = null;
         ctx.render_finished_semaphores[i] = null;
         ctx.in_flight_fences[i] = null;
+        ctx.global_ubos[i] = .{ .buffer = null, .memory = null, .size = 0 };
+        ctx.shadow_ubos[i] = .{ .buffer = null, .memory = null, .size = 0 };
+        ctx.descriptor_sets[i] = null;
     }
+    ctx.model_ubo = .{ .buffer = null, .memory = null, .size = 0 };
 
     // 1. Create Instance
     var count: u32 = 0;
@@ -1825,7 +1831,7 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window) !rhi.RHI {
         try ctx.swapchain_framebuffers.append(ctx.allocator, fb);
     }
 
-    // 8. Command Pool & Buffer
+    // 8. Command Pool & Buffers
     var pool_info = std.mem.zeroes(c.VkCommandPoolCreateInfo);
     pool_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     pool_info.queueFamilyIndex = graphics_family.?;
@@ -1836,8 +1842,8 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window) !rhi.RHI {
     cb_alloc_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     cb_alloc_info.commandPool = ctx.command_pool;
     cb_alloc_info.level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cb_alloc_info.commandBufferCount = 1;
-    try checkVk(c.vkAllocateCommandBuffers(ctx.device, &cb_alloc_info, &ctx.command_buffer));
+    cb_alloc_info.commandBufferCount = MAX_FRAMES_IN_FLIGHT;
+    try checkVk(c.vkAllocateCommandBuffers(ctx.device, &cb_alloc_info, &ctx.command_buffers[0]));
 
     // Create Transfer Command Pool & Buffer
     var transfer_pool_info = std.mem.zeroes(c.VkCommandPoolCreateInfo);
@@ -1868,108 +1874,66 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window) !rhi.RHI {
     }
 
     // 10. Uniform Buffers
-    ctx.global_ubo = createVulkanBuffer(ctx, @sizeOf(GlobalUniforms), c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+    for (0..MAX_FRAMES_IN_FLIGHT) |ubo_i| {
+        ctx.global_ubos[ubo_i] = createVulkanBuffer(ctx, @sizeOf(GlobalUniforms), c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+        ctx.shadow_ubos[ubo_i] = createVulkanBuffer(ctx, @sizeOf(ShadowUniforms), c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+    }
     ctx.model_ubo = createVulkanBuffer(ctx, @sizeOf(ModelUniforms) * 1000, c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-    ctx.shadow_ubo = createVulkanBuffer(ctx, @sizeOf(ShadowUniforms), c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 
     // 11. Descriptors
     var pool_sizes = [_]c.VkDescriptorPoolSize{
-        .{ .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 2 },
-        .{ .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 4 },
+        .{ .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT },
+        .{ .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 4 * MAX_FRAMES_IN_FLIGHT },
     };
 
     var pool_info_desc = std.mem.zeroes(c.VkDescriptorPoolCreateInfo);
     pool_info_desc.sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool_info_desc.poolSizeCount = 2;
     pool_info_desc.pPoolSizes = &pool_sizes[0];
-    pool_info_desc.maxSets = 1;
+    pool_info_desc.maxSets = MAX_FRAMES_IN_FLIGHT;
 
     try checkVk(c.vkCreateDescriptorPool(ctx.device, &pool_info_desc, null, &ctx.descriptor_pool));
 
-    var layout_bindings = [_]c.VkDescriptorSetLayoutBinding{
-        .{
-            .binding = 0, // Global UBO
-            .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = 1,
-            .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT,
-        },
-        .{
-            .binding = 1, // Main Texture
-            .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 1,
-            .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
-        },
-        .{
-            .binding = 2, // Shadow UBO
-            .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-            .descriptorCount = 1,
-            .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
-        },
-        .{
-            .binding = 3, // Shadow Map 0
-            .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 1,
-            .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
-        },
-        .{
-            .binding = 4, // Shadow Map 1
-            .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 1,
-            .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
-        },
-        .{
-            .binding = 5, // Shadow Map 2
-            .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 1,
-            .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
-        },
-    };
+    for (0..MAX_FRAMES_IN_FLIGHT) |ds_i| {
+        var ds_alloc_info = std.mem.zeroes(c.VkDescriptorSetAllocateInfo);
+        ds_alloc_info.sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        ds_alloc_info.descriptorPool = ctx.descriptor_pool;
+        ds_alloc_info.descriptorSetCount = 1;
+        ds_alloc_info.pSetLayouts = &ctx.descriptor_set_layout;
 
-    var layout_info = std.mem.zeroes(c.VkDescriptorSetLayoutCreateInfo);
-    layout_info.sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout_info.bindingCount = 6;
-    layout_info.pBindings = &layout_bindings[0];
+        try checkVk(c.vkAllocateDescriptorSets(ctx.device, &ds_alloc_info, &ctx.descriptor_sets[ds_i]));
 
-    try checkVk(c.vkCreateDescriptorSetLayout(ctx.device, &layout_info, null, &ctx.descriptor_set_layout));
+        var global_buffer_info = c.VkDescriptorBufferInfo{
+            .buffer = ctx.global_ubos[ds_i].buffer,
+            .offset = 0,
+            .range = @sizeOf(GlobalUniforms),
+        };
 
-    var ds_alloc_info = std.mem.zeroes(c.VkDescriptorSetAllocateInfo);
-    ds_alloc_info.sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    ds_alloc_info.descriptorPool = ctx.descriptor_pool;
-    ds_alloc_info.descriptorSetCount = 1;
-    ds_alloc_info.pSetLayouts = &ctx.descriptor_set_layout;
+        var shadow_buffer_info = c.VkDescriptorBufferInfo{
+            .buffer = ctx.shadow_ubos[ds_i].buffer,
+            .offset = 0,
+            .range = @sizeOf(ShadowUniforms),
+        };
 
-    try checkVk(c.vkAllocateDescriptorSets(ctx.device, &ds_alloc_info, &ctx.descriptor_set));
+        var write0 = std.mem.zeroes(c.VkWriteDescriptorSet);
+        write0.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write0.dstSet = ctx.descriptor_sets[ds_i];
+        write0.dstBinding = 0;
+        write0.descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        write0.descriptorCount = 1;
+        write0.pBufferInfo = &global_buffer_info;
 
-    var global_buffer_info = c.VkDescriptorBufferInfo{
-        .buffer = ctx.global_ubo.buffer,
-        .offset = 0,
-        .range = @sizeOf(GlobalUniforms),
-    };
+        var write2 = std.mem.zeroes(c.VkWriteDescriptorSet);
+        write2.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write2.dstSet = ctx.descriptor_sets[ds_i];
+        write2.dstBinding = 2;
+        write2.descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        write2.descriptorCount = 1;
+        write2.pBufferInfo = &shadow_buffer_info;
 
-    var shadow_buffer_info = c.VkDescriptorBufferInfo{
-        .buffer = ctx.shadow_ubo.buffer,
-        .offset = 0,
-        .range = @sizeOf(ShadowUniforms),
-    };
-
-    var write0 = std.mem.zeroes(c.VkWriteDescriptorSet);
-    write0.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write0.dstSet = ctx.descriptor_set;
-    write0.dstBinding = 0;
-    write0.descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    write0.descriptorCount = 1;
-    write0.pBufferInfo = &global_buffer_info;
-
-    var write2 = std.mem.zeroes(c.VkWriteDescriptorSet);
-    write2.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write2.dstSet = ctx.descriptor_set;
-    write2.dstBinding = 2;
-    write2.descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    write2.descriptorCount = 1;
-    write2.pBufferInfo = &shadow_buffer_info;
-
-    var descriptor_writes = [_]c.VkWriteDescriptorSet{ write0, write2 };
-    c.vkUpdateDescriptorSets(ctx.device, 2, &descriptor_writes, 0, null);
+        var descriptor_writes = [_]c.VkWriteDescriptorSet{ write0, write2 };
+        c.vkUpdateDescriptorSets(ctx.device, 2, &descriptor_writes, 0, null);
+    }
 
     ctx.current_model = Mat4.identity;
 
