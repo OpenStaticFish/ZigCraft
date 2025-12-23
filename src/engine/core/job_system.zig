@@ -30,6 +30,8 @@ pub const JobQueue = struct {
     cond: Condition,
     jobs: std.PriorityQueue(Job, void, compareJobs),
     stopped: bool,
+    paused: bool = false,
+    abort_worker: bool = false,
     allocator: std.mem.Allocator,
     // Current player chunk for dynamic re-prioritization
     player_cx: i32 = 0,
@@ -46,6 +48,8 @@ pub const JobQueue = struct {
             .cond = Condition{},
             .jobs = std.PriorityQueue(Job, void, compareJobs).init(allocator, {}),
             .stopped = false,
+            .paused = false,
+            .abort_worker = false,
             .allocator = allocator,
         };
     }
@@ -57,6 +61,7 @@ pub const JobQueue = struct {
     pub fn push(self: *JobQueue, job: Job) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
+        if (self.stopped or self.paused) return;
         try self.jobs.add(job);
         self.cond.signal();
     }
@@ -77,6 +82,8 @@ pub const JobQueue = struct {
     pub fn updatePlayerPos(self: *JobQueue, cx: i32, cz: i32) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
+
+        if (self.paused) return;
 
         // Only rebuild if player moved
         if (cx == self.player_cx and cz == self.player_cz) return;
@@ -115,9 +122,28 @@ pub const JobQueue = struct {
         }
     }
 
+    pub fn clear(self: *JobQueue) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        while (self.jobs.removeOrNull()) |_| {}
+    }
+
+    pub fn setPaused(self: *JobQueue, paused: bool) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.paused = paused;
+        self.abort_worker = paused or self.stopped;
+        if (paused) {
+            while (self.jobs.removeOrNull()) |_| {}
+        } else {
+            self.cond.broadcast();
+        }
+    }
+
     pub fn stop(self: *JobQueue) void {
         self.mutex.lock();
         self.stopped = true;
+        self.abort_worker = true;
         // Clear all pending jobs to allow workers to exit immediately
         while (self.jobs.removeOrNull()) |_| {}
         self.mutex.unlock();

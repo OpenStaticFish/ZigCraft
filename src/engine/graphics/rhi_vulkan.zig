@@ -700,19 +700,29 @@ fn abortFrame(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
 
-    if (ctx.main_pass_active) {
-        endMainPass(ctx_ptr);
-    }
-    if (ctx.shadow_pass_active) {
-        endShadowPass(ctx_ptr);
-    }
+    if (ctx.main_pass_active) endMainPass(ctx_ptr);
+    if (ctx.shadow_pass_active) endShadowPass(ctx_ptr);
 
     const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
     _ = c.vkEndCommandBuffer(command_buffer);
 
-    // We don't submit it. We just signal that frame is over.
-    // Next beginFrame will wait for the fence (which is already signaled from previous successful endFrame)
-    // and reset this command buffer.
+    // We didn't submit, so we must manually signal the fence so we don't deadlock
+    // on the next time this sync frame comes around.
+    // However, it's safer to just reset the fence to a signaled state.
+    _ = c.vkResetFences(ctx.device, 1, &ctx.in_flight_fences[ctx.current_sync_frame]);
+    var fence_info = std.mem.zeroes(c.VkFenceCreateInfo);
+    fence_info.sType = c.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fence_info.flags = c.VK_FENCE_CREATE_SIGNALED_BIT;
+
+    // Recreating semaphores is the most robust way to "abort" their pending status from AcquireNextImage
+    c.vkDestroySemaphore(ctx.device, ctx.image_available_semaphores[ctx.current_sync_frame], null);
+    c.vkDestroySemaphore(ctx.device, ctx.render_finished_semaphores[ctx.current_sync_frame], null);
+
+    var semaphore_info = std.mem.zeroes(c.VkSemaphoreCreateInfo);
+    semaphore_info.sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    _ = c.vkCreateSemaphore(ctx.device, &semaphore_info, null, &ctx.image_available_semaphores[ctx.current_sync_frame]);
+    _ = c.vkCreateSemaphore(ctx.device, &semaphore_info, null, &ctx.render_finished_semaphores[ctx.current_sync_frame]);
+
     ctx.frame_in_progress = false;
 }
 
@@ -2213,13 +2223,17 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window) !rhi.RHI {
 
     try checkVk(c.vkCreateGraphicsPipelines(ctx.device, null, 1, &pipeline_info, null, &ctx.pipeline));
 
-    // 13a. Create wireframe pipeline variant
-    var wireframe_rasterizer = rasterizer;
-    wireframe_rasterizer.polygonMode = c.VK_POLYGON_MODE_LINE;
-    wireframe_rasterizer.lineWidth = 1.0;
+    // 13a. Create wireframe pipeline variant if supported
+    if (device_features.fillModeNonSolid == c.VK_TRUE) {
+        var wireframe_rasterizer = rasterizer;
+        wireframe_rasterizer.polygonMode = c.VK_POLYGON_MODE_LINE;
+        wireframe_rasterizer.lineWidth = 1.0;
 
-    pipeline_info.pRasterizationState = &wireframe_rasterizer;
-    try checkVk(c.vkCreateGraphicsPipelines(ctx.device, null, 1, &pipeline_info, null, &ctx.wireframe_pipeline));
+        pipeline_info.pRasterizationState = &wireframe_rasterizer;
+        try checkVk(c.vkCreateGraphicsPipelines(ctx.device, null, 1, &pipeline_info, null, &ctx.wireframe_pipeline));
+    } else {
+        ctx.wireframe_pipeline = null;
+    }
 
     // Restore solid rasterizer for other pipelines
     pipeline_info.pRasterizationState = &rasterizer;

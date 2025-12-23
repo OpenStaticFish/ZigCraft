@@ -425,13 +425,15 @@ pub fn main() !void {
 
     var app_state: AppState = .home;
     var last_state: AppState = .home;
+    var pending_world_cleanup = false;
+    var pending_new_world_seed: ?u64 = null;
     var debug_shadows = false;
     var debug_cascade_idx: usize = 0;
     var seed_input = std.ArrayListUnmanaged(u8).empty;
     defer seed_input.deinit(allocator);
     var seed_focused = false;
     var world: ?*World = null;
-    defer if (world) |active_world| active_world.deinit();
+
     var world_map: ?WorldMap = null;
     defer if (world_map) |*m| m.deinit();
     var show_map = false;
@@ -447,6 +449,25 @@ pub fn main() !void {
     log.log.info("=== Zig Voxel Engine ===", .{});
 
     while (!input.should_quit) {
+        // Safe deferred world management OUTSIDE the frame window
+        if (pending_world_cleanup or pending_new_world_seed != null) {
+            rhi.waitIdle();
+            if (world) |w| {
+                w.deinit();
+                world = null;
+            }
+            pending_world_cleanup = false;
+        }
+
+        if (pending_new_world_seed) |seed| {
+            world = try World.init(allocator, settings.render_distance, seed, rhi);
+            if (world_map == null) world_map = WorldMap.init(rhi, 256, 256, use_vulkan);
+            show_map = false;
+            map_needs_update = true;
+            camera = Camera.init(.{ .position = Vec3.init(8, 100, 8), .pitch = -0.3, .move_speed = 50.0 });
+            pending_new_world_seed = null;
+        }
+
         time.update();
         if (atmosphere) |*a| a.update(time.delta_time);
         input.beginFrame();
@@ -810,14 +831,7 @@ pub fn main() !void {
                         py += ph + 16.0;
                         if (drawButton(u, .{ .x = px, .y = py, .width = pw, .height = ph }, "QUIT TO TITLE", 2.0, mouse_x, mouse_y, mouse_clicked)) {
                             app_state = .home;
-                            if (world) |w| {
-                                w.deinit();
-                                world = null;
-                            }
-                            // Skip rest of this frame to avoid using destroyed resources
-                            u.end();
-                            rhi.abortFrame();
-                            continue;
+                            pending_world_cleanup = true;
                         }
                     }
                     u.end();
@@ -932,23 +946,10 @@ pub fn main() !void {
                     }
                     if (drawButton(u, .{ .x = px + 24.0 + hw + 12.0, .y = byy, .width = hw, .height = 40.0 }, "CREATE", 1.9, mouse_x, mouse_y, mouse_clicked) or input.isKeyPressed(.enter)) {
                         const seed = try resolveSeed(&seed_input, allocator);
-                        if (world) |w| {
-                            w.deinit();
-                            world = null;
-                        }
-                        world = try World.init(allocator, settings.render_distance, seed, rhi);
-                        if (world_map == null) world_map = WorldMap.init(rhi, 256, 256, use_vulkan);
-                        show_map = false;
-                        map_needs_update = true;
+                        pending_new_world_seed = seed;
                         app_state = .world;
                         seed_focused = false;
-                        camera = Camera.init(.{ .position = Vec3.init(8, 100, 8), .pitch = -0.3, .move_speed = 50.0 });
                         log.log.info("World seed: {}", .{seed});
-
-                        // Terminate frame early to avoid rendering partially initialized state
-                        u.end();
-                        rhi.abortFrame();
-                        continue;
                     }
                 },
                 .world, .paused => unreachable,
