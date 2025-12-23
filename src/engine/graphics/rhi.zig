@@ -3,6 +3,20 @@ const Allocator = std.mem.Allocator;
 const Mat4 = @import("../math/mat4.zig").Mat4;
 const Vec3 = @import("../math/vec3.zig").Vec3;
 
+/// Common RHI errors that backends may return.
+pub const RhiError = error{
+    /// Vulkan API call failed
+    VulkanError,
+    /// OpenGL error occurred
+    OpenGLError,
+    /// Out of memory
+    OutOfMemory,
+    /// Resource not found
+    ResourceNotFound,
+    /// Invalid operation for current state
+    InvalidState,
+};
+
 /// Handle to a GPU buffer (Vertex Buffer, Index Buffer, etc.)
 pub const BufferHandle = u32;
 pub const InvalidBufferHandle: BufferHandle = 0;

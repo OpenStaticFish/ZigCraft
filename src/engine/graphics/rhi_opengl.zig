@@ -1,3 +1,17 @@
+//! OpenGL Rendering Hardware Interface (RHI) Backend
+//!
+//! Implements the RHI interface for OpenGL 3.3+. This is the simpler backend
+//! compared to Vulkan, using immediate-mode style rendering.
+//!
+//! ## Key Differences from Vulkan
+//! - No explicit synchronization (OpenGL driver handles it)
+//! - Simpler resource management (VAO/VBO pairs)
+//! - Embedded GLSL shaders for UI and sky rendering
+//!
+//! ## Thread Safety
+//! A mutex protects the buffer list. OpenGL context is NOT thread-safe -
+//! all rendering must occur on the main thread with the GL context current.
+
 const std = @import("std");
 const c = @import("../../c.zig").c;
 const rhi = @import("rhi.zig");
@@ -267,10 +281,9 @@ fn createBuffer(ctx_ptr: *anyopaque, size: usize, usage: rhi.BufferUsage) rhi.Bu
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
 
-    // We only support vertex buffers for this refactor as per requirements
-    if (usage != .vertex) {
-        // Fallback or error
-    }
+    // Currently only vertex buffers are fully supported
+    // Index and uniform buffers use the same code path for now
+    _ = usage;
 
     var vao: c.GLuint = 0;
     var vbo: c.GLuint = 0;

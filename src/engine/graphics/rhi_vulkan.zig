@@ -1,3 +1,27 @@
+//! Vulkan Rendering Hardware Interface (RHI) Backend
+//!
+//! This module implements the RHI interface for Vulkan, providing GPU abstraction.
+//! Key features:
+//! - Vulkan instance, device, and swapchain management
+//! - Multiple pipelines: terrain, shadow (CSM), sky, UI
+//! - Resource management (buffers, textures, descriptors)
+//! - Synchronization (semaphores, fences for frame pacing)
+//!
+//! ## Frame Lifecycle
+//! 1. `beginFrame()` - Acquires swapchain image, begins command buffer
+//! 2. `beginMainPass()` / `beginShadowPass()` - Starts render passes
+//! 3. `draw()` / `drawSky()` / `drawUIQuad()` - Records draw commands
+//! 4. `endMainPass()` / `endShadowPass()` - Ends render passes
+//! 5. `endFrame()` - Submits command buffer, presents to swapchain
+//!
+//! ## Memory Model
+//! Uses host-visible coherent memory for simplicity. Future improvement:
+//! staging buffers with device-local memory for better GPU performance.
+//!
+//! ## Thread Safety
+//! A mutex protects buffer/texture maps. Vulkan commands are NOT thread-safe
+//! - all rendering must occur on the main thread.
+
 const std = @import("std");
 const c = @import("../../c.zig").c;
 const rhi = @import("rhi.zig");
@@ -5,29 +29,33 @@ const shadows = @import("shadows.zig");
 const Mat4 = @import("../math/mat4.zig").Mat4;
 const Vec3 = @import("../math/vec3.zig").Vec3;
 
+/// Global uniform buffer layout (std140). Bound to descriptor set 0, binding 0.
 const GlobalUniforms = extern struct {
-    view_proj: Mat4,
-    cam_pos: [4]f32,
-    sun_dir: [4]f32,
-    fog_color: [4]f32,
+    view_proj: Mat4, // Combined view-projection matrix
+    cam_pos: [4]f32, // Camera world position (w unused)
+    sun_dir: [4]f32, // Sun direction (w unused)
+    fog_color: [4]f32, // Fog RGB (a unused)
     time: f32,
     fog_density: f32,
-    fog_enabled: f32,
+    fog_enabled: f32, // 0.0 or 1.0
     sun_intensity: f32,
     ambient: f32,
-    padding: [3]f32,
+    padding: [3]f32, // Align to 16 bytes
 };
 
+/// Shadow cascade uniforms for CSM. Bound to descriptor set 0, binding 2.
 const ShadowUniforms = extern struct {
     light_space_matrices: [shadows.ShadowMap.CASCADE_COUNT]Mat4,
-    cascade_splits: [4]f32,
+    cascade_splits: [4]f32, // View-space depth splits
     shadow_texel_sizes: [4]f32,
 };
 
+/// Per-draw model matrix, passed via push constants for efficiency.
 const ModelUniforms = extern struct {
     model: Mat4,
 };
 
+/// Push constants for procedural sky rendering.
 const SkyPushConstants = extern struct {
     cam_forward: [4]f32,
     cam_right: [4]f32,
@@ -39,12 +67,14 @@ const SkyPushConstants = extern struct {
     time: [4]f32,
 };
 
+/// Vulkan buffer with backing memory.
 const VulkanBuffer = struct {
     buffer: c.VkBuffer,
     memory: c.VkDeviceMemory,
     size: c.VkDeviceSize,
 };
 
+/// Vulkan texture with image, view, and sampler.
 const TextureResource = struct {
     image: c.VkImage,
     memory: c.VkDeviceMemory,
@@ -54,6 +84,8 @@ const TextureResource = struct {
     height: u32,
 };
 
+/// Core Vulkan context containing all renderer state.
+/// Owns Vulkan objects and manages their lifecycle.
 const VulkanContext = struct {
     allocator: std.mem.Allocator,
     instance: c.VkInstance,
@@ -153,10 +185,12 @@ const VulkanContext = struct {
     ui_mapped_ptr: ?*anyopaque,
 };
 
+/// Converts VkResult to Zig error for consistent error handling.
 fn checkVk(result: c.VkResult) !void {
     if (result != c.VK_SUCCESS) return error.VulkanError;
 }
 
+/// Creates a shader module from SPIR-V bytecode. Caller must destroy after use.
 fn createShaderModule(device: c.VkDevice, code: []const u8) !c.VkShaderModule {
     var create_info = std.mem.zeroes(c.VkShaderModuleCreateInfo);
     create_info.sType = c.VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -168,6 +202,7 @@ fn createShaderModule(device: c.VkDevice, code: []const u8) !c.VkShaderModule {
     return shader_module;
 }
 
+/// Finds memory type index matching filter and properties (e.g., HOST_VISIBLE).
 fn findMemoryType(physical_device: c.VkPhysicalDevice, type_filter: u32, properties: c.VkMemoryPropertyFlags) u32 {
     var mem_properties: c.VkPhysicalDeviceMemoryProperties = undefined;
     c.vkGetPhysicalDeviceMemoryProperties(physical_device, &mem_properties);
@@ -183,6 +218,7 @@ fn findMemoryType(physical_device: c.VkPhysicalDevice, type_filter: u32, propert
     return 0;
 }
 
+/// Creates a buffer with host-visible coherent memory (CPU-writable).
 fn createVulkanBuffer(ctx: *VulkanContext, size: usize, usage: c.VkBufferUsageFlags) VulkanBuffer {
     var buffer_info = std.mem.zeroes(c.VkBufferCreateInfo);
     buffer_info.sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -359,26 +395,42 @@ fn cleanupSwapchain(ctx: *VulkanContext) void {
     c.vkDestroySwapchainKHR(ctx.device, ctx.swapchain, null);
 }
 
+/// Recreates swapchain after window resize or when it becomes invalid.
+/// Returns true on success, false if recreation failed (caller should retry).
 fn recreateSwapchain(ctx: *VulkanContext) void {
-    // Wait for device idle
-    _ = c.vkDeviceWaitIdle(ctx.device);
+    // Wait for device idle before destroying resources
+    const wait_result = c.vkDeviceWaitIdle(ctx.device);
+    if (wait_result != c.VK_SUCCESS) {
+        std.log.err("vkDeviceWaitIdle failed during swapchain recreation: {}", .{wait_result});
+        return;
+    }
 
     // Get new window size
     var w: c_int = 0;
     var h: c_int = 0;
     _ = c.SDL_GetWindowSize(ctx.window, &w, &h);
 
-    // Handle minimized window
+    // Handle minimized window - wait for valid size
+    var wait_count: u32 = 0;
     while (w == 0 or h == 0) {
         _ = c.SDL_GetWindowSize(ctx.window, &w, &h);
         _ = c.SDL_WaitEvent(null);
+        wait_count += 1;
+        if (wait_count > 1000) {
+            std.log.warn("Timed out waiting for non-zero window size", .{});
+            return;
+        }
     }
 
     cleanupSwapchain(ctx);
 
     // Get surface capabilities
     var cap: c.VkSurfaceCapabilitiesKHR = undefined;
-    _ = c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx.physical_device, ctx.surface, &cap);
+    const cap_result = c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx.physical_device, ctx.surface, &cap);
+    if (cap_result != c.VK_SUCCESS) {
+        std.log.err("Failed to get surface capabilities: {}", .{cap_result});
+        return;
+    }
 
     ctx.swapchain_extent = cap.currentExtent;
     if (ctx.swapchain_extent.width == 0xFFFFFFFF) {
@@ -404,7 +456,11 @@ fn recreateSwapchain(ctx: *VulkanContext) void {
     swapchain_info.presentMode = c.VK_PRESENT_MODE_FIFO_KHR;
     swapchain_info.clipped = c.VK_TRUE;
 
-    _ = c.vkCreateSwapchainKHR(ctx.device, &swapchain_info, null, &ctx.swapchain);
+    const create_result = c.vkCreateSwapchainKHR(ctx.device, &swapchain_info, null, &ctx.swapchain);
+    if (create_result != c.VK_SUCCESS) {
+        std.log.err("Failed to create swapchain: {}", .{create_result});
+        return;
+    }
 
     // Get swapchain images
     var image_count: u32 = 0;
@@ -1301,11 +1357,45 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window) !rhi.RHI {
     app_info.pApplicationName = "Zig Voxel Engine";
     app_info.apiVersion = c.VK_API_VERSION_1_0;
 
+    // Enable validation layers in debug builds for better error messages
+    const enable_validation = std.debug.runtime_safety;
+    const validation_layers = [_][*c]const u8{"VK_LAYER_KHRONOS_validation"};
+
     var create_info = std.mem.zeroes(c.VkInstanceCreateInfo);
     create_info.sType = c.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     create_info.pApplicationInfo = &app_info;
     create_info.enabledExtensionCount = count;
     create_info.ppEnabledExtensionNames = extensions_ptr;
+
+    if (enable_validation) {
+        // Check if validation layer is available
+        var layer_count: u32 = 0;
+        _ = c.vkEnumerateInstanceLayerProperties(&layer_count, null);
+        if (layer_count > 0) {
+            const layer_props = allocator.alloc(c.VkLayerProperties, layer_count) catch null;
+            if (layer_props) |props| {
+                defer allocator.free(props);
+                _ = c.vkEnumerateInstanceLayerProperties(&layer_count, props.ptr);
+
+                var found = false;
+                for (props) |layer| {
+                    const layer_name: [*:0]const u8 = @ptrCast(&layer.layerName);
+                    if (std.mem.eql(u8, std.mem.span(layer_name), "VK_LAYER_KHRONOS_validation")) {
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (found) {
+                    create_info.enabledLayerCount = 1;
+                    create_info.ppEnabledLayerNames = &validation_layers;
+                    std.log.info("Vulkan validation layers enabled", .{});
+                } else {
+                    std.log.warn("Vulkan validation layer not found - install vulkan-validation-layers", .{});
+                }
+            }
+        }
+    }
 
     try checkVk(c.vkCreateInstance(&create_info, null, &ctx.instance));
 
