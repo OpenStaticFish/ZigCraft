@@ -28,16 +28,19 @@ layout(set = 0, binding = 0) uniform GlobalUniforms {
     float fog_enabled;
     float sun_intensity;
     float ambient;
-    float padding[3];
+    float use_texture;
+    float padding[2];
 } global;
 
 layout(push_constant) uniform ModelUniforms {
+    mat4 view_proj;
     mat4 model;
-} model_data;
+} pc;
 
 void main() {
-    vec4 worldPos = model_data.model * vec4(aPos, 1.0);
-    vec4 clipPos = global.view_proj * worldPos;
+    vec4 worldPos = pc.model * vec4(aPos, 1.0);
+    // Use the view_proj from push constants to avoid UBO race conditions
+    vec4 clipPos = pc.view_proj * worldPos;
     
     // Vulkan has inverted Y in clip space compared to OpenGL
     gl_Position = clipPos;

@@ -37,6 +37,37 @@ pub const BufferUsage = enum {
     uniform,
 };
 
+pub const TextureFormat = enum {
+    rgb,
+    rgba,
+    red,
+    depth,
+};
+
+pub const FilterMode = enum {
+    nearest,
+    linear,
+    nearest_mipmap_nearest,
+    linear_mipmap_nearest,
+    nearest_mipmap_linear,
+    linear_mipmap_linear,
+};
+
+pub const WrapMode = enum {
+    repeat,
+    mirrored_repeat,
+    clamp_to_edge,
+    clamp_to_border,
+};
+
+pub const TextureConfig = struct {
+    min_filter: FilterMode = .linear_mipmap_linear,
+    mag_filter: FilterMode = .linear,
+    wrap_s: WrapMode = .repeat,
+    wrap_t: WrapMode = .repeat,
+    generate_mipmaps: bool = true,
+};
+
 pub const Vertex = extern struct {
     pos: [3]f32,
     color: [3]f32,
@@ -55,6 +86,7 @@ pub const DrawMode = enum {
 
 /// Sky rendering parameters
 pub const SkyParams = struct {
+    cam_pos: Vec3,
     cam_forward: Vec3,
     cam_right: Vec3,
     cam_up: Vec3,
@@ -73,6 +105,22 @@ pub const ShadowParams = struct {
     light_space_matrices: [SHADOW_CASCADE_COUNT]Mat4,
     cascade_splits: [SHADOW_CASCADE_COUNT]f32,
     shadow_texel_sizes: [SHADOW_CASCADE_COUNT]f32,
+};
+
+/// Cloud rendering and shadow parameters
+pub const CloudParams = struct {
+    cam_pos: Vec3 = Vec3.init(0, 0, 0),
+    view_proj: Mat4 = Mat4.identity,
+    sun_dir: Vec3 = Vec3.init(0, 1, 0),
+    sun_intensity: f32 = 1.0,
+    fog_color: Vec3 = Vec3.init(0.7, 0.8, 0.9),
+    fog_density: f32 = 0.0,
+    cloud_height: f32 = 160.0,
+    cloud_coverage: f32 = 0.5,
+    cloud_scale: f32 = 1.0 / 64.0,
+    wind_offset_x: f32 = 0.0,
+    wind_offset_z: f32 = 0.0,
+    base_color: Vec3 = Vec3.init(1.0, 1.0, 1.0),
 };
 
 /// RGBA color for UI rendering
@@ -135,17 +183,19 @@ pub const RHI = struct {
 
         // Command Recording
         beginFrame: *const fn (ctx: *anyopaque) void,
+        abortFrame: *const fn (ctx: *anyopaque) void,
         setClearColor: *const fn (ctx: *anyopaque, color: Vec3) void,
         beginMainPass: *const fn (ctx: *anyopaque) void,
         endMainPass: *const fn (ctx: *anyopaque) void,
         endFrame: *const fn (ctx: *anyopaque) void,
+        waitIdle: *const fn (ctx: *anyopaque) void,
 
         // Shadow Pass
         beginShadowPass: *const fn (ctx: *anyopaque, cascade_index: u32) void,
         endShadowPass: *const fn (ctx: *anyopaque) void,
 
         // Uniforms
-        updateGlobalUniforms: *const fn (ctx: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32) void,
+        updateGlobalUniforms: *const fn (ctx: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, cloud_params: CloudParams) void,
         updateShadowUniforms: *const fn (ctx: *anyopaque, params: ShadowParams) void,
         setModelMatrix: *const fn (ctx: *anyopaque, model: Mat4) void,
 
@@ -154,18 +204,26 @@ pub const RHI = struct {
         drawSky: *const fn (ctx: *anyopaque, params: SkyParams) void,
 
         // Textures
-        createTexture: *const fn (ctx: *anyopaque, width: u32, height: u32, data: []const u8) TextureHandle,
+        createTexture: *const fn (ctx: *anyopaque, width: u32, height: u32, format: TextureFormat, config: TextureConfig, data: ?[]const u8) TextureHandle,
         destroyTexture: *const fn (ctx: *anyopaque, handle: TextureHandle) void,
         bindTexture: *const fn (ctx: *anyopaque, handle: TextureHandle, slot: u32) void,
         updateTexture: *const fn (ctx: *anyopaque, handle: TextureHandle, data: []const u8) void,
 
         getAllocator: *const fn (ctx: *anyopaque) std.mem.Allocator,
 
+        // Rendering options
+        setWireframe: *const fn (ctx: *anyopaque, enabled: bool) void,
+        setTexturesEnabled: *const fn (ctx: *anyopaque, enabled: bool) void,
+        setVSync: *const fn (ctx: *anyopaque, enabled: bool) void,
+
         // UI Rendering (2D orthographic)
         beginUI: *const fn (ctx: *anyopaque, screen_width: f32, screen_height: f32) void,
         endUI: *const fn (ctx: *anyopaque) void,
         drawUIQuad: *const fn (ctx: *anyopaque, rect: Rect, color: Color) void,
         drawUITexturedQuad: *const fn (ctx: *anyopaque, texture: TextureHandle, rect: Rect) void,
+
+        // Clouds
+        drawClouds: *const fn (ctx: *anyopaque, params: CloudParams) void,
     };
 
     pub fn init(self: RHI, allocator: Allocator) !void {
@@ -192,6 +250,10 @@ pub const RHI = struct {
         self.vtable.beginFrame(self.ptr);
     }
 
+    pub fn abortFrame(self: RHI) void {
+        self.vtable.abortFrame(self.ptr);
+    }
+
     pub fn setClearColor(self: RHI, color: Vec3) void {
         self.vtable.setClearColor(self.ptr, color);
     }
@@ -208,6 +270,10 @@ pub const RHI = struct {
         self.vtable.endFrame(self.ptr);
     }
 
+    pub fn waitIdle(self: RHI) void {
+        self.vtable.waitIdle(self.ptr);
+    }
+
     pub fn beginShadowPass(self: RHI, cascade_index: u32) void {
         self.vtable.beginShadowPass(self.ptr, cascade_index);
     }
@@ -216,8 +282,8 @@ pub const RHI = struct {
         self.vtable.endShadowPass(self.ptr);
     }
 
-    pub fn updateGlobalUniforms(self: RHI, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32) void {
-        self.vtable.updateGlobalUniforms(self.ptr, view_proj, cam_pos, sun_dir, time, fog_color, fog_density, fog_enabled, sun_intensity, ambient);
+    pub fn updateGlobalUniforms(self: RHI, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, cloud_params: CloudParams) void {
+        self.vtable.updateGlobalUniforms(self.ptr, view_proj, cam_pos, sun_dir, time, fog_color, fog_density, fog_enabled, sun_intensity, ambient, cloud_params);
     }
 
     pub fn updateShadowUniforms(self: RHI, params: ShadowParams) void {
@@ -236,8 +302,9 @@ pub const RHI = struct {
         self.vtable.drawSky(self.ptr, params);
     }
 
-    pub fn createTexture(self: RHI, width: u32, height: u32, data: []const u8) TextureHandle {
-        return self.vtable.createTexture(self.ptr, width, height, data);
+    // Textures
+    pub fn createTexture(self: RHI, width: u32, height: u32, format: TextureFormat, config: TextureConfig, data: ?[]const u8) TextureHandle {
+        return self.vtable.createTexture(self.ptr, width, height, format, config, data);
     }
 
     pub fn destroyTexture(self: RHI, handle: TextureHandle) void {
@@ -256,6 +323,19 @@ pub const RHI = struct {
         return self.vtable.getAllocator(self.ptr);
     }
 
+    // Rendering options
+    pub fn setWireframe(self: RHI, enabled: bool) void {
+        self.vtable.setWireframe(self.ptr, enabled);
+    }
+
+    pub fn setTexturesEnabled(self: RHI, enabled: bool) void {
+        self.vtable.setTexturesEnabled(self.ptr, enabled);
+    }
+
+    pub fn setVSync(self: RHI, enabled: bool) void {
+        self.vtable.setVSync(self.ptr, enabled);
+    }
+
     // UI Rendering methods
     pub fn beginUI(self: RHI, screen_width: f32, screen_height: f32) void {
         self.vtable.beginUI(self.ptr, screen_width, screen_height);
@@ -271,5 +351,9 @@ pub const RHI = struct {
 
     pub fn drawUITexturedQuad(self: RHI, texture: TextureHandle, rect: Rect) void {
         self.vtable.drawUITexturedQuad(self.ptr, texture, rect);
+    }
+
+    pub fn drawClouds(self: RHI, params: CloudParams) void {
+        self.vtable.drawClouds(self.ptr, params);
     }
 };

@@ -84,6 +84,7 @@ pub const World = struct {
     next_job_token: u32,
     last_pc: ChunkPos,
     rhi: RHI,
+    paused: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI) !*World {
         const world = try allocator.create(World);
@@ -109,6 +110,7 @@ pub const World = struct {
             .next_job_token = 1,
             .last_pc = .{ .x = 9999, .z = 9999 },
             .rhi = rhi,
+            .paused = false,
         };
 
         world.gen_pool = try WorkerPool.init(allocator, 4, gen_queue, world, processGenJob);
@@ -118,6 +120,7 @@ pub const World = struct {
     }
 
     pub fn deinit(self: *World) void {
+        self.rhi.waitIdle();
         self.gen_queue.stop();
         self.mesh_queue.stop();
 
@@ -138,6 +141,34 @@ pub const World = struct {
         }
         self.chunks.deinit();
         self.allocator.destroy(self);
+    }
+
+    pub fn pauseGeneration(self: *World) void {
+        self.paused = true;
+        self.gen_queue.setPaused(true);
+        self.mesh_queue.setPaused(true);
+
+        // Reset chunks that were waiting for generation or meshing
+        self.chunks_mutex.lock();
+        defer self.chunks_mutex.unlock();
+        var iter = self.chunks.iterator();
+        while (iter.next()) |entry| {
+            const chunk = &entry.value_ptr.*.chunk;
+            if (chunk.state == .generating) {
+                chunk.state = .missing;
+            } else if (chunk.state == .meshing) {
+                chunk.state = .generated;
+            }
+        }
+    }
+
+    pub fn resumeGeneration(self: *World) void {
+        self.paused = false;
+        self.gen_queue.setPaused(false);
+        self.mesh_queue.setPaused(false);
+        // Chunks will be re-queued in the next update() cycle
+        // Force an update of player position to trigger re-scanning
+        self.last_pc = .{ .x = 9999, .z = 9999 };
     }
 
     fn processGenJob(ctx: *anyopaque, job: Job) void {
@@ -163,14 +194,17 @@ pub const World = struct {
         }
 
         // Pin chunk to prevent unloading during generation.
-        // The pin mechanism uses atomic refcounting to ensure thread-safe access.
         chunk_data.chunk.pin();
         self.chunks_mutex.unlock();
 
         defer chunk_data.chunk.unpin();
 
         if (chunk_data.chunk.state == .generating and chunk_data.chunk.job_token == job.job_token) {
-            self.generator.generate(&chunk_data.chunk);
+            self.generator.generate(&chunk_data.chunk, &self.gen_queue.abort_worker);
+            if (self.gen_queue.abort_worker) {
+                chunk_data.chunk.state = .missing;
+                return;
+            }
             chunk_data.chunk.state = .generated;
             self.markNeighborsForRemesh(job.chunk_x, job.chunk_z);
         }
@@ -198,7 +232,6 @@ pub const World = struct {
         }
 
         // Pin chunk and neighbors to prevent unloading during mesh building.
-        // Uses atomic refcounting for thread-safe access across worker threads.
         chunk_data.chunk.pin();
         const neighbors = NeighborChunks{
             .north = if (self.chunks.get(ChunkKey{ .x = job.chunk_x, .z = job.chunk_z - 1 })) |d| d: {
@@ -232,6 +265,10 @@ pub const World = struct {
             chunk_data.mesh.buildWithNeighbors(&chunk_data.chunk, neighbors) catch |err| {
                 log.log.err("Mesh build failed for chunk ({}, {}): {}", .{ job.chunk_x, job.chunk_z, err });
             };
+            if (self.mesh_queue.abort_worker) {
+                chunk_data.chunk.state = .generated;
+                return;
+            }
             chunk_data.chunk.state = .mesh_ready;
         }
     }
@@ -260,9 +297,6 @@ pub const World = struct {
         defer self.chunks_mutex.unlock();
         for (offsets) |off| {
             if (self.chunks.get(ChunkKey{ .x = cx + off[0], .z = cz + off[1] })) |data| {
-                // Only trigger remesh if the chunk is already in a stable state.
-                // If it's currently meshing or uploading, we mark it as dirty so it
-                // remeshes on the next update cycle after it reaches 'renderable'.
                 if (data.chunk.state == .renderable) {
                     data.chunk.state = .generated;
                 } else if (data.chunk.state == .mesh_ready or data.chunk.state == .uploading or data.chunk.state == .meshing) {
@@ -288,14 +322,21 @@ pub const World = struct {
         data.chunk.setBlock(local.x, @intCast(world_y), local.z, block);
     }
 
+    pub fn getChunk(self: *World, cx: i32, cz: i32) ?*ChunkData {
+        self.chunks_mutex.lock();
+        defer self.chunks_mutex.unlock();
+        return self.chunks.get(ChunkKey{ .x = cx, .z = cz });
+    }
+
     pub fn update(self: *World, player_pos: Vec3) !void {
+        if (self.paused) return;
+
         const pc = worldToChunk(@intFromFloat(player_pos.x), @intFromFloat(player_pos.z));
         const moved = pc.chunk_x != self.last_pc.x or pc.chunk_z != self.last_pc.z;
 
         if (moved) {
             self.last_pc = .{ .x = pc.chunk_x, .z = pc.chunk_z };
 
-            // Re-prioritize queued jobs based on new player position
             try self.gen_queue.updatePlayerPos(pc.chunk_x, pc.chunk_z);
             try self.mesh_queue.updatePlayerPos(pc.chunk_x, pc.chunk_z);
 
@@ -355,7 +396,6 @@ pub const World = struct {
         }
         self.chunks_mutex.unlock();
 
-        // Upload multiple meshes per frame (up to 4) for faster chunk appearance
         const max_uploads: usize = 4;
         var uploads: usize = 0;
         while (self.upload_queue.items.len > 0 and uploads < max_uploads) {
@@ -379,8 +419,6 @@ pub const World = struct {
             const dx = key.x - pc.chunk_x;
             const dz = key.z - pc.chunk_z;
             if (dx * dx + dz * dz > unload_dist_sq) {
-                // Only unload if not currently being processed by a worker or in the upload queue.
-                // ALSO check the pin_count to ensure no neighbor lookups are active.
                 if (data.chunk.state != .generating and data.chunk.state != .meshing and
                     data.chunk.state != .mesh_ready and data.chunk.state != .uploading and
                     !data.chunk.isPinned())
@@ -400,8 +438,6 @@ pub const World = struct {
         self.chunks_mutex.unlock();
     }
 
-    /// Render all visible chunks using camera-relative coordinates (floating origin)
-    /// This prevents floating-point precision issues at large world coordinates
     pub fn render(self: *World, shader: ?*const Shader, view_proj: Mat4, camera_pos: Vec3) void {
         const frustum = Frustum.fromViewProj(view_proj);
         self.last_render_stats = .{};
@@ -415,7 +451,6 @@ pub const World = struct {
             if (data.chunk.state != .renderable) continue;
 
             self.last_render_stats.chunks_total += 1;
-            // Use camera-relative frustum culling
             if (!frustum.intersectsChunkRelative(key.x, key.z, camera_pos.x, camera_pos.y, camera_pos.z)) {
                 self.last_render_stats.chunks_culled += 1;
                 continue;
@@ -426,14 +461,11 @@ pub const World = struct {
                 self.last_render_stats.vertices_rendered += s.count_solid;
             }
 
-            // Camera-relative chunk position (floating origin)
-            // Chunk mesh vertices are in local coords (0-16), we translate them
-            // relative to camera position to keep values small for GPU precision
             const chunk_world_x: f32 = @floatFromInt(key.x * CHUNK_SIZE_X);
             const chunk_world_z: f32 = @floatFromInt(key.z * CHUNK_SIZE_Z);
             const rel_x = chunk_world_x - camera_pos.x;
             const rel_z = chunk_world_z - camera_pos.z;
-            const rel_y = -camera_pos.y; // Y=0 in chunk space maps to -camera_y in view space
+            const rel_y = -camera_pos.y;
 
             const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
             const mvp = view_proj.multiply(model);
@@ -447,7 +479,6 @@ pub const World = struct {
             data.mesh.draw(self.rhi, .solid);
         }
 
-        // Fluid pass
         iter = self.chunks.iterator();
         while (iter.next()) |entry| {
             const data = entry.value_ptr.*;
@@ -480,7 +511,6 @@ pub const World = struct {
         self.chunks_mutex.unlock();
     }
 
-    /// Render scene for shadow mapping (only opaque geometry)
     pub fn renderShadowPass(self: *World, shader: ?*const Shader, view_proj: Mat4, camera_pos: Vec3) void {
         const frustum = Frustum.fromViewProj(view_proj);
 
@@ -494,31 +524,26 @@ pub const World = struct {
 
             if (data.chunk.state != .renderable) continue;
 
-            // Use a more generous intersection check for shadows
-            // This prevents shadows from "popping" at the edge of the cascade
             const chunk_world_x: f32 = @floatFromInt(key.x * CHUNK_SIZE_X);
             const chunk_world_z: f32 = @floatFromInt(key.z * CHUNK_SIZE_Z);
 
-            // Check if chunk is near the shadow frustum (using a large sphere check for stability)
             if (!frustum.intersectsSphere(.{ .x = chunk_world_x - camera_pos.x + 8, .y = 128 - camera_pos.y, .z = chunk_world_z - camera_pos.z + 8 }, 150.0)) {
                 continue;
             }
 
-            // Camera-relative chunk position (floating origin)
             const rel_x = chunk_world_x - camera_pos.x;
             const rel_z = chunk_world_z - camera_pos.z;
             const rel_y = -camera_pos.y;
 
             const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
-            const mvp = view_proj.multiply(model);
 
             if (shader) |s| {
+                const mvp = view_proj.multiply(model);
                 s.setMat4("transform", &mvp.data);
             } else {
                 self.rhi.setModelMatrix(model);
             }
 
-            // Only render solid mesh (terrain + trees) for shadows
             data.mesh.draw(self.rhi, .solid);
         }
     }

@@ -24,7 +24,8 @@ const World = @import("world/world.zig").World;
 const worldToChunk = @import("world/chunk.zig").worldToChunk;
 const WorldMap = @import("world/worldgen/world_map.zig").WorldMap;
 
-const RHI = @import("engine/graphics/rhi.zig").RHI;
+const rhi_pkg = @import("engine/graphics/rhi.zig");
+const RHI = rhi_pkg.RHI;
 const rhi_opengl = @import("engine/graphics/rhi_opengl.zig");
 const rhi_vulkan = @import("engine/graphics/rhi_vulkan.zig");
 
@@ -157,8 +158,12 @@ const fragment_shader_src =
     \\    vec4 fragPosLightSpace = uLightSpaceMatrices[layer] * vec4(fragPosWorld, 1.0);
     \\    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     \\
-    \\    // XY [-1,1]->[0,1]. Z is already [0,1] due to glClipControl + Correct Matrix.
+    \\    // XY [-1,1]->[0,1]. Z is mapped if OpenGL (Vulkan already [0,1])
     \\    projCoords.xy = projCoords.xy * 0.5 + 0.5;
+    \\    
+    \\    // In OpenGL (without glClipControl), Z is in [-1, 1].
+    \\    // If the matrix was built for [-1, 1], we map it to [0, 1] to match texture.
+    \\    projCoords.z = projCoords.z * 0.5 + 0.5;
     \\    
     \\    if (projCoords.z > 1.0 || projCoords.z < 0.0) return 0.0;
     \\    
@@ -277,6 +282,7 @@ const Settings = struct {
     vsync: bool = true,
     fov: f32 = 45.0,
     textures_enabled: bool = true,
+    wireframe_enabled: bool = false,
     shadow_resolution: u32 = 2048,
     shadow_distance: f32 = 250.0,
 };
@@ -417,20 +423,22 @@ pub fn main() !void {
     defer if (ui) |*u| u.deinit();
     var atmosphere: ?Atmosphere = if (is_vulkan) Atmosphere.initNoGL() else Atmosphere.init();
     defer if (atmosphere) |*a| a.deinit();
-    var clouds: ?Clouds = if (!is_vulkan) try Clouds.init() else null;
+    var clouds: ?Clouds = if (is_vulkan) Clouds.initNoGL() else try Clouds.init();
     defer if (clouds) |*cl| cl.deinit();
     var shadow_map: ?ShadowMap = if (!is_vulkan) ShadowMap.init(rhi, settings.shadow_resolution) catch null else null;
     defer if (shadow_map) |*sm| sm.deinit();
 
     var app_state: AppState = .home;
     var last_state: AppState = .home;
+    var pending_world_cleanup = false;
+    var pending_new_world_seed: ?u64 = null;
     var debug_shadows = false;
     var debug_cascade_idx: usize = 0;
     var seed_input = std.ArrayListUnmanaged(u8).empty;
     defer seed_input.deinit(allocator);
     var seed_focused = false;
     var world: ?*World = null;
-    defer if (world) |active_world| active_world.deinit();
+
     var world_map: ?WorldMap = null;
     defer if (world_map) |*m| m.deinit();
     var show_map = false;
@@ -446,8 +454,28 @@ pub fn main() !void {
     log.log.info("=== Zig Voxel Engine ===", .{});
 
     while (!input.should_quit) {
+        // Safe deferred world management OUTSIDE the frame window
+        if (pending_world_cleanup or pending_new_world_seed != null) {
+            rhi.waitIdle();
+            if (world) |w| {
+                w.deinit();
+                world = null;
+            }
+            pending_world_cleanup = false;
+        }
+
+        if (pending_new_world_seed) |seed| {
+            world = try World.init(allocator, settings.render_distance, seed, rhi);
+            if (world_map == null) world_map = WorldMap.init(rhi, 256, 256);
+            show_map = false;
+            map_needs_update = true;
+            camera = Camera.init(.{ .position = Vec3.init(8, 100, 8), .pitch = -0.3, .move_speed = 50.0 });
+            pending_new_world_seed = null;
+        }
+
         time.update();
         if (atmosphere) |*a| a.update(time.delta_time);
+        if (clouds) |*cl| cl.update(time.delta_time);
         input.beginFrame();
         input.pollEvents();
         if (renderer) |*r| r.setViewport(input.window_width, input.window_height);
@@ -491,15 +519,23 @@ pub fn main() !void {
             if (input.isKeyPressed(.c)) if (clouds) |*cl| {
                 cl.enabled = !cl.enabled;
             };
-            if (input.isKeyPressed(.f)) if (renderer) |*r| r.toggleWireframe();
-            if (input.isKeyPressed(.t)) settings.textures_enabled = !settings.textures_enabled;
+            if (input.isKeyPressed(.f)) {
+                settings.wireframe_enabled = !settings.wireframe_enabled;
+                if (renderer) |*r| r.toggleWireframe();
+                rhi.setWireframe(settings.wireframe_enabled);
+            }
+            if (input.isKeyPressed(.t)) {
+                settings.textures_enabled = !settings.textures_enabled;
+                rhi.setTexturesEnabled(settings.textures_enabled);
+            }
             if (input.isKeyPressed(.v)) {
                 settings.vsync = !settings.vsync;
-                if (!is_vulkan) setVSync(settings.vsync);
+                rhi.setVSync(settings.vsync);
             }
             if (input.isKeyPressed(.u)) debug_shadows = !debug_shadows;
             if (input.isKeyPressed(.m)) {
                 show_map = !show_map;
+                log.log.info("Toggle map: show={}", .{show_map});
                 if (show_map) {
                     map_pos_x = camera.position.x;
                     map_pos_z = camera.position.z;
@@ -683,7 +719,7 @@ pub fn main() !void {
                     }
 
                     if (light_active) {
-                        const cascades = ShadowMap.computeCascades(settings.shadow_resolution, camera.fov, aspect, 0.1, settings.shadow_distance, light_dir, camera.getViewMatrixOriginCentered());
+                        const cascades = ShadowMap.computeCascades(settings.shadow_resolution, camera.fov, aspect, 0.1, settings.shadow_distance, light_dir, camera.getViewMatrixOriginCentered(), true);
                         rhi.updateShadowUniforms(.{
                             .light_space_matrices = cascades.light_space_matrices,
                             .cascade_splits = cascades.cascade_splits,
@@ -691,13 +727,14 @@ pub fn main() !void {
                         });
                         for (0..ShadowMap.CASCADE_COUNT) |i| {
                             rhi.beginShadowPass(@intCast(i));
-                            rhi.updateGlobalUniforms(cascades.light_space_matrices[i], camera.position, light_dir, time_val, fog_color, fog_density, false, 0.0, 0.0);
+                            rhi.updateGlobalUniforms(cascades.light_space_matrices[i], camera.position, light_dir, time_val, fog_color, fog_density, false, 0.0, 0.0, .{});
                             active_world.renderShadowPass(null, cascades.light_space_matrices[i], camera.position);
                             rhi.endShadowPass();
                         }
                     }
 
                     rhi.drawSky(.{
+                        .cam_pos = camera.position,
                         .cam_forward = camera.forward,
                         .cam_right = camera.right,
                         .cam_up = camera.up,
@@ -712,7 +749,17 @@ pub fn main() !void {
                     });
 
                     atlas.bind(0);
-                    rhi.updateGlobalUniforms(view_proj_render, camera.position, sun_dir, time_val, fog_color, fog_density, fog_enabled, sun_intensity_val, ambient_val);
+                    const cp: rhi_pkg.CloudParams = if (clouds) |*cl| blk: {
+                        const p = cl.getCloudShadowParams();
+                        break :blk .{
+                            .wind_offset_x = p.wind_offset_x,
+                            .wind_offset_z = p.wind_offset_z,
+                            .cloud_scale = p.cloud_scale,
+                            .cloud_coverage = p.cloud_coverage,
+                            .cloud_height = p.cloud_height,
+                        };
+                    } else .{};
+                    rhi.updateGlobalUniforms(view_proj_render, camera.position, sun_dir, time_val, fog_color, fog_density, fog_enabled, sun_intensity_val, ambient_val, cp);
                     active_world.render(null, view_proj_cull, camera.position);
                 }
                 if (clouds) |*cl| if (atmosphere) |atmo| if (!is_vulkan) cl.render(camera.position, &view_proj_cull.data, atmo.sun_dir, atmo.sun_intensity, atmo.fog_color, atmo.fog_density);
@@ -728,7 +775,10 @@ pub fn main() !void {
                 if (ui) |*u| {
                     u.begin();
                     if (show_map) if (world_map) |*m| {
-                        if (map_needs_update) try m.update(&active_world.generator, map_pos_x, map_pos_z, map_zoom);
+                        if (map_needs_update) {
+                            try m.update(&active_world.generator, map_pos_x, map_pos_z, map_zoom);
+                            map_needs_update = false;
+                        }
                         const sz: f32 = @min(screen_w, screen_h) * 0.8;
                         const mx = (screen_w - sz) * 0.5;
                         const my = (screen_h - sz) * 0.5;
@@ -799,10 +849,7 @@ pub fn main() !void {
                         py += ph + 16.0;
                         if (drawButton(u, .{ .x = px, .y = py, .width = pw, .height = ph }, "QUIT TO TITLE", 2.0, mouse_x, mouse_y, mouse_clicked)) {
                             app_state = .home;
-                            if (world) |w| {
-                                w.deinit();
-                                world = null;
-                            }
+                            pending_world_cleanup = true;
                         }
                     }
                     u.end();
@@ -870,7 +917,7 @@ pub fn main() !void {
                     drawText(u, "VSYNC", lx, sy, 2.0, Color.white);
                     if (drawButton(u, .{ .x = vx, .y = sy - 5.0, .width = 130.0, .height = 30.0 }, if (settings.vsync) "ENABLED" else "DISABLED", 1.5, mouse_x, mouse_y, mouse_clicked)) {
                         settings.vsync = !settings.vsync;
-                        if (!is_vulkan) setVSync(settings.vsync);
+                        rhi.setVSync(settings.vsync);
                     }
                     sy += 50.0;
                     drawText(u, "SHADOW DISTANCE", lx, sy, 2.0, Color.white);
@@ -917,17 +964,9 @@ pub fn main() !void {
                     }
                     if (drawButton(u, .{ .x = px + 24.0 + hw + 12.0, .y = byy, .width = hw, .height = 40.0 }, "CREATE", 1.9, mouse_x, mouse_y, mouse_clicked) or input.isKeyPressed(.enter)) {
                         const seed = try resolveSeed(&seed_input, allocator);
-                        if (world) |w| {
-                            w.deinit();
-                            world = null;
-                        }
-                        world = try World.init(allocator, settings.render_distance, seed, rhi);
-                        if (world_map == null) world_map = WorldMap.init(rhi, 256, 256);
-                        show_map = false;
-                        map_needs_update = true;
+                        pending_new_world_seed = seed;
                         app_state = .world;
                         seed_focused = false;
-                        camera = Camera.init(.{ .position = Vec3.init(8, 100, 8), .pitch = -0.3, .move_speed = 50.0 });
                         log.log.info("World seed: {}", .{seed});
                     }
                 },

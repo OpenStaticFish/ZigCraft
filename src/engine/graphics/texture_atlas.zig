@@ -182,7 +182,7 @@ pub const TextureAtlas = struct {
         generateTile(pixels, TILE_BROWN_MUSHROOM, .{ 150, 100, 70 }, .mushroom_cap);
 
         // Create texture using RHI
-        const texture = Texture.init(rhi_instance, ATLAS_SIZE, ATLAS_SIZE, pixels);
+        const texture = Texture.init(rhi_instance, ATLAS_SIZE, ATLAS_SIZE, .rgba, .{}, pixels);
 
         log.log.info("Texture atlas created: {}x{} ({} tiles)", .{ ATLAS_SIZE, ATLAS_SIZE, TILES_PER_ROW * TILES_PER_ROW });
 

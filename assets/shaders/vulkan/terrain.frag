@@ -22,8 +22,58 @@ layout(set = 0, binding = 0) uniform GlobalUniforms {
     float fog_enabled;
     float sun_intensity;
     float ambient;
-    float padding[3];
+    float use_texture; // 0.0 = vertex colors only, 1.0 = use textures
+    vec2 cloud_wind_offset;
+    float cloud_scale;
+    float cloud_coverage;
+    float cloud_shadow_strength;
+    float cloud_height;
+    float padding[2];
 } global;
+
+// Cloud shadow noise functions
+float cloudHash(vec2 p) {
+    p = fract(p * vec2(234.34, 435.345));
+    p += dot(p, p + 34.23);
+    return fract(p.x * p.y);
+}
+
+float cloudNoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    float a = cloudHash(i);
+    float b = cloudHash(i + vec2(1.0, 0.0));
+    float c = cloudHash(i + vec2(0.0, 1.0));
+    float d = cloudHash(i + vec2(1.0, 1.0));
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+float cloudFbm(vec2 p) {
+    float v = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 4; i++) {
+        v += a * cloudNoise(p);
+        p *= 2.0;
+        a *= 0.5;
+    }
+    return v;
+}
+
+float getCloudShadow(vec3 worldPos, vec3 sunDir) {
+    // Project position along sun direction to cloud plane
+    vec2 shadowOffset = sunDir.xz * (global.cloud_height - worldPos.y) / max(sunDir.y, 0.1);
+    vec2 samplePos = (worldPos.xz + shadowOffset + global.cloud_wind_offset) * global.cloud_scale;
+    
+    float n1 = cloudFbm(samplePos * 0.5);
+    float n2 = cloudFbm(samplePos * 2.0 + vec2(100.0, 200.0)) * 0.3;
+    float cloudValue = n1 * 0.7 + n2;
+    
+    float threshold = 1.0 - global.cloud_coverage;
+    float cloudMask = smoothstep(threshold - 0.1, threshold + 0.1, cloudValue);
+    
+    return cloudMask * global.cloud_shadow_strength;
+}
 
 layout(set = 0, binding = 1) uniform sampler2D uTexture;
 
@@ -43,12 +93,21 @@ float calculateShadow(vec3 fragPosWorld, float nDotL, int layer) {
 
     // XY [-1,1] -> [0,1]
     projCoords.xy = projCoords.xy * 0.5 + 0.5;
+    
+    // No Y-flip needed - shadow vertex shader also doesn't flip Y,
+    // so the coordinate spaces match and texel snapping works correctly.
 
-    if (projCoords.z > 1.0 || projCoords.z < 0.0) return 0.0;
+    // Check bounds - areas outside the shadow frustum should not be shadowed
+    if (projCoords.x < 0.0 || projCoords.x > 1.0 ||
+        projCoords.y < 0.0 || projCoords.y > 1.0 ||
+        projCoords.z > 1.0 || projCoords.z < 0.0) return 0.0;
 
     float currentDepth = projCoords.z;
 
-    float bias = max(0.002 * (1.0 - nDotL), 0.0005);
+    // Reverse-Z: closer objects have LARGER Z.
+    // Fragment is in shadow if it's further than the depth stored in the shadow map.
+    // Further means SMALLER Z.
+    float bias = max(0.0005 * (1.0 - nDotL), 0.0001);
     if (layer == 1) bias *= 2.0;
     if (layer == 2) bias *= 4.0;
 
@@ -66,7 +125,7 @@ float calculateShadow(vec3 fragPosWorld, float nDotL, int layer) {
                 pcfDepth = texture(uShadowMap2, projCoords.xy + vec2(x, y) * texelSize).r;
             }
 
-            shadow += currentDepth > pcfDepth + bias ? 1.0 : 0.0;
+            shadow += currentDepth < pcfDepth - bias ? 1.0 : 0.0;
         }
     }
     shadow /= 9.0;
@@ -101,7 +160,15 @@ void main() {
         }
     }
 
-    float directLight = nDotL * global.sun_intensity * (1.0 - shadow);
+    // Cloud shadow
+    float cloudShadow = 0.0;
+    if (global.sun_intensity > 0.05 && global.sun_dir.y > 0.05) {
+        cloudShadow = getCloudShadow(vFragPosWorld, global.sun_dir.xyz);
+    }
+    
+    float totalShadow = min(shadow + cloudShadow, 1.0);
+
+    float directLight = nDotL * global.sun_intensity * (1.0 - totalShadow);
     float skyLight = vSkyLight * (global.ambient + directLight * 0.8);
     float blockLight = vBlockLight;
     float lightLevel = max(skyLight, blockLight);
@@ -109,17 +176,22 @@ void main() {
     lightLevel = max(lightLevel, global.ambient * 0.5);
     lightLevel = clamp(lightLevel, 0.0, 1.0);
 
-    vec2 atlasSize = vec2(16.0, 16.0);
-    vec2 tileSize = 1.0 / atlasSize;
-    vec2 tilePos = vec2(mod(float(vTileID), atlasSize.x), floor(float(vTileID) / atlasSize.x));
-    vec2 tiledUV = fract(vTexCoord);
-    tiledUV = clamp(tiledUV, 0.001, 0.999);
-    vec2 uv = (tilePos + tiledUV) * tileSize;
+    vec3 color;
+    if (global.use_texture > 0.5) {
+        vec2 atlasSize = vec2(16.0, 16.0);
+        vec2 tileSize = 1.0 / atlasSize;
+        vec2 tilePos = vec2(mod(float(vTileID), atlasSize.x), floor(float(vTileID) / atlasSize.x));
+        vec2 tiledUV = fract(vTexCoord);
+        tiledUV = clamp(tiledUV, 0.001, 0.999);
+        vec2 uv = (tilePos + tiledUV) * tileSize;
 
-    vec4 texColor = texture(uTexture, uv);
-    if (texColor.a < 0.1) discard;
+        vec4 texColor = texture(uTexture, uv);
+        if (texColor.a < 0.1) discard;
 
-    vec3 color = texColor.rgb * vColor * lightLevel;
+        color = texColor.rgb * vColor * lightLevel;
+    } else {
+        color = vColor * lightLevel;
+    }
 
     if (global.fog_enabled > 0.5) {
         float fogFactor = 1.0 - exp(-vDistance * global.fog_density);

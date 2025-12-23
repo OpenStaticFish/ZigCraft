@@ -390,6 +390,10 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
     _ = ctx_ptr;
 }
 
+fn abortFrame(ctx_ptr: *anyopaque) void {
+    _ = ctx_ptr;
+}
+
 fn setClearColor(ctx_ptr: *anyopaque, color: Vec3) void {
     _ = ctx_ptr;
     c.glClearColor(color.x, color.y, color.z, 1.0);
@@ -397,6 +401,7 @@ fn setClearColor(ctx_ptr: *anyopaque, color: Vec3) void {
 
 fn beginMainPass(ctx_ptr: *anyopaque) void {
     _ = ctx_ptr;
+    c.glClear(c.GL_COLOR_BUFFER_BIT | c.GL_DEPTH_BUFFER_BIT);
 }
 
 fn endMainPass(ctx_ptr: *anyopaque) void {
@@ -405,6 +410,11 @@ fn endMainPass(ctx_ptr: *anyopaque) void {
 
 fn endFrame(ctx_ptr: *anyopaque) void {
     _ = ctx_ptr;
+}
+
+fn waitIdle(ctx_ptr: *anyopaque) void {
+    _ = ctx_ptr;
+    c.glFinish();
 }
 
 fn beginShadowPass(ctx_ptr: *anyopaque, cascade_index: u32) void {
@@ -416,7 +426,7 @@ fn endShadowPass(ctx_ptr: *anyopaque) void {
     _ = ctx_ptr;
 }
 
-fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32) void {
+fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, cloud_params: rhi.CloudParams) void {
     _ = ctx_ptr;
     _ = view_proj;
     _ = cam_pos;
@@ -427,6 +437,7 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
     _ = fog_enabled;
     _ = sun_intensity;
     _ = ambient;
+    _ = cloud_params;
 }
 
 fn updateShadowUniforms(ctx_ptr: *anyopaque, params: rhi.ShadowParams) void {
@@ -487,20 +498,69 @@ fn drawSky(ctx_ptr: *anyopaque, params: rhi.SkyParams) void {
     c.glBindVertexArray().?(0);
 }
 
-fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, data: []const u8) rhi.TextureHandle {
+fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.TextureFormat, config: rhi.TextureConfig, data: ?[]const u8) rhi.TextureHandle {
     _ = ctx_ptr;
     var id: c.GLuint = 0;
     c.glGenTextures(1, &id);
     c.glBindTexture(c.GL_TEXTURE_2D, id);
 
-    // Default parameters (linear/linear)
-    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, c.GL_REPEAT);
-    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, c.GL_REPEAT);
-    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR);
-    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
+    // Apply config
+    const gl_min = switch (config.min_filter) {
+        .nearest => c.GL_NEAREST,
+        .linear => c.GL_LINEAR,
+        .nearest_mipmap_nearest => c.GL_NEAREST_MIPMAP_NEAREST,
+        .linear_mipmap_nearest => c.GL_LINEAR_MIPMAP_NEAREST,
+        .nearest_mipmap_linear => c.GL_NEAREST_MIPMAP_LINEAR,
+        .linear_mipmap_linear => c.GL_LINEAR_MIPMAP_LINEAR,
+    };
+    const gl_mag = if (config.mag_filter == .nearest) c.GL_NEAREST else c.GL_LINEAR;
+    const gl_wrap_s = switch (config.wrap_s) {
+        .repeat => c.GL_REPEAT,
+        .mirrored_repeat => c.GL_MIRRORED_REPEAT,
+        .clamp_to_edge => c.GL_CLAMP_TO_EDGE,
+        .clamp_to_border => c.GL_CLAMP_TO_BORDER,
+    };
+    const gl_wrap_t = switch (config.wrap_t) {
+        .repeat => c.GL_REPEAT,
+        .mirrored_repeat => c.GL_MIRRORED_REPEAT,
+        .clamp_to_edge => c.GL_CLAMP_TO_EDGE,
+        .clamp_to_border => c.GL_CLAMP_TO_BORDER,
+    };
 
-    c.glTexImage2D(c.GL_TEXTURE_2D, 0, c.GL_RGBA, @intCast(width), @intCast(height), 0, c.GL_RGBA, c.GL_UNSIGNED_BYTE, if (data.len > 0) data.ptr else null);
-    c.glGenerateMipmap().?(c.GL_TEXTURE_2D);
+    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, @intCast(gl_min));
+    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, @intCast(gl_mag));
+    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, @intCast(gl_wrap_s));
+    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, @intCast(gl_wrap_t));
+
+    if (config.wrap_s == .clamp_to_border or config.wrap_t == .clamp_to_border) {
+        const border_color = [_]f32{ 1.0, 1.0, 1.0, 1.0 };
+        c.glTexParameterfv(c.GL_TEXTURE_2D, c.GL_TEXTURE_BORDER_COLOR, &border_color);
+    }
+
+    const internal_format: c.GLint = switch (format) {
+        .rgb => c.GL_RGB,
+        .rgba => c.GL_RGBA,
+        .red => c.GL_RED,
+        .depth => c.GL_DEPTH_COMPONENT24,
+    };
+    const gl_format: c.GLenum = switch (format) {
+        .rgb => c.GL_RGB,
+        .rgba => c.GL_RGBA,
+        .red => c.GL_RED,
+        .depth => c.GL_DEPTH_COMPONENT,
+    };
+    const gl_type: c.GLenum = if (format == .depth) c.GL_FLOAT else c.GL_UNSIGNED_BYTE;
+
+    c.glTexImage2D(c.GL_TEXTURE_2D, 0, internal_format, @intCast(width), @intCast(height), 0, gl_format, gl_type, if (data) |d| d.ptr else null);
+
+    if (config.generate_mipmaps and format != .depth) {
+        c.glGenerateMipmap().?(c.GL_TEXTURE_2D);
+    }
+
+    // Special hardware shadow mapping support for depth textures
+    if (format == .depth) {
+        c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_COMPARE_MODE, c.GL_NONE);
+    }
 
     return @intCast(id);
 }
@@ -521,6 +581,29 @@ fn bindTexture(ctx_ptr: *anyopaque, handle: rhi.TextureHandle, slot: u32) void {
 fn getAllocator(ctx_ptr: *anyopaque) std.mem.Allocator {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     return ctx.allocator;
+}
+
+fn setWireframe(ctx_ptr: *anyopaque, enabled: bool) void {
+    _ = ctx_ptr;
+    // OpenGL wireframe is handled via glPolygonMode in renderer.zig
+    // This is a no-op here since the old renderer handles it directly
+    if (enabled) {
+        c.glPolygonMode(c.GL_FRONT_AND_BACK, c.GL_LINE);
+    } else {
+        c.glPolygonMode(c.GL_FRONT_AND_BACK, c.GL_FILL);
+    }
+}
+
+fn setTexturesEnabled(ctx_ptr: *anyopaque, enabled: bool) void {
+    _ = ctx_ptr;
+    _ = enabled;
+    // OpenGL texture toggle is handled via shader uniform in renderer.zig
+    // This is a no-op here since the old code path handles it
+}
+
+fn setVSync(ctx_ptr: *anyopaque, enabled: bool) void {
+    _ = ctx_ptr;
+    _ = c.SDL_GL_SetSwapInterval(if (enabled) 1 else 0);
 }
 
 fn updateTexture(ctx_ptr: *anyopaque, handle: rhi.TextureHandle, data: []const u8) void {
@@ -659,6 +742,13 @@ fn drawUITexturedQuad(ctx_ptr: *anyopaque, texture: rhi.TextureHandle, rect: rhi
     }
 }
 
+fn drawClouds(ctx_ptr: *anyopaque, params: rhi.CloudParams) void {
+    _ = ctx_ptr;
+    _ = params;
+    // OpenGL path currently still uses Clouds struct directly from main.zig,
+    // but we can proxy it here if needed.
+}
+
 const vtable = rhi.RHI.VTable{
     .init = init,
     .deinit = deinit,
@@ -666,10 +756,12 @@ const vtable = rhi.RHI.VTable{
     .uploadBuffer = uploadBuffer,
     .destroyBuffer = destroyBuffer,
     .beginFrame = beginFrame,
+    .abortFrame = abortFrame,
     .setClearColor = setClearColor,
     .beginMainPass = beginMainPass,
     .endMainPass = endMainPass,
     .endFrame = endFrame,
+    .waitIdle = waitIdle,
     .beginShadowPass = beginShadowPass,
     .endShadowPass = endShadowPass,
     .updateGlobalUniforms = updateGlobalUniforms,
@@ -682,10 +774,14 @@ const vtable = rhi.RHI.VTable{
     .bindTexture = bindTexture,
     .updateTexture = updateTexture,
     .getAllocator = getAllocator,
+    .setWireframe = setWireframe,
+    .setTexturesEnabled = setTexturesEnabled,
+    .setVSync = setVSync,
     .beginUI = beginUI,
     .endUI = endUI,
     .drawUIQuad = drawUIQuad,
     .drawUITexturedQuad = drawUITexturedQuad,
+    .drawClouds = drawClouds,
 };
 
 pub fn createRHI(allocator: std.mem.Allocator) !rhi.RHI {

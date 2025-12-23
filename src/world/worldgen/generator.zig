@@ -173,7 +173,7 @@ pub const TerrainGenerator = struct {
         };
     }
 
-    pub fn generate(self: *const TerrainGenerator, chunk: *Chunk) void {
+    pub fn generate(self: *const TerrainGenerator, chunk: *Chunk, stop_flag: ?*const bool) void {
         const world_x = chunk.getWorldX();
         const world_z = chunk.getWorldZ();
         const p = self.params;
@@ -192,6 +192,7 @@ pub const TerrainGenerator = struct {
 
         var local_z: u32 = 0;
         while (local_z < CHUNK_SIZE_Z) : (local_z += 1) {
+            if (stop_flag) |sf| if (sf.*) return;
             var local_x: u32 = 0;
             while (local_x < CHUNK_SIZE_X) : (local_x += 1) {
                 const idx = local_x + local_z * CHUNK_SIZE_X;
@@ -249,6 +250,7 @@ pub const TerrainGenerator = struct {
 
         local_z = 0;
         while (local_z < CHUNK_SIZE_Z) : (local_z += 1) {
+            if (stop_flag) |sf| if (sf.*) return;
             var local_x: u32 = 0;
             while (local_x < CHUNK_SIZE_X) : (local_x += 1) {
                 const idx = local_x + local_z * CHUNK_SIZE_X;
@@ -301,6 +303,7 @@ pub const TerrainGenerator = struct {
         var debug_beach_count: u32 = 0;
         local_z = 0;
         while (local_z < CHUNK_SIZE_Z) : (local_z += 1) {
+            if (stop_flag) |sf| if (sf.*) return;
             var local_x: u32 = 0;
             while (local_x < CHUNK_SIZE_X) : (local_x += 1) {
                 const idx = local_x + local_z * CHUNK_SIZE_X;
@@ -350,9 +353,13 @@ pub const TerrainGenerator = struct {
             }
         }
         chunk.generated = true;
+        if (stop_flag) |sf| if (sf.*) return;
         self.generateOres(chunk);
+        if (stop_flag) |sf| if (sf.*) return;
         self.generateFeatures(chunk, &biome_ids, &secondary_biome_ids, &biome_blends);
+        if (stop_flag) |sf| if (sf.*) return;
         self.computeSkylight(chunk);
+        if (stop_flag) |sf| if (sf.*) return;
         self.computeBlockLight(chunk) catch |err| {
             std.debug.print("Failed to compute block light: {}\n", .{err});
         };
@@ -812,6 +819,7 @@ pub const TerrainGenerator = struct {
                     const r: i32 = if (ly == leaf_end) 1 else 2;
                     self.placeLeafDisk(chunk, x, ly, z, r, leaf_type);
                 }
+                if (leaf_end < CHUNK_SIZE_Y) chunk.setBlock(x, leaf_end, z, leaf_type);
             },
         }
     }
