@@ -638,6 +638,59 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
     _ = c.vkBeginCommandBuffer(command_buffer, &begin_info);
 
     ctx.frame_in_progress = true;
+
+    // Update descriptors once per frame at the start
+    // This assumes the main texture doesn't change during the frame
+    // (True for this voxel engine's terrain pass)
+    ctx.mutex.lock();
+    const tex_opt = ctx.textures.get(ctx.current_texture);
+    ctx.mutex.unlock();
+
+    if (tex_opt) |tex| {
+        var image_info = c.VkDescriptorImageInfo{
+            .sampler = tex.sampler,
+            .imageView = tex.view,
+            .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+
+        var write = std.mem.zeroes(c.VkWriteDescriptorSet);
+        write.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = ctx.descriptor_sets[ctx.current_sync_frame];
+        write.dstBinding = 1;
+        write.descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.descriptorCount = 1;
+        write.pImageInfo = &image_info;
+
+        c.vkUpdateDescriptorSets(ctx.device, 1, &write, 0, null);
+    }
+
+    // Update shadow map descriptors (bindings 3, 4, 5)
+    for (0..3) |i| {
+        const view = if (ctx.shadow_image_views[i] != null) ctx.shadow_image_views[i] else blk: {
+            ctx.mutex.lock();
+            const t = ctx.textures.get(ctx.current_texture);
+            ctx.mutex.unlock();
+            break :blk if (t) |tex| tex.view else null;
+        };
+        if (view == null) continue;
+
+        var image_info = c.VkDescriptorImageInfo{
+            .sampler = ctx.shadow_sampler,
+            .imageView = view,
+            .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        var write = std.mem.zeroes(c.VkWriteDescriptorSet);
+        write.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = ctx.descriptor_sets[ctx.current_sync_frame];
+        write.dstBinding = @intCast(3 + i);
+        write.descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.descriptorCount = 1;
+        write.pImageInfo = &image_info;
+        c.vkUpdateDescriptorSets(ctx.device, 1, &write, 0, null);
+    }
+
+    ctx.descriptors_updated = true;
+    ctx.bound_texture = ctx.current_texture;
 }
 
 fn endFrame(ctx_ptr: *anyopaque) void {
@@ -1151,11 +1204,12 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
     if (vbo_opt) |vbo| {
         ctx.draw_call_count += 1;
 
+        const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
+
         // Bind pipeline only if not already bound (major optimization)
         if (use_shadow) {
             if (!ctx.shadow_pipeline_bound) {
                 if (ctx.shadow_pipeline == null) return;
-                const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
                 c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.shadow_pipeline);
                 c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_layout, 0, 1, &ctx.descriptor_sets[ctx.current_sync_frame], 0, null);
                 ctx.shadow_pipeline_bound = true;
@@ -1168,71 +1222,13 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
                 else
                     ctx.pipeline;
                 if (selected_pipeline == null) return;
-                const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
                 c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, selected_pipeline);
-
-                // Update descriptors if they haven't been updated this frame, or if the texture changed
-                if (!ctx.descriptors_updated or ctx.current_texture != ctx.bound_texture) {
-                    ctx.mutex.lock();
-                    const tex_opt = ctx.textures.get(ctx.current_texture);
-                    ctx.mutex.unlock();
-
-                    // Update texture descriptor
-                    if (tex_opt) |tex| {
-                        var image_info = c.VkDescriptorImageInfo{
-                            .sampler = tex.sampler,
-                            .imageView = tex.view,
-                            .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        };
-
-                        var write = std.mem.zeroes(c.VkWriteDescriptorSet);
-                        write.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                        write.dstSet = ctx.descriptor_sets[ctx.current_sync_frame];
-                        write.dstBinding = 1;
-                        write.descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                        write.descriptorCount = 1;
-                        write.pImageInfo = &image_info;
-
-                        c.vkUpdateDescriptorSets(ctx.device, 1, &write, 0, null);
-                    }
-
-                    // Update shadow map descriptors (bindings 3, 4, 5) if this is the first update of the frame
-                    if (!ctx.descriptors_updated) {
-                        for (0..3) |i| {
-                            const view = if (ctx.shadow_image_views[i] != null) ctx.shadow_image_views[i] else blk: {
-                                ctx.mutex.lock();
-                                const t = ctx.textures.get(ctx.current_texture);
-                                ctx.mutex.unlock();
-                                break :blk if (t) |tex| tex.view else null;
-                            };
-                            if (view == null) continue;
-
-                            var image_info = c.VkDescriptorImageInfo{
-                                .sampler = ctx.shadow_sampler,
-                                .imageView = view,
-                                .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                            };
-                            var write = std.mem.zeroes(c.VkWriteDescriptorSet);
-                            write.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                            write.dstSet = ctx.descriptor_sets[ctx.current_sync_frame];
-                            write.dstBinding = @intCast(3 + i);
-                            write.descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                            write.descriptorCount = 1;
-                            write.pImageInfo = &image_info;
-                            c.vkUpdateDescriptorSets(ctx.device, 1, &write, 0, null);
-                        }
-                    }
-
-                    ctx.descriptors_updated = true;
-                    ctx.bound_texture = ctx.current_texture;
-                }
 
                 c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_layout, 0, 1, &ctx.descriptor_sets[ctx.current_sync_frame], 0, null);
                 ctx.terrain_pipeline_bound = true;
             }
         }
 
-        const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
         // Push constants are cheap, always update per-draw
         const uniforms = ModelUniforms{ .model = ctx.current_model };
         c.vkCmdPushConstants(command_buffer, ctx.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf(ModelUniforms), &uniforms);
@@ -1610,6 +1606,14 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window) !rhi.RHI {
     ctx.physical_device = devices[0];
 
     // 4. Create Logical Device
+    var supported_features: c.VkPhysicalDeviceFeatures = undefined;
+    c.vkGetPhysicalDeviceFeatures(ctx.physical_device, &supported_features);
+
+    var device_features = std.mem.zeroes(c.VkPhysicalDeviceFeatures);
+    if (supported_features.fillModeNonSolid == c.VK_TRUE) {
+        device_features.fillModeNonSolid = c.VK_TRUE;
+    }
+
     var queue_family_count: u32 = 0;
     c.vkGetPhysicalDeviceQueueFamilyProperties(ctx.physical_device, &queue_family_count, null);
     const queue_families = try allocator.alloc(c.VkQueueFamilyProperties, queue_family_count);
@@ -1638,6 +1642,7 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window) !rhi.RHI {
     device_create_info.sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     device_create_info.queueCreateInfoCount = 1;
     device_create_info.pQueueCreateInfos = &queue_create_info;
+    device_create_info.pEnabledFeatures = &device_features;
 
     const device_extensions = [_][*c]const u8{c.VK_KHR_SWAPCHAIN_EXTENSION_NAME};
     device_create_info.enabledExtensionCount = 1;
@@ -1881,6 +1886,52 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window) !rhi.RHI {
     ctx.model_ubo = createVulkanBuffer(ctx, @sizeOf(ModelUniforms) * 1000, c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 
     // 11. Descriptors
+    var layout_bindings = [_]c.VkDescriptorSetLayoutBinding{
+        .{
+            .binding = 0, // Global UBO
+            .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        .{
+            .binding = 1, // Main Texture
+            .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        .{
+            .binding = 2, // Shadow UBO
+            .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        .{
+            .binding = 3, // Shadow Map 0
+            .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        .{
+            .binding = 4, // Shadow Map 1
+            .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        .{
+            .binding = 5, // Shadow Map 2
+            .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+    };
+
+    var layout_info = std.mem.zeroes(c.VkDescriptorSetLayoutCreateInfo);
+    layout_info.sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layout_info.bindingCount = 6;
+    layout_info.pBindings = &layout_bindings[0];
+
+    try checkVk(c.vkCreateDescriptorSetLayout(ctx.device, &layout_info, null, &ctx.descriptor_set_layout));
+
     var pool_sizes = [_]c.VkDescriptorPoolSize{
         .{ .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT },
         .{ .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 4 * MAX_FRAMES_IN_FLIGHT },
