@@ -13,7 +13,12 @@ const RHI = @import("../engine/graphics/rhi.zig").RHI;
 const log = @import("../engine/core/log.zig");
 const seed_gen = @import("seed.zig");
 
-pub fn drawHome(u: *UISystem, screen_w: f32, screen_h: f32, app_state: *AppState, input: *const Input, last_state: *AppState, seed_focused: *bool) void {
+pub const MenuAction = enum {
+    none,
+    quit,
+};
+
+pub fn drawHome(u: *UISystem, screen_w: f32, screen_h: f32, app_state: *AppState, input: *const Input, last_state: *AppState, seed_focused: *bool) MenuAction {
     const mouse_pos = input.getMousePosition();
     const mouse_x: f32 = @floatFromInt(mouse_pos.x);
     const mouse_y: f32 = @floatFromInt(mouse_pos.y);
@@ -35,9 +40,9 @@ pub fn drawHome(u: *UISystem, screen_w: f32, screen_h: f32, app_state: *AppState
     }
     by += bh + 14.0;
     if (Widgets.drawButton(u, .{ .x = bx, .y = by, .width = bw, .height = bh }, "QUIT", 2.2, mouse_x, mouse_y, mouse_clicked)) {
-        // We can't set input.should_quit directly as input is const here.
-        // We'll handle quit return value in the caller or pass a mutable bool pointer.
+        return .quit;
     }
+    return .none;
 }
 
 pub fn drawSettings(u: *UISystem, screen_w: f32, screen_h: f32, app_state: *AppState, settings: *Settings, input: *const Input, last_state: AppState, rhi: RHI) void {

@@ -255,6 +255,10 @@ pub const App = struct {
         if (self.ui) |*u| u.deinit();
         self.atlas.deinit();
         if (self.debug_shader) |*s| s.deinit();
+        if (!self.is_vulkan) {
+            if (self.debug_quad_vao != 0) c.glDeleteVertexArrays().?(1, &self.debug_quad_vao);
+            if (self.debug_quad_vbo != 0) c.glDeleteBuffers().?(1, &self.debug_quad_vbo);
+        }
         if (self.shader) |*s| s.deinit();
         self.input.deinit();
         self.rhi.deinit();
@@ -671,7 +675,10 @@ pub const App = struct {
             } else if (self.ui) |*u| {
                 u.begin();
                 switch (self.app_state) {
-                    .home => Menus.drawHome(u, screen_w, screen_h, &self.app_state, &self.input, &self.last_state, &self.seed_focused),
+                    .home => {
+                        const action = Menus.drawHome(u, screen_w, screen_h, &self.app_state, &self.input, &self.last_state, &self.seed_focused);
+                        if (action == .quit) self.input.should_quit = true;
+                    },
                     .settings => Menus.drawSettings(u, screen_w, screen_h, &self.app_state, &self.settings, &self.input, self.last_state, self.rhi),
                     .singleplayer => try Menus.drawSingleplayer(u, screen_w, screen_h, &self.app_state, &self.input, &self.seed_input, &self.seed_focused, self.allocator, &self.time, &self.pending_new_world_seed),
                     .world, .paused => unreachable,
