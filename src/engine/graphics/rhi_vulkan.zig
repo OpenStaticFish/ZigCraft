@@ -1231,6 +1231,13 @@ fn updateTexture(ctx_ptr: *anyopaque, handle: rhi.TextureHandle, data: []const u
     }
 }
 
+fn setViewport(ctx_ptr: *anyopaque, width: u32, height: u32) void {
+    _ = ctx_ptr;
+    _ = width;
+    _ = height;
+    // Vulkan handles viewport dynamically in render passes
+}
+
 fn getAllocator(ctx_ptr: *anyopaque) std.mem.Allocator {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     return ctx.allocator;
@@ -1702,6 +1709,7 @@ const vtable = rhi.RHI.VTable{
     .bindTexture = bindTexture,
     .updateTexture = updateTexture,
     .getAllocator = getAllocator,
+    .setViewport = setViewport,
     .setWireframe = setWireframe,
     .setTexturesEnabled = setTexturesEnabled,
     .setVSync = setVSync,

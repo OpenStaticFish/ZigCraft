@@ -212,6 +212,7 @@ pub const RHI = struct {
         getAllocator: *const fn (ctx: *anyopaque) std.mem.Allocator,
 
         // Rendering options
+        setViewport: *const fn (ctx: *anyopaque, width: u32, height: u32) void,
         setWireframe: *const fn (ctx: *anyopaque, enabled: bool) void,
         setTexturesEnabled: *const fn (ctx: *anyopaque, enabled: bool) void,
         setVSync: *const fn (ctx: *anyopaque, enabled: bool) void,
@@ -324,6 +325,10 @@ pub const RHI = struct {
     }
 
     // Rendering options
+    pub fn setViewport(self: RHI, width: u32, height: u32) void {
+        self.vtable.setViewport(self.ptr, width, height);
+    }
+
     pub fn setWireframe(self: RHI, enabled: bool) void {
         self.vtable.setWireframe(self.ptr, enabled);
     }

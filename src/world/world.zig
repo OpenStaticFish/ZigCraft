@@ -438,7 +438,7 @@ pub const World = struct {
         self.chunks_mutex.unlock();
     }
 
-    pub fn render(self: *World, shader: ?*const Shader, view_proj: Mat4, camera_pos: Vec3) void {
+    pub fn render(self: *World, view_proj: Mat4, camera_pos: Vec3) void {
         const frustum = Frustum.fromViewProj(view_proj);
         self.last_render_stats = .{};
 
@@ -468,14 +468,7 @@ pub const World = struct {
             const rel_y = -camera_pos.y;
 
             const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
-            const mvp = view_proj.multiply(model);
-
-            if (shader) |s| {
-                s.setMat4("transform", &mvp.data);
-                s.setMat4("uModel", &model.data);
-            } else {
-                self.rhi.setModelMatrix(model);
-            }
+            self.rhi.setModelMatrix(model);
             data.mesh.draw(self.rhi, .solid);
         }
 
@@ -497,21 +490,14 @@ pub const World = struct {
             const rel_y = -camera_pos.y;
 
             const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
-            const mvp = view_proj.multiply(model);
-
-            if (shader) |s| {
-                s.setMat4("transform", &mvp.data);
-                s.setMat4("uModel", &model.data);
-            } else {
-                self.rhi.setModelMatrix(model);
-            }
+            self.rhi.setModelMatrix(model);
             data.mesh.draw(self.rhi, .fluid);
         }
 
         self.chunks_mutex.unlock();
     }
 
-    pub fn renderShadowPass(self: *World, shader: ?*const Shader, view_proj: Mat4, camera_pos: Vec3) void {
+    pub fn renderShadowPass(self: *World, view_proj: Mat4, camera_pos: Vec3) void {
         const frustum = Frustum.fromViewProj(view_proj);
 
         self.chunks_mutex.lock();
@@ -536,13 +522,7 @@ pub const World = struct {
             const rel_y = -camera_pos.y;
 
             const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
-
-            if (shader) |s| {
-                const mvp = view_proj.multiply(model);
-                s.setMat4("transform", &mvp.data);
-            } else {
-                self.rhi.setModelMatrix(model);
-            }
+            self.rhi.setModelMatrix(model);
 
             data.mesh.draw(self.rhi, .solid);
         }

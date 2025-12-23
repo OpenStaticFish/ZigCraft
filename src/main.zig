@@ -5,7 +5,6 @@ const Vec3 = @import("engine/math/vec3.zig").Vec3;
 const Mat4 = @import("engine/math/mat4.zig").Mat4;
 const Camera = @import("engine/graphics/camera.zig").Camera;
 const Shader = @import("engine/graphics/shader.zig").Shader;
-const Renderer = @import("engine/graphics/renderer.zig").Renderer;
 const setVSync = @import("engine/graphics/renderer.zig").setVSync;
 const Input = @import("engine/input/input.zig").Input;
 const Time = @import("engine/core/time.zig").Time;
@@ -18,6 +17,8 @@ const TextureAtlas = @import("engine/graphics/texture_atlas.zig").TextureAtlas;
 const Atmosphere = @import("engine/graphics/atmosphere.zig").Atmosphere;
 const ShadowMap = @import("engine/graphics/shadows.zig").ShadowMap;
 const Clouds = @import("engine/graphics/clouds.zig").Clouds;
+const Font = @import("engine/ui/font.zig");
+const Widgets = @import("engine/ui/widgets.zig");
 
 // World imports
 const World = @import("world/world.zig").World;
@@ -385,7 +386,6 @@ pub fn main() !void {
     input.window_width = 1280;
     input.window_height = 720;
     var time = Time.init();
-    var renderer: ?Renderer = if (!is_vulkan) Renderer.init() else null;
     if (!is_vulkan) setVSync(settings.vsync);
 
     var camera = Camera.init(.{
@@ -450,7 +450,7 @@ pub fn main() !void {
     var last_mouse_x: f32 = 0.0;
     var last_mouse_y: f32 = 0.0;
 
-    if (renderer) |*r| r.setViewport(1280, 720);
+    rhi.setViewport(1280, 720);
     log.log.info("=== Zig Voxel Engine ===", .{});
 
     while (!input.should_quit) {
@@ -478,7 +478,7 @@ pub fn main() !void {
         if (clouds) |*cl| cl.update(time.delta_time);
         input.beginFrame();
         input.pollEvents();
-        if (renderer) |*r| r.setViewport(input.window_width, input.window_height);
+        rhi.setViewport(input.window_width, input.window_height);
         if (ui) |*u| u.resize(input.window_width, input.window_height);
         const screen_w: f32 = @floatFromInt(input.window_width);
         const screen_h: f32 = @floatFromInt(input.window_height);
@@ -521,7 +521,6 @@ pub fn main() !void {
             };
             if (input.isKeyPressed(.f)) {
                 settings.wireframe_enabled = !settings.wireframe_enabled;
-                if (renderer) |*r| r.toggleWireframe();
                 rhi.setWireframe(settings.wireframe_enabled);
             }
             if (input.isKeyPressed(.t)) {
@@ -627,10 +626,6 @@ pub fn main() !void {
 
         const clear_color = if (in_world or in_pause) (if (atmosphere) |a| a.fog_color else Vec3.init(0.5, 0.7, 1.0)) else Vec3.init(0.07, 0.08, 0.1);
         rhi.setClearColor(clear_color);
-        if (renderer) |*r| {
-            r.setClearColor(clear_color);
-            r.beginFrame();
-        }
         rhi.beginFrame();
 
         if (in_world or in_pause) {
@@ -649,17 +644,16 @@ pub fn main() !void {
                             sm.update(camera.fov, aspect, 0.1, settings.shadow_distance, light_dir, camera.position, camera.getViewMatrixOriginCentered());
                             for (0..3) |i| {
                                 sm.begin(i);
-                                active_world.renderShadowPass(&sm.shader, sm.light_space_matrices[i], camera.position);
+                                active_world.renderShadowPass(sm.light_space_matrices[i], camera.position);
                             }
                             sm.end(input.window_width, input.window_height);
                         }
                     }
                 }
-                if (renderer) |*r| {
-                    r.setClearColor(clear_color);
-                    r.beginFrame();
+                if (!is_vulkan) {
+                    rhi.beginMainPass();
+                    if (atmosphere) |*a| a.renderSky(camera.forward, camera.right, camera.up, aspect, camera.fov);
                 }
-                if (!is_vulkan) if (atmosphere) |*a| a.renderSky(camera.forward, camera.right, camera.up, aspect, camera.fov);
                 if (shader) |*s| {
                     s.use();
                     atlas.bind(0);
@@ -670,29 +664,34 @@ pub fn main() !void {
                             sm.depth_maps[i].bind(@intCast(1 + i));
                             var buf: [64]u8 = undefined;
                             s.setInt(std.fmt.bufPrintZ(&buf, "uShadowMap{}", .{i}) catch "uShadowMap0", @intCast(1 + i));
-                            s.setMat4(std.fmt.bufPrintZ(&buf, "uLightSpaceMatrices[{}]", .{i}) catch unreachable, &sm.light_space_matrices[i].data);
-                            s.setFloat(std.fmt.bufPrintZ(&buf, "uCascadeSplits[{}]", .{i}) catch unreachable, sm.cascade_splits[i]);
-                            s.setFloat(std.fmt.bufPrintZ(&buf, "uShadowTexelSizes[{}]", .{i}) catch unreachable, sm.texel_sizes[i]);
+                            // Update shadow uniforms via RHI for consistency, but here we set shader uniforms directly?
+                            // Wait, RHI updateShadowUniforms expects params.
+                            // We can build ShadowParams here.
                         }
+                        const cascades = ShadowMap.computeCascades(settings.shadow_resolution, camera.fov, aspect, 0.1, settings.shadow_distance, if (atmosphere) |a| a.sun_dir else Vec3.init(0, 1, 0), camera.getViewMatrixOriginCentered(), true);
+                        rhi.updateShadowUniforms(.{
+                            .light_space_matrices = cascades.light_space_matrices,
+                            .cascade_splits = cascades.cascade_splits,
+                            .shadow_texel_sizes = cascades.texel_sizes,
+                        });
                     }
                     if (atmosphere) |atmo| {
-                        s.setVec3("uSunDir", atmo.sun_dir.x, atmo.sun_dir.y, atmo.sun_dir.z);
-                        s.setFloat("uSunIntensity", atmo.sun_intensity);
-                        s.setFloat("uAmbient", atmo.ambient_intensity);
-                        s.setVec3("uFogColor", atmo.fog_color.x, atmo.fog_color.y, atmo.fog_color.z);
-                        s.setFloat("uFogDensity", atmo.fog_density);
-                        s.setBool("uFogEnabled", atmo.fog_enabled);
+                        // Call RHI to update global uniforms (which now sets uniforms on active shader)
+                        // Prepare cloud params
+                        const cp: rhi_pkg.CloudParams = if (clouds) |*cl| blk: {
+                            const p = cl.getCloudShadowParams();
+                            break :blk .{
+                                .wind_offset_x = p.wind_offset_x,
+                                .wind_offset_z = p.wind_offset_z,
+                                .cloud_scale = p.cloud_scale,
+                                .cloud_coverage = p.cloud_coverage,
+                                .cloud_height = p.cloud_height,
+                            };
+                        } else .{};
+
+                        rhi.updateGlobalUniforms(view_proj_cull, camera.position, atmo.sun_dir, atmo.time_of_day, atmo.fog_color, atmo.fog_density, atmo.fog_enabled, atmo.sun_intensity, atmo.ambient_intensity, cp);
                     }
-                    if (clouds) |*cl| {
-                        const p = cl.getCloudShadowParams();
-                        s.setFloat("uCloudWindOffsetX", p.wind_offset_x);
-                        s.setFloat("uCloudWindOffsetZ", p.wind_offset_z);
-                        s.setFloat("uCloudScale", p.cloud_scale);
-                        s.setFloat("uCloudCoverage", p.cloud_coverage);
-                        s.setFloat("uCloudShadowStrength", 0.15);
-                        s.setFloat("uCloudHeight", p.cloud_height);
-                    }
-                    active_world.render(s, view_proj_cull, camera.position);
+                    active_world.render(view_proj_cull, camera.position);
                 } else if (is_vulkan) {
                     const fallback_sun_dir = Vec3.init(0.5, 0.8, 0.2);
                     const fallback_sky_color = Vec3.init(0.5, 0.7, 1.0);
@@ -728,7 +727,7 @@ pub fn main() !void {
                         for (0..ShadowMap.CASCADE_COUNT) |i| {
                             rhi.beginShadowPass(@intCast(i));
                             rhi.updateGlobalUniforms(cascades.light_space_matrices[i], camera.position, light_dir, time_val, fog_color, fog_density, false, 0.0, 0.0, .{});
-                            active_world.renderShadowPass(null, cascades.light_space_matrices[i], camera.position);
+                            active_world.renderShadowPass(cascades.light_space_matrices[i], camera.position);
                             rhi.endShadowPass();
                         }
                     }
@@ -760,7 +759,7 @@ pub fn main() !void {
                         };
                     } else .{};
                     rhi.updateGlobalUniforms(view_proj_render, camera.position, sun_dir, time_val, fog_color, fog_density, fog_enabled, sun_intensity_val, ambient_val, cp);
-                    active_world.render(null, view_proj_cull, camera.position);
+                    active_world.render(view_proj_cull, camera.position);
                 }
                 if (clouds) |*cl| if (atmosphere) |atmo| if (!is_vulkan) cl.render(camera.position, &view_proj_cull.data, atmo.sun_dir, atmo.sun_intensity, atmo.fog_color, atmo.fog_density);
                 if (debug_shadows and debug_shader != null and shadow_map != null) {
@@ -785,7 +784,7 @@ pub fn main() !void {
                         u.drawRect(.{ .x = 0, .y = 0, .width = screen_w, .height = screen_h }, Color.rgba(0, 0, 0, 0.5));
                         u.drawTexture(@intCast(m.texture.handle), .{ .x = mx, .y = my, .width = sz, .height = sz });
                         u.drawRectOutline(.{ .x = mx, .y = my, .width = sz, .height = sz }, Color.white, 2.0);
-                        drawTextCentered(u, "WORLD MAP", screen_w * 0.5, my - 40.0, 3.0, Color.white);
+                        Font.drawTextCentered(u, "WORLD MAP", screen_w * 0.5, my - 40.0, 3.0, Color.white);
                         const rx = (camera.position.x - map_pos_x) / (map_zoom * @as(f32, @floatFromInt(m.width)));
                         const rz = (camera.position.z - map_pos_z) / (map_zoom * @as(f32, @floatFromInt(m.height)));
                         const px = mx + (rx + 0.5) * sz;
@@ -796,25 +795,25 @@ pub fn main() !void {
                         }
                     };
                     u.drawRect(.{ .x = 10, .y = 10, .width = 80, .height = 30 }, Color.rgba(0, 0, 0, 0.7));
-                    drawNumber(u, @intFromFloat(time.fps), 15, 15, Color.white);
+                    Font.drawNumber(u, @intFromFloat(time.fps), 15, 15, Color.white);
                     const stats = active_world.getStats();
                     const rs = active_world.getRenderStats();
                     const pc = worldToChunk(@intFromFloat(camera.position.x), @intFromFloat(camera.position.z));
                     const hy: f32 = 50.0;
                     u.drawRect(.{ .x = 10, .y = hy, .width = 220, .height = 170 }, Color.rgba(0, 0, 0, 0.6));
-                    drawText(u, "POS:", 15, hy + 5, 1.5, Color.white);
-                    drawNumber(u, pc.chunk_x, 120, hy + 5, Color.white);
-                    drawNumber(u, pc.chunk_z, 170, hy + 5, Color.white);
-                    drawText(u, "CHUNKS:", 15, hy + 25, 1.5, Color.white);
-                    drawNumber(u, @intCast(stats.chunks_loaded), 140, hy + 25, Color.white);
-                    drawText(u, "VISIBLE:", 15, hy + 45, 1.5, Color.white);
-                    drawNumber(u, @intCast(rs.chunks_rendered), 140, hy + 45, Color.white);
-                    drawText(u, "QUEUED GEN:", 15, hy + 65, 1.5, Color.white);
-                    drawNumber(u, @intCast(stats.gen_queue), 140, hy + 65, Color.white);
-                    drawText(u, "QUEUED MESH:", 15, hy + 85, 1.5, Color.white);
-                    drawNumber(u, @intCast(stats.mesh_queue), 140, hy + 85, Color.white);
-                    drawText(u, "PENDING UP:", 15, hy + 105, 1.5, Color.white);
-                    drawNumber(u, @intCast(stats.upload_queue), 140, hy + 105, Color.white);
+                    Font.drawText(u, "POS:", 15, hy + 5, 1.5, Color.white);
+                    Font.drawNumber(u, pc.chunk_x, 120, hy + 5, Color.white);
+                    Font.drawNumber(u, pc.chunk_z, 170, hy + 5, Color.white);
+                    Font.drawText(u, "CHUNKS:", 15, hy + 25, 1.5, Color.white);
+                    Font.drawNumber(u, @intCast(stats.chunks_loaded), 140, hy + 25, Color.white);
+                    Font.drawText(u, "VISIBLE:", 15, hy + 45, 1.5, Color.white);
+                    Font.drawNumber(u, @intCast(rs.chunks_rendered), 140, hy + 45, Color.white);
+                    Font.drawText(u, "QUEUED GEN:", 15, hy + 65, 1.5, Color.white);
+                    Font.drawNumber(u, @intCast(stats.gen_queue), 140, hy + 65, Color.white);
+                    Font.drawText(u, "QUEUED MESH:", 15, hy + 85, 1.5, Color.white);
+                    Font.drawNumber(u, @intCast(stats.mesh_queue), 140, hy + 85, Color.white);
+                    Font.drawText(u, "PENDING UP:", 15, hy + 105, 1.5, Color.white);
+                    Font.drawNumber(u, @intCast(stats.upload_queue), 140, hy + 105, Color.white);
                     var hr: i32 = 0;
                     var mn: i32 = 0;
                     var si: f32 = 1.0;
@@ -824,30 +823,30 @@ pub fn main() !void {
                         mn = @intFromFloat((h - @as(f32, @floatFromInt(hr))) * 60.0);
                         si = atmo.sun_intensity;
                     }
-                    drawText(u, "TIME:", 15, hy + 125, 1.5, Color.white);
-                    drawNumber(u, hr, 100, hy + 125, Color.white);
-                    drawText(u, ":", 125, hy + 125, 1.5, Color.white);
-                    drawNumber(u, mn, 140, hy + 125, Color.white);
-                    drawText(u, "SUN:", 15, hy + 145, 1.5, Color.white);
-                    drawNumber(u, @intFromFloat(si * 100.0), 100, hy + 145, Color.white);
+                    Font.drawText(u, "TIME:", 15, hy + 125, 1.5, Color.white);
+                    Font.drawNumber(u, hr, 100, hy + 125, Color.white);
+                    Font.drawText(u, ":", 125, hy + 125, 1.5, Color.white);
+                    Font.drawNumber(u, mn, 140, hy + 125, Color.white);
+                    Font.drawText(u, "SUN:", 15, hy + 145, 1.5, Color.white);
+                    Font.drawNumber(u, @intFromFloat(si * 100.0), 100, hy + 145, Color.white);
                     if (in_pause) {
                         u.drawRect(.{ .x = 0, .y = 0, .width = screen_w, .height = screen_h }, Color.rgba(0, 0, 0, 0.5));
                         const pw: f32 = 300.0;
                         const ph: f32 = 48.0;
                         const px: f32 = (screen_w - pw) * 0.5;
                         var py: f32 = screen_h * 0.35;
-                        drawTextCentered(u, "PAUSED", screen_w * 0.5, py - 60.0, 3.0, Color.white);
-                        if (drawButton(u, .{ .x = px, .y = py, .width = pw, .height = ph }, "RESUME", 2.0, mouse_x, mouse_y, mouse_clicked)) {
+                        Font.drawTextCentered(u, "PAUSED", screen_w * 0.5, py - 60.0, 3.0, Color.white);
+                        if (Widgets.drawButton(u, .{ .x = px, .y = py, .width = pw, .height = ph }, "RESUME", 2.0, mouse_x, mouse_y, mouse_clicked)) {
                             app_state = .world;
                             input.setMouseCapture(window, true);
                         }
                         py += ph + 16.0;
-                        if (drawButton(u, .{ .x = px, .y = py, .width = pw, .height = ph }, "SETTINGS", 2.0, mouse_x, mouse_y, mouse_clicked)) {
+                        if (Widgets.drawButton(u, .{ .x = px, .y = py, .width = pw, .height = ph }, "SETTINGS", 2.0, mouse_x, mouse_y, mouse_clicked)) {
                             last_state = .paused;
                             app_state = .settings;
                         }
                         py += ph + 16.0;
-                        if (drawButton(u, .{ .x = px, .y = py, .width = pw, .height = ph }, "QUIT TO TITLE", 2.0, mouse_x, mouse_y, mouse_clicked)) {
+                        if (Widgets.drawButton(u, .{ .x = px, .y = py, .width = pw, .height = ph }, "QUIT TO TITLE", 2.0, mouse_x, mouse_y, mouse_clicked)) {
                             app_state = .home;
                             pending_world_cleanup = true;
                         }
@@ -859,22 +858,22 @@ pub fn main() !void {
             u.begin();
             switch (app_state) {
                 .home => {
-                    drawTextCentered(u, "ZIG VOXEL ENGINE", screen_w * 0.5, screen_h * 0.16, 4.0, Color.rgba(0.95, 0.96, 0.98, 1.0));
+                    Font.drawTextCentered(u, "ZIG VOXEL ENGINE", screen_w * 0.5, screen_h * 0.16, 4.0, Color.rgba(0.95, 0.96, 0.98, 1.0));
                     const bw: f32 = @min(screen_w * 0.5, 360.0);
                     const bh: f32 = 48.0;
                     const bx: f32 = (screen_w - bw) * 0.5;
                     var by: f32 = screen_h * 0.4;
-                    if (drawButton(u, .{ .x = bx, .y = by, .width = bw, .height = bh }, "SINGLEPLAYER", 2.2, mouse_x, mouse_y, mouse_clicked)) {
+                    if (Widgets.drawButton(u, .{ .x = bx, .y = by, .width = bw, .height = bh }, "SINGLEPLAYER", 2.2, mouse_x, mouse_y, mouse_clicked)) {
                         app_state = .singleplayer;
                         seed_focused = true;
                     }
                     by += bh + 14.0;
-                    if (drawButton(u, .{ .x = bx, .y = by, .width = bw, .height = bh }, "SETTINGS", 2.2, mouse_x, mouse_y, mouse_clicked)) {
+                    if (Widgets.drawButton(u, .{ .x = bx, .y = by, .width = bw, .height = bh }, "SETTINGS", 2.2, mouse_x, mouse_y, mouse_clicked)) {
                         last_state = .home;
                         app_state = .settings;
                     }
                     by += bh + 14.0;
-                    if (drawButton(u, .{ .x = bx, .y = by, .width = bw, .height = bh }, "QUIT", 2.2, mouse_x, mouse_y, mouse_clicked)) input.should_quit = true;
+                    if (Widgets.drawButton(u, .{ .x = bx, .y = by, .width = bw, .height = bh }, "QUIT", 2.2, mouse_x, mouse_y, mouse_clicked)) input.should_quit = true;
                 },
                 .settings => {
                     const pw: f32 = @min(screen_w * 0.7, 600.0);
@@ -883,52 +882,52 @@ pub fn main() !void {
                     const py: f32 = (screen_h - ph) * 0.5;
                     u.drawRect(.{ .x = px, .y = py, .width = pw, .height = ph }, Color.rgba(0.12, 0.14, 0.18, 0.95));
                     u.drawRectOutline(.{ .x = px, .y = py, .width = pw, .height = ph }, Color.rgba(0.28, 0.33, 0.42, 1.0), 2.0);
-                    drawTextCentered(u, "SETTINGS", screen_w * 0.5, py + 20.0, 2.8, Color.white);
+                    Font.drawTextCentered(u, "SETTINGS", screen_w * 0.5, py + 20.0, 2.8, Color.white);
                     var sy: f32 = py + 80.0;
                     const lx: f32 = px + 40.0;
                     const vx: f32 = px + pw - 200.0;
-                    drawText(u, "RENDER DISTANCE", lx, sy, 2.0, Color.white);
-                    drawNumber(u, @intCast(settings.render_distance), vx + 60.0, sy, Color.white);
-                    if (drawButton(u, .{ .x = vx, .y = sy - 5.0, .width = 30.0, .height = 30.0 }, "-", 1.5, mouse_x, mouse_y, mouse_clicked)) {
+                    Font.drawText(u, "RENDER DISTANCE", lx, sy, 2.0, Color.white);
+                    Font.drawNumber(u, @intCast(settings.render_distance), vx + 60.0, sy, Color.white);
+                    if (Widgets.drawButton(u, .{ .x = vx, .y = sy - 5.0, .width = 30.0, .height = 30.0 }, "-", 1.5, mouse_x, mouse_y, mouse_clicked)) {
                         if (settings.render_distance > 1) settings.render_distance -= 1;
                     }
-                    if (drawButton(u, .{ .x = vx + 100.0, .y = sy - 5.0, .width = 30.0, .height = 30.0 }, "+", 1.5, mouse_x, mouse_y, mouse_clicked)) {
+                    if (Widgets.drawButton(u, .{ .x = vx + 100.0, .y = sy - 5.0, .width = 30.0, .height = 30.0 }, "+", 1.5, mouse_x, mouse_y, mouse_clicked)) {
                         settings.render_distance += 1;
                     }
                     sy += 50.0;
-                    drawText(u, "SENSITIVITY", lx, sy, 2.0, Color.white);
-                    drawNumber(u, @intFromFloat(settings.mouse_sensitivity), vx + 60.0, sy, Color.white);
-                    if (drawButton(u, .{ .x = vx, .y = sy - 5.0, .width = 30.0, .height = 30.0 }, "-", 1.5, mouse_x, mouse_y, mouse_clicked)) {
+                    Font.drawText(u, "SENSITIVITY", lx, sy, 2.0, Color.white);
+                    Font.drawNumber(u, @intFromFloat(settings.mouse_sensitivity), vx + 60.0, sy, Color.white);
+                    if (Widgets.drawButton(u, .{ .x = vx, .y = sy - 5.0, .width = 30.0, .height = 30.0 }, "-", 1.5, mouse_x, mouse_y, mouse_clicked)) {
                         if (settings.mouse_sensitivity > 10.0) settings.mouse_sensitivity -= 5.0;
                     }
-                    if (drawButton(u, .{ .x = vx + 100.0, .y = sy - 5.0, .width = 30.0, .height = 30.0 }, "+", 1.5, mouse_x, mouse_y, mouse_clicked)) {
+                    if (Widgets.drawButton(u, .{ .x = vx + 100.0, .y = sy - 5.0, .width = 30.0, .height = 30.0 }, "+", 1.5, mouse_x, mouse_y, mouse_clicked)) {
                         if (settings.mouse_sensitivity < 200.0) settings.mouse_sensitivity += 5.0;
                     }
                     sy += 50.0;
-                    drawText(u, "FOV", lx, sy, 2.0, Color.white);
-                    drawNumber(u, @intFromFloat(settings.fov), vx + 60.0, sy, Color.white);
-                    if (drawButton(u, .{ .x = vx, .y = sy - 5.0, .width = 30.0, .height = 30.0 }, "-", 1.5, mouse_x, mouse_y, mouse_clicked)) {
+                    Font.drawText(u, "FOV", lx, sy, 2.0, Color.white);
+                    Font.drawNumber(u, @intFromFloat(settings.fov), vx + 60.0, sy, Color.white);
+                    if (Widgets.drawButton(u, .{ .x = vx, .y = sy - 5.0, .width = 30.0, .height = 30.0 }, "-", 1.5, mouse_x, mouse_y, mouse_clicked)) {
                         if (settings.fov > 30.0) settings.fov -= 5.0;
                     }
-                    if (drawButton(u, .{ .x = vx + 100.0, .y = sy - 5.0, .width = 30.0, .height = 30.0 }, "+", 1.5, mouse_x, mouse_y, mouse_clicked)) {
+                    if (Widgets.drawButton(u, .{ .x = vx + 100.0, .y = sy - 5.0, .width = 30.0, .height = 30.0 }, "+", 1.5, mouse_x, mouse_y, mouse_clicked)) {
                         if (settings.fov < 120.0) settings.fov += 5.0;
                     }
                     sy += 50.0;
-                    drawText(u, "VSYNC", lx, sy, 2.0, Color.white);
-                    if (drawButton(u, .{ .x = vx, .y = sy - 5.0, .width = 130.0, .height = 30.0 }, if (settings.vsync) "ENABLED" else "DISABLED", 1.5, mouse_x, mouse_y, mouse_clicked)) {
+                    Font.drawText(u, "VSYNC", lx, sy, 2.0, Color.white);
+                    if (Widgets.drawButton(u, .{ .x = vx, .y = sy - 5.0, .width = 130.0, .height = 30.0 }, if (settings.vsync) "ENABLED" else "DISABLED", 1.5, mouse_x, mouse_y, mouse_clicked)) {
                         settings.vsync = !settings.vsync;
                         rhi.setVSync(settings.vsync);
                     }
                     sy += 50.0;
-                    drawText(u, "SHADOW DISTANCE", lx, sy, 2.0, Color.white);
-                    drawNumber(u, @intFromFloat(settings.shadow_distance), vx + 60.0, sy, Color.white);
-                    if (drawButton(u, .{ .x = vx, .y = sy - 5.0, .width = 30.0, .height = 30.0 }, "-", 1.5, mouse_x, mouse_y, mouse_clicked)) {
+                    Font.drawText(u, "SHADOW DISTANCE", lx, sy, 2.0, Color.white);
+                    Font.drawNumber(u, @intFromFloat(settings.shadow_distance), vx + 60.0, sy, Color.white);
+                    if (Widgets.drawButton(u, .{ .x = vx, .y = sy - 5.0, .width = 30.0, .height = 30.0 }, "-", 1.5, mouse_x, mouse_y, mouse_clicked)) {
                         if (settings.shadow_distance > 50.0) settings.shadow_distance -= 50.0;
                     }
-                    if (drawButton(u, .{ .x = vx + 100.0, .y = sy - 5.0, .width = 30.0, .height = 30.0 }, "+", 1.5, mouse_x, mouse_y, mouse_clicked)) {
+                    if (Widgets.drawButton(u, .{ .x = vx + 100.0, .y = sy - 5.0, .width = 30.0, .height = 30.0 }, "+", 1.5, mouse_x, mouse_y, mouse_clicked)) {
                         if (settings.shadow_distance < 1000.0) settings.shadow_distance += 50.0;
                     }
-                    if (drawButton(u, .{ .x = px + (pw - 120.0) * 0.5, .y = py + ph - 60.0, .width = 120.0, .height = 40.0 }, "BACK", 2.0, mouse_x, mouse_y, mouse_clicked)) app_state = last_state;
+                    if (Widgets.drawButton(u, .{ .x = px + (pw - 120.0) * 0.5, .y = py + ph - 60.0, .width = 120.0, .height = 40.0 }, "BACK", 2.0, mouse_x, mouse_y, mouse_clicked)) app_state = last_state;
                 },
                 .singleplayer => {
                     const pw: f32 = @min(screen_w * 0.7, 520.0);
@@ -937,9 +936,9 @@ pub fn main() !void {
                     const py: f32 = screen_h * 0.24;
                     u.drawRect(.{ .x = px, .y = py, .width = pw, .height = ph }, Color.rgba(0.12, 0.14, 0.18, 0.92));
                     u.drawRectOutline(.{ .x = px, .y = py, .width = pw, .height = ph }, Color.rgba(0.28, 0.33, 0.42, 1.0), 2.0);
-                    drawTextCentered(u, "CREATE WORLD", screen_w * 0.5, py + 18.0, 2.8, Color.rgba(0.92, 0.94, 0.97, 1.0));
+                    Font.drawTextCentered(u, "CREATE WORLD", screen_w * 0.5, py + 18.0, 2.8, Color.rgba(0.92, 0.94, 0.97, 1.0));
                     const ly: f32 = py + 78.0;
-                    drawText(u, "SEED", px + 24.0, ly, 2.0, Color.rgba(0.72, 0.78, 0.86, 1.0));
+                    Font.drawText(u, "SEED", px + 24.0, ly, 2.0, Color.rgba(0.72, 0.78, 0.86, 1.0));
                     const ih: f32 = 42.0;
                     const iy: f32 = ly + 22.0;
                     const rw: f32 = 120.0;
@@ -949,8 +948,8 @@ pub fn main() !void {
                     const seed_rect = Rect{ .x = ix, .y = iy, .width = iw, .height = ih };
                     const random_rect = Rect{ .x = rx, .y = iy, .width = rw, .height = ih };
                     if (mouse_clicked) seed_focused = seed_rect.contains(mouse_x, mouse_y);
-                    drawTextInput(u, seed_rect, seed_input.items, "LEAVE BLANK FOR RANDOM", 2.0, seed_focused, @as(u32, @intFromFloat(time.elapsed * 2.0)) % 2 == 0);
-                    if (drawButton(u, random_rect, "RANDOM", 1.8, mouse_x, mouse_y, mouse_clicked)) {
+                    Widgets.drawTextInput(u, seed_rect, seed_input.items, "LEAVE BLANK FOR RANDOM", 2.0, seed_focused, @as(u32, @intFromFloat(time.elapsed * 2.0)) % 2 == 0);
+                    if (Widgets.drawButton(u, random_rect, "RANDOM", 1.8, mouse_x, mouse_y, mouse_clicked)) {
                         const gen = randomSeedValue();
                         try setSeedInput(&seed_input, allocator, gen);
                         seed_focused = true;
@@ -958,11 +957,11 @@ pub fn main() !void {
                     if (seed_focused) try handleSeedTyping(&seed_input, allocator, &input, 32);
                     const byy: f32 = py + ph - 64.0;
                     const hw: f32 = (pw - 24.0 - 12.0 - 24.0) / 2.0;
-                    if (drawButton(u, .{ .x = px + 24.0, .y = byy, .width = hw, .height = 40.0 }, "BACK", 1.9, mouse_x, mouse_y, mouse_clicked)) {
+                    if (Widgets.drawButton(u, .{ .x = px + 24.0, .y = byy, .width = hw, .height = 40.0 }, "BACK", 1.9, mouse_x, mouse_y, mouse_clicked)) {
                         app_state = .home;
                         seed_focused = false;
                     }
-                    if (drawButton(u, .{ .x = px + 24.0 + hw + 12.0, .y = byy, .width = hw, .height = 40.0 }, "CREATE", 1.9, mouse_x, mouse_y, mouse_clicked) or input.isKeyPressed(.enter)) {
+                    if (Widgets.drawButton(u, .{ .x = px + 24.0 + hw + 12.0, .y = byy, .width = hw, .height = 40.0 }, "CREATE", 1.9, mouse_x, mouse_y, mouse_clicked) or input.isKeyPressed(.enter)) {
                         const seed = try resolveSeed(&seed_input, allocator);
                         pending_new_world_seed = seed;
                         app_state = .world;
@@ -989,79 +988,6 @@ pub fn main() !void {
     }
 }
 
-fn drawNumber(u: *UISystem, num: i32, x: f32, y: f32, color: Color) void {
-    var buffer: [12]u8 = undefined;
-    const text = std.fmt.bufPrint(&buffer, "{d}", .{num}) catch return;
-    drawText(u, text, x, y, 2.0, color);
-}
-
-fn drawDigit(u: *UISystem, digit: u4, x: f32, y: f32, color: Color) void {
-    const segments: [10][7]bool = .{ .{ true, true, true, false, true, true, true }, .{ false, false, true, false, false, true, false }, .{ true, false, true, true, true, false, true }, .{ true, false, true, true, false, true, true }, .{ false, true, true, true, false, true, false }, .{ true, true, false, true, false, true, true }, .{ true, true, false, true, true, true, true }, .{ true, false, true, false, false, true, false }, .{ true, true, true, true, true, true, true }, .{ true, true, true, true, false, true, true } };
-    const seg = segments[digit];
-    if (seg[0]) u.drawRect(.{ .x = x, .y = y, .width = 10, .height = 2 }, color);
-    if (seg[1]) u.drawRect(.{ .x = x, .y = y, .width = 2, .height = 8 }, color);
-    if (seg[2]) u.drawRect(.{ .x = x + 8, .y = y, .width = 2, .height = 8 }, color);
-    if (seg[3]) u.drawRect(.{ .x = x, .y = y + 7, .width = 10, .height = 2 }, color);
-    if (seg[4]) u.drawRect(.{ .x = x, .y = y + 8, .width = 2, .height = 8 }, color);
-    if (seg[5]) u.drawRect(.{ .x = x + 8, .y = y + 8, .width = 2, .height = 8 }, color);
-    if (seg[6]) u.drawRect(.{ .x = x, .y = y + 14, .width = 10, .height = 2 }, color);
-}
-
-const font_letters = [_][7]u8{ .{ 0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001 }, .{ 0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110 }, .{ 0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110 }, .{ 0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110 }, .{ 0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111 }, .{ 0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000 }, .{ 0b01110, 0b10001, 0b10000, 0b10000, 0b10011, 0b10001, 0b01110 }, .{ 0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001 }, .{ 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111 }, .{ 0b00001, 0b00001, 0b00001, 0b00001, 0b10001, 0b10001, 0b01110 }, .{ 0b10001, 0b10100, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001 }, .{ 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111 }, .{ 0b10001, 0b11011, 0b10101, 0b10001, 0b10001, 0b10001, 0b10001 }, .{ 0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001 }, .{ 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110 }, .{ 0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000 }, .{ 0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101 }, .{ 0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001 }, .{ 0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110 }, .{ 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111 }, .{ 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110 }, .{ 0b10001, 0b10001, 0b10001, 0b10001, 0b10101, 0b01010, 0b00100 }, .{ 0b10001, 0b10001, 0b10001, 0b10001, 0b10101, 0b11011, 0b10001 }, .{ 0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001 }, .{ 0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100 }, .{ 0b11111, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111, 0b11111 } };
-const font_digits = [_][7]u8{ .{ 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110 }, .{ 0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110 }, .{ 0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111 }, .{ 0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110 }, .{ 0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010 }, .{ 0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110 }, .{ 0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110 }, .{ 0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000 }, .{ 0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110 }, .{ 0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100 } };
-fn glyphForChar(ch: u8) [7]u8 {
-    if (ch >= 'A' and ch <= 'Z') return font_letters[ch - 'A'];
-    if (ch >= '0' and ch <= '9') return font_digits[ch - '0'];
-    return switch (ch) {
-        ' ' => .{ 0, 0, 0, 0, 0, 0, 0 },
-        '-' => .{ 0, 0, 0, 0b01110, 0, 0, 0 },
-        ':' => .{ 0, 0b00100, 0b00100, 0, 0b00100, 0b00100, 0 },
-        '.' => .{ 0, 0, 0, 0, 0, 0b00100, 0b00100 },
-        else => .{ 0, 0, 0, 0, 0, 0, 0 },
-    };
-}
-fn drawGlyph(u: *UISystem, glyph: [7]u8, x: f32, y: f32, scale: f32, color: Color) void {
-    var row: usize = 0;
-    while (row < 7) : (row += 1) {
-        const rb = glyph[row];
-        var col: usize = 0;
-        while (col < 5) : (col += 1) {
-            const shift: u3 = @intCast(4 - col);
-            if ((rb & (@as(u8, 1) << shift)) != 0) u.drawRect(.{ .x = x + @as(f32, @floatFromInt(col)) * scale, .y = y + @as(f32, @floatFromInt(row)) * scale, .width = scale, .height = scale }, color);
-        }
-    }
-}
-fn drawText(u: *UISystem, text: []const u8, x: f32, y: f32, scale: f32, color: Color) void {
-    var cx = x;
-    for (text) |raw| {
-        var ch = raw;
-        if (ch >= 'a' and ch <= 'z') ch = std.ascii.toUpper(ch);
-        drawGlyph(u, glyphForChar(ch), cx, y, scale, color);
-        cx += 6.0 * scale;
-    }
-}
-fn measureTextWidth(text: []const u8, scale: f32) f32 {
-    if (text.len == 0) return 0;
-    return @as(f32, @floatFromInt(text.len)) * 6.0 * scale - scale;
-}
-fn drawTextCentered(u: *UISystem, text: []const u8, cx: f32, y: f32, scale: f32, color: Color) void {
-    const w = measureTextWidth(text, scale);
-    drawText(u, text, cx - w * 0.5, y, scale, color);
-}
-fn drawButton(u: *UISystem, rect: Rect, label: []const u8, scale: f32, mx: f32, my: f32, clicked: bool) bool {
-    const hov = rect.contains(mx, my);
-    u.drawRect(rect, if (hov) Color.rgba(0.2, 0.26, 0.36, 0.95) else Color.rgba(0.13, 0.17, 0.24, 0.92));
-    u.drawRectOutline(rect, if (hov) Color.rgba(0.55, 0.7, 0.9, 1.0) else Color.rgba(0.29, 0.35, 0.45, 1.0), 2.0);
-    drawTextCentered(u, label, rect.x + rect.width * 0.5, rect.y + (rect.height - 7.0 * scale) * 0.5, scale, Color.rgba(0.95, 0.96, 0.98, 1.0));
-    return hov and clicked;
-}
-fn drawTextInput(u: *UISystem, rect: Rect, text: []const u8, ph: []const u8, scale: f32, foc: bool, caret: bool) void {
-    u.drawRect(rect, Color.rgba(0.07, 0.09, 0.13, 0.95));
-    u.drawRectOutline(rect, if (foc) Color.rgba(0.5, 0.75, 0.95, 1.0) else Color.rgba(0.25, 0.3, 0.38, 1.0), 2.0);
-    const ty = rect.y + (rect.height - 7.0 * scale) * 0.5;
-    if (text.len > 0) drawText(u, text, rect.x + 8, ty, scale, Color.rgba(0.92, 0.95, 0.98, 1.0)) else drawText(u, ph, rect.x + 8, ty, scale, Color.rgba(0.5, 0.56, 0.65, 1.0));
-    if (foc and caret) u.drawRect(.{ .x = rect.x + 8 + measureTextWidth(text, scale), .y = rect.y + 8, .width = 2, .height = rect.height - 16 }, Color.rgba(0.9, 0.95, 1.0, 1.0));
-}
 fn handleSeedTyping(seed_input: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, input: *const Input, max_len: usize) !void {
     if (input.isKeyPressed(.backspace)) {
         if (seed_input.items.len > 0) _ = seed_input.pop();

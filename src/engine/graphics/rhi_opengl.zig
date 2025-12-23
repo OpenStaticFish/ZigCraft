@@ -42,6 +42,9 @@ const OpenGLContext = struct {
     sky_shader: ?Shader,
     sky_vao: c.GLuint,
     sky_vbo: c.GLuint,
+
+    // State for setModelMatrix
+    current_view_proj: Mat4,
 };
 
 // UI Shaders (embedded GLSL)
@@ -246,6 +249,8 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     c.glVertexAttribPointer().?(0, 2, c.GL_FLOAT, c.GL_FALSE, 2 * @sizeOf(f32), null);
     c.glEnableVertexAttribArray().?(0);
     c.glBindVertexArray().?(0);
+
+    ctx.current_view_proj = Mat4.identity;
 }
 
 fn deinit(ctx_ptr: *anyopaque) void {
@@ -400,7 +405,14 @@ fn setClearColor(ctx_ptr: *anyopaque, color: Vec3) void {
 }
 
 fn beginMainPass(ctx_ptr: *anyopaque) void {
-    _ = ctx_ptr;
+    const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
+    _ = ctx;
+
+    // Ensure render state matches what Renderer was doing
+    c.glEnable(c.GL_DEPTH_TEST);
+    c.glDepthMask(c.GL_TRUE);
+    c.glDepthFunc(c.GL_LESS);
+
     c.glClear(c.GL_COLOR_BUFFER_BIT | c.GL_DEPTH_BUFFER_BIT);
 }
 
@@ -427,27 +439,95 @@ fn endShadowPass(ctx_ptr: *anyopaque) void {
 }
 
 fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, cloud_params: rhi.CloudParams) void {
-    _ = ctx_ptr;
-    _ = view_proj;
+    const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.current_view_proj = view_proj;
+
+    // We assume the shader is already bound by the caller (main.zig calling shader.use())
+    // Note: In a fully abstracted RHI, we would bind the shader here.
+    // For now, we just set uniforms on the currently active program.
+
+    var prog: c.GLint = 0;
+    c.glGetIntegerv(c.GL_CURRENT_PROGRAM, &prog);
+    if (prog == 0) return;
+    const program: c.GLuint = @intCast(prog);
+
+    setUniformVec3(program, "uSunDir", sun_dir);
+    setUniformFloat(program, "uSunIntensity", sun_intensity);
+    setUniformFloat(program, "uAmbient", ambient);
+    setUniformVec3(program, "uFogColor", fog_color);
+    setUniformFloat(program, "uFogDensity", fog_density);
+    setUniformBool(program, "uFogEnabled", fog_enabled);
+
+    // Cloud shadow params
+    setUniformFloat(program, "uCloudWindOffsetX", cloud_params.wind_offset_x);
+    setUniformFloat(program, "uCloudWindOffsetZ", cloud_params.wind_offset_z);
+    setUniformFloat(program, "uCloudScale", cloud_params.cloud_scale);
+    setUniformFloat(program, "uCloudCoverage", cloud_params.cloud_coverage);
+    setUniformFloat(program, "uCloudShadowStrength", 0.15); // Hardcoded in Vulkan/Shader
+    setUniformFloat(program, "uCloudHeight", cloud_params.cloud_height);
+
     _ = cam_pos;
-    _ = sun_dir;
     _ = time;
-    _ = fog_color;
-    _ = fog_density;
-    _ = fog_enabled;
-    _ = sun_intensity;
-    _ = ambient;
-    _ = cloud_params;
+}
+
+fn setUniformVec3(program: c.GLuint, name: [:0]const u8, val: Vec3) void {
+    const loc = c.glGetUniformLocation().?(program, name);
+    if (loc != -1) c.glUniform3f().?(loc, val.x, val.y, val.z);
+}
+
+fn setUniformFloat(program: c.GLuint, name: [:0]const u8, val: f32) void {
+    const loc = c.glGetUniformLocation().?(program, name);
+    if (loc != -1) c.glUniform1f().?(loc, val);
+}
+
+fn setUniformBool(program: c.GLuint, name: [:0]const u8, val: bool) void {
+    const loc = c.glGetUniformLocation().?(program, name);
+    if (loc != -1) c.glUniform1i().?(loc, if (val) 1 else 0);
 }
 
 fn updateShadowUniforms(ctx_ptr: *anyopaque, params: rhi.ShadowParams) void {
     _ = ctx_ptr;
-    _ = params;
+    // For OpenGL, shadow uniforms are arrays.
+    var prog: c.GLint = 0;
+    c.glGetIntegerv(c.GL_CURRENT_PROGRAM, &prog);
+    if (prog == 0) return;
+    const program: c.GLuint = @intCast(prog);
+
+    // We only support up to 3 cascades in shader
+    for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
+        var buf: [64]u8 = undefined;
+        // uLightSpaceMatrices[i]
+        const name_mat = std.fmt.bufPrintZ(&buf, "uLightSpaceMatrices[{}]", .{i}) catch continue;
+        const loc_mat = c.glGetUniformLocation().?(program, name_mat);
+        if (loc_mat != -1) c.glUniformMatrix4fv().?(loc_mat, 1, c.GL_FALSE, @ptrCast(&params.light_space_matrices[i].data));
+
+        // uCascadeSplits[i]
+        const name_split = std.fmt.bufPrintZ(&buf, "uCascadeSplits[{}]", .{i}) catch continue;
+        const loc_split = c.glGetUniformLocation().?(program, name_split);
+        if (loc_split != -1) c.glUniform1f().?(loc_split, params.cascade_splits[i]);
+
+        // uShadowTexelSizes[i]
+        const name_size = std.fmt.bufPrintZ(&buf, "uShadowTexelSizes[{}]", .{i}) catch continue;
+        const loc_size = c.glGetUniformLocation().?(program, name_size);
+        if (loc_size != -1) c.glUniform1f().?(loc_size, params.shadow_texel_sizes[i]);
+    }
 }
 
 fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4) void {
-    _ = ctx_ptr;
-    _ = model;
+    const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
+
+    var prog: c.GLint = 0;
+    c.glGetIntegerv(c.GL_CURRENT_PROGRAM, &prog);
+    if (prog == 0) return;
+    const program: c.GLuint = @intCast(prog);
+
+    const mvp = ctx.current_view_proj.multiply(model);
+
+    const loc_mvp = c.glGetUniformLocation().?(program, "transform");
+    if (loc_mvp != -1) c.glUniformMatrix4fv().?(loc_mvp, 1, c.GL_FALSE, @ptrCast(&mvp.data));
+
+    const loc_model = c.glGetUniformLocation().?(program, "uModel");
+    if (loc_model != -1) c.glUniformMatrix4fv().?(loc_model, 1, c.GL_FALSE, @ptrCast(&model.data));
 }
 
 fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.DrawMode) void {
@@ -581,6 +661,11 @@ fn bindTexture(ctx_ptr: *anyopaque, handle: rhi.TextureHandle, slot: u32) void {
 fn getAllocator(ctx_ptr: *anyopaque) std.mem.Allocator {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     return ctx.allocator;
+}
+
+fn setViewport(ctx_ptr: *anyopaque, width: u32, height: u32) void {
+    _ = ctx_ptr;
+    c.glViewport(0, 0, @intCast(width), @intCast(height));
 }
 
 fn setWireframe(ctx_ptr: *anyopaque, enabled: bool) void {
@@ -774,6 +859,7 @@ const vtable = rhi.RHI.VTable{
     .bindTexture = bindTexture,
     .updateTexture = updateTexture,
     .getAllocator = getAllocator,
+    .setViewport = setViewport,
     .setWireframe = setWireframe,
     .setTexturesEnabled = setTexturesEnabled,
     .setVSync = setVSync,
@@ -800,6 +886,7 @@ pub fn createRHI(allocator: std.mem.Allocator) !rhi.RHI {
         .sky_shader = null,
         .sky_vao = 0,
         .sky_vbo = 0,
+        .current_view_proj = Mat4.identity,
     };
 
     return rhi.RHI{
