@@ -80,7 +80,7 @@ pub const ShadowMap = struct {
         texel_sizes: [CASCADE_COUNT]f32,
     };
 
-    pub fn computeCascades(resolution: u32, camera_fov: f32, aspect: f32, near: f32, far: f32, sun_dir: Vec3, cam_view: Mat4) ShadowCascades {
+    pub fn computeCascades(resolution: u32, camera_fov: f32, aspect: f32, near: f32, far: f32, sun_dir: Vec3, cam_view: Mat4, z_range_01: bool) ShadowCascades {
         const lambda = 0.8;
         const shadow_dist = far;
 
@@ -157,10 +157,19 @@ pub const ShadowMap = struct {
             light_ortho.data[1][1] = 2.0 / (maxY - minY);
             light_ortho.data[3][1] = -(maxY + minY) / (maxY - minY);
 
-            const A = 1.0 / (maxZ - minZ);
-            const B = -A * minZ;
-            light_ortho.data[2][2] = A;
-            light_ortho.data[3][2] = B;
+            if (z_range_01) {
+                const A = 1.0 / (maxZ - minZ);
+                const B = -A * minZ;
+                light_ortho.data[2][2] = A;
+                light_ortho.data[3][2] = B;
+            } else {
+                // Standard OpenGL: map closer to -1, further to 1
+                // maxZ is closer (less negative), minZ is further (more negative)
+                const A = -2.0 / (maxZ - minZ);
+                const B = (maxZ + minZ) / (maxZ - minZ);
+                light_ortho.data[2][2] = A;
+                light_ortho.data[3][2] = B;
+            }
 
             cascades.light_space_matrices[i] = light_ortho.multiply(light_rot);
             last_split = split;
@@ -172,7 +181,7 @@ pub const ShadowMap = struct {
     /// Calculate cascade splits and matrices
     pub fn update(self: *ShadowMap, camera_fov: f32, aspect: f32, near: f32, far: f32, sun_dir: Vec3, cam_pos: Vec3, cam_view: Mat4) void {
         _ = cam_pos;
-        const cascades = computeCascades(self.resolution, camera_fov, aspect, near, far, sun_dir, cam_view);
+        const cascades = computeCascades(self.resolution, camera_fov, aspect, near, far, sun_dir, cam_view, false);
         self.light_space_matrices = cascades.light_space_matrices;
         self.cascade_splits = cascades.cascade_splits;
         self.texel_sizes = cascades.texel_sizes;
@@ -188,7 +197,6 @@ pub const ShadowMap = struct {
         c.glClear(c.GL_DEPTH_BUFFER_BIT);
         // Use GL_LESS for standard depth test
         c.glDepthFunc(c.GL_LESS);
-
         // Use standard back-face culling for shadows too
         // Front-face culling can cause issues if chunks have holes or are thin
         c.glEnable(c.GL_CULL_FACE);

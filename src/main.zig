@@ -24,7 +24,8 @@ const World = @import("world/world.zig").World;
 const worldToChunk = @import("world/chunk.zig").worldToChunk;
 const WorldMap = @import("world/worldgen/world_map.zig").WorldMap;
 
-const RHI = @import("engine/graphics/rhi.zig").RHI;
+const rhi_pkg = @import("engine/graphics/rhi.zig");
+const RHI = rhi_pkg.RHI;
 const rhi_opengl = @import("engine/graphics/rhi_opengl.zig");
 const rhi_vulkan = @import("engine/graphics/rhi_vulkan.zig");
 
@@ -157,8 +158,12 @@ const fragment_shader_src =
     \\    vec4 fragPosLightSpace = uLightSpaceMatrices[layer] * vec4(fragPosWorld, 1.0);
     \\    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     \\
-    \\    // XY [-1,1]->[0,1]. Z is already [0,1] due to glClipControl + Correct Matrix.
+    \\    // XY [-1,1]->[0,1]. Z is mapped if OpenGL (Vulkan already [0,1])
     \\    projCoords.xy = projCoords.xy * 0.5 + 0.5;
+    \\    
+    \\    // In OpenGL (without glClipControl), Z is in [-1, 1].
+    \\    // If the matrix was built for [-1, 1], we map it to [0, 1] to match texture.
+    \\    projCoords.z = projCoords.z * 0.5 + 0.5;
     \\    
     \\    if (projCoords.z > 1.0 || projCoords.z < 0.0) return 0.0;
     \\    
@@ -418,7 +423,7 @@ pub fn main() !void {
     defer if (ui) |*u| u.deinit();
     var atmosphere: ?Atmosphere = if (is_vulkan) Atmosphere.initNoGL() else Atmosphere.init();
     defer if (atmosphere) |*a| a.deinit();
-    var clouds: ?Clouds = if (!is_vulkan) try Clouds.init() else null;
+    var clouds: ?Clouds = if (is_vulkan) Clouds.initNoGL() else try Clouds.init();
     defer if (clouds) |*cl| cl.deinit();
     var shadow_map: ?ShadowMap = if (!is_vulkan) ShadowMap.init(rhi, settings.shadow_resolution) catch null else null;
     defer if (shadow_map) |*sm| sm.deinit();
@@ -461,7 +466,7 @@ pub fn main() !void {
 
         if (pending_new_world_seed) |seed| {
             world = try World.init(allocator, settings.render_distance, seed, rhi);
-            if (world_map == null) world_map = WorldMap.init(rhi, 256, 256, use_vulkan);
+            if (world_map == null) world_map = WorldMap.init(rhi, 256, 256);
             show_map = false;
             map_needs_update = true;
             camera = Camera.init(.{ .position = Vec3.init(8, 100, 8), .pitch = -0.3, .move_speed = 50.0 });
@@ -470,6 +475,7 @@ pub fn main() !void {
 
         time.update();
         if (atmosphere) |*a| a.update(time.delta_time);
+        if (clouds) |*cl| cl.update(time.delta_time);
         input.beginFrame();
         input.pollEvents();
         if (renderer) |*r| r.setViewport(input.window_width, input.window_height);
@@ -712,7 +718,7 @@ pub fn main() !void {
                     }
 
                     if (light_active) {
-                        const cascades = ShadowMap.computeCascades(settings.shadow_resolution, camera.fov, aspect, 0.1, settings.shadow_distance, light_dir, camera.getViewMatrixOriginCentered());
+                        const cascades = ShadowMap.computeCascades(settings.shadow_resolution, camera.fov, aspect, 0.1, settings.shadow_distance, light_dir, camera.getViewMatrixOriginCentered(), true);
                         rhi.updateShadowUniforms(.{
                             .light_space_matrices = cascades.light_space_matrices,
                             .cascade_splits = cascades.cascade_splits,
@@ -720,13 +726,14 @@ pub fn main() !void {
                         });
                         for (0..ShadowMap.CASCADE_COUNT) |i| {
                             rhi.beginShadowPass(@intCast(i));
-                            rhi.updateGlobalUniforms(cascades.light_space_matrices[i], camera.position, light_dir, time_val, fog_color, fog_density, false, 0.0, 0.0);
+                            rhi.updateGlobalUniforms(cascades.light_space_matrices[i], camera.position, light_dir, time_val, fog_color, fog_density, false, 0.0, 0.0, .{});
                             active_world.renderShadowPass(null, cascades.light_space_matrices[i], camera.position);
                             rhi.endShadowPass();
                         }
                     }
 
                     rhi.drawSky(.{
+                        .cam_pos = camera.position,
                         .cam_forward = camera.forward,
                         .cam_right = camera.right,
                         .cam_up = camera.up,
@@ -741,7 +748,17 @@ pub fn main() !void {
                     });
 
                     atlas.bind(0);
-                    rhi.updateGlobalUniforms(view_proj_render, camera.position, sun_dir, time_val, fog_color, fog_density, fog_enabled, sun_intensity_val, ambient_val);
+                    const cp: rhi_pkg.CloudParams = if (clouds) |*cl| blk: {
+                        const p = cl.getCloudShadowParams();
+                        break :blk .{
+                            .wind_offset_x = p.wind_offset_x,
+                            .wind_offset_z = p.wind_offset_z,
+                            .cloud_scale = p.cloud_scale,
+                            .cloud_coverage = p.cloud_coverage,
+                            .cloud_height = p.cloud_height,
+                        };
+                    } else .{};
+                    rhi.updateGlobalUniforms(view_proj_render, camera.position, sun_dir, time_val, fog_color, fog_density, fog_enabled, sun_intensity_val, ambient_val, cp);
                     active_world.render(null, view_proj_cull, camera.position);
                 }
                 if (clouds) |*cl| if (atmosphere) |atmo| if (!is_vulkan) cl.render(camera.position, &view_proj_cull.data, atmo.sun_dir, atmo.sun_intensity, atmo.fog_color, atmo.fog_density);

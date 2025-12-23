@@ -84,8 +84,12 @@ float calculateShadow(vec3 fragPosWorld, float nDotL, int layer) {
     vec4 fragPosLightSpace = uLightSpaceMatrices[layer] * vec4(fragPosWorld, 1.0);
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
 
-    // XY [-1,1]->[0,1]. Z is already [0,1] due to glClipControl + Correct Matrix.
+    // XY [-1,1]->[0,1]. Z is mapped if OpenGL (Vulkan already [0,1])
     projCoords.xy = projCoords.xy * 0.5 + 0.5;
+    
+    // In OpenGL (without glClipControl), Z is in [-1, 1].
+    // If the matrix was built for [-1, 1], we map it to [0, 1] to match texture.
+    projCoords.z = projCoords.z * 0.5 + 0.5;
     
     if (projCoords.z > 1.0 || projCoords.z < 0.0) return 0.0;
     

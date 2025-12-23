@@ -14,6 +14,34 @@ layout(push_constant) uniform SkyPC {
     vec4 time;
 } pc;
 
+float cloudHash(vec2 p) {
+    p = fract(p * vec2(234.34, 435.345));
+    p += dot(p, p + 34.23);
+    return fract(p.x * p.y);
+}
+
+float cloudNoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    float a = cloudHash(i);
+    float b = cloudHash(i + vec2(1.0, 0.0));
+    float c = cloudHash(i + vec2(0.0, 1.0));
+    float d = cloudHash(i + vec2(1.0, 1.0));
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+float cloudFbm(vec2 p) {
+    float v = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 4; i++) {
+        v += a * cloudNoise(p);
+        p *= 2.0;
+        a *= 0.5;
+    }
+    return v;
+}
+
 float hash21(vec2 p) {
     p = fract(p * vec2(234.34, 435.345));
     p += dot(p, p + 34.23);
@@ -83,6 +111,44 @@ void main() {
     }
 
     vec3 finalColor = sky;
+    
+    // Clouds
+    if (dir.y > 0.0) {
+        float cloudHeight = 160.0;
+        float cloudCoverage = 0.5;
+        float cloudScale = 1.0 / 64.0;
+        float cloudBlockSize = 12.0;
+        
+        vec3 camPos = pc.time.yzw;
+        
+        // Ray-plane intersection
+        float t = (cloudHeight - camPos.y) / dir.y;
+        if (t > 0.0 && t < 3000.0) {
+            vec3 worldPos = camPos + dir * t;
+            vec2 worldXZ = worldPos.xz + vec2(pc.time.x * 2.0, pc.time.x * 0.4);
+            vec2 pixelPos = floor(worldXZ / cloudBlockSize) * cloudBlockSize;
+            vec2 samplePos = pixelPos * cloudScale;
+            
+            // Reusing hash from stars for simplicity or adding cloud noise
+            float n1 = cloudFbm(samplePos * 0.5);
+            float n2 = cloudFbm(samplePos * 2.0 + vec2(100.0, 200.0)) * 0.3;
+            float cloudValue = n1 * 0.7 + n2;
+            
+            float threshold = 1.0 - cloudCoverage;
+            if (cloudValue > threshold) {
+                float distFade = 1.0 - smoothstep(800.0, 2500.0, t);
+                float shadow = 0.8 + 0.2 * smoothstep(threshold, threshold + 0.2, cloudValue);
+                
+                vec3 nightTint = vec3(0.1, 0.12, 0.2);
+                vec3 dayColor = vec3(1.0);
+                vec3 cloudColor = mix(nightTint, dayColor, pc.params.z);
+                cloudColor *= (0.7 + 0.3 * pc.params.z) * shadow;
+                
+                finalColor = mix(finalColor, cloudColor, distFade * 0.9);
+            }
+        }
+    }
+
     finalColor += sunGlow * pc.params.z * vec3(1.0, 0.8, 0.4);
     finalColor += sunDisc * sunColor * pc.params.z;
     finalColor += moonDisc * moonColor * pc.params.w * 3.0;

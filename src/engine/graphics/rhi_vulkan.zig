@@ -43,6 +43,11 @@ const GlobalUniforms = extern struct {
     sun_intensity: f32,
     ambient: f32,
     use_texture: f32, // 0.0 = vertex colors, 1.0 = textures
+    cloud_wind_offset: [2]f32,
+    cloud_scale: f32,
+    cloud_coverage: f32,
+    cloud_shadow_strength: f32,
+    cloud_height: f32,
     padding: [2]f32, // Align to 16 bytes
 };
 
@@ -895,7 +900,7 @@ fn waitIdle(ctx_ptr: *anyopaque) void {
     }
 }
 
-fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time_val: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32) void {
+fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time_val: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, cloud_params: rhi.CloudParams) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
 
@@ -917,6 +922,11 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
         .sun_intensity = sun_intensity,
         .ambient = ambient,
         .use_texture = if (ctx.textures_enabled) 1.0 else 0.0,
+        .cloud_wind_offset = .{ cloud_params.wind_offset_x, cloud_params.wind_offset_z },
+        .cloud_scale = cloud_params.cloud_scale,
+        .cloud_coverage = cloud_params.cloud_coverage,
+        .cloud_shadow_strength = 0.15,
+        .cloud_height = cloud_params.cloud_height,
         .padding = .{ 0, 0 },
     };
 
@@ -934,8 +944,18 @@ fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4) void {
     ctx.current_model = model;
 }
 
-fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, data: []const u8) rhi.TextureHandle {
+fn drawClouds(ctx_ptr: *anyopaque, params: rhi.CloudParams) void {
+    _ = ctx_ptr;
+    _ = params;
+    // TODO: Implement Vulkan cloud plane rendering
+}
+
+fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.TextureFormat, config: rhi.TextureConfig, data_opt: ?[]const u8) rhi.TextureHandle {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    _ = format;
+    _ = config;
+
+    const data = data_opt orelse return 0; // Vulkan backend currently expects data
 
     const staging_buffer = createVulkanBuffer(ctx, data.len, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
     defer {
@@ -1530,7 +1550,7 @@ fn drawSky(ctx_ptr: *anyopaque, params: rhi.SkyParams) void {
         .sky_color = .{ params.sky_color.x, params.sky_color.y, params.sky_color.z, 1.0 },
         .horizon_color = .{ params.horizon_color.x, params.horizon_color.y, params.horizon_color.z, 1.0 },
         .params = .{ params.aspect, params.tan_half_fov, params.sun_intensity, params.moon_intensity },
-        .time = .{ params.time, 0.0, 0.0, 0.0 },
+        .time = .{ params.time, params.cam_pos.x, params.cam_pos.y, params.cam_pos.z },
     };
 
     const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
@@ -1567,6 +1587,7 @@ const vtable = rhi.RHI.VTable{
     .endUI = endUI,
     .drawUIQuad = drawUIQuad,
     .drawUITexturedQuad = drawUITexturedQuad,
+    .drawClouds = drawClouds,
     .beginShadowPass = beginShadowPass,
     .endShadowPass = endShadowPass,
     .updateShadowUniforms = updateShadowUniforms,
@@ -2592,7 +2613,7 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window) !rhi.RHI {
 
     // 15. Create Dummy Texture for Descriptor set validity
     const white_pixel = [_]u8{ 255, 255, 255, 255 };
-    const dummy_handle = createTexture(ctx, 1, 1, &white_pixel);
+    const dummy_handle = createTexture(ctx, 1, 1, .rgba, .{}, &white_pixel);
     ctx.current_texture = dummy_handle;
 
     // 16. Create Shadow Sampler

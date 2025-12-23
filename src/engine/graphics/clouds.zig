@@ -38,6 +38,10 @@ pub const Clouds = struct {
         return clouds;
     }
 
+    pub fn initNoGL() Clouds {
+        return Clouds{};
+    }
+
     pub fn deinit(self: *Clouds) void {
         if (self.cloud_vao != 0) c.glDeleteVertexArrays().?(1, &self.cloud_vao);
         if (self.cloud_vbo != 0) c.glDeleteBuffers().?(1, &self.cloud_vbo);
@@ -95,7 +99,7 @@ pub const Clouds = struct {
         fog_color: Vec3,
         fog_density: f32,
     ) void {
-        if (!self.enabled) return;
+        if (!self.enabled or self.cloud_vao == 0) return;
         const shader = self.cloud_shader orelse return;
 
         c.glDepthMask(c.GL_FALSE); // Don't write to depth
@@ -104,7 +108,7 @@ pub const Clouds = struct {
         c.glBlendFunc(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
 
         // Proper depth testing to ensure mountains hide clouds
-        c.glDepthFunc(c.GL_GEQUAL);
+        c.glDepthFunc(c.GL_LEQUAL);
         defer c.glDepthMask(c.GL_TRUE);
 
         shader.use();

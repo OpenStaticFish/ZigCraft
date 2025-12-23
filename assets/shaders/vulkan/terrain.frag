@@ -22,9 +22,58 @@ layout(set = 0, binding = 0) uniform GlobalUniforms {
     float fog_enabled;
     float sun_intensity;
     float ambient;
-    float use_texture;  // 0.0 = vertex colors only, 1.0 = use textures
+    float use_texture; // 0.0 = vertex colors only, 1.0 = use textures
+    vec2 cloud_wind_offset;
+    float cloud_scale;
+    float cloud_coverage;
+    float cloud_shadow_strength;
+    float cloud_height;
     float padding[2];
 } global;
+
+// Cloud shadow noise functions
+float cloudHash(vec2 p) {
+    p = fract(p * vec2(234.34, 435.345));
+    p += dot(p, p + 34.23);
+    return fract(p.x * p.y);
+}
+
+float cloudNoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    float a = cloudHash(i);
+    float b = cloudHash(i + vec2(1.0, 0.0));
+    float c = cloudHash(i + vec2(0.0, 1.0));
+    float d = cloudHash(i + vec2(1.0, 1.0));
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+float cloudFbm(vec2 p) {
+    float v = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 4; i++) {
+        v += a * cloudNoise(p);
+        p *= 2.0;
+        a *= 0.5;
+    }
+    return v;
+}
+
+float getCloudShadow(vec3 worldPos, vec3 sunDir) {
+    // Project position along sun direction to cloud plane
+    vec2 shadowOffset = sunDir.xz * (global.cloud_height - worldPos.y) / max(sunDir.y, 0.1);
+    vec2 samplePos = (worldPos.xz + shadowOffset + global.cloud_wind_offset) * global.cloud_scale;
+    
+    float n1 = cloudFbm(samplePos * 0.5);
+    float n2 = cloudFbm(samplePos * 2.0 + vec2(100.0, 200.0)) * 0.3;
+    float cloudValue = n1 * 0.7 + n2;
+    
+    float threshold = 1.0 - global.cloud_coverage;
+    float cloudMask = smoothstep(threshold - 0.1, threshold + 0.1, cloudValue);
+    
+    return cloudMask * global.cloud_shadow_strength;
+}
 
 layout(set = 0, binding = 1) uniform sampler2D uTexture;
 
@@ -111,7 +160,15 @@ void main() {
         }
     }
 
-    float directLight = nDotL * global.sun_intensity * (1.0 - shadow);
+    // Cloud shadow
+    float cloudShadow = 0.0;
+    if (global.sun_intensity > 0.05 && global.sun_dir.y > 0.05) {
+        cloudShadow = getCloudShadow(vFragPosWorld, global.sun_dir.xyz);
+    }
+    
+    float totalShadow = min(shadow + cloudShadow, 1.0);
+
+    float directLight = nDotL * global.sun_intensity * (1.0 - totalShadow);
     float skyLight = vSkyLight * (global.ambient + directLight * 0.8);
     float blockLight = vBlockLight;
     float lightLevel = max(skyLight, blockLight);
