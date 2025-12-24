@@ -23,6 +23,30 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v9
+
+      - name: Setup Dev Environment
+        run: |
+          nix develop --command bash -c '
+            # Add Nix store paths to GITHUB_PATH
+            echo "$PATH" | tr ":" "\n" | grep "^/nix/store" >> "$GITHUB_PATH"
+            
+            # Export essential environment variables to GITHUB_ENV
+            vars=(PKG_CONFIG_PATH C_INCLUDE_PATH CPLUS_INCLUDE_PATH LIBRARY_PATH LD_LIBRARY_PATH NIX_CFLAGS_COMPILE NIX_LDFLAGS NIX_BINTOOLS NIX_CC)
+            for var in "${vars[@]}"; do
+              if [ -n "${!var}" ]; then
+                echo "$var<<EOF" >> "$GITHUB_ENV"
+                echo "${!var}" >> "$GITHUB_ENV"
+                echo "EOF" >> "$GITHUB_ENV"
+              fi
+            done
+            echo "IN_NIX_SHELL=impure" >> "$GITHUB_ENV"
+          '
+
       - name: Run opencode
         uses: sst/opencode/github@latest
         env:

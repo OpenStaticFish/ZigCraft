@@ -64,7 +64,9 @@
       devShells.${system}.default = pkgs.mkShell {
         nativeBuildInputs = [
           zig
+          pkgs.zls
           pkgs.pkg-config
+          pkgs.glslang
         ];
 
         buildInputs = [
@@ -74,7 +76,6 @@
           pkgs.vulkan-loader
           pkgs.vulkan-headers
           pkgs.vulkan-validation-layers
-          pkgs.glslang
         ];
 
         shellHook = ''
