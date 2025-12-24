@@ -26,6 +26,10 @@ pub const RenderSystem = struct {
     shadow_map: ?ShadowMap,
 
     pub fn init(allocator: std.mem.Allocator, window: *c.SDL_Window, is_vulkan: bool, settings: *const Settings) !RenderSystem {
+        if (!is_vulkan) {
+            if (c.glewInit() != c.GLEW_OK) return error.GLEWInitFailed;
+        }
+
         const RhiResult = struct {
             rhi: RHI,
             is_vulkan: bool,
@@ -43,9 +47,6 @@ pub const RenderSystem = struct {
             }
         } else blk: {
             log.log.info("Initializing OpenGL backend...", .{});
-            if (c.glewInit() != c.GLEW_OK) {
-                return error.GLEWInitFailed;
-            }
             break :blk RhiResult{ .rhi = try rhi_opengl.createRHI(allocator), .is_vulkan = false };
         };
 
@@ -79,7 +80,13 @@ pub const RenderSystem = struct {
         const atlas = TextureAtlas.init(allocator, rhi);
         const atmosphere = if (actual_is_vulkan) Atmosphere.initNoGL() else Atmosphere.init();
         const clouds = if (actual_is_vulkan) Clouds.initNoGL() else try Clouds.init();
-        const shadow_map = if (!actual_is_vulkan) ShadowMap.init(rhi, settings.shadow_resolution) catch null else null;
+        const shadow_map = if (!actual_is_vulkan) blk: {
+            const sm = ShadowMap.init(rhi, settings.shadow_resolution) catch |err| {
+                log.log.warn("ShadowMap initialization failed: {}. Shadows disabled.", .{err});
+                break :blk null;
+            };
+            break :blk sm;
+        } else null;
 
         return RenderSystem{
             .allocator = allocator,

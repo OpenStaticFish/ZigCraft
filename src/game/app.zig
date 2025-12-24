@@ -363,7 +363,7 @@ pub const App = struct {
                                 var buf: [64]u8 = undefined;
                                 s.setInt(std.fmt.bufPrintZ(&buf, "uShadowMap{}", .{i}) catch "uShadowMap0", @intCast(1 + i));
                             }
-                            const cascades = ShadowMap.computeCascades(self.settings.shadow_resolution, self.camera.fov, aspect, 0.1, self.settings.shadow_distance, if (self.render_system.atmosphere) |a| a.sun_dir else Vec3.init(0, 1, 0), self.camera.getViewMatrixOriginCentered(), true);
+                            const cascades = ShadowMap.computeCascades(self.settings.shadow_resolution, self.camera.fov, aspect, 0.1, self.settings.shadow_distance, if (self.render_system.atmosphere) |a| a.sun_dir else Vec3.init(0, 1, 0), self.camera.getViewMatrixOriginCentered(), false);
                             self.render_system.rhi.updateShadowUniforms(.{
                                 .light_space_matrices = cascades.light_space_matrices,
                                 .cascade_splits = cascades.cascade_splits,
