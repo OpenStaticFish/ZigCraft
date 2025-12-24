@@ -17,9 +17,6 @@ pub const RenderSystem = struct {
     rhi: RHI,
     is_vulkan: bool,
     shader: ?Shader,
-    debug_shader: ?Shader,
-    debug_quad_vao: c.GLuint,
-    debug_quad_vbo: c.GLuint,
     atlas: TextureAtlas,
     atmosphere: ?Atmosphere,
     clouds: ?Clouds,
@@ -57,26 +54,6 @@ pub const RenderSystem = struct {
 
         const shader: ?Shader = if (!actual_is_vulkan) try Shader.initFromFile(allocator, "assets/shaders/terrain.vert", "assets/shaders/terrain.frag") else null;
 
-        var debug_shader: ?Shader = null;
-        var debug_quad_vao: c.GLuint = 0;
-        var debug_quad_vbo: c.GLuint = 0;
-
-        if (!actual_is_vulkan) {
-            const debug_vs = "#version 330 core\nlayout (location = 0) in vec2 aPos;layout (location = 1) in vec2 aTexCoord;out vec2 vTexCoord;void main() {gl_Position = vec4(aPos, 0.0, 1.0);vTexCoord = aTexCoord;}";
-            const debug_fs = "#version 330 core\nout vec4 FragColor;in vec2 vTexCoord;uniform sampler2D uDepthMap;void main() {float depth = texture(uDepthMap, vTexCoord).r;FragColor = vec4(vec3(depth), 1.0);}";
-            debug_shader = try Shader.initSimple(debug_vs, debug_fs);
-            const quad_vertices = [_]f32{ -1.0, 1.0, 0.0, 1.0, -1.0, -1.0, 0.0, 0.0, 1.0, -1.0, 1.0, 0.0, -1.0, 1.0, 0.0, 1.0, 1.0, -1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0 };
-            c.glGenVertexArrays().?(1, &debug_quad_vao);
-            c.glGenBuffers().?(1, &debug_quad_vbo);
-            c.glBindVertexArray().?(debug_quad_vao);
-            c.glBindBuffer().?(c.GL_ARRAY_BUFFER, debug_quad_vbo);
-            c.glBufferData().?(c.GL_ARRAY_BUFFER, quad_vertices.len * @sizeOf(f32), &quad_vertices, c.GL_STATIC_DRAW);
-            c.glEnableVertexAttribArray().?(0);
-            c.glVertexAttribPointer().?(0, 2, c.GL_FLOAT, c.GL_FALSE, 4 * @sizeOf(f32), null);
-            c.glEnableVertexAttribArray().?(1);
-            c.glVertexAttribPointer().?(1, 2, c.GL_FLOAT, c.GL_FALSE, 4 * @sizeOf(f32), @ptrFromInt(2 * @sizeOf(f32)));
-        }
-
         const atlas = try TextureAtlas.init(allocator, rhi);
         const atmosphere = if (actual_is_vulkan) Atmosphere.initNoGL() else Atmosphere.init();
         const clouds = if (actual_is_vulkan) Clouds.initNoGL() else try Clouds.init();
@@ -93,9 +70,6 @@ pub const RenderSystem = struct {
             .rhi = rhi,
             .is_vulkan = actual_is_vulkan,
             .shader = shader,
-            .debug_shader = debug_shader,
-            .debug_quad_vao = debug_quad_vao,
-            .debug_quad_vbo = debug_quad_vbo,
             .atlas = atlas,
             .atmosphere = atmosphere,
             .clouds = clouds,
@@ -108,11 +82,6 @@ pub const RenderSystem = struct {
         if (self.clouds) |*cl| cl.deinit();
         if (self.atmosphere) |*a| a.deinit();
         self.atlas.deinit();
-        if (self.debug_shader) |*s| s.deinit();
-        if (!self.is_vulkan) {
-            if (self.debug_quad_vao != 0) c.glDeleteVertexArrays().?(1, &self.debug_quad_vao);
-            if (self.debug_quad_vbo != 0) c.glDeleteBuffers().?(1, &self.debug_quad_vbo);
-        }
         if (self.shader) |*s| s.deinit();
         self.rhi.deinit();
     }

@@ -2120,6 +2120,13 @@ fn drawClouds(ctx_ptr: *anyopaque, params: rhi.CloudParams) void {
     // TODO: Implement Vulkan cloud plane rendering
 }
 
+fn drawDebugShadowMap(ctx_ptr: *anyopaque, cascade_index: usize, depth_map_handle: rhi.TextureHandle) void {
+    _ = ctx_ptr;
+    _ = cascade_index;
+    _ = depth_map_handle;
+    // Debug shadow map visualization is not implemented for Vulkan
+}
+
 fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.TextureFormat, config: rhi.TextureConfig, data_opt: ?[]const u8) rhi.TextureHandle {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     _ = format;
@@ -2881,6 +2888,7 @@ const vtable = rhi.RHI.VTable{
     .drawUIQuad = drawUIQuad,
     .drawUITexturedQuad = drawUITexturedQuad,
     .drawClouds = drawClouds,
+    .drawDebugShadowMap = drawDebugShadowMap,
     .beginShadowPass = beginShadowPass,
     .endShadowPass = endShadowPass,
     .updateShadowUniforms = updateShadowUniforms,

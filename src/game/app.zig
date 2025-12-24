@@ -376,14 +376,8 @@ pub const App = struct {
                         active_world.render(view_proj_cull, self.camera.position);
                     }
                     if (self.render_system.clouds) |*cl| if (self.render_system.atmosphere) |atmo| if (!self.render_system.is_vulkan) cl.render(self.camera.position, &view_proj_cull.data, atmo.sun_dir, atmo.sun_intensity, atmo.fog_color, atmo.fog_density);
-                    if (!self.render_system.is_vulkan and self.debug_shadows and self.render_system.debug_shader != null and self.render_system.shadow_map != null) {
-                        self.render_system.debug_shader.?.use();
-                        c.glActiveTexture().?(c.GL_TEXTURE0);
-                        c.glBindTexture(c.GL_TEXTURE_2D, @intCast(self.render_system.shadow_map.?.depth_maps[self.debug_cascade_idx].handle));
-                        self.render_system.debug_shader.?.setInt("uDepthMap", 0);
-                        c.glBindVertexArray().?(self.render_system.debug_quad_vao);
-                        c.glDrawArrays(c.GL_TRIANGLES, 0, 6);
-                        c.glBindVertexArray().?(0);
+                    if (self.debug_shadows and self.render_system.shadow_map != null) {
+                        self.render_system.rhi.drawDebugShadowMap(self.debug_cascade_idx, self.render_system.shadow_map.?.depth_maps[self.debug_cascade_idx].handle);
                     }
                     if (self.ui) |*u| {
                         u.begin();
