@@ -81,7 +81,7 @@ pub const World = struct {
     gen_pool: *WorkerPool,
     mesh_pool: *WorkerPool,
     upload_queue: std.ArrayListUnmanaged(*ChunkData),
-    visible_chunks: std.ArrayList(*ChunkData),
+    visible_chunks: std.ArrayListUnmanaged(*ChunkData),
     next_job_token: u32,
     last_pc: ChunkPos,
     rhi: RHI,
@@ -108,7 +108,7 @@ pub const World = struct {
             .gen_pool = undefined,
             .mesh_pool = undefined,
             .upload_queue = .empty,
-            .visible_chunks = std.ArrayList(*ChunkData).init(allocator),
+            .visible_chunks = .empty,
             .next_job_token = 1,
             .last_pc = .{ .x = 9999, .z = 9999 },
             .rhi = rhi,
@@ -135,7 +135,7 @@ pub const World = struct {
         self.allocator.destroy(self.mesh_queue);
 
         self.upload_queue.deinit(self.allocator);
-        self.visible_chunks.deinit();
+        self.visible_chunks.deinit(self.allocator);
 
         var iter = self.chunks.iterator();
         while (iter.next()) |entry| {
@@ -461,7 +461,7 @@ pub const World = struct {
 
                 if (self.chunks.get(.{ .x = cx, .z = cz })) |data| {
                     if (data.chunk.state == .renderable) {
-                        self.visible_chunks.append(data) catch {};
+                        self.visible_chunks.append(self.allocator, data) catch {};
                     }
                 }
             }
