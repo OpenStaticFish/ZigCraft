@@ -1,19 +1,20 @@
 const std = @import("std");
 const c = @import("../c.zig").c;
+const builtin = @import("builtin");
 
-const Vec3 = @import("../engine/math/vec3.zig").Vec3;
-const Mat4 = @import("../engine/math/mat4.zig").Mat4;
-const Camera = @import("../engine/graphics/camera.zig").Camera;
+const log = @import("../engine/core/log.zig");
+const WindowManager = @import("../engine/core/window.zig").WindowManager;
 const Input = @import("../engine/input/input.zig").Input;
 const Time = @import("../engine/core/time.zig").Time;
+const Camera = @import("../engine/graphics/camera.zig").Camera;
 const UISystem = @import("../engine/ui/ui_system.zig").UISystem;
 const Color = @import("../engine/ui/ui_system.zig").Color;
-const log = @import("../engine/core/log.zig");
-const ShadowMap = @import("../engine/graphics/shadows.zig").ShadowMap;
 const Font = @import("../engine/ui/font.zig");
 const Widgets = @import("../engine/ui/widgets.zig");
-const WindowManager = @import("../engine/core/window.zig").WindowManager;
-
+const MapController = @import("map_controller.zig").MapController;
+const Vec3 = @import("../engine/math/vec3.zig").Vec3;
+const Mat4 = @import("../engine/math/mat4.zig").Mat4;
+const ShadowMap = @import("../engine/graphics/shadows.zig").ShadowMap;
 const World = @import("../world/world.zig").World;
 const worldToChunk = @import("../world/chunk.zig").worldToChunk;
 const WorldMap = @import("../world/worldgen/world_map.zig").WorldMap;
@@ -30,7 +31,13 @@ const Clouds = @import("../engine/graphics/clouds.zig").Clouds;
 const AppState = @import("state.zig").AppState;
 const Settings = @import("state.zig").Settings;
 const Menus = @import("menus.zig");
-const MapController = @import("map_controller.zig").MapController;
+
+const debug_build = builtin.mode == .Debug;
+
+const DebugState = packed struct {
+    shadows: bool = false,
+    cascade_idx: usize = 0,
+};
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -58,14 +65,14 @@ pub const App = struct {
     last_state: AppState,
     pending_world_cleanup: bool,
     pending_new_world_seed: ?u64,
-    debug_shadows: bool,
-    debug_cascade_idx: usize,
     seed_input: std.ArrayListUnmanaged(u8),
     seed_focused: bool,
 
     world: ?*World,
     world_map: ?WorldMap,
     map_controller: MapController,
+
+    debug_state: DebugState,
 
     pub fn init(allocator: std.mem.Allocator) !*App {
         var use_vulkan = false;
@@ -181,13 +188,12 @@ pub const App = struct {
             .last_state = .home,
             .pending_world_cleanup = false,
             .pending_new_world_seed = null,
-            .debug_shadows = false,
-            .debug_cascade_idx = 0,
             .seed_input = std.ArrayListUnmanaged(u8).empty,
             .seed_focused = false,
             .world = null,
             .world_map = null,
             .map_controller = .{},
+            .debug_state = .{},
         };
 
         return app;
@@ -303,11 +309,11 @@ pub const App = struct {
                     self.settings.vsync = !self.settings.vsync;
                     self.rhi.setVSync(self.settings.vsync);
                 }
-                if (self.input.isKeyPressed(.u)) self.debug_shadows = !self.debug_shadows;
+                if (debug_build and self.input.isKeyPressed(.u)) self.debug_state.shadows = !self.debug_state.shadows;
 
                 self.map_controller.update(&self.input, &self.camera, self.time.delta_time, self.window_manager.window, screen_w, screen_h, if (self.world_map) |m| m.width else 256);
 
-                if (self.debug_shadows and self.input.isKeyPressed(.k)) self.debug_cascade_idx = (self.debug_cascade_idx + 1) % 3;
+                if (debug_build and self.debug_state.shadows and self.input.isKeyPressed(.k)) self.debug_state.cascade_idx = (self.debug_state.cascade_idx + 1) % 3;
 
                 if (self.input.isKeyPressed(.@"1")) if (self.atmosphere) |*a| a.setTimeOfDay(0.0);
                 if (self.input.isKeyPressed(.@"2")) if (self.atmosphere) |*a| a.setTimeOfDay(0.25);
@@ -463,51 +469,60 @@ pub const App = struct {
                         self.rhi.updateGlobalUniforms(view_proj_render, self.camera.position, sun_dir, time_val, fog_color, fog_density, fog_enabled, sun_intensity_val, ambient_val, cp);
                         active_world.render(view_proj_cull, self.camera.position);
                     }
-<<<<<<< HEAD
+
                     if (self.clouds) |*cl| if (self.atmosphere) |atmo| if (!self.is_vulkan) cl.render(self.camera.position, &view_proj_cull.data, atmo.sun_dir, atmo.sun_intensity, atmo.fog_color, atmo.fog_density);
-                    if (self.debug_shadows and self.shadow_map != null) {
-                        self.rhi.drawDebugShadowMap(self.debug_cascade_idx, self.shadow_map.?.depth_maps[self.debug_cascade_idx].handle);
+                    if (debug_build and !self.is_vulkan and self.debug_state.shadows and self.debug_shader != null and self.shadow_map != null) {
+                        self.debug_shader.?.use();
+                        c.glActiveTexture().?(c.GL_TEXTURE0);
+                        c.glBindTexture(c.GL_TEXTURE_2D, @intCast(self.shadow_map.?.depth_maps[self.debug_state.cascade_idx].handle));
+                        self.debug_shader.?.setInt("uDepthMap", 0);
+                        c.glBindVertexArray().?(self.debug_quad_vao);
+                        c.glDrawArrays(c.GL_TRIANGLES, 0, 6);
+                        c.glBindVertexArray().?(0);
                     }
+
                     if (self.ui) |*u| {
                         u.begin();
                         if (self.world_map) |*m| {
                             try self.map_controller.draw(u, screen_w, screen_h, m, &active_world.generator, self.camera.position);
                         }
-                        u.drawRect(.{ .x = 10, .y = 10, .width = 80, .height = 30 }, Color.rgba(0, 0, 0, 0.7));
-                        Font.drawNumber(u, @intFromFloat(self.time.fps), 15, 15, Color.white);
-                        const stats = active_world.getStats();
-                        const rs = active_world.getRenderStats();
-                        const pc = worldToChunk(@intFromFloat(self.camera.position.x), @intFromFloat(self.camera.position.z));
-                        const hy: f32 = 50.0;
-                        u.drawRect(.{ .x = 10, .y = hy, .width = 220, .height = 170 }, Color.rgba(0, 0, 0, 0.6));
-                        Font.drawText(u, "POS:", 15, hy + 5, 1.5, Color.white);
-                        Font.drawNumber(u, pc.chunk_x, 120, hy + 5, Color.white);
-                        Font.drawNumber(u, pc.chunk_z, 170, hy + 5, Color.white);
-                        Font.drawText(u, "CHUNKS:", 15, hy + 25, 1.5, Color.white);
-                        Font.drawNumber(u, @intCast(stats.chunks_loaded), 140, hy + 25, Color.white);
-                        Font.drawText(u, "VISIBLE:", 15, hy + 45, 1.5, Color.white);
-                        Font.drawNumber(u, @intCast(rs.chunks_rendered), 140, hy + 45, Color.white);
-                        Font.drawText(u, "QUEUED GEN:", 15, hy + 65, 1.5, Color.white);
-                        Font.drawNumber(u, @intCast(stats.gen_queue), 140, hy + 65, Color.white);
-                        Font.drawText(u, "QUEUED MESH:", 15, hy + 85, 1.5, Color.white);
-                        Font.drawNumber(u, @intCast(stats.mesh_queue), 140, hy + 85, Color.white);
-                        Font.drawText(u, "PENDING UP:", 15, hy + 105, 1.5, Color.white);
-                        Font.drawNumber(u, @intCast(stats.upload_queue), 140, hy + 105, Color.white);
-                        var hr: i32 = 0;
-                        var mn: i32 = 0;
-                        var si: f32 = 1.0;
-                        if (self.atmosphere) |atmo| {
-                            const h = atmo.getHours();
-                            hr = @intFromFloat(h);
-                            mn = @intFromFloat((h - @as(f32, @floatFromInt(hr))) * 60.0);
-                            si = atmo.sun_intensity;
+                        if (debug_build) {
+                            u.drawRect(.{ .x = 10, .y = 10, .width = 80, .height = 30 }, Color.rgba(0, 0, 0, 0.7));
+                            Font.drawNumber(u, @intFromFloat(self.time.fps), 15, 15, Color.white);
+                            const stats = active_world.getStats();
+                            const rs = active_world.getRenderStats();
+                            const pc = worldToChunk(@intFromFloat(self.camera.position.x), @intFromFloat(self.camera.position.z));
+                            const hy: f32 = 50.0;
+                            u.drawRect(.{ .x = 10, .y = hy, .width = 220, .height = 170 }, Color.rgba(0, 0, 0, 0.6));
+                            Font.drawText(u, "POS:", 15, hy + 5, 1.5, Color.white);
+                            Font.drawNumber(u, pc.chunk_x, 120, hy + 5, Color.white);
+                            Font.drawNumber(u, pc.chunk_z, 170, hy + 5, Color.white);
+                            Font.drawText(u, "CHUNKS:", 15, hy + 25, 1.5, Color.white);
+                            Font.drawNumber(u, @intCast(stats.chunks_loaded), 140, hy + 25, Color.white);
+                            Font.drawText(u, "VISIBLE:", 15, hy + 45, 1.5, Color.white);
+                            Font.drawNumber(u, @intCast(rs.chunks_rendered), 140, hy + 45, Color.white);
+                            Font.drawText(u, "QUEUED GEN:", 15, hy + 65, 1.5, Color.white);
+                            Font.drawNumber(u, @intCast(stats.gen_queue), 140, hy + 65, Color.white);
+                            Font.drawText(u, "QUEUED MESH:", 15, hy + 85, 1.5, Color.white);
+                            Font.drawNumber(u, @intCast(stats.mesh_queue), 140, hy + 85, Color.white);
+                            Font.drawText(u, "PENDING UP:", 15, hy + 105, 1.5, Color.white);
+                            Font.drawNumber(u, @intCast(stats.upload_queue), 140, hy + 105, Color.white);
+                            var hr: i32 = 0;
+                            var mn: i32 = 0;
+                            var si: f32 = 1.0;
+                            if (self.atmosphere) |atmo| {
+                                const h = atmo.getHours();
+                                hr = @intFromFloat(h);
+                                mn = @intFromFloat((h - @as(f32, @floatFromInt(hr))) * 60.0);
+                                si = atmo.sun_intensity;
+                            }
+                            Font.drawText(u, "TIME:", 15, hy + 125, 1.5, Color.white);
+                            Font.drawNumber(u, hr, 100, hy + 125, Color.white);
+                            Font.drawText(u, ":", 125, hy + 125, 1.5, Color.white);
+                            Font.drawNumber(u, mn, 140, hy + 125, Color.white);
+                            Font.drawText(u, "SUN:", 15, hy + 145, 1.5, Color.white);
+                            Font.drawNumber(u, @intFromFloat(si * 100.0), 100, hy + 145, Color.white);
                         }
-                        Font.drawText(u, "TIME:", 15, hy + 125, 1.5, Color.white);
-                        Font.drawNumber(u, hr, 100, hy + 125, Color.white);
-                        Font.drawText(u, ":", 125, hy + 125, 1.5, Color.white);
-                        Font.drawNumber(u, mn, 140, hy + 125, Color.white);
-                        Font.drawText(u, "SUN:", 15, hy + 145, 1.5, Color.white);
-                        Font.drawNumber(u, @intFromFloat(si * 100.0), 100, hy + 145, Color.white);
                         if (in_pause) {
                             u.drawRect(.{ .x = 0, .y = 0, .width = screen_w, .height = screen_h }, Color.rgba(0, 0, 0, 0.5));
                             const pw: f32 = 300.0;
@@ -557,7 +572,7 @@ pub const App = struct {
 
             self.rhi.endFrame();
             if (!self.is_vulkan) _ = c.SDL_GL_SwapWindow(self.window_manager.window);
-            if (in_world) {
+            if (debug_build and in_world) {
                 if (self.world) |active_world| {
                     if (self.time.frame_count % 120 == 0) {
                         const s = active_world.getStats();
