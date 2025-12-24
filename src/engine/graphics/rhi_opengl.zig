@@ -43,6 +43,11 @@ const OpenGLContext = struct {
     sky_vao: c.GLuint,
     sky_vbo: c.GLuint,
 
+    // Debug shadow map rendering state
+    debug_shadow_shader: ?Shader,
+    debug_shadow_vao: c.GLuint,
+    debug_shadow_vbo: c.GLuint,
+
     // State for setModelMatrix
     current_view_proj: Mat4,
 };
@@ -209,6 +214,29 @@ const sky_fragment_shader =
     \\}
 ;
 
+// Debug shadow map visualization shader
+const debug_shadow_vertex_shader =
+    \\#version 330 core
+    \\layout (location = 0) in vec2 aPos;
+    \\layout (location = 1) in vec2 aTexCoord;
+    \\out vec2 vTexCoord;
+    \\void main() {
+    \\    gl_Position = vec4(aPos, 0.0, 1.0);
+    \\    vTexCoord = aTexCoord;
+    \\}
+;
+
+const debug_shadow_fragment_shader =
+    \\#version 330 core
+    \\out vec4 FragColor;
+    \\in vec2 vTexCoord;
+    \\uniform sampler2D uDepthMap;
+    \\void main() {
+    \\    float depth = texture(uDepthMap, vTexCoord).r;
+    \\    FragColor = vec4(vec3(depth), 1.0);
+    \\}
+;
+
 fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.allocator = allocator;
@@ -257,6 +285,29 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     c.glEnableVertexAttribArray().?(0);
     c.glBindVertexArray().?(0);
 
+    // Initialize debug shadow map visualization shader and quad
+    ctx.debug_shadow_shader = try Shader.initSimple(debug_shadow_vertex_shader, debug_shadow_fragment_shader);
+
+    const debug_quad_vertices = [_]f32{
+        -1.0,  1.0, 0.0, 1.0,
+        -1.0, -1.0, 0.0, 0.0,
+         1.0, -1.0, 1.0, 0.0,
+        -1.0,  1.0, 0.0, 1.0,
+         1.0, -1.0, 1.0, 0.0,
+         1.0,  1.0, 1.0, 1.0,
+    };
+
+    c.glGenVertexArrays().?(1, &ctx.debug_shadow_vao);
+    c.glGenBuffers().?(1, &ctx.debug_shadow_vbo);
+    c.glBindVertexArray().?(ctx.debug_shadow_vao);
+    c.glBindBuffer().?(c.GL_ARRAY_BUFFER, ctx.debug_shadow_vbo);
+    c.glBufferData().?(c.GL_ARRAY_BUFFER, @sizeOf(@TypeOf(debug_quad_vertices)), &debug_quad_vertices, c.GL_STATIC_DRAW);
+    c.glEnableVertexAttribArray().?(0);
+    c.glVertexAttribPointer().?(0, 2, c.GL_FLOAT, c.GL_FALSE, 4 * @sizeOf(f32), null);
+    c.glEnableVertexAttribArray().?(1);
+    c.glVertexAttribPointer().?(1, 2, c.GL_FLOAT, c.GL_FALSE, 4 * @sizeOf(f32), @ptrFromInt(2 * @sizeOf(f32)));
+    c.glBindVertexArray().?(0);
+
     ctx.current_view_proj = Mat4.identity;
 }
 
@@ -284,6 +335,11 @@ fn deinit(ctx_ptr: *anyopaque) void {
     if (ctx.sky_shader) |*s| s.deinit();
     if (ctx.sky_vao != 0) c.glDeleteVertexArrays().?(1, &ctx.sky_vao);
     if (ctx.sky_vbo != 0) c.glDeleteBuffers().?(1, &ctx.sky_vbo);
+
+    // Cleanup debug shadow map resources
+    if (ctx.debug_shadow_shader) |*s| s.deinit();
+    if (ctx.debug_shadow_vao != 0) c.glDeleteVertexArrays().?(1, &ctx.debug_shadow_vao);
+    if (ctx.debug_shadow_vbo != 0) c.glDeleteBuffers().?(1, &ctx.debug_shadow_vbo);
 
     ctx.allocator.destroy(ctx);
 }
@@ -846,6 +902,22 @@ fn drawClouds(ctx_ptr: *anyopaque, params: rhi.CloudParams) void {
     // but we can proxy it here if needed.
 }
 
+fn drawDebugShadowMap(ctx_ptr: *anyopaque, cascade_index: usize, depth_map_handle: rhi.TextureHandle) void {
+    const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
+    const shader = ctx.debug_shadow_shader orelse return;
+    if (ctx.debug_shadow_vao == 0) return;
+
+    _ = cascade_index;
+
+    shader.use();
+    c.glActiveTexture().?(c.GL_TEXTURE0);
+    c.glBindTexture(c.GL_TEXTURE_2D, @intCast(depth_map_handle));
+    shader.setInt("uDepthMap", 0);
+    c.glBindVertexArray().?(ctx.debug_shadow_vao);
+    c.glDrawArrays(c.GL_TRIANGLES, 0, 6);
+    c.glBindVertexArray().?(0);
+}
+
 const vtable = rhi.RHI.VTable{
     .init = init,
     .deinit = deinit,
@@ -880,6 +952,7 @@ const vtable = rhi.RHI.VTable{
     .drawUIQuad = drawUIQuad,
     .drawUITexturedQuad = drawUITexturedQuad,
     .drawClouds = drawClouds,
+    .drawDebugShadowMap = drawDebugShadowMap,
 };
 
 pub fn createRHI(allocator: std.mem.Allocator) !rhi.RHI {
@@ -898,6 +971,9 @@ pub fn createRHI(allocator: std.mem.Allocator) !rhi.RHI {
         .sky_shader = null,
         .sky_vao = 0,
         .sky_vbo = 0,
+        .debug_shadow_shader = null,
+        .debug_shadow_vao = 0,
+        .debug_shadow_vbo = 0,
         .current_view_proj = Mat4.identity,
     };
 
