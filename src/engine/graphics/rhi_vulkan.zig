@@ -247,8 +247,8 @@ fn findMemoryType(physical_device: c.VkPhysicalDevice, type_filter: u32, propert
     return 0;
 }
 
-/// Creates a buffer with host-visible coherent memory (CPU-writable).
-fn createVulkanBuffer(ctx: *VulkanContext, size: usize, usage: c.VkBufferUsageFlags) VulkanBuffer {
+/// Creates a buffer with specified usage and memory properties.
+fn createVulkanBuffer(ctx: *VulkanContext, size: usize, usage: c.VkBufferUsageFlags, properties: c.VkMemoryPropertyFlags) VulkanBuffer {
     var buffer_info = std.mem.zeroes(c.VkBufferCreateInfo);
     buffer_info.sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     buffer_info.size = @intCast(size);
@@ -264,10 +264,15 @@ fn createVulkanBuffer(ctx: *VulkanContext, size: usize, usage: c.VkBufferUsageFl
     var alloc_info = std.mem.zeroes(c.VkMemoryAllocateInfo);
     alloc_info.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     alloc_info.allocationSize = mem_reqs.size;
-    alloc_info.memoryTypeIndex = findMemoryType(ctx.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    alloc_info.memoryTypeIndex = findMemoryType(ctx.physical_device, mem_reqs.memoryTypeBits, properties);
 
     var memory: c.VkDeviceMemory = null;
-    _ = c.vkAllocateMemory(ctx.device, &alloc_info, null, &memory);
+    // If allocation fails, we return null memory/buffer (handled by caller hopefully, or we should log/panic?)
+    // Existing code ignored errors here mostly. Ideally we check result.
+    if (c.vkAllocateMemory(ctx.device, &alloc_info, null, &memory) != c.VK_SUCCESS) {
+        c.vkDestroyBuffer(ctx.device, buffer, null);
+        return .{ .buffer = null, .memory = null, .size = 0 };
+    }
     _ = c.vkBindBufferMemory(ctx.device, buffer, memory, 0);
 
     return .{ .buffer = buffer, .memory = memory, .size = mem_reqs.size };
@@ -618,10 +623,10 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
 
     // 10. Uniform Buffers
     for (0..MAX_FRAMES_IN_FLIGHT) |ubo_i| {
-        ctx.global_ubos[ubo_i] = createVulkanBuffer(ctx, @sizeOf(GlobalUniforms), c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-        ctx.shadow_ubos[ubo_i] = createVulkanBuffer(ctx, @sizeOf(ShadowUniforms), c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+        ctx.global_ubos[ubo_i] = createVulkanBuffer(ctx, @sizeOf(GlobalUniforms), c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        ctx.shadow_ubos[ubo_i] = createVulkanBuffer(ctx, @sizeOf(ShadowUniforms), c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     }
-    ctx.model_ubo = createVulkanBuffer(ctx, @sizeOf(ModelUniforms) * 1000, c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+    ctx.model_ubo = createVulkanBuffer(ctx, @sizeOf(ModelUniforms) * 1000, c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
     // 11. Descriptors
     var layout_bindings = [_]c.VkDescriptorSetLayoutBinding{
@@ -1312,7 +1317,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
 
     // Create UI VBOs (enough for many quads)
     for (0..MAX_FRAMES_IN_FLIGHT) |vbo_sync_i| {
-        ctx.ui_vbos[vbo_sync_i] = createVulkanBuffer(ctx, 1024 * 1024, c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+        ctx.ui_vbos[vbo_sync_i] = createVulkanBuffer(ctx, 1024 * 1024, c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     }
     ctx.ui_screen_width = 1280;
     ctx.ui_screen_height = 720;
@@ -1444,12 +1449,17 @@ fn createBuffer(ctx_ptr: *anyopaque, size: usize, usage: rhi.BufferUsage) rhi.Bu
     if (size == 0) return 0;
 
     const vk_usage: c.VkBufferUsageFlags = switch (usage) {
-        .vertex => c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        .index => c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+        .vertex => c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        .index => c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT | c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         .uniform => c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
     };
 
-    const buf = createVulkanBuffer(ctx, size, vk_usage);
+    const props: c.VkMemoryPropertyFlags = switch (usage) {
+        .vertex, .index => c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+        .uniform => c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+    };
+
+    const buf = createVulkanBuffer(ctx, size, vk_usage, props);
 
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
@@ -1469,13 +1479,60 @@ fn uploadBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, data: []const u8)
     ctx.mutex.unlock();
 
     if (buf_opt) |buf| {
+        // Try mapping directly first (for HOST_VISIBLE buffers like UBOs)
         var map_ptr: ?*anyopaque = null;
         const result = c.vkMapMemory(ctx.device, buf.memory, 0, @intCast(data.len), 0, &map_ptr);
         if (result == c.VK_SUCCESS) {
             @memcpy(@as([*]u8, @ptrCast(map_ptr))[0..data.len], data);
             c.vkUnmapMemory(ctx.device, buf.memory);
+            return;
+        }
+
+        // If mapping failed, assume DEVICE_LOCAL and use staging buffer
+        const staging = createVulkanBuffer(ctx, data.len, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        defer {
+            if (staging.buffer != null) c.vkDestroyBuffer(ctx.device, staging.buffer, null);
+            if (staging.memory != null) c.vkFreeMemory(ctx.device, staging.memory, null);
+        }
+
+        if (staging.buffer == null) {
+            std.log.err("Failed to create staging buffer for upload", .{});
+            return;
+        }
+
+        // Copy to staging
+        if (c.vkMapMemory(ctx.device, staging.memory, 0, @intCast(data.len), 0, &map_ptr) == c.VK_SUCCESS) {
+            @memcpy(@as([*]u8, @ptrCast(map_ptr))[0..data.len], data);
+            c.vkUnmapMemory(ctx.device, staging.memory);
         } else {
-            std.log.err("Failed to map buffer memory for upload: {}", .{result});
+            std.log.err("Failed to map staging buffer memory", .{});
+            return;
+        }
+
+        // Copy from staging to device buffer
+        {
+            ctx.mutex.lock();
+            defer ctx.mutex.unlock();
+
+            var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
+            begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            begin_info.flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+            _ = c.vkBeginCommandBuffer(ctx.transfer_command_buffer, &begin_info);
+
+            var copy_region = std.mem.zeroes(c.VkBufferCopy);
+            copy_region.size = @intCast(data.len);
+            c.vkCmdCopyBuffer(ctx.transfer_command_buffer, staging.buffer, buf.buffer, 1, &copy_region);
+
+            _ = c.vkEndCommandBuffer(ctx.transfer_command_buffer);
+
+            var submit_info = std.mem.zeroes(c.VkSubmitInfo);
+            submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submit_info.commandBufferCount = 1;
+            submit_info.pCommandBuffers = &ctx.transfer_command_buffer;
+
+            _ = c.vkQueueSubmit(ctx.queue, 1, &submit_info, null);
+            _ = c.vkQueueWaitIdle(ctx.queue);
         }
     }
 }
@@ -2068,7 +2125,7 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
     }
 
     if (data_opt) |data| {
-        const staging_buffer = createVulkanBuffer(ctx, data.len, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+        const staging_buffer = createVulkanBuffer(ctx, data.len, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         defer {
             c.vkDestroyBuffer(ctx.device, staging_buffer.buffer, null);
             c.vkFreeMemory(ctx.device, staging_buffer.memory, null);
@@ -2236,7 +2293,7 @@ fn updateTexture(ctx_ptr: *anyopaque, handle: rhi.TextureHandle, data: []const u
 
     const tex = tex_opt orelse return;
 
-    const staging_buffer = createVulkanBuffer(ctx, data.len, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    const staging_buffer = createVulkanBuffer(ctx, data.len, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     defer {
         c.vkDestroyBuffer(ctx.device, staging_buffer.buffer, null);
         c.vkFreeMemory(ctx.device, staging_buffer.memory, null);
