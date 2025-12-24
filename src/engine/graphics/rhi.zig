@@ -225,6 +225,9 @@ pub const RHI = struct {
 
         // Clouds
         drawClouds: *const fn (ctx: *anyopaque, params: CloudParams) void,
+
+        // Debug rendering
+        drawDebugShadowMap: *const fn (ctx: *anyopaque, cascade_index: usize, depth_map_handle: TextureHandle) void,
     };
 
     pub fn init(self: RHI, allocator: Allocator) !void {
@@ -360,5 +363,9 @@ pub const RHI = struct {
 
     pub fn drawClouds(self: RHI, params: CloudParams) void {
         self.vtable.drawClouds(self.ptr, params);
+    }
+
+    pub fn drawDebugShadowMap(self: RHI, cascade_index: usize, depth_map_handle: TextureHandle) void {
+        self.vtable.drawDebugShadowMap(self.ptr, cascade_index, depth_map_handle);
     }
 };
