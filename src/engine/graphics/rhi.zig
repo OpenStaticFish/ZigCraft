@@ -195,9 +195,10 @@ pub const RHI = struct {
         endShadowPass: *const fn (ctx: *anyopaque) void,
 
         // Uniforms
-        updateGlobalUniforms: *const fn (ctx: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, cloud_params: CloudParams) void,
+        updateGlobalUniforms: *const fn (ctx: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void,
         updateShadowUniforms: *const fn (ctx: *anyopaque, params: ShadowParams) void,
         setModelMatrix: *const fn (ctx: *anyopaque, model: Mat4) void,
+        setTextureUniforms: *const fn (ctx: *anyopaque, texture_enabled: bool, shadow_map_handles: [3]TextureHandle) void,
 
         // Draw Calls
         draw: *const fn (ctx: *anyopaque, handle: BufferHandle, count: u32, mode: DrawMode) void,
@@ -286,8 +287,8 @@ pub const RHI = struct {
         self.vtable.endShadowPass(self.ptr);
     }
 
-    pub fn updateGlobalUniforms(self: RHI, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, cloud_params: CloudParams) void {
-        self.vtable.updateGlobalUniforms(self.ptr, view_proj, cam_pos, sun_dir, time, fog_color, fog_density, fog_enabled, sun_intensity, ambient, cloud_params);
+    pub fn updateGlobalUniforms(self: RHI, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void {
+        self.vtable.updateGlobalUniforms(self.ptr, view_proj, cam_pos, sun_dir, time, fog_color, fog_density, fog_enabled, sun_intensity, ambient, use_texture, cloud_params);
     }
 
     pub fn updateShadowUniforms(self: RHI, params: ShadowParams) void {
@@ -296,6 +297,10 @@ pub const RHI = struct {
 
     pub fn setModelMatrix(self: RHI, model: Mat4) void {
         self.vtable.setModelMatrix(self.ptr, model);
+    }
+
+    pub fn setTextureUniforms(self: RHI, texture_enabled: bool, shadow_map_handles: [3]TextureHandle) void {
+        self.vtable.setTextureUniforms(self.ptr, texture_enabled, shadow_map_handles);
     }
 
     pub fn draw(self: RHI, handle: BufferHandle, count: u32, mode: DrawMode) void {

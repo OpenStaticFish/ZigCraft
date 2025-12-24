@@ -504,7 +504,7 @@ fn endShadowPass(ctx_ptr: *anyopaque) void {
     _ = ctx_ptr;
 }
 
-fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, cloud_params: rhi.CloudParams) void {
+fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: rhi.CloudParams) void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.current_view_proj = view_proj;
 
@@ -523,6 +523,7 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
     setUniformVec3(program, "uFogColor", fog_color);
     setUniformFloat(program, "uFogDensity", fog_density);
     setUniformBool(program, "uFogEnabled", fog_enabled);
+    setUniformBool(program, "uUseTexture", use_texture);
 
     // Cloud shadow params
     setUniformFloat(program, "uCloudWindOffsetX", cloud_params.wind_offset_x);
@@ -549,6 +550,33 @@ fn setUniformFloat(program: c.GLuint, name: [:0]const u8, val: f32) void {
 fn setUniformBool(program: c.GLuint, name: [:0]const u8, val: bool) void {
     const loc = c.glGetUniformLocation().?(program, name);
     if (loc != -1) c.glUniform1i().?(loc, if (val) 1 else 0);
+}
+
+fn setTextureUniforms(ctx_ptr: *anyopaque, texture_enabled: bool, shadow_map_handles: [3]rhi.TextureHandle) void {
+    const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
+    _ = ctx;
+
+    var prog: c.GLint = 0;
+    c.glGetIntegerv(c.GL_CURRENT_PROGRAM, &prog);
+    if (prog == 0) return;
+    const program: c.GLuint = @intCast(prog);
+
+    setUniformInt(program, "uTexture", 0);
+    setUniformBool(program, "uUseTexture", texture_enabled);
+
+    const shadow_map_names = [_][:0]const u8{ "uShadowMap0", "uShadowMap1", "uShadowMap2" };
+    for (0..3) |i| {
+        const slot = @as(c.GLint, 1 + @as(c_int, @intCast(i)));
+        c.glActiveTexture().?(@as(c.GLenum, @intCast(@as(u32, @intCast(c.GL_TEXTURE0)) + @as(u32, @intCast(slot)))));
+        c.glBindTexture(c.GL_TEXTURE_2D, @intCast(shadow_map_handles[i]));
+        setUniformInt(program, shadow_map_names[i], slot);
+    }
+    c.glActiveTexture(c.GL_TEXTURE0);
+}
+
+fn setUniformInt(program: c.GLuint, name: [:0]const u8, val: c.GLint) void {
+    const loc = c.glGetUniformLocation().?(program, name);
+    if (loc != -1) c.glUniform1i().?(loc, val);
 }
 
 fn updateShadowUniforms(ctx_ptr: *anyopaque, params: rhi.ShadowParams) void {
@@ -936,6 +964,7 @@ const vtable = rhi.RHI.VTable{
     .updateGlobalUniforms = updateGlobalUniforms,
     .updateShadowUniforms = updateShadowUniforms,
     .setModelMatrix = setModelMatrix,
+    .setTextureUniforms = setTextureUniforms,
     .draw = draw,
     .drawSky = drawSky,
     .createTexture = createTexture,

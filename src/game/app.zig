@@ -340,19 +340,19 @@ pub const App = struct {
                     if (self.shader) |*s| {
                         s.use();
                         self.atlas.bind(0);
-                        s.setInt("uTexture", 0);
-                        s.setBool("uUseTexture", self.settings.textures_enabled);
                         if (self.shadow_map) |*sm| {
-                            const shadow_map_names = [_][:0]const u8{ "uShadowMap0", "uShadowMap1", "uShadowMap2" };
+                            var shadow_map_handles: [3]rhi.TextureHandle = undefined;
                             for (0..3) |i| {
-                                sm.depth_maps[i].bind(@intCast(1 + i));
-                                s.setInt(shadow_map_names[i], @intCast(1 + i));
+                                shadow_map_handles[i] = sm.depth_maps[i].handle;
                             }
+                            self.rhi.setTextureUniforms(self.settings.textures_enabled, shadow_map_handles);
                             self.rhi.updateShadowUniforms(.{
                                 .light_space_matrices = sm.light_space_matrices,
                                 .cascade_splits = sm.cascade_splits,
                                 .shadow_texel_sizes = sm.texel_sizes,
                             });
+                        } else {
+                            self.rhi.setTextureUniforms(self.settings.textures_enabled, [_]rhi.TextureHandle{0, 0, 0});
                         }
                         if (self.atmosphere) |atmo| {
                             const cp: rhi_pkg.CloudParams = if (self.clouds) |*cl| blk: {
@@ -366,7 +366,7 @@ pub const App = struct {
                                 };
                             } else .{};
 
-                            self.rhi.updateGlobalUniforms(view_proj_cull, self.camera.position, atmo.sun_dir, atmo.time_of_day, atmo.fog_color, atmo.fog_density, atmo.fog_enabled, atmo.sun_intensity, atmo.ambient_intensity, cp);
+                            self.rhi.updateGlobalUniforms(view_proj_cull, self.camera.position, atmo.sun_dir, atmo.time_of_day, atmo.fog_color, atmo.fog_density, atmo.fog_enabled, atmo.sun_intensity, atmo.ambient_intensity, self.settings.textures_enabled, cp);
                         }
                         active_world.render(view_proj_cull, self.camera.position);
                     } else if (self.is_vulkan) {
@@ -403,7 +403,7 @@ pub const App = struct {
                             });
                             for (0..ShadowMap.CASCADE_COUNT) |i| {
                                 self.rhi.beginShadowPass(@intCast(i));
-                                self.rhi.updateGlobalUniforms(cascades.light_space_matrices[i], self.camera.position, light_dir, time_val, fog_color, fog_density, false, 0.0, 0.0, .{});
+                                self.rhi.updateGlobalUniforms(cascades.light_space_matrices[i], self.camera.position, light_dir, time_val, fog_color, fog_density, false, 0.0, 0.0, false, .{});
                                 active_world.renderShadowPass(cascades.light_space_matrices[i], self.camera.position);
                                 self.rhi.endShadowPass();
                             }
@@ -425,6 +425,7 @@ pub const App = struct {
                         });
 
                         self.atlas.bind(0);
+                        self.rhi.setTextureUniforms(self.settings.textures_enabled, [_]rhi.TextureHandle{0, 0, 0});
                         const cp: rhi_pkg.CloudParams = if (self.clouds) |*cl| blk: {
                             const p = cl.getCloudShadowParams();
                             break :blk .{
@@ -435,7 +436,7 @@ pub const App = struct {
                                 .cloud_height = p.cloud_height,
                             };
                         } else .{};
-                        self.rhi.updateGlobalUniforms(view_proj_render, self.camera.position, sun_dir, time_val, fog_color, fog_density, fog_enabled, sun_intensity_val, ambient_val, cp);
+                        self.rhi.updateGlobalUniforms(view_proj_render, self.camera.position, sun_dir, time_val, fog_color, fog_density, fog_enabled, sun_intensity_val, ambient_val, self.settings.textures_enabled, cp);
                         active_world.render(view_proj_cull, self.camera.position);
                     }
 

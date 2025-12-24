@@ -2070,7 +2070,7 @@ fn waitIdle(ctx_ptr: *anyopaque) void {
     }
 }
 
-fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time_val: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, cloud_params: rhi.CloudParams) void {
+fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time_val: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: rhi.CloudParams) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
 
@@ -2091,7 +2091,7 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
         .fog_enabled = if (fog_enabled) 1.0 else 0.0,
         .sun_intensity = sun_intensity,
         .ambient = ambient,
-        .use_texture = if (ctx.textures_enabled) 1.0 else 0.0,
+        .use_texture = if (use_texture) 1.0 else 0.0,
         .cloud_wind_offset = .{ cloud_params.wind_offset_x, cloud_params.wind_offset_z },
         .cloud_scale = cloud_params.cloud_scale,
         .cloud_coverage = cloud_params.cloud_coverage,
@@ -2112,6 +2112,17 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
 fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.current_model = model;
+}
+
+fn setTextureUniforms(ctx_ptr: *anyopaque, texture_enabled: bool, shadow_map_handles: [3]rhi.TextureHandle) void {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.textures_enabled = texture_enabled;
+
+    for (0..3) |i| {
+        if (shadow_map_handles[i] != 0) {
+            ctx.shadow_image_views[i] = @ptrCast(@alignCast(shadow_map_handles[i]));
+        }
+    }
 }
 
 fn drawClouds(ctx_ptr: *anyopaque, params: rhi.CloudParams) void {
@@ -2873,6 +2884,7 @@ const vtable = rhi.RHI.VTable{
     .waitIdle = waitIdle,
     .updateGlobalUniforms = updateGlobalUniforms,
     .setModelMatrix = setModelMatrix,
+    .setTextureUniforms = setTextureUniforms,
     .draw = draw,
     .createTexture = createTexture,
     .destroyTexture = destroyTexture,
