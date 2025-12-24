@@ -232,12 +232,24 @@ pub const ChunkMesh = struct {
         }
     }
 
+    /// Upload pending mesh data to the GPU.
+    ///
+    /// ## Buffer Reuse Strategy
+    /// Buffers are reused when possible to avoid GPU sync points:
+    /// - If new data fits in existing buffer capacity, only the data is updated
+    /// - If capacity is exceeded, buffer is reallocated to next power-of-2 size
+    /// - Minimum allocation is 1KB to reduce small reallocations
+    ///
+    /// This approach balances memory usage with reallocation frequency.
+    /// A full ring buffer would be more efficient for frequently-changing meshes,
+    /// but chunk meshes change infrequently after initial generation.
     pub fn upload(self: *ChunkMesh, rhi: RHI) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         for (0..NUM_SUBCHUNKS) |si| {
             if (self.pending_solid[si]) |v| {
                 const bytes = std.mem.sliceAsBytes(v);
+                // Reuse buffer if capacity is sufficient; otherwise reallocate
                 if (bytes.len > self.subchunks[si].capacity_solid) {
                     if (self.subchunks[si].solid_handle != 0) {
                         rhi.destroyBuffer(self.subchunks[si].solid_handle);
