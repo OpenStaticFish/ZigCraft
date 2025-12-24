@@ -631,6 +631,12 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     }
 
     // 10. Uniform Buffers
+    // TODO(performance): These UBOs use HOST_VISIBLE|COHERENT memory for simplicity.
+    // For better GPU performance on discrete GPUs, consider:
+    // 1. Use DEVICE_LOCAL memory with staging buffer uploads
+    // 2. Implement a ring buffer for frame-based UBO updates
+    // 3. Use persistent mapping with explicit flushes for dynamic data
+    // Current approach works well on integrated GPUs where memory is shared.
     for (0..MAX_FRAMES_IN_FLIGHT) |ubo_i| {
         ctx.global_ubos[ubo_i] = createVulkanBuffer(ctx, @sizeOf(GlobalUniforms), c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         ctx.shadow_ubos[ubo_i] = createVulkanBuffer(ctx, @sizeOf(ShadowUniforms), c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
