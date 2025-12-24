@@ -27,6 +27,7 @@ const AppState = @import("state.zig").AppState;
 const Settings = @import("state.zig").Settings;
 const Menus = @import("menus.zig");
 const RenderSystem = @import("render_system.zig").RenderSystem;
+const MapController = @import("map_controller.zig").MapController;
 
 pub const App = struct {
     allocator: std.mem.Allocator,
@@ -51,14 +52,7 @@ pub const App = struct {
 
     world: ?*World,
     world_map: ?WorldMap,
-    show_map: bool,
-    map_needs_update: bool,
-    map_zoom: f32,
-    map_target_zoom: f32,
-    map_pos_x: f32,
-    map_pos_z: f32,
-    last_mouse_x: f32,
-    last_mouse_y: f32,
+    map_controller: MapController,
 
     pub fn init(allocator: std.mem.Allocator) !*App {
         var use_vulkan = false;
@@ -114,14 +108,7 @@ pub const App = struct {
             .seed_focused = false,
             .world = null,
             .world_map = null,
-            .show_map = false,
-            .map_needs_update = true,
-            .map_zoom = 4.0,
-            .map_target_zoom = 4.0,
-            .map_pos_x = 0.0,
-            .map_pos_z = 0.0,
-            .last_mouse_x = 0.0,
-            .last_mouse_y = 0.0,
+            .map_controller = .{},
         };
 
         return app;
@@ -183,8 +170,8 @@ pub const App = struct {
             const mouse_clicked = self.input.isMouseButtonPressed(.left);
 
             if (self.input.isKeyPressed(.escape)) {
-                if (self.show_map) {
-                    self.show_map = false;
+                if (self.map_controller.show_map) {
+                    self.map_controller.show_map = false;
                     if (self.app_state == .world) self.input.setMouseCapture(self.window_manager.window, true);
                 } else {
                     switch (self.app_state) {
@@ -227,74 +214,10 @@ pub const App = struct {
                     self.render_system.rhi.setVSync(self.settings.vsync);
                 }
                 if (self.input.isKeyPressed(.u)) self.debug_shadows = !self.debug_shadows;
-                if (self.input.isKeyPressed(.m)) {
-                    self.show_map = !self.show_map;
-                    log.log.info("Toggle map: show={}", .{self.show_map});
-                    if (self.show_map) {
-                        self.map_pos_x = self.camera.position.x;
-                        self.map_pos_z = self.camera.position.z;
-                        self.map_target_zoom = self.map_zoom;
-                        self.map_needs_update = true;
-                        self.input.setMouseCapture(self.window_manager.window, false);
-                    } else if (self.app_state == .world) self.input.setMouseCapture(self.window_manager.window, true);
-                }
 
-                if (self.show_map) {
-                    const dt = @min(self.time.delta_time, 0.033);
-                    // ... map input logic (omitted for brevity, same as before) ...
-                    // Wait, I need to keep this logic or extract it.
-                    // For now, I'll copy-paste the map input logic as it's coupled to App state.
-                    if (self.input.isKeyDown(.plus) or self.input.isKeyDown(.kp_plus)) {
-                        self.map_target_zoom /= @exp(1.2 * dt);
-                        self.map_needs_update = true;
-                    }
-                    if (self.input.isKeyDown(.minus) or self.input.isKeyDown(.kp_minus)) {
-                        self.map_target_zoom *= @exp(1.2 * dt);
-                        self.map_needs_update = true;
-                    }
-                    if (self.input.scroll_y != 0) {
-                        self.map_target_zoom *= @exp(-self.input.scroll_y * 0.12);
-                        self.map_needs_update = true;
-                    }
-                    self.map_target_zoom = std.math.clamp(self.map_target_zoom, 0.05, 128.0);
-                    const old_zoom = self.map_zoom;
-                    self.map_zoom = std.math.lerp(self.map_zoom, self.map_target_zoom, 20.0 * dt);
-                    if (@abs(self.map_zoom - old_zoom) > 0.001 * self.map_zoom) self.map_needs_update = true;
-                    if (self.input.isKeyPressed(.space)) {
-                        self.map_pos_x = self.camera.position.x;
-                        self.map_pos_z = self.camera.position.z;
-                        self.map_needs_update = true;
-                    }
-                    const map_ui_size: f32 = @min(screen_w, screen_h) * 0.8;
-                    const world_to_screen_ratio = if (self.world_map) |m| @as(f32, @floatFromInt(m.width)) / map_ui_size else 1.0;
-                    if (self.input.isMouseButtonPressed(.left)) {
-                        self.last_mouse_x = mouse_x;
-                        self.last_mouse_y = mouse_y;
-                    }
-                    if (self.input.isMouseButtonDown(.left)) {
-                        const drag_dx = mouse_x - self.last_mouse_x;
-                        const drag_dz = mouse_y - self.last_mouse_y;
-                        if (@abs(drag_dx) > 0.1 or @abs(drag_dz) > 0.1) {
-                            self.map_pos_x -= drag_dx * self.map_zoom * world_to_screen_ratio;
-                            self.map_pos_z -= drag_dz * self.map_zoom * world_to_screen_ratio;
-                            self.map_needs_update = true;
-                        }
-                        self.last_mouse_x = mouse_x;
-                        self.last_mouse_y = mouse_y;
-                    } else {
-                        const pan_kb_speed = 800.0 * self.map_zoom;
-                        var dx: f32 = 0;
-                        var dz: f32 = 0;
-                        if (self.input.isKeyDown(.w)) dz -= 1;
-                        if (self.input.isKeyDown(.s)) dz += 1;
-                        if (self.input.isKeyDown(.a)) dx -= 1;
-                        if (self.input.isKeyDown(.d)) dx += 1;
-                        if (dx != 0 or dz != 0) {
-                            self.map_pos_x += dx * pan_kb_speed * dt;
-                            self.map_pos_z += dz * pan_kb_speed * dt;
-                            self.map_needs_update = true;
-                        }
-                    }
+                self.map_controller.handleInput(&self.input, &self.camera, self.time.delta_time, self.window_manager.window);
+                if (self.world_map) |m| {
+                    self.map_controller.updateDrag(&self.input, screen_w, screen_h, m.width);
                 }
 
                 if (self.debug_shadows and self.input.isKeyPressed(.k)) self.debug_cascade_idx = (self.debug_cascade_idx + 1) % 3;
@@ -307,7 +230,7 @@ pub const App = struct {
                 };
 
                 if (in_world) {
-                    if (!self.show_map and !in_pause) {
+                    if (!self.map_controller.show_map and !in_pause) {
                         self.camera.update(&self.input, self.time.delta_time);
                     }
 
@@ -466,27 +389,9 @@ pub const App = struct {
                     }
                     if (self.ui) |*u| {
                         u.begin();
-                        if (self.show_map) if (self.world_map) |*m| {
-                            if (self.map_needs_update) {
-                                try m.update(&active_world.generator, self.map_pos_x, self.map_pos_z, self.map_zoom);
-                                self.map_needs_update = false;
-                            }
-                            const sz: f32 = @min(screen_w, screen_h) * 0.8;
-                            const mx = (screen_w - sz) * 0.5;
-                            const my = (screen_h - sz) * 0.5;
-                            u.drawRect(.{ .x = 0, .y = 0, .width = screen_w, .height = screen_h }, Color.rgba(0, 0, 0, 0.5));
-                            u.drawTexture(@intCast(m.texture.handle), .{ .x = mx, .y = my, .width = sz, .height = sz });
-                            u.drawRectOutline(.{ .x = mx, .y = my, .width = sz, .height = sz }, Color.white, 2.0);
-                            Font.drawTextCentered(u, "WORLD MAP", screen_w * 0.5, my - 40.0, 3.0, Color.white);
-                            const rx = (self.camera.position.x - self.map_pos_x) / (self.map_zoom * @as(f32, @floatFromInt(m.width)));
-                            const rz = (self.camera.position.z - self.map_pos_z) / (self.map_zoom * @as(f32, @floatFromInt(m.height)));
-                            const px = mx + (rx + 0.5) * sz;
-                            const pz = my + (rz + 0.5) * sz;
-                            if (px >= mx and px <= mx + sz and pz >= my and pz <= my + sz) {
-                                u.drawRect(.{ .x = px - 5, .y = pz - 1, .width = 10, .height = 2 }, Color.red);
-                                u.drawRect(.{ .x = px - 1, .y = pz - 5, .width = 2, .height = 10 }, Color.red);
-                            }
-                        };
+                        if (self.world_map) |*m| {
+                            try self.map_controller.draw(u, screen_w, screen_h, m, &active_world.generator, self.camera.position);
+                        }
                         u.drawRect(.{ .x = 10, .y = 10, .width = 80, .height = 30 }, Color.rgba(0, 0, 0, 0.7));
                         Font.drawNumber(u, @intFromFloat(self.time.fps), 15, 15, Color.white);
                         const stats = active_world.getStats();
