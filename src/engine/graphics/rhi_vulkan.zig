@@ -94,6 +94,11 @@ const TextureResource = struct {
     height: u32,
 };
 
+const ZombieBuffer = struct {
+    buffer: c.VkBuffer,
+    memory: c.VkDeviceMemory,
+};
+
 /// Core Vulkan context containing all renderer state.
 /// Owns Vulkan objects and manages their lifecycle.
 const VulkanContext = struct {
@@ -108,6 +113,8 @@ const VulkanContext = struct {
     command_buffers: [MAX_FRAMES_IN_FLIGHT]c.VkCommandBuffer,
     transfer_command_pool: c.VkCommandPool,
     transfer_command_buffer: c.VkCommandBuffer,
+
+    buffer_deletion_queue: [MAX_FRAMES_IN_FLIGHT]std.ArrayListUnmanaged(ZombieBuffer),
 
     // Sync
     image_available_semaphores: [MAX_FRAMES_IN_FLIGHT]c.VkSemaphore,
@@ -1347,6 +1354,10 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
         ctx.shadow_image_layouts[si] = c.VK_IMAGE_LAYOUT_UNDEFINED;
     }
 
+    for (0..MAX_FRAMES_IN_FLIGHT) |frame_i| {
+        ctx.buffer_deletion_queue[frame_i] = .empty;
+    }
+
     std.log.info("Vulkan initialized successfully!", .{});
 }
 
@@ -1437,6 +1448,14 @@ fn deinit(ctx_ptr: *anyopaque) void {
             c.vkDestroyImage(ctx.device, entry.value_ptr.image, null);
         }
         ctx.textures.deinit();
+
+        for (0..MAX_FRAMES_IN_FLIGHT) |frame_i| {
+            for (ctx.buffer_deletion_queue[frame_i].items) |zombie| {
+                if (zombie.buffer != null) c.vkDestroyBuffer(ctx.device, zombie.buffer, null);
+                if (zombie.memory != null) c.vkFreeMemory(ctx.device, zombie.memory, null);
+            }
+            ctx.buffer_deletion_queue[frame_i].deinit(ctx.allocator);
+        }
 
         c.vkDestroyDevice(ctx.device, null);
     }
@@ -1549,8 +1568,9 @@ fn destroyBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle) void {
     ctx.mutex.unlock();
 
     if (entry_opt) |entry| {
-        c.vkDestroyBuffer(ctx.device, entry.value.buffer, null);
-        c.vkFreeMemory(ctx.device, entry.value.memory, null);
+        ctx.buffer_deletion_queue[ctx.current_sync_frame].append(ctx.allocator, .{ .buffer = entry.value.buffer, .memory = entry.value.memory }) catch {
+            std.log.err("Failed to queue buffer deletion (OOM). Leaking buffer.", .{});
+        };
     }
 }
 
@@ -1761,6 +1781,13 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
     const acquire_semaphore = ctx.image_available_semaphores[ctx.current_sync_frame];
 
     _ = c.vkWaitForFences(ctx.device, 1, &fence, c.VK_TRUE, std.math.maxInt(u64));
+
+    // Process deletion queue for this frame
+    for (ctx.buffer_deletion_queue[ctx.current_sync_frame].items) |zombie| {
+        c.vkDestroyBuffer(ctx.device, zombie.buffer, null);
+        c.vkFreeMemory(ctx.device, zombie.memory, null);
+    }
+    ctx.buffer_deletion_queue[ctx.current_sync_frame].clearRetainingCapacity();
 
     var image_index: u32 = 0;
     const result = c.vkAcquireNextImageKHR(ctx.device, ctx.swapchain, 1000000000, acquire_semaphore, null, &image_index);
