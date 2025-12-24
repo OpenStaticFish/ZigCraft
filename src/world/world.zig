@@ -81,6 +81,7 @@ pub const World = struct {
     gen_pool: *WorkerPool,
     mesh_pool: *WorkerPool,
     upload_queue: std.ArrayListUnmanaged(*ChunkData),
+    visible_chunks: std.ArrayListUnmanaged(*ChunkData),
     next_job_token: u32,
     last_pc: ChunkPos,
     rhi: RHI,
@@ -107,6 +108,7 @@ pub const World = struct {
             .gen_pool = undefined,
             .mesh_pool = undefined,
             .upload_queue = .empty,
+            .visible_chunks = .empty,
             .next_job_token = 1,
             .last_pc = .{ .x = 9999, .z = 9999 },
             .rhi = rhi,
@@ -133,6 +135,7 @@ pub const World = struct {
         self.allocator.destroy(self.mesh_queue);
 
         self.upload_queue.deinit(self.allocator);
+        self.visible_chunks.deinit(self.allocator);
 
         var iter = self.chunks.iterator();
         while (iter.next()) |entry| {
@@ -443,26 +446,37 @@ pub const World = struct {
         self.last_render_stats = .{};
 
         self.chunks_mutex.lock();
-        var iter = self.chunks.iterator();
-        while (iter.next()) |entry| {
-            const key = entry.key_ptr.*;
-            const data = entry.value_ptr.*;
+        defer self.chunks_mutex.unlock();
 
-            if (data.chunk.state != .renderable) continue;
+        self.visible_chunks.clearRetainingCapacity();
 
-            self.last_render_stats.chunks_total += 1;
-            if (!frustum.intersectsChunkRelative(key.x, key.z, camera_pos.x, camera_pos.y, camera_pos.z)) {
-                self.last_render_stats.chunks_culled += 1;
-                continue;
+        const pc = worldToChunk(@intFromFloat(camera_pos.x), @intFromFloat(camera_pos.z));
+        var cz = pc.chunk_z - self.render_distance;
+        while (cz <= pc.chunk_z + self.render_distance) : (cz += 1) {
+            var cx = pc.chunk_x - self.render_distance;
+            while (cx <= pc.chunk_x + self.render_distance) : (cx += 1) {
+                if (!frustum.intersectsChunkRelative(cx, cz, camera_pos.x, camera_pos.y, camera_pos.z)) {
+                    continue;
+                }
+
+                if (self.chunks.get(.{ .x = cx, .z = cz })) |data| {
+                    if (data.chunk.state == .renderable) {
+                        self.visible_chunks.append(self.allocator, data) catch {};
+                    }
+                }
             }
+        }
 
+        self.last_render_stats.chunks_total = @intCast(self.chunks.count());
+
+        for (self.visible_chunks.items) |data| {
             self.last_render_stats.chunks_rendered += 1;
             for (data.mesh.subchunks) |s| {
                 self.last_render_stats.vertices_rendered += s.count_solid;
             }
 
-            const chunk_world_x: f32 = @floatFromInt(key.x * CHUNK_SIZE_X);
-            const chunk_world_z: f32 = @floatFromInt(key.z * CHUNK_SIZE_Z);
+            const chunk_world_x: f32 = @floatFromInt(data.chunk.chunk_x * CHUNK_SIZE_X);
+            const chunk_world_z: f32 = @floatFromInt(data.chunk.chunk_z * CHUNK_SIZE_Z);
             const rel_x = chunk_world_x - camera_pos.x;
             const rel_z = chunk_world_z - camera_pos.z;
             const rel_y = -camera_pos.y;
@@ -472,19 +486,13 @@ pub const World = struct {
             data.mesh.draw(self.rhi, .solid);
         }
 
-        iter = self.chunks.iterator();
-        while (iter.next()) |entry| {
-            const data = entry.value_ptr.*;
-            if (data.chunk.state != .renderable) continue;
-            const key = entry.key_ptr.*;
-            if (!frustum.intersectsChunkRelative(key.x, key.z, camera_pos.x, camera_pos.y, camera_pos.z)) continue;
-
+        for (self.visible_chunks.items) |data| {
             for (data.mesh.subchunks) |s| {
                 self.last_render_stats.vertices_rendered += s.count_fluid;
             }
 
-            const chunk_world_x: f32 = @floatFromInt(key.x * CHUNK_SIZE_X);
-            const chunk_world_z: f32 = @floatFromInt(key.z * CHUNK_SIZE_Z);
+            const chunk_world_x: f32 = @floatFromInt(data.chunk.chunk_x * CHUNK_SIZE_X);
+            const chunk_world_z: f32 = @floatFromInt(data.chunk.chunk_z * CHUNK_SIZE_Z);
             const rel_x = chunk_world_x - camera_pos.x;
             const rel_z = chunk_world_z - camera_pos.z;
             const rel_y = -camera_pos.y;
@@ -493,8 +501,6 @@ pub const World = struct {
             self.rhi.setModelMatrix(model);
             data.mesh.draw(self.rhi, .fluid);
         }
-
-        self.chunks_mutex.unlock();
     }
 
     pub fn renderShadowPass(self: *World, view_proj: Mat4, camera_pos: Vec3) void {

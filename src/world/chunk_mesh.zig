@@ -42,9 +42,11 @@ pub const NeighborChunks = struct {
 pub const SubChunkMesh = struct {
     solid_handle: BufferHandle = 0,
     count_solid: u32 = 0,
+    capacity_solid: u32 = 0,
 
     fluid_handle: BufferHandle = 0,
     count_fluid: u32 = 0,
+    capacity_fluid: u32 = 0,
 
     ready: bool = false,
 
@@ -74,8 +76,10 @@ pub const ChunkMesh = struct {
             self.subchunks[i] = .{
                 .solid_handle = 0,
                 .count_solid = 0,
+                .capacity_solid = 0,
                 .fluid_handle = 0,
                 .count_fluid = 0,
+                .capacity_fluid = 0,
                 .ready = false,
             };
         }
@@ -233,11 +237,16 @@ pub const ChunkMesh = struct {
         defer self.mutex.unlock();
         for (0..NUM_SUBCHUNKS) |si| {
             if (self.pending_solid[si]) |v| {
-                if (self.subchunks[si].solid_handle != 0) {
-                    rhi.destroyBuffer(self.subchunks[si].solid_handle);
-                }
                 const bytes = std.mem.sliceAsBytes(v);
-                self.subchunks[si].solid_handle = rhi.createBuffer(bytes.len, .vertex);
+                if (bytes.len > self.subchunks[si].capacity_solid) {
+                    if (self.subchunks[si].solid_handle != 0) {
+                        rhi.destroyBuffer(self.subchunks[si].solid_handle);
+                    }
+                    var new_cap = std.math.ceilPowerOfTwo(usize, bytes.len) catch bytes.len;
+                    if (new_cap < 1024) new_cap = 1024;
+                    self.subchunks[si].solid_handle = rhi.createBuffer(new_cap, .vertex);
+                    self.subchunks[si].capacity_solid = @intCast(new_cap);
+                }
                 rhi.uploadBuffer(self.subchunks[si].solid_handle, bytes);
 
                 self.subchunks[si].count_solid = @intCast(v.len);
@@ -246,11 +255,16 @@ pub const ChunkMesh = struct {
                 self.subchunks[si].ready = true;
             }
             if (self.pending_fluid[si]) |v| {
-                if (self.subchunks[si].fluid_handle != 0) {
-                    rhi.destroyBuffer(self.subchunks[si].fluid_handle);
-                }
                 const bytes = std.mem.sliceAsBytes(v);
-                self.subchunks[si].fluid_handle = rhi.createBuffer(bytes.len, .vertex);
+                if (bytes.len > self.subchunks[si].capacity_fluid) {
+                    if (self.subchunks[si].fluid_handle != 0) {
+                        rhi.destroyBuffer(self.subchunks[si].fluid_handle);
+                    }
+                    var new_cap = std.math.ceilPowerOfTwo(usize, bytes.len) catch bytes.len;
+                    if (new_cap < 1024) new_cap = 1024;
+                    self.subchunks[si].fluid_handle = rhi.createBuffer(new_cap, .vertex);
+                    self.subchunks[si].capacity_fluid = @intCast(new_cap);
+                }
                 rhi.uploadBuffer(self.subchunks[si].fluid_handle, bytes);
 
                 self.subchunks[si].count_fluid = @intCast(v.len);

@@ -47,6 +47,13 @@ const OpenGLContext = struct {
     current_view_proj: Mat4,
 };
 
+fn checkError(label: []const u8) void {
+    const err = c.glGetError();
+    if (err != c.GL_NO_ERROR) {
+        std.log.err("OpenGL Error in {s}: {}", .{ label, err });
+    }
+}
+
 // UI Shaders (embedded GLSL)
 const ui_vertex_shader =
     \\#version 330 core
@@ -333,6 +340,7 @@ fn createBuffer(ctx_ptr: *anyopaque, size: usize, usage: rhi.BufferUsage) rhi.Bu
     c.glEnableVertexAttribArray().?(6);
 
     c.glBindVertexArray().?(0);
+    checkError("createBuffer");
 
     if (ctx.free_indices.items.len > 0) {
         const new_len = ctx.free_indices.items.len - 1;
@@ -342,7 +350,8 @@ fn createBuffer(ctx_ptr: *anyopaque, size: usize, usage: rhi.BufferUsage) rhi.Bu
         ctx.buffers.items[idx] = .{ .vao = vao, .vbo = vbo };
         return @intCast(idx + 1);
     } else {
-        ctx.buffers.append(ctx.allocator, .{ .vao = vao, .vbo = vbo }) catch {
+        ctx.buffers.append(ctx.allocator, .{ .vao = vao, .vbo = vbo }) catch |err| {
+            std.log.err("OpenGL: Failed to allocate buffer handle: {}", .{err});
             c.glDeleteVertexArrays().?(1, &vao);
             c.glDeleteBuffers().?(1, &vbo);
             return rhi.InvalidBufferHandle;
@@ -367,6 +376,7 @@ fn uploadBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, data: []const u8)
             // For now, since we allocate with size in createBuffer, we use glBufferSubData.
             c.glBufferSubData().?(c.GL_ARRAY_BUFFER, 0, @intCast(data.len), data.ptr);
             c.glBindBuffer().?(c.GL_ARRAY_BUFFER, 0);
+            checkError("uploadBuffer");
         }
     }
 }
@@ -548,6 +558,7 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
             };
             c.glDrawArrays(gl_mode, 0, @intCast(count));
             c.glBindVertexArray().?(0);
+            checkError("draw");
         }
     }
 }
