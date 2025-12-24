@@ -29,7 +29,7 @@ pub const WindowManager = struct {
         }
 
         const window = c.SDL_CreateWindow(
-            "Zig Voxel Engine",
+            "ZigCraft",
             1280,
             720,
             @intCast(window_flags),

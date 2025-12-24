@@ -298,7 +298,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
 
     var app_info = std.mem.zeroes(c.VkApplicationInfo);
     app_info.sType = c.VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    app_info.pApplicationName = "Zig Voxel Engine";
+    app_info.pApplicationName = "ZigCraft";
     app_info.apiVersion = c.VK_API_VERSION_1_0;
 
     // Enable validation layers in debug builds for better error messages

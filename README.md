@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/screenshots/hero.png" alt="Zig Voxel Engine Hero" width="100%" />
+  <img src="assets/screenshots/hero.png" alt="ZigCraft Hero" width="100%" />
 
   # ⚡ ZigCraft ⚡
 

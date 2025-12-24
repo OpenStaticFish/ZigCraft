@@ -1,4 +1,4 @@
-//! Comprehensive unit tests for the Zig Voxel Engine.
+//! Comprehensive unit tests for ZigCraft.
 //!
 //! Coverage includes:
 //! - Math: Vec3, Mat4, AABB, Frustum, Plane

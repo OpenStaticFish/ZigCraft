@@ -129,7 +129,7 @@ pub const App = struct {
 
     pub fn run(self: *App) !void {
         self.render_system.rhi.setViewport(1280, 720);
-        log.log.info("=== Zig Voxel Engine ===", .{});
+        log.log.info("=== ZigCraft ===", .{});
 
         while (!self.input.should_quit) {
             // Safe deferred world management OUTSIDE the frame window
