@@ -20,7 +20,7 @@ pub const MapController = struct {
     last_mouse_x: f32 = 0.0,
     last_mouse_y: f32 = 0.0,
 
-    pub fn handleInput(self: *MapController, input: *const Input, camera: *const Camera, time_delta: f32, window: *c.SDL_Window) void {
+    pub fn handleInput(self: *MapController, input: *Input, camera: *const Camera, time_delta: f32, window: *c.SDL_Window) void {
         if (input.isKeyPressed(.m)) {
             self.show_map = !self.show_map;
             log.log.info("Toggle map: show={}", .{self.show_map});

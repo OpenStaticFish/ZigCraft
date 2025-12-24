@@ -150,8 +150,8 @@ pub const App = struct {
                     continue;
                 };
                 if (self.world_map == null) self.world_map = WorldMap.init(self.render_system.rhi, 256, 256);
-                self.show_map = false;
-                self.map_needs_update = true;
+                self.map_controller.show_map = false;
+                self.map_controller.map_needs_update = true;
                 self.camera = Camera.init(.{ .position = Vec3.init(8, 100, 8), .pitch = -0.3, .move_speed = 50.0 });
             }
 
