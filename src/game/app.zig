@@ -345,7 +345,7 @@ pub const App = struct {
             if (in_world or in_pause) {
                 if (self.world) |active_world| {
                     const aspect = screen_w / screen_h;
-                    const view_proj_cull = self.camera.getViewProjectionMatrixOriginCentered();
+                    const view_proj_cull = self.camera.getViewProjectionMatrixOriginCentered(aspect);
                     const view_proj_render = if (self.is_vulkan)
                         Mat4.perspectiveReverseZ(self.camera.fov, aspect, self.camera.near, self.camera.far).multiply(self.camera.getViewMatrixOriginCentered())
                     else
