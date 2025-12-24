@@ -571,7 +571,7 @@ fn setTextureUniforms(ctx_ptr: *anyopaque, texture_enabled: bool, shadow_map_han
         c.glBindTexture(c.GL_TEXTURE_2D, @intCast(shadow_map_handles[i]));
         setUniformInt(program, shadow_map_names[i], slot);
     }
-    c.glActiveTexture(c.GL_TEXTURE0);
+    c.glActiveTexture().?(c.GL_TEXTURE0);
 }
 
 fn setUniformInt(program: c.GLuint, name: [:0]const u8, val: c.GLint) void {

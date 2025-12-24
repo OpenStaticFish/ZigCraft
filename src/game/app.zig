@@ -341,7 +341,7 @@ pub const App = struct {
                         s.use();
                         self.atlas.bind(0);
                         if (self.shadow_map) |*sm| {
-                            var shadow_map_handles: [3]rhi.TextureHandle = undefined;
+                            var shadow_map_handles: [3]rhi_pkg.TextureHandle = undefined;
                             for (0..3) |i| {
                                 shadow_map_handles[i] = sm.depth_maps[i].handle;
                             }
@@ -352,7 +352,7 @@ pub const App = struct {
                                 .shadow_texel_sizes = sm.texel_sizes,
                             });
                         } else {
-                            self.rhi.setTextureUniforms(self.settings.textures_enabled, [_]rhi.TextureHandle{0, 0, 0});
+                            self.rhi.setTextureUniforms(self.settings.textures_enabled, [_]rhi_pkg.TextureHandle{ 0, 0, 0 });
                         }
                         if (self.atmosphere) |atmo| {
                             const cp: rhi_pkg.CloudParams = if (self.clouds) |*cl| blk: {
@@ -425,7 +425,7 @@ pub const App = struct {
                         });
 
                         self.atlas.bind(0);
-                        self.rhi.setTextureUniforms(self.settings.textures_enabled, [_]rhi.TextureHandle{0, 0, 0});
+                        self.rhi.setTextureUniforms(self.settings.textures_enabled, [_]rhi_pkg.TextureHandle{ 0, 0, 0 });
                         const cp: rhi_pkg.CloudParams = if (self.clouds) |*cl| blk: {
                             const p = cl.getCloudShadowParams();
                             break :blk .{

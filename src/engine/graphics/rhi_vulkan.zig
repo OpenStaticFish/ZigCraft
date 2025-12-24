@@ -2120,7 +2120,9 @@ fn setTextureUniforms(ctx_ptr: *anyopaque, texture_enabled: bool, shadow_map_han
 
     for (0..3) |i| {
         if (shadow_map_handles[i] != 0) {
-            ctx.shadow_image_views[i] = @ptrCast(@alignCast(shadow_map_handles[i]));
+            if (ctx.textures.get(shadow_map_handles[i])) |tex| {
+                ctx.shadow_image_views[i] = tex.view;
+            }
         }
     }
 }
