@@ -363,11 +363,11 @@ pub const App = struct {
                                 var buf: [64]u8 = undefined;
                                 s.setInt(std.fmt.bufPrintZ(&buf, "uShadowMap{}", .{i}) catch "uShadowMap0", @intCast(1 + i));
                             }
-                            const cascades = ShadowMap.computeCascades(self.settings.shadow_resolution, self.camera.fov, aspect, 0.1, self.settings.shadow_distance, if (self.render_system.atmosphere) |a| a.sun_dir else Vec3.init(0, 1, 0), self.camera.getViewMatrixOriginCentered(), false);
+                            // Reuse cascades computed during update()
                             self.render_system.rhi.updateShadowUniforms(.{
-                                .light_space_matrices = cascades.light_space_matrices,
-                                .cascade_splits = cascades.cascade_splits,
-                                .shadow_texel_sizes = cascades.texel_sizes,
+                                .light_space_matrices = sm.light_space_matrices,
+                                .cascade_splits = sm.cascade_splits,
+                                .shadow_texel_sizes = sm.texel_sizes,
                             });
                         }
                         if (self.render_system.atmosphere) |atmo| {
@@ -455,7 +455,7 @@ pub const App = struct {
                         active_world.render(view_proj_cull, self.camera.position);
                     }
                     if (self.render_system.clouds) |*cl| if (self.render_system.atmosphere) |atmo| if (!self.render_system.is_vulkan) cl.render(self.camera.position, &view_proj_cull.data, atmo.sun_dir, atmo.sun_intensity, atmo.fog_color, atmo.fog_density);
-                    if (self.debug_shadows and self.render_system.debug_shader != null and self.render_system.shadow_map != null) {
+                    if (!self.render_system.is_vulkan and self.debug_shadows and self.render_system.debug_shader != null and self.render_system.shadow_map != null) {
                         self.render_system.debug_shader.?.use();
                         c.glActiveTexture().?(c.GL_TEXTURE0);
                         c.glBindTexture(c.GL_TEXTURE_2D, @intCast(self.render_system.shadow_map.?.depth_maps[self.debug_cascade_idx].handle));
