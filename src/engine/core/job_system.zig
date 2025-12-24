@@ -107,7 +107,7 @@ pub const JobQueue = struct {
             temp.append(self.allocator, updated_job) catch {
                 // On allocation failure, job is dropped. This is acceptable as the chunk
                 // will be re-queued on next update cycle when player position changes.
-                log.log.debug("Job queue: dropped job during priority update (allocation failed)", .{});
+                log.log.warn("Job queue: dropped job during priority update (allocation failed)", .{});
                 continue;
             };
         }
@@ -116,7 +116,7 @@ pub const JobQueue = struct {
         for (temp.items) |job| {
             self.jobs.add(job) catch {
                 // Priority queue full or allocation failed - job dropped, will be re-queued
-                log.log.debug("Job queue: failed to re-add job after priority update", .{});
+                log.log.warn("Job queue: failed to re-add job after priority update", .{});
                 continue;
             };
         }

@@ -129,10 +129,10 @@ pub const TextureAtlas = struct {
         };
     }
 
-    pub fn init(allocator: std.mem.Allocator, rhi_instance: rhi.RHI) TextureAtlas {
+    pub fn init(allocator: std.mem.Allocator, rhi_instance: rhi.RHI) !TextureAtlas {
         // Allocate pixel data for the atlas (RGBA)
         const pixel_count = ATLAS_SIZE * ATLAS_SIZE * 4;
-        var pixels = allocator.alloc(u8, pixel_count) catch @panic("Failed to allocate atlas");
+        var pixels = try allocator.alloc(u8, pixel_count);
         defer allocator.free(pixels);
 
         // Clear to magenta (missing texture indicator)

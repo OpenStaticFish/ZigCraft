@@ -77,7 +77,7 @@ pub const RenderSystem = struct {
             c.glVertexAttribPointer().?(1, 2, c.GL_FLOAT, c.GL_FALSE, 4 * @sizeOf(f32), @ptrFromInt(2 * @sizeOf(f32)));
         }
 
-        const atlas = TextureAtlas.init(allocator, rhi);
+        const atlas = try TextureAtlas.init(allocator, rhi);
         const atmosphere = if (actual_is_vulkan) Atmosphere.initNoGL() else Atmosphere.init();
         const clouds = if (actual_is_vulkan) Clouds.initNoGL() else try Clouds.init();
         const shadow_map = if (!actual_is_vulkan) blk: {

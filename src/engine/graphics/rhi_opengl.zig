@@ -342,7 +342,8 @@ fn createBuffer(ctx_ptr: *anyopaque, size: usize, usage: rhi.BufferUsage) rhi.Bu
         ctx.buffers.items[idx] = .{ .vao = vao, .vbo = vbo };
         return @intCast(idx + 1);
     } else {
-        ctx.buffers.append(ctx.allocator, .{ .vao = vao, .vbo = vbo }) catch {
+        ctx.buffers.append(ctx.allocator, .{ .vao = vao, .vbo = vbo }) catch |err| {
+            std.log.err("OpenGL: Failed to allocate buffer handle: {}", .{err});
             c.glDeleteVertexArrays().?(1, &vao);
             c.glDeleteBuffers().?(1, &vbo);
             return rhi.InvalidBufferHandle;
