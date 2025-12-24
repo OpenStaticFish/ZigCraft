@@ -1,0 +1,37 @@
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: cachix/install-nix-action@v27
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+        extra_nix_config: |
+          experimental-features = nix-command flakes
+        
+    - name: Build
+      run: nix build -L
+      
+    - name: Prepare Artifact
+      run: |
+        mkdir -p dist
+        # Copy binary (resolving symlink from nix build)
+        cp -L result/bin/zig-triangle dist/zig-voxel-engine-linux
+        
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: zig-voxel-engine-${{ matrix.os }}
+        path: dist/

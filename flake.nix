@@ -43,12 +43,15 @@
           pkgs.vulkan-validation-layers
         ];
 
+        # Disable hardening to fix "__builtin_va_arg_pack" error during C import
+        hardeningDisable = [ "all" ];
+
         dontConfigure = true;
         dontBuild = true;
 
         installPhase = ''
           export ZIG_GLOBAL_CACHE_DIR=$TMPDIR/zig-cache
-          zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu --prefix $out
+          zig build -Doptimize=Debug -Dtarget=x86_64-linux-gnu --prefix $out
         '';
 
         postFixup = ''
