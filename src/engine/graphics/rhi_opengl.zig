@@ -765,8 +765,6 @@ fn setViewport(ctx_ptr: *anyopaque, width: u32, height: u32) void {
 
 fn setWireframe(ctx_ptr: *anyopaque, enabled: bool) void {
     _ = ctx_ptr;
-    // OpenGL wireframe is handled via glPolygonMode in renderer.zig
-    // This is a no-op here since the old renderer handles it directly
     if (enabled) {
         c.glPolygonMode(c.GL_FRONT_AND_BACK, c.GL_LINE);
     } else {
