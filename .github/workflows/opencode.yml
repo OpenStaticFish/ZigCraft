@@ -26,8 +26,11 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@v16
 
-      - name: FlakeHub Cache
-        uses: DeterminateSystems/flakehub-cache-action@v9
+      - name: Cache Nix Store
+        uses: nix-community/cache-nix-action@v6
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
 
       - name: Setup Dev Environment
         run: |
