@@ -31,6 +31,9 @@ jobs:
 
       - name: Setup Dev Environment
         run: |
+          # Create a profile to prevent GC of the devShell environment
+          nix develop --profile ./dev-profile --command true
+
           nix develop --command bash -c '
             # Add Nix store paths to GITHUB_PATH
             echo "$PATH" | tr ":" "\n" | grep "^/nix/store" >> "$GITHUB_PATH"
