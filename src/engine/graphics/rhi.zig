@@ -181,6 +181,15 @@ pub const RHI = struct {
         uploadBuffer: *const fn (ctx: *anyopaque, handle: BufferHandle, data: []const u8) void,
         destroyBuffer: *const fn (ctx: *anyopaque, handle: BufferHandle) void,
 
+        // Shader Management
+        createShader: *const fn (ctx: *anyopaque, vertex_src: [*c]const u8, fragment_src: [*c]const u8) RhiError!ShaderHandle,
+        destroyShader: *const fn (ctx: *anyopaque, handle: ShaderHandle) void,
+        bindShader: *const fn (ctx: *anyopaque, handle: ShaderHandle) void,
+        shaderSetMat4: *const fn (ctx: *anyopaque, handle: ShaderHandle, name: [*c]const u8, matrix: *const [4][4]f32) void,
+        shaderSetVec3: *const fn (ctx: *anyopaque, handle: ShaderHandle, name: [*c]const u8, x: f32, y: f32, z: f32) void,
+        shaderSetFloat: *const fn (ctx: *anyopaque, handle: ShaderHandle, name: [*c]const u8, value: f32) void,
+        shaderSetInt: *const fn (ctx: *anyopaque, handle: ShaderHandle, name: [*c]const u8, value: i32) void,
+
         // Command Recording
         beginFrame: *const fn (ctx: *anyopaque) void,
         abortFrame: *const fn (ctx: *anyopaque) void,
@@ -249,6 +258,35 @@ pub const RHI = struct {
 
     pub fn destroyBuffer(self: RHI, handle: BufferHandle) void {
         self.vtable.destroyBuffer(self.ptr, handle);
+    }
+
+    // Shader Management
+    pub fn createShader(self: RHI, vertex_src: [*c]const u8, fragment_src: [*c]const u8) RhiError!ShaderHandle {
+        return self.vtable.createShader(self.ptr, vertex_src, fragment_src);
+    }
+
+    pub fn destroyShader(self: RHI, handle: ShaderHandle) void {
+        self.vtable.destroyShader(self.ptr, handle);
+    }
+
+    pub fn bindShader(self: RHI, handle: ShaderHandle) void {
+        self.vtable.bindShader(self.ptr, handle);
+    }
+
+    pub fn shaderSetMat4(self: RHI, handle: ShaderHandle, name: [*c]const u8, matrix: *const [4][4]f32) void {
+        self.vtable.shaderSetMat4(self.ptr, handle, name, matrix);
+    }
+
+    pub fn shaderSetVec3(self: RHI, handle: ShaderHandle, name: [*c]const u8, x: f32, y: f32, z: f32) void {
+        self.vtable.shaderSetVec3(self.ptr, handle, name, x, y, z);
+    }
+
+    pub fn shaderSetFloat(self: RHI, handle: ShaderHandle, name: [*c]const u8, value: f32) void {
+        self.vtable.shaderSetFloat(self.ptr, handle, name, value);
+    }
+
+    pub fn shaderSetInt(self: RHI, handle: ShaderHandle, name: [*c]const u8, value: i32) void {
+        self.vtable.shaderSetInt(self.ptr, handle, name, value);
     }
 
     pub fn beginFrame(self: RHI) void {

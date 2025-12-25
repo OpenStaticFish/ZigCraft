@@ -408,12 +408,12 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     ctx.debug_shadow_shader = try Shader.initSimple(debug_shadow_vertex_shader, debug_shadow_fragment_shader);
 
     const debug_quad_vertices = [_]f32{
-        -1.0,  1.0, 0.0, 1.0,
+        -1.0, 1.0,  0.0, 1.0,
         -1.0, -1.0, 0.0, 0.0,
-         1.0, -1.0, 1.0, 0.0,
-        -1.0,  1.0, 0.0, 1.0,
-         1.0, -1.0, 1.0, 0.0,
-         1.0,  1.0, 1.0, 1.0,
+        1.0,  -1.0, 1.0, 0.0,
+        -1.0, 1.0,  0.0, 1.0,
+        1.0,  -1.0, 1.0, 0.0,
+        1.0,  1.0,  1.0, 1.0,
     };
 
     c.glGenVertexArrays().?(1, &ctx.debug_shadow_vao);
@@ -675,6 +675,103 @@ fn setUniformFloat(program: c.GLuint, name: [:0]const u8, val: f32) void {
 fn setUniformBool(program: c.GLuint, name: [:0]const u8, val: bool) void {
     const loc = c.glGetUniformLocation().?(program, name);
     if (loc != -1) c.glUniform1i().?(loc, if (val) 1 else 0);
+}
+
+fn compileShaderGL(shader_type: c.GLenum, source: [*c]const u8) Shader.Error!c.GLuint {
+    const shader = c.glCreateShader().?(shader_type);
+    c.glShaderSource().?(shader, 1, &source, null);
+    c.glCompileShader().?(shader);
+
+    var success: c.GLint = undefined;
+    c.glGetShaderiv().?(shader, c.GL_COMPILE_STATUS, &success);
+    if (success == 0) {
+        var info_log: [512]u8 = undefined;
+        var length: c.GLsizei = undefined;
+        c.glGetShaderInfoLog().?(shader, 512, &length, &info_log);
+        std.log.err("Shader compile error: {s}", .{info_log[0..@intCast(length)]});
+        c.glDeleteShader().?(shader);
+        return if (shader_type == c.GL_VERTEX_SHADER) Shader.Error.VertexCompileFailed else Shader.Error.FragmentCompileFailed;
+    }
+
+    return shader;
+}
+
+fn createShaderGL(vertex_src: [*c]const u8, fragment_src: [*c]const u8) Shader.Error!c.GLuint {
+    const vert = try compileShaderGL(c.GL_VERTEX_SHADER, vertex_src);
+    defer c.glDeleteShader().?(vert);
+
+    const frag = try compileShaderGL(c.GL_FRAGMENT_SHADER, fragment_src);
+    defer c.glDeleteShader().?(frag);
+
+    const program: c.GLuint = c.glCreateProgram().?();
+    c.glAttachShader().?(program, vert);
+    c.glAttachShader().?(program, frag);
+    c.glLinkProgram().?(program);
+
+    var success: c.GLint = undefined;
+    c.glGetProgramiv().?(program, c.GL_LINK_STATUS, &success);
+    if (success == 0) {
+        var info_log: [512]u8 = undefined;
+        var length: c.GLsizei = undefined;
+        c.glGetProgramInfoLog().?(program, 512, &length, &info_log);
+        std.log.err("Shader link failed: {s}", .{info_log[0..@intCast(length)]});
+        c.glDeleteProgram().?(program);
+        return Shader.Error.LinkFailed;
+    }
+
+    return program;
+}
+
+fn createShader(ctx_ptr: *anyopaque, vertex_src: [*c]const u8, fragment_src: [*c]const u8) rhi.RhiError!rhi.ShaderHandle {
+    _ = ctx_ptr;
+    const program = createShaderGL(vertex_src, fragment_src) catch {
+        return error.VulkanError;
+    };
+    return @intCast(program);
+}
+
+fn destroyShader(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle) void {
+    _ = ctx_ptr;
+    if (handle != 0) {
+        c.glDeleteProgram().?(@intCast(handle));
+    }
+}
+
+fn bindShader(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle) void {
+    _ = ctx_ptr;
+    if (handle != 0) {
+        c.glUseProgram().?(@intCast(handle));
+    } else {
+        c.glUseProgram().?(0);
+    }
+}
+
+fn shaderSetMat4(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle, name: [*c]const u8, matrix: *const [4][4]f32) void {
+    _ = ctx_ptr;
+    const program = @as(c.GLuint, @intCast(handle));
+    const loc = c.glGetUniformLocation().?(program, name);
+    if (loc != -1) c.glUniformMatrix4fv().?(loc, 1, c.GL_FALSE, @ptrCast(matrix));
+}
+
+fn shaderSetVec3(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle, name: [*c]const u8, x: f32, y: f32, z: f32) void {
+    _ = ctx_ptr;
+    const program = @as(c.GLuint, @intCast(handle));
+    const loc = c.glGetUniformLocation().?(program, name);
+    if (loc != -1) c.glUniform3f().?(loc, x, y, z);
+}
+
+fn shaderSetFloat(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle, name: [*c]const u8, value: f32) void {
+    _ = ctx_ptr;
+    const program = @as(c.GLuint, @intCast(handle));
+    const loc = c.glGetUniformLocation().?(program, name);
+    if (loc != -1) c.glUniform1f().?(loc, value);
+}
+
+fn shaderSetInt(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle, name: [*c]const u8, value: i32) void {
+    _ = ctx_ptr;
+    const program = @as(c.GLuint, @intCast(handle));
+    const loc = c.glGetUniformLocation().?(program, name);
+    if (loc != -1) c.glUniform1i().?(loc, value);
 }
 
 fn setTextureUniforms(ctx_ptr: *anyopaque, texture_enabled: bool, shadow_map_handles: [3]rhi.TextureHandle) void {
@@ -1102,6 +1199,13 @@ const vtable = rhi.RHI.VTable{
     .createBuffer = createBuffer,
     .uploadBuffer = uploadBuffer,
     .destroyBuffer = destroyBuffer,
+    .createShader = createShader,
+    .destroyShader = destroyShader,
+    .bindShader = bindShader,
+    .shaderSetMat4 = shaderSetMat4,
+    .shaderSetVec3 = shaderSetVec3,
+    .shaderSetFloat = shaderSetFloat,
+    .shaderSetInt = shaderSetInt,
     .beginFrame = beginFrame,
     .abortFrame = abortFrame,
     .setClearColor = setClearColor,
