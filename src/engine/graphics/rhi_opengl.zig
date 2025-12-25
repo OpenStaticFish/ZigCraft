@@ -43,6 +43,13 @@ const OpenGLContext = struct {
     sky_vao: c.GLuint,
     sky_vbo: c.GLuint,
 
+    // Cloud rendering state
+    cloud_shader: ?Shader,
+    cloud_vao: c.GLuint,
+    cloud_vbo: c.GLuint,
+    cloud_ebo: c.GLuint,
+    cloud_mesh_size: f32,
+
     // Debug shadow map rendering state
     debug_shadow_shader: ?Shader,
     debug_shadow_vao: c.GLuint,
@@ -237,6 +244,93 @@ const debug_shadow_fragment_shader =
     \\}
 ;
 
+// Cloud shaders (2D layered clouds)
+const cloud_vertex_shader =
+    \\#version 330 core
+    \\layout (location = 0) in vec2 aPos;
+    \\out vec3 vWorldPos;
+    \\out float vDistance;
+    \\uniform vec3 uCameraPos;
+    \\uniform float uCloudHeight;
+    \\uniform mat4 uViewProj;
+    \\void main() {
+    \\    vec3 relPos = vec3(
+    \\        aPos.x,
+    \\        uCloudHeight - uCameraPos.y,
+    \\        aPos.y
+    \\    );
+    \\    vWorldPos = vec3(aPos.x + uCameraPos.x, uCloudHeight, aPos.y + uCameraPos.z);
+    \\    vDistance = length(relPos);
+    \\    gl_Position = uViewProj * vec4(relPos, 1.0);
+    \\}
+;
+
+const cloud_fragment_shader =
+    \\#version 330 core
+    \\in vec3 vWorldPos;
+    \\in float vDistance;
+    \\out vec4 FragColor;
+    \\uniform vec3 uCameraPos;
+    \\uniform float uCloudHeight;
+    \\uniform float uCloudCoverage;
+    \\uniform float uCloudScale;
+    \\uniform float uWindOffsetX;
+    \\uniform float uWindOffsetZ;
+    \\uniform vec3 uSunDir;
+    \\uniform float uSunIntensity;
+    \\uniform vec3 uBaseColor;
+    \\uniform vec3 uFogColor;
+    \\uniform float uFogDensity;
+    \\float hash(vec2 p) {
+    \\    p = fract(p * vec2(234.34, 435.345));
+    \\    p += dot(p, p + 34.23);
+    \\    return fract(p.x * p.y);
+    \\}
+    \\float noise(vec2 p) {
+    \\    vec2 i = floor(p);
+    \\    vec2 f = fract(p);
+    \\    float a = hash(i);
+    \\    float b = hash(i + vec2(1.0, 0.0));
+    \\    float c = hash(i + vec2(0.0, 1.0));
+    \\    float d = hash(i + vec2(1.0, 1.0));
+    \\    vec2 u = f * f * (3.0 - 2.0 * f);
+    \\    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+    \\}
+    \\float fbm(vec2 p, int octaves) {
+    \\    float value = 0.0;
+    \\    float amplitude = 0.5;
+    \\    float frequency = 1.0;
+    \\    for (int i = 0; i < octaves; i++) {
+    \\        value += amplitude * noise(p * frequency);
+    \\        amplitude *= 0.5;
+    \\        frequency *= 2.0;
+    \\    }
+    \\    return value;
+    \\}
+    \\void main() {
+    \\    float cloudBlockSize = 12.0;
+    \\    vec2 worldXZ = vWorldPos.xz + vec2(uWindOffsetX, uWindOffsetZ);
+    \\    vec2 pixelPos = floor(worldXZ / cloudBlockSize) * cloudBlockSize;
+    \\    vec2 samplePos = pixelPos * uCloudScale;
+    \\    float cloudValue = fbm(samplePos, 3);
+    \\    float threshold = 1.0 - uCloudCoverage;
+    \\    if (cloudValue < threshold) discard;
+    \\    vec3 nightTint = vec3(0.1, 0.12, 0.2);
+    \\    vec3 dayColor = uBaseColor;
+    \\    vec3 cloudColor = mix(nightTint, dayColor, uSunIntensity);
+    \\    float lightFactor = clamp(uSunDir.y, 0.0, 1.0);
+    \\    cloudColor *= (0.7 + 0.3 * lightFactor);
+    \\    float fogFactor = 1.0 - exp(-vDistance * uFogDensity * 0.4);
+    \\    cloudColor = mix(cloudColor, uFogColor, fogFactor);
+    \\    float alpha = 1.0 * (1.0 - fogFactor * 0.8);
+    \\    float altitudeDiff = uCameraPos.y - uCloudHeight;
+    \\    if (altitudeDiff > 0.0) {
+    \\        alpha *= 1.0 - smoothstep(10.0, 400.0, altitudeDiff);
+    \\    }
+    \\    FragColor = vec4(cloudColor, alpha);
+    \\}
+;
+
 fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.allocator = allocator;
@@ -281,6 +375,31 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     c.glBindVertexArray().?(ctx.sky_vao);
     c.glBindBuffer().?(c.GL_ARRAY_BUFFER, ctx.sky_vbo);
     c.glBufferData().?(c.GL_ARRAY_BUFFER, @sizeOf(@TypeOf(sky_vertices)), &sky_vertices, c.GL_STATIC_DRAW);
+    c.glVertexAttribPointer().?(0, 2, c.GL_FLOAT, c.GL_FALSE, 2 * @sizeOf(f32), null);
+    c.glEnableVertexAttribArray().?(0);
+    c.glBindVertexArray().?(0);
+
+    // Initialize cloud shader and quad
+    ctx.cloud_shader = try Shader.initSimple(cloud_vertex_shader, cloud_fragment_shader);
+    ctx.cloud_mesh_size = 10000.0;
+
+    const cloud_vertices = [_]f32{
+        -ctx.cloud_mesh_size, -ctx.cloud_mesh_size,
+        ctx.cloud_mesh_size,  -ctx.cloud_mesh_size,
+        ctx.cloud_mesh_size,  ctx.cloud_mesh_size,
+        -ctx.cloud_mesh_size, ctx.cloud_mesh_size,
+    };
+
+    const cloud_indices = [_]u16{ 0, 1, 2, 0, 2, 3 };
+
+    c.glGenVertexArrays().?(1, &ctx.cloud_vao);
+    c.glGenBuffers().?(1, &ctx.cloud_vbo);
+    c.glGenBuffers().?(1, &ctx.cloud_ebo);
+    c.glBindVertexArray().?(ctx.cloud_vao);
+    c.glBindBuffer().?(c.GL_ARRAY_BUFFER, ctx.cloud_vbo);
+    c.glBufferData().?(c.GL_ARRAY_BUFFER, @sizeOf(@TypeOf(cloud_vertices)), &cloud_vertices, c.GL_STATIC_DRAW);
+    c.glBindBuffer().?(c.GL_ELEMENT_ARRAY_BUFFER, ctx.cloud_ebo);
+    c.glBufferData().?(c.GL_ELEMENT_ARRAY_BUFFER, @sizeOf(@TypeOf(cloud_indices)), &cloud_indices, c.GL_STATIC_DRAW);
     c.glVertexAttribPointer().?(0, 2, c.GL_FLOAT, c.GL_FALSE, 2 * @sizeOf(f32), null);
     c.glEnableVertexAttribArray().?(0);
     c.glBindVertexArray().?(0);
@@ -335,6 +454,12 @@ fn deinit(ctx_ptr: *anyopaque) void {
     if (ctx.sky_shader) |*s| s.deinit();
     if (ctx.sky_vao != 0) c.glDeleteVertexArrays().?(1, &ctx.sky_vao);
     if (ctx.sky_vbo != 0) c.glDeleteBuffers().?(1, &ctx.sky_vbo);
+
+    // Cleanup cloud resources
+    if (ctx.cloud_shader) |*s| s.deinit();
+    if (ctx.cloud_vao != 0) c.glDeleteVertexArrays().?(1, &ctx.cloud_vao);
+    if (ctx.cloud_vbo != 0) c.glDeleteBuffers().?(1, &ctx.cloud_vbo);
+    if (ctx.cloud_ebo != 0) c.glDeleteBuffers().?(1, &ctx.cloud_ebo);
 
     // Cleanup debug shadow map resources
     if (ctx.debug_shadow_shader) |*s| s.deinit();
@@ -924,10 +1049,37 @@ fn drawUITexturedQuad(ctx_ptr: *anyopaque, texture: rhi.TextureHandle, rect: rhi
 }
 
 fn drawClouds(ctx_ptr: *anyopaque, params: rhi.CloudParams) void {
-    _ = ctx_ptr;
-    _ = params;
-    // OpenGL path currently still uses Clouds struct directly from main.zig,
-    // but we can proxy it here if needed.
+    const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
+    const shader = ctx.cloud_shader orelse return;
+    if (ctx.cloud_vao == 0) return;
+
+    c.glDepthMask(c.GL_FALSE);
+    c.glDisable(c.GL_CULL_FACE);
+    c.glEnable(c.GL_BLEND);
+    c.glBlendFunc(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
+    c.glDepthFunc(c.GL_LEQUAL);
+    defer c.glDepthMask(c.GL_TRUE);
+    defer c.glDisable(c.GL_BLEND);
+    defer c.glEnable(c.GL_CULL_FACE);
+    defer c.glDepthFunc(c.GL_LESS);
+
+    shader.use();
+    shader.setVec3("uCameraPos", params.cam_pos.x, params.cam_pos.y, params.cam_pos.z);
+    shader.setFloat("uCloudHeight", params.cloud_height);
+    shader.setFloat("uCloudCoverage", params.cloud_coverage);
+    shader.setFloat("uCloudScale", params.cloud_scale);
+    shader.setFloat("uWindOffsetX", params.wind_offset_x);
+    shader.setFloat("uWindOffsetZ", params.wind_offset_z);
+    shader.setVec3("uSunDir", params.sun_dir.x, params.sun_dir.y, params.sun_dir.z);
+    shader.setFloat("uSunIntensity", params.sun_intensity);
+    shader.setVec3("uBaseColor", params.base_color.x, params.base_color.y, params.base_color.z);
+    shader.setVec3("uFogColor", params.fog_color.x, params.fog_color.y, params.fog_color.z);
+    shader.setFloat("uFogDensity", params.fog_density);
+    shader.setMat4("uViewProj", &params.view_proj.data);
+
+    c.glBindVertexArray().?(ctx.cloud_vao);
+    c.glDrawElements(c.GL_TRIANGLES, 6, c.GL_UNSIGNED_SHORT, null);
+    c.glBindVertexArray().?(0);
 }
 
 fn drawDebugShadowMap(ctx_ptr: *anyopaque, cascade_index: usize, depth_map_handle: rhi.TextureHandle) void {
@@ -1000,6 +1152,11 @@ pub fn createRHI(allocator: std.mem.Allocator) !rhi.RHI {
         .sky_shader = null,
         .sky_vao = 0,
         .sky_vbo = 0,
+        .cloud_shader = null,
+        .cloud_vao = 0,
+        .cloud_vbo = 0,
+        .cloud_ebo = 0,
+        .cloud_mesh_size = 0,
         .debug_shadow_shader = null,
         .debug_shadow_vao = 0,
         .debug_shadow_vbo = 0,
