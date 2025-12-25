@@ -20,7 +20,10 @@ jobs:
         nix_path: nixpkgs=channel:nixos-unstable
         extra_nix_config: |
           experimental-features = nix-command flakes
-        
+
+    - name: Magic Nix Cache
+      uses: DeterminateSystems/magic-nix-cache-action@v9
+
     - name: Build
       run: nix build -L
       
