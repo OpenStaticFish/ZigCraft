@@ -25,14 +25,197 @@ const rhi_opengl = @import("../engine/graphics/rhi_opengl.zig");
 const rhi_vulkan = @import("../engine/graphics/rhi_vulkan.zig");
 const Shader = @import("../engine/graphics/shader.zig").Shader;
 const TextureAtlas = @import("../engine/graphics/texture_atlas.zig").TextureAtlas;
-const Atmosphere = @import("../engine/graphics/atmosphere.zig").Atmosphere;
-const Clouds = @import("../engine/graphics/clouds.zig").Clouds;
 
 const AppState = @import("state.zig").AppState;
 const Settings = @import("state.zig").Settings;
 const Menus = @import("menus.zig");
 
 const debug_build = builtin.mode == .Debug;
+
+const AtmosphereState = struct {
+    world_ticks: u64 = 0,
+    tick_accumulator: f32 = 0.0,
+    time_scale: f32 = 1.0,
+    time_of_day: f32 = 0.25,
+    sun_intensity: f32 = 1.0,
+    moon_intensity: f32 = 0.0,
+    sun_dir: Vec3 = Vec3.init(0, 1, 0),
+    moon_dir: Vec3 = Vec3.init(0, -1, 0),
+    sky_color: Vec3 = Vec3.init(0.5, 0.7, 1.0),
+    horizon_color: Vec3 = Vec3.init(0.8, 0.85, 0.95),
+    fog_color: Vec3 = Vec3.init(0.6, 0.75, 0.95),
+    ambient_intensity: f32 = 0.3,
+    fog_density: f32 = 0.0015,
+    fog_enabled: bool = true,
+    orbit_tilt: f32 = 0.35,
+
+    fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
+        const t = std.math.clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+        return t * t * (3.0 - 2.0 * t);
+    }
+
+    fn lerpVec3(a: Vec3, b: Vec3, t: f32) Vec3 {
+        return Vec3.init(
+            std.math.lerp(a.x, b.x, t),
+            std.math.lerp(a.y, b.y, t),
+            std.math.lerp(a.z, b.z, t),
+        );
+    }
+
+    pub fn update(self: *AtmosphereState, delta_time: f32) void {
+        self.tick_accumulator += delta_time * 20.0 * self.time_scale;
+        if (self.tick_accumulator >= 1.0) {
+            const ticks_delta: u64 = @intFromFloat(self.tick_accumulator);
+            self.world_ticks +%= ticks_delta;
+            self.tick_accumulator -= @floatFromInt(ticks_delta);
+        }
+
+        const day_ticks = self.world_ticks % 24000;
+        self.time_of_day = @as(f32, @floatFromInt(day_ticks)) / 24000.0;
+
+        self.updateCelestialBodies();
+        self.updateIntensities();
+        self.updateColors();
+    }
+
+    fn updateCelestialBodies(self: *AtmosphereState) void {
+        const sun_angle = self.time_of_day * std.math.tau;
+        const cos_angle = @cos(sun_angle);
+        const sin_angle = @sin(sun_angle);
+        const cos_tilt = @cos(self.orbit_tilt);
+        const sin_tilt = @sin(self.orbit_tilt);
+
+        self.sun_dir = Vec3.init(
+            sin_angle,
+            -cos_angle * cos_tilt,
+            -cos_angle * sin_tilt,
+        ).normalize();
+        self.moon_dir = self.sun_dir.scale(-1);
+    }
+
+    fn updateIntensities(self: *AtmosphereState) void {
+        const t = self.time_of_day;
+        const DAWN_START: f32 = 0.20;
+        const DAWN_END: f32 = 0.30;
+        const DUSK_START: f32 = 0.70;
+        const DUSK_END: f32 = 0.80;
+
+        if (t < DAWN_START) {
+            self.sun_intensity = 0;
+        } else if (t < DAWN_END) {
+            self.sun_intensity = smoothstep(DAWN_START, DAWN_END, t);
+        } else if (t < DUSK_START) {
+            self.sun_intensity = 1.0;
+        } else if (t < DUSK_END) {
+            self.sun_intensity = 1.0 - smoothstep(DUSK_START, DUSK_END, t);
+        } else {
+            self.sun_intensity = 0;
+        }
+
+        self.moon_intensity = (1.0 - self.sun_intensity) * 0.15;
+        const day_ambient: f32 = 0.30;
+        const night_ambient: f32 = 0.08;
+        self.ambient_intensity = std.math.lerp(night_ambient, day_ambient, self.sun_intensity);
+    }
+
+    fn updateColors(self: *AtmosphereState) void {
+        const t = self.time_of_day;
+        const DAWN_START: f32 = 0.20;
+        const DAWN_END: f32 = 0.30;
+        const DUSK_START: f32 = 0.70;
+        const DUSK_END: f32 = 0.80;
+
+        const day_sky = Vec3.init(0.4, 0.65, 1.0);
+        const day_horizon = Vec3.init(0.7, 0.8, 0.95);
+        const night_sky = Vec3.init(0.02, 0.02, 0.08);
+        const night_horizon = Vec3.init(0.05, 0.05, 0.12);
+        const dawn_sky = Vec3.init(0.4, 0.4, 0.6);
+        const dawn_horizon = Vec3.init(1.0, 0.5, 0.3);
+        const dusk_sky = Vec3.init(0.35, 0.25, 0.5);
+        const dusk_horizon = Vec3.init(1.0, 0.4, 0.2);
+
+        if (t < DAWN_START) {
+            self.sky_color = night_sky;
+            self.horizon_color = night_horizon;
+        } else if (t < DAWN_END) {
+            const blend = smoothstep(DAWN_START, DAWN_END, t);
+            self.sky_color = lerpVec3(night_sky, dawn_sky, blend);
+            self.horizon_color = lerpVec3(night_horizon, dawn_horizon, blend);
+        } else if (t < 0.35) {
+            const blend = smoothstep(DAWN_END, 0.35, t);
+            self.sky_color = lerpVec3(dawn_sky, day_sky, blend);
+            self.horizon_color = lerpVec3(dawn_horizon, day_horizon, blend);
+        } else if (t < DUSK_START) {
+            self.sky_color = day_sky;
+            self.horizon_color = day_horizon;
+        } else if (t < 0.75) {
+            const blend = smoothstep(DUSK_START, 0.75, t);
+            self.sky_color = lerpVec3(day_sky, dusk_sky, blend);
+            self.horizon_color = lerpVec3(day_horizon, dusk_horizon, blend);
+        } else if (t < DUSK_END) {
+            const blend = smoothstep(0.75, DUSK_END, t);
+            self.sky_color = lerpVec3(dusk_sky, night_sky, blend);
+            self.horizon_color = lerpVec3(dusk_horizon, night_horizon, blend);
+        } else {
+            self.sky_color = night_sky;
+            self.horizon_color = night_horizon;
+        }
+
+        self.fog_color = self.horizon_color;
+        self.fog_density = std.math.lerp(0.002, 0.0012, self.sun_intensity);
+    }
+
+    pub fn setTimeOfDay(self: *AtmosphereState, time: f32) void {
+        self.world_ticks = @intFromFloat(time * 24000.0);
+        self.time_of_day = time;
+        self.tick_accumulator = 0;
+        self.updateCelestialBodies();
+        self.updateIntensities();
+        self.updateColors();
+    }
+
+    pub fn getHours(self: *const AtmosphereState) f32 {
+        return self.time_of_day * 24.0;
+    }
+
+    pub fn getSkyLightFactor(self: *const AtmosphereState) f32 {
+        return @max(self.sun_intensity, self.moon_intensity);
+    }
+};
+
+const CloudState = struct {
+    wind_offset_x: f32 = 0.0,
+    wind_offset_z: f32 = 0.0,
+    cloud_scale: f32 = 1.0 / 64.0,
+    cloud_coverage: f32 = 0.5,
+    cloud_height: f32 = 160.0,
+    cloud_thickness: f32 = 12.0,
+    base_color: Vec3 = Vec3.init(1.0, 1.0, 1.0),
+
+    pub fn update(self: *CloudState, delta_time: f32) void {
+        const wind_dir_x: f32 = 1.0;
+        const wind_dir_z: f32 = 0.2;
+        const wind_speed: f32 = 2.0;
+        self.wind_offset_x += wind_dir_x * wind_speed * delta_time;
+        self.wind_offset_z += wind_dir_z * wind_speed * delta_time;
+    }
+
+    pub fn getShadowParams(self: *const CloudState) struct {
+        wind_offset_x: f32,
+        wind_offset_z: f32,
+        cloud_scale: f32,
+        cloud_coverage: f32,
+        cloud_height: f32,
+    } {
+        return .{
+            .wind_offset_x = self.wind_offset_x,
+            .wind_offset_z = self.wind_offset_z,
+            .cloud_scale = self.cloud_scale,
+            .cloud_coverage = self.cloud_coverage,
+            .cloud_height = self.cloud_height,
+        };
+    }
+};
 
 const DebugState = packed struct {
     shadows: bool = false,
@@ -47,8 +230,8 @@ pub const App = struct {
     is_vulkan: bool,
     shader: ?Shader,
     atlas: TextureAtlas,
-    atmosphere: ?Atmosphere,
-    clouds: ?Clouds,
+    atmosphere: AtmosphereState,
+    clouds: CloudState,
     shadow_map: ?ShadowMap,
 
     settings: Settings,
@@ -122,8 +305,9 @@ pub const App = struct {
         const shader: ?Shader = if (!actual_is_vulkan) try Shader.initFromFile(allocator, "assets/shaders/terrain.vert", "assets/shaders/terrain.frag") else null;
 
         const atlas = try TextureAtlas.init(allocator, rhi);
-        const atmosphere = if (actual_is_vulkan) Atmosphere.initNoGL() else Atmosphere.init();
-        const clouds = if (actual_is_vulkan) Clouds.initNoGL() else try Clouds.init();
+        var atmosphere = AtmosphereState{};
+        atmosphere.setTimeOfDay(0.25);
+        const clouds = CloudState{};
         const shadow_map = if (!actual_is_vulkan) blk: {
             const sm = ShadowMap.init(rhi, settings.shadow_resolution) catch |err| {
                 log.log.warn("ShadowMap initialization failed: {}. Shadows disabled.", .{err});
@@ -181,8 +365,6 @@ pub const App = struct {
         if (self.ui) |*u| u.deinit();
 
         if (self.shadow_map) |*sm| sm.deinit();
-        if (self.clouds) |*cl| cl.deinit();
-        if (self.atmosphere) |*a| a.deinit();
         self.atlas.deinit();
         if (self.shader) |*s| s.deinit();
         self.rhi.deinit();
@@ -221,8 +403,8 @@ pub const App = struct {
             }
 
             self.time.update();
-            if (self.atmosphere) |*a| a.update(self.time.delta_time);
-            if (self.clouds) |*cl| cl.update(self.time.delta_time);
+            self.atmosphere.update(self.time.delta_time);
+            self.clouds.update(self.time.delta_time);
             self.input.beginFrame();
             self.input.pollEvents();
             self.rhi.setViewport(self.input.window_width, self.input.window_height);
@@ -263,9 +445,6 @@ pub const App = struct {
 
             if (in_world or in_pause) {
                 if (in_world and self.input.isKeyPressed(.tab)) self.input.setMouseCapture(self.window_manager.window, !self.input.mouse_captured);
-                if (self.input.isKeyPressed(.c)) if (self.clouds) |*cl| {
-                    cl.enabled = !cl.enabled;
-                };
                 if (self.input.isKeyPressed(.f)) {
                     self.settings.wireframe_enabled = !self.settings.wireframe_enabled;
                     self.rhi.setWireframe(self.settings.wireframe_enabled);
@@ -284,13 +463,13 @@ pub const App = struct {
 
                 if (debug_build and self.debug_state.shadows and self.input.isKeyPressed(.k)) self.debug_state.cascade_idx = (self.debug_state.cascade_idx + 1) % 3;
 
-                if (self.input.isKeyPressed(.@"1")) if (self.atmosphere) |*a| a.setTimeOfDay(0.0);
-                if (self.input.isKeyPressed(.@"2")) if (self.atmosphere) |*a| a.setTimeOfDay(0.25);
-                if (self.input.isKeyPressed(.@"3")) if (self.atmosphere) |*a| a.setTimeOfDay(0.5);
-                if (self.input.isKeyPressed(.@"4")) if (self.atmosphere) |*a| a.setTimeOfDay(0.75);
-                if (self.input.isKeyPressed(.n)) if (self.atmosphere) |*a| {
-                    a.time_scale = if (a.time_scale > 0) @as(f32, 0.0) else @as(f32, 1.0);
-                };
+                if (self.input.isKeyPressed(.@"1")) self.atmosphere.setTimeOfDay(0.0);
+                if (self.input.isKeyPressed(.@"2")) self.atmosphere.setTimeOfDay(0.25);
+                if (self.input.isKeyPressed(.@"3")) self.atmosphere.setTimeOfDay(0.5);
+                if (self.input.isKeyPressed(.@"4")) self.atmosphere.setTimeOfDay(0.75);
+                if (self.input.isKeyPressed(.n)) {
+                    self.atmosphere.time_scale = if (self.atmosphere.time_scale > 0) @as(f32, 0.0) else @as(f32, 1.0);
+                }
 
                 if (in_world) {
                     if (!self.map_controller.show_map and !in_pause) {
@@ -307,7 +486,7 @@ pub const App = struct {
                 }
             } else if (self.input.mouse_captured) self.input.setMouseCapture(self.window_manager.window, false);
 
-            const clear_color = if (in_world or in_pause) (if (self.atmosphere) |a| a.fog_color else Vec3.init(0.5, 0.7, 1.0)) else Vec3.init(0.07, 0.08, 0.1);
+            const clear_color = if (in_world or in_pause) self.atmosphere.fog_color else Vec3.init(0.07, 0.08, 0.1);
             self.rhi.setClearColor(clear_color);
             self.rhi.beginFrame();
 
@@ -320,23 +499,32 @@ pub const App = struct {
                     else
                         view_proj_cull;
                     if (self.shadow_map) |*sm| {
-                        if (self.atmosphere) |atmo| {
-                            var light_dir = atmo.sun_dir;
-                            if (atmo.sun_intensity < 0.05 and atmo.moon_intensity > 0.05) light_dir = atmo.moon_dir;
-                            if (atmo.sun_intensity > 0.05 or atmo.moon_intensity > 0.05) {
-                                sm.update(self.camera.fov, aspect, 0.1, self.settings.shadow_distance, light_dir, self.camera.position, self.camera.getViewMatrixOriginCentered());
-                                for (0..3) |i| {
-                                    sm.begin(i);
-                                    active_world.renderShadowPass(sm.light_space_matrices[i], self.camera.position);
-                                }
-                                sm.end(self.input.window_width, self.input.window_height);
+                        var light_dir = self.atmosphere.sun_dir;
+                        if (self.atmosphere.sun_intensity < 0.05 and self.atmosphere.moon_intensity > 0.05) light_dir = self.atmosphere.moon_dir;
+                        if (self.atmosphere.sun_intensity > 0.05 or self.atmosphere.moon_intensity > 0.05) {
+                            sm.update(self.camera.fov, aspect, 0.1, self.settings.shadow_distance, light_dir, self.camera.position, self.camera.getViewMatrixOriginCentered());
+                            for (0..3) |i| {
+                                sm.begin(i);
+                                active_world.renderShadowPass(sm.light_space_matrices[i], self.camera.position);
                             }
+                            sm.end(self.input.window_width, self.input.window_height);
                         }
                     }
-                    if (!self.is_vulkan) {
-                        self.rhi.beginMainPass();
-                        if (self.atmosphere) |*a| a.renderSky(self.camera.forward, self.camera.right, self.camera.up, aspect, self.camera.fov);
-                    }
+                    self.rhi.beginMainPass();
+                    self.rhi.drawSky(.{
+                        .cam_pos = self.camera.position,
+                        .cam_forward = self.camera.forward,
+                        .cam_right = self.camera.right,
+                        .cam_up = self.camera.up,
+                        .aspect = aspect,
+                        .tan_half_fov = @tan(self.camera.fov / 2.0),
+                        .sun_dir = self.atmosphere.sun_dir,
+                        .sky_color = self.atmosphere.sky_color,
+                        .horizon_color = self.atmosphere.horizon_color,
+                        .sun_intensity = self.atmosphere.sun_intensity,
+                        .moon_intensity = self.atmosphere.moon_intensity,
+                        .time = self.atmosphere.time_of_day,
+                    });
                     if (self.shader) |*s| {
                         s.use();
                         self.atlas.bind(0);
@@ -354,45 +542,43 @@ pub const App = struct {
                         } else {
                             self.rhi.setTextureUniforms(self.settings.textures_enabled, [_]rhi_pkg.TextureHandle{ 0, 0, 0 });
                         }
-                        if (self.atmosphere) |atmo| {
-                            const cp: rhi_pkg.CloudParams = if (self.clouds) |*cl| blk: {
-                                const p = cl.getCloudShadowParams();
-                                break :blk .{
-                                    .wind_offset_x = p.wind_offset_x,
-                                    .wind_offset_z = p.wind_offset_z,
-                                    .cloud_scale = p.cloud_scale,
-                                    .cloud_coverage = p.cloud_coverage,
-                                    .cloud_height = p.cloud_height,
-                                };
-                            } else .{};
-
-                            self.rhi.updateGlobalUniforms(view_proj_cull, self.camera.position, atmo.sun_dir, atmo.time_of_day, atmo.fog_color, atmo.fog_density, atmo.fog_enabled, atmo.sun_intensity, atmo.ambient_intensity, self.settings.textures_enabled, cp);
-                        }
+                        const cp: rhi_pkg.CloudParams = blk: {
+                            const p = self.clouds.getShadowParams();
+                            break :blk .{
+                                .cam_pos = self.camera.position,
+                                .view_proj = view_proj_cull,
+                                .sun_dir = self.atmosphere.sun_dir,
+                                .sun_intensity = self.atmosphere.sun_intensity,
+                                .fog_color = self.atmosphere.fog_color,
+                                .fog_density = self.atmosphere.fog_density,
+                                .wind_offset_x = p.wind_offset_x,
+                                .wind_offset_z = p.wind_offset_z,
+                                .cloud_scale = p.cloud_scale,
+                                .cloud_coverage = p.cloud_coverage,
+                                .cloud_height = p.cloud_height,
+                                .base_color = self.clouds.base_color,
+                            };
+                        };
+                        self.rhi.updateGlobalUniforms(view_proj_cull, self.camera.position, self.atmosphere.sun_dir, self.atmosphere.time_of_day, self.atmosphere.fog_color, self.atmosphere.fog_density, self.atmosphere.fog_enabled, self.atmosphere.sun_intensity, self.atmosphere.ambient_intensity, self.settings.textures_enabled, cp);
                         active_world.render(view_proj_cull, self.camera.position);
                     } else if (self.is_vulkan) {
-                        const fallback_sun_dir = Vec3.init(0.5, 0.8, 0.2);
-                        const fallback_sky_color = Vec3.init(0.5, 0.7, 1.0);
-                        const fallback_horizon_color = Vec3.init(0.8, 0.85, 0.95);
-
-                        const sun_dir = if (self.atmosphere) |a| a.sun_dir else fallback_sun_dir;
-                        const time_val = if (self.atmosphere) |a| a.time_of_day else 0.25;
-                        const fog_color = if (self.atmosphere) |a| a.fog_color else Vec3.init(0.7, 0.8, 0.9);
-                        const fog_density = if (self.atmosphere) |a| a.fog_density else 0.0;
-                        const fog_enabled = if (self.atmosphere) |a| a.fog_enabled else false;
-                        const sun_intensity_val = if (self.atmosphere) |a| a.sun_intensity else 1.0;
-                        const moon_intensity_val = if (self.atmosphere) |a| a.moon_intensity else 0.0;
-                        const ambient_val = if (self.atmosphere) |a| a.ambient_intensity else 0.2;
-                        const sky_color = if (self.atmosphere) |a| a.sky_color else fallback_sky_color;
-                        const horizon_color = if (self.atmosphere) |a| a.horizon_color else fallback_horizon_color;
+                        const sun_dir = self.atmosphere.sun_dir;
+                        const time_val = self.atmosphere.time_of_day;
+                        const fog_color = self.atmosphere.fog_color;
+                        const fog_density = self.atmosphere.fog_density;
+                        const fog_enabled = self.atmosphere.fog_enabled;
+                        const sun_intensity_val = self.atmosphere.sun_intensity;
+                        const moon_intensity_val = self.atmosphere.moon_intensity;
+                        const ambient_val = self.atmosphere.ambient_intensity;
+                        const sky_color = self.atmosphere.sky_color;
+                        const horizon_color = self.atmosphere.horizon_color;
 
                         var light_dir = sun_dir;
                         var light_active = true;
-                        if (self.atmosphere) |atmo| {
-                            if (atmo.sun_intensity < 0.05 and atmo.moon_intensity > 0.05) {
-                                light_dir = atmo.moon_dir;
-                            }
-                            light_active = atmo.sun_intensity > 0.05 or atmo.moon_intensity > 0.05;
+                        if (self.atmosphere.sun_intensity < 0.05 and self.atmosphere.moon_intensity > 0.05) {
+                            light_dir = self.atmosphere.moon_dir;
                         }
+                        light_active = self.atmosphere.sun_intensity > 0.05 or self.atmosphere.moon_intensity > 0.05;
 
                         if (light_active) {
                             const cascades = ShadowMap.computeCascades(self.settings.shadow_resolution, self.camera.fov, aspect, 0.1, self.settings.shadow_distance, light_dir, self.camera.getViewMatrixOriginCentered(), true);
@@ -409,6 +595,7 @@ pub const App = struct {
                             }
                         }
 
+                        self.rhi.beginMainPass();
                         self.rhi.drawSky(.{
                             .cam_pos = self.camera.position,
                             .cam_forward = self.camera.forward,
@@ -426,21 +613,43 @@ pub const App = struct {
 
                         self.atlas.bind(0);
                         self.rhi.setTextureUniforms(self.settings.textures_enabled, [_]rhi_pkg.TextureHandle{ 0, 0, 0 });
-                        const cp: rhi_pkg.CloudParams = if (self.clouds) |*cl| blk: {
-                            const p = cl.getCloudShadowParams();
+                        const cp: rhi_pkg.CloudParams = blk: {
+                            const p = self.clouds.getShadowParams();
                             break :blk .{
+                                .cam_pos = self.camera.position,
+                                .view_proj = view_proj_render,
+                                .sun_dir = sun_dir,
+                                .sun_intensity = sun_intensity_val,
+                                .fog_color = fog_color,
+                                .fog_density = fog_density,
                                 .wind_offset_x = p.wind_offset_x,
                                 .wind_offset_z = p.wind_offset_z,
                                 .cloud_scale = p.cloud_scale,
                                 .cloud_coverage = p.cloud_coverage,
                                 .cloud_height = p.cloud_height,
+                                .base_color = self.clouds.base_color,
                             };
-                        } else .{};
+                        };
                         self.rhi.updateGlobalUniforms(view_proj_render, self.camera.position, sun_dir, time_val, fog_color, fog_density, fog_enabled, sun_intensity_val, ambient_val, self.settings.textures_enabled, cp);
                         active_world.render(view_proj_cull, self.camera.position);
                     }
 
-                    if (self.clouds) |*cl| if (self.atmosphere) |atmo| if (!self.is_vulkan) cl.render(self.camera.position, &view_proj_cull.data, atmo.sun_dir, atmo.sun_intensity, atmo.fog_color, atmo.fog_density);
+                    const p = self.clouds.getShadowParams();
+                    self.rhi.drawClouds(.{
+                        .cam_pos = self.camera.position,
+                        .view_proj = view_proj_cull,
+                        .sun_dir = self.atmosphere.sun_dir,
+                        .sun_intensity = self.atmosphere.sun_intensity,
+                        .fog_color = self.atmosphere.fog_color,
+                        .fog_density = self.atmosphere.fog_density,
+                        .wind_offset_x = p.wind_offset_x,
+                        .wind_offset_z = p.wind_offset_z,
+                        .cloud_scale = p.cloud_scale,
+                        .cloud_coverage = p.cloud_coverage,
+                        .cloud_height = p.cloud_height,
+                        .base_color = self.clouds.base_color,
+                    });
+
                     if (debug_build and !self.is_vulkan and self.debug_state.shadows and self.shadow_map != null) {
                         self.rhi.drawDebugShadowMap(self.debug_state.cascade_idx, self.shadow_map.?.depth_maps[self.debug_state.cascade_idx].handle);
                     }
@@ -474,12 +683,10 @@ pub const App = struct {
                             var hr: i32 = 0;
                             var mn: i32 = 0;
                             var si: f32 = 1.0;
-                            if (self.atmosphere) |atmo| {
-                                const h = atmo.getHours();
-                                hr = @intFromFloat(h);
-                                mn = @intFromFloat((h - @as(f32, @floatFromInt(hr))) * 60.0);
-                                si = atmo.sun_intensity;
-                            }
+                            const h = self.atmosphere.getHours();
+                            hr = @intFromFloat(h);
+                            mn = @intFromFloat((h - @as(f32, @floatFromInt(hr))) * 60.0);
+                            si = self.atmosphere.sun_intensity;
                             Font.drawText(u, "TIME:", 15, hy + 125, 1.5, Color.white);
                             Font.drawNumber(u, hr, 100, hy + 125, Color.white);
                             Font.drawText(u, ":", 125, hy + 125, 1.5, Color.white);

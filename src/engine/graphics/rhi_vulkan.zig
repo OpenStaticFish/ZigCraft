@@ -2128,9 +2128,15 @@ fn setTextureUniforms(ctx_ptr: *anyopaque, texture_enabled: bool, shadow_map_han
 }
 
 fn drawClouds(ctx_ptr: *anyopaque, params: rhi.CloudParams) void {
-    _ = ctx_ptr;
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     _ = params;
-    // TODO: Implement Vulkan cloud plane rendering
+    // TODO: Implement Vulkan cloud rendering
+    // This requires:
+    // 1. Cloud vertex/fragment shaders compiled to SPIR-V
+    // 2. Cloud pipeline and VAO/VBO setup in init()
+    // 3. Cloud resources cleanup in deinit()
+    // See rhi_opengl.zig::drawClouds for reference implementation
+    _ = ctx;
 }
 
 fn drawDebugShadowMap(ctx_ptr: *anyopaque, cascade_index: usize, depth_map_handle: rhi.TextureHandle) void {
