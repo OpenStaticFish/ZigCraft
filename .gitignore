@@ -4,3 +4,11 @@ zig-out/
 result
 .direnv/
 *-profile*
+.env
+.env.*
+!.env.example
+*.log
+.vscode/
+.idea/
+*.swp
+.DS_Store
