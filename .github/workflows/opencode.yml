@@ -54,7 +54,7 @@ jobs:
           '
 
       - name: Run opencode
-        uses: sst/opencode/github@latest
+        uses: sst/opencode/github@1.0.199
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         with:
