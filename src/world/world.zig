@@ -455,14 +455,7 @@ pub const World = struct {
         while (cz <= pc.chunk_z + self.render_distance) : (cz += 1) {
             var cx = pc.chunk_x - self.render_distance;
             while (cx <= pc.chunk_x + self.render_distance) : (cx += 1) {
-                // if (!frustum.intersectsChunkRelative(cx, cz, camera_pos.x, camera_pos.y, camera_pos.z)) {
-                //     continue;
-                // }
-
                 if (self.chunks.get(.{ .x = cx, .z = cz })) |data| {
-
-
-
                     if (data.chunk.state == .renderable) {
                         self.visible_chunks.append(self.allocator, data) catch {};
                     }
@@ -507,8 +500,7 @@ pub const World = struct {
     }
 
     pub fn renderShadowPass(self: *World, view_proj: Mat4, camera_pos: Vec3) void {
-        const frustum = Frustum.fromViewProj(view_proj);
-
+        _ = view_proj;
         self.chunks_mutex.lock();
         defer self.chunks_mutex.unlock();
 
@@ -521,10 +513,6 @@ pub const World = struct {
 
             const chunk_world_x: f32 = @floatFromInt(key.x * CHUNK_SIZE_X);
             const chunk_world_z: f32 = @floatFromInt(key.z * CHUNK_SIZE_Z);
-
-            // if (!frustum.intersectsSphere(.{ .x = chunk_world_x - camera_pos.x + 8, .y = 128 - camera_pos.y, .z = chunk_world_z - camera_pos.z + 8 }, 150.0)) {
-            //     continue;
-            // }
 
             const rel_x = chunk_world_x - camera_pos.x;
             const rel_z = chunk_world_z - camera_pos.z;
