@@ -527,6 +527,8 @@ pub const App = struct {
                             sm.update(self.camera.fov, aspect, 0.1, self.settings.shadow_distance, light_dir, self.camera.position, self.camera.getViewMatrixOriginCentered());
                             for (0..3) |i| {
                                 sm.begin(i);
+                                // SYNC RHI STATE
+                                self.rhi.updateGlobalUniforms(sm.light_space_matrices[i], self.camera.position, self.atmosphere.sun_dir, self.atmosphere.time_of_day, self.atmosphere.fog_color, self.atmosphere.fog_density, self.atmosphere.fog_enabled, self.atmosphere.sun_intensity, self.atmosphere.ambient_intensity, self.settings.textures_enabled, .{});
                                 active_world.renderShadowPass(sm.light_space_matrices[i], self.camera.position);
                             }
                             sm.end(self.input.window_width, self.input.window_height);

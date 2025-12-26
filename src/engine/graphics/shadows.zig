@@ -99,20 +99,19 @@ pub const ShadowMap = struct {
         // Use GL_LESS for standard depth test
         c.glDepthFunc(c.GL_LESS);
         // Use standard back-face culling for shadows too
-        // Front-face culling can cause issues if chunks have holes or are thin
         c.glEnable(c.GL_CULL_FACE);
         c.glCullFace(c.GL_BACK);
 
         self.shader.use();
-        self.shader.setMat4("uLightSpaceMatrix", &self.light_space_matrices[cascade_index].data);
+        // Set transform uniform - World.renderShadowPass will set it again per-chunk,
+        // but we need to initialize the View-Proj part of it for the RHI to track it.
+        self.shader.setMat4("transform", &self.light_space_matrices[cascade_index].data);
     }
 
     /// End shadow pass
     pub fn end(self: *ShadowMap, screen_width: u32, screen_height: u32) void {
         _ = self;
-        // Restore standard culling (Back faces)
-        c.glCullFace(c.GL_BACK);
-
+        c.glDisable(c.GL_CULL_FACE); // project default
         c.glBindFramebuffer().?(c.GL_FRAMEBUFFER, 0);
         c.glViewport(0, 0, @intCast(screen_width), @intCast(screen_height));
     }
