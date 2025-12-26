@@ -32,6 +32,19 @@ jobs:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
 
+      - name: Setup Dev Environment
+        run: |
+          nix develop --profile ./dev-profile --command true
+          nix develop --command bash -c '
+            # Add Nix store paths to GITHUB_PATH
+            echo "$PATH" | tr ":" "\n" | grep "^/nix/store" >> "$GITHUB_PATH"
+            
+            # Export only essential paths to GITHUB_ENV, avoiding massive compiler flags
+            echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+            echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          '
+          echo "IN_NIX_SHELL=impure" >> "$GITHUB_ENV"
+
       - name: Run opencode
         uses: sst/opencode/github@v1.0.199
         env:
