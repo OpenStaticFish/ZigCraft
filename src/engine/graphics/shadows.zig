@@ -99,12 +99,18 @@ pub const ShadowMap = struct {
         // Use GL_LESS for standard depth test
         c.glDepthFunc(c.GL_LESS);
         // Use standard back-face culling for shadows too
-        // Front-face culling can cause issues if chunks have holes or are thin
         c.glEnable(c.GL_CULL_FACE);
         c.glCullFace(c.GL_BACK);
 
         self.shader.use();
-        self.shader.setMat4("uLightSpaceMatrix", &self.light_space_matrices[cascade_index].data);
+        // Set transform uniform - World.renderShadowPass will set it again per-chunk,
+        // but we need to initialize the View-Proj part of it.
+        // Wait, World.renderShadowPass sets the model matrix via RHI.
+        // The RHI needs to know the light_space_matrix as its current_view_proj.
+        
+        // We set the uniform directly here for safety, but RHI state sync is better.
+        // Fix: Use the correct name "transform" as per shader source.
+        self.shader.setMat4("transform", &self.light_space_matrices[cascade_index].data);
     }
 
     /// End shadow pass

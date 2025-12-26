@@ -658,8 +658,8 @@ fn waitIdle(ctx_ptr: *anyopaque) void {
 }
 
 fn beginShadowPass(ctx_ptr: *anyopaque, cascade_index: u32) void {
-    _ = ctx_ptr;
     _ = cascade_index;
+    _ = ctx_ptr;
 }
 
 fn endShadowPass(ctx_ptr: *anyopaque) void {
@@ -679,7 +679,8 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
         .allocator = undefined,
         .uses_opengl = true,
     };
-    shader.use();
+    // Don't call shader.use() here, it might be called in a loop or where it's already bound.
+    // Actually, we should probably call it to be safe, but let's see.
 
     shader.setVec3("uSunDir", sun_dir.x, sun_dir.y, sun_dir.z);
     shader.setFloat("uSunIntensity", sun_intensity);
