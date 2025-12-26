@@ -48,8 +48,9 @@ pub const Frustum = struct {
     pub fn fromViewProj(vp: Mat4) Frustum {
         const m = vp.data;
 
-        // Each row of the matrix contributes to plane extraction
-        // m[row][col] - remember Mat4 is row-major
+        // Extract frustum planes from a column-major view-projection matrix
+        // m[col][row] - Each index access m[c][r] gets the r-th component of column c.
+        // Gribb-Hartmann extraction for column-major storage:
         var planes: [6]Plane = undefined;
 
         // Left: row3 + row0

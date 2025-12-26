@@ -145,12 +145,6 @@ void main() {
         }
     }
     
-    // DEBUG: Visualize cascades if shadows are missing
-    // if (layer == 0) FragColor = vec4(1.0, 0.0, 0.0, 1.0);
-    // else if (layer == 1) FragColor = vec4(0.0, 1.0, 0.0, 1.0);
-    // else FragColor = vec4(0.0, 0.0, 1.0, 1.0);
-    // return;
-    
     // Cloud shadow (only when sun is up)
     float cloudShadow = 0.0;
     if (uSunIntensity > 0.05 && uSunDir.y > 0.05) {

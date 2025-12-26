@@ -60,12 +60,13 @@ const OpenGLContext = struct {
 
     // Active shader tracking (to avoid glGetIntegerv queries)
     active_shader: ?*Shader,
+    active_program: rhi.ShaderHandle,
 };
 
 fn checkError(label: []const u8) void {
     const err = c.glGetError();
     if (err != c.GL_NO_ERROR) {
-        std.log.err("OpenGL Error in {s}: {}", .{ label, err });
+        std.log.err("OpenGL Error in {s}: 0x{X}", .{ label, err });
     }
 }
 
@@ -442,6 +443,10 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     c.glBindVertexArray().?(0);
 
     ctx.current_view_proj = Mat4.identity;
+    ctx.active_shader = null;
+    ctx.active_program = 0;
+
+    c.glFrontFace(c.GL_CW);
 }
 
 fn deinit(ctx_ptr: *anyopaque) void {
@@ -632,6 +637,8 @@ fn beginMainPass(ctx_ptr: *anyopaque) void {
     c.glEnable(c.GL_DEPTH_TEST);
     c.glDepthMask(c.GL_TRUE);
     c.glDepthFunc(c.GL_LESS);
+    c.glEnable(c.GL_CULL_FACE);
+    c.glCullFace(c.GL_BACK);
 
     c.glClear(c.GL_COLOR_BUFFER_BIT | c.GL_DEPTH_BUFFER_BIT);
 }
@@ -662,7 +669,15 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.current_view_proj = view_proj;
 
-    const shader = ctx.active_shader orelse return;
+    const program = if (ctx.active_shader) |s| s.handle else ctx.active_program;
+    if (program == 0) return;
+
+    const shader = Shader{
+        .handle = program,
+        .uniform_cache = undefined,
+        .allocator = undefined,
+        .uses_opengl = true,
+    };
     shader.use();
 
     shader.setVec3("uSunDir", sun_dir.x, sun_dir.y, sun_dir.z);
@@ -682,6 +697,77 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
 
     _ = cam_pos;
     _ = time;
+}
+
+
+fn setTextureUniforms(ctx_ptr: *anyopaque, texture_enabled: bool, shadow_map_handles: [3]rhi.TextureHandle) void {
+    const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
+    const program = if (ctx.active_shader) |s| s.handle else ctx.active_program;
+    if (program == 0) return;
+
+    const shader = Shader{
+        .handle = program,
+        .uniform_cache = undefined,
+        .allocator = undefined,
+        .uses_opengl = true,
+    };
+    shader.use();
+
+    shader.setInt("uTexture", 0);
+    shader.setBool("uUseTexture", texture_enabled);
+
+    const shadow_map_names = [_][:0]const u8{ "uShadowMap0", "uShadowMap1", "uShadowMap2" };
+    for (0..3) |i| {
+        const slot = @as(c.GLint, 1 + @as(c_int, @intCast(i)));
+        c.glActiveTexture().?(@as(c.GLenum, @intCast(@as(u32, @intCast(c.GL_TEXTURE0)) + @as(u32, @intCast(slot)))));
+        c.glBindTexture(c.GL_TEXTURE_2D, @intCast(shadow_map_handles[i]));
+        shader.setInt(shadow_map_names[i], slot);
+    }
+    c.glActiveTexture().?(c.GL_TEXTURE0);
+}
+
+fn updateShadowUniforms(ctx_ptr: *anyopaque, params: rhi.ShadowParams) void {
+    const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
+    const program = if (ctx.active_shader) |s| s.handle else ctx.active_program;
+    if (program == 0) return;
+
+    const shader = Shader{
+        .handle = program,
+        .uniform_cache = undefined,
+        .allocator = undefined,
+        .uses_opengl = true,
+    };
+    shader.use();
+
+    for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
+        var buf: [64]u8 = undefined;
+        const name_mat = std.fmt.bufPrintZ(&buf, "uLightSpaceMatrices[{}]", .{i}) catch continue;
+        shader.setMat4(name_mat.ptr, &params.light_space_matrices[i].data);
+
+        const name_split = std.fmt.bufPrintZ(&buf, "uCascadeSplits[{}]", .{i}) catch continue;
+        shader.setFloat(name_split.ptr, params.cascade_splits[i]);
+
+        const name_size = std.fmt.bufPrintZ(&buf, "uShadowTexelSizes[{}]", .{i}) catch continue;
+        shader.setFloat(name_size.ptr, params.shadow_texel_sizes[i]);
+    }
+}
+
+fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4) void {
+    const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
+    const program = if (ctx.active_shader) |s| s.handle else ctx.active_program;
+    if (program == 0) return;
+
+    const shader = Shader{
+        .handle = program,
+        .uniform_cache = undefined,
+        .allocator = undefined,
+        .uses_opengl = true,
+    };
+    shader.use();
+
+    const mvp = ctx.current_view_proj.multiply(model);
+    shader.setMat4("transform", &mvp.data);
+    shader.setMat4("uModel", &model.data);
 }
 
 fn compileShaderGL(shader_type: c.GLenum, source: [*c]const u8) Shader.Error!c.GLuint {
@@ -745,7 +831,9 @@ fn destroyShader(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle) void {
 }
 
 fn bindShader(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle) void {
-    _ = ctx_ptr;
+    const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.active_program = handle;
+    ctx.active_shader = null;
     if (handle != 0) {
         c.glUseProgram().?(@intCast(handle));
     } else {
@@ -781,52 +869,6 @@ fn shaderSetInt(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle, name: [*c]const u
     if (loc != -1) c.glUniform1i().?(loc, value);
 }
 
-fn setTextureUniforms(ctx_ptr: *anyopaque, texture_enabled: bool, shadow_map_handles: [3]rhi.TextureHandle) void {
-    const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
-    const shader = ctx.active_shader orelse return;
-    shader.use();
-
-    shader.setInt("uTexture", 0);
-    shader.setBool("uUseTexture", texture_enabled);
-
-    const shadow_map_names = [_][:0]const u8{ "uShadowMap0", "uShadowMap1", "uShadowMap2" };
-    for (0..3) |i| {
-        const slot = @as(c.GLint, 1 + @as(c_int, @intCast(i)));
-        c.glActiveTexture().?(@as(c.GLenum, @intCast(@as(u32, @intCast(c.GL_TEXTURE0)) + @as(u32, @intCast(slot)))));
-        c.glBindTexture(c.GL_TEXTURE_2D, @intCast(shadow_map_handles[i]));
-        shader.setInt(shadow_map_names[i], slot);
-    }
-    c.glActiveTexture().?(c.GL_TEXTURE0);
-}
-
-fn updateShadowUniforms(ctx_ptr: *anyopaque, params: rhi.ShadowParams) void {
-    const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
-    const shader = ctx.active_shader orelse return;
-    shader.use();
-
-    for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
-        var buf: [64]u8 = undefined;
-        const name_mat = std.fmt.bufPrintZ(&buf, "uLightSpaceMatrices[{}]", .{i}) catch continue;
-        shader.setMat4(name_mat.ptr, &params.light_space_matrices[i].data);
-
-        const name_split = std.fmt.bufPrintZ(&buf, "uCascadeSplits[{}]", .{i}) catch continue;
-        shader.setFloat(name_split.ptr, params.cascade_splits[i]);
-
-        const name_size = std.fmt.bufPrintZ(&buf, "uShadowTexelSizes[{}]", .{i}) catch continue;
-        shader.setFloat(name_size.ptr, params.shadow_texel_sizes[i]);
-    }
-}
-
-fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4) void {
-    const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
-    const shader = ctx.active_shader orelse return;
-    shader.use();
-
-    const mvp = ctx.current_view_proj.multiply(model);
-    shader.setMat4("transform", &mvp.data);
-    shader.setMat4("uModel", &model.data);
-}
-
 fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.DrawMode) void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.mutex.lock();
@@ -854,6 +896,7 @@ fn drawSky(ctx_ptr: *anyopaque, params: rhi.SkyParams) void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     const shader = ctx.sky_shader orelse return;
     ctx.active_shader = shader;
+    ctx.active_program = shader.handle;
 
     // Disable depth write, keep depth test
     c.glDepthMask(c.GL_FALSE);
@@ -979,9 +1022,6 @@ fn setWireframe(ctx_ptr: *anyopaque, enabled: bool) void {
 fn setTexturesEnabled(ctx_ptr: *anyopaque, enabled: bool) void {
     _ = ctx_ptr;
     _ = enabled;
-    // OpenGL texture toggle is handled via shader uniform 'uUseTexture' in main.zig.
-    // The RHI interface provides this method for consistency with Vulkan or future usage where
-    // RHI manages the shader state directly.
 }
 
 fn setVSync(ctx_ptr: *anyopaque, enabled: bool) void {
@@ -991,10 +1031,6 @@ fn setVSync(ctx_ptr: *anyopaque, enabled: bool) void {
 
 fn updateTexture(ctx_ptr: *anyopaque, handle: rhi.TextureHandle, data: []const u8) void {
     _ = ctx_ptr;
-    // This assumes the texture is already bound or we bind it temporarily
-    // For safety, we should really track width/height or have them passed in.
-    // But world_map.zig calls it expecting a specific size.
-    // For now, let's assume 256x256 as used in world_map.zig or get from GL.
     c.glBindTexture(c.GL_TEXTURE_2D, @intCast(handle));
     var w: c.GLint = 0;
     var h: c.GLint = 0;
@@ -1014,16 +1050,13 @@ fn updateTexture(ctx_ptr: *anyopaque, handle: rhi.TextureHandle, data: []const u
     );
 }
 
-// UI Rendering functions
 fn beginUI(ctx_ptr: *anyopaque, screen_width: f32, screen_height: f32) void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.ui_screen_width = screen_width;
     ctx.ui_screen_height = screen_height;
 
-    // Ensure we're rendering to the default framebuffer
     c.glBindFramebuffer().?(c.GL_FRAMEBUFFER, 0);
 
-    // Disable depth test and culling for UI
     c.glDisable(c.GL_DEPTH_TEST);
     c.glDisable(c.GL_CULL_FACE);
     c.glEnable(c.GL_BLEND);
@@ -1031,8 +1064,8 @@ fn beginUI(ctx_ptr: *anyopaque, screen_width: f32, screen_height: f32) void {
 
     if (ctx.ui_shader) |shader| {
         ctx.active_shader = shader;
+        ctx.active_program = shader.handle;
         shader.use();
-        // Orthographic projection: (0,0) at top-left
         const proj = Mat4.orthographic(0, screen_width, screen_height, 0, -1, 1);
         shader.setMat4("projection", &proj.data);
     }
@@ -1056,14 +1089,10 @@ fn drawUIQuad(ctx_ptr: *anyopaque, rect: rhi.Rect, color: rhi.Color) void {
     const w = rect.width;
     const h = rect.height;
 
-    // Two triangles forming a quad
-    // Each vertex: x, y, r, g, b, a
     const vertices = [_]f32{
-        // Triangle 1
         x,     y,     color.r, color.g, color.b, color.a,
         x + w, y,     color.r, color.g, color.b, color.a,
         x + w, y + h, color.r, color.g, color.b, color.a,
-        // Triangle 2
         x,     y,     color.r, color.g, color.b, color.a,
         x + w, y + h, color.r, color.g, color.b, color.a,
         x,     y + h, color.r, color.g, color.b, color.a,
@@ -1084,6 +1113,7 @@ fn drawUITexturedQuad(ctx_ptr: *anyopaque, texture: rhi.TextureHandle, rect: rhi
 
     if (ctx.ui_tex_shader) |tex_shader| {
         ctx.active_shader = tex_shader;
+        ctx.active_program = tex_shader.handle;
         tex_shader.use();
         const proj = Mat4.orthographic(0, ctx.ui_screen_width, ctx.ui_screen_height, 0, -1, 1);
         tex_shader.setMat4("projection", &proj.data);
@@ -1093,9 +1123,7 @@ fn drawUITexturedQuad(ctx_ptr: *anyopaque, texture: rhi.TextureHandle, rect: rhi
         tex_shader.setInt("uTexture", 0);
     }
 
-    // Position (2) + TexCoord (2) = 4 floats per vertex
     const vertices = [_]f32{
-        // pos, uv
         x,     y,     0.0, 0.0,
         x + w, y,     1.0, 0.0,
         x + w, y + h, 1.0, 1.0,
@@ -1104,24 +1132,19 @@ fn drawUITexturedQuad(ctx_ptr: *anyopaque, texture: rhi.TextureHandle, rect: rhi
         x,     y + h, 0.0, 1.0,
     };
 
-    // Need different VAO setup for textured quads - use same VBO but different layout
-    // For simplicity, we'll just draw with position data and let the shader handle it
     c.glBindBuffer().?(c.GL_ARRAY_BUFFER, ctx.ui_vbo);
     c.glBufferData().?(c.GL_ARRAY_BUFFER, @sizeOf(@TypeOf(vertices)), &vertices, c.GL_DYNAMIC_DRAW);
 
-    // Temporarily reconfigure vertex attributes for textured quad
     const stride: c.GLsizei = 4 * @sizeOf(f32);
     c.glVertexAttribPointer().?(0, 2, c.GL_FLOAT, c.GL_FALSE, stride, null);
     c.glVertexAttribPointer().?(1, 2, c.GL_FLOAT, c.GL_FALSE, stride, @ptrFromInt(2 * @sizeOf(f32)));
 
     c.glDrawArrays(c.GL_TRIANGLES, 0, 6);
 
-    // Restore colored quad vertex format
     const color_stride: c.GLsizei = 6 * @sizeOf(f32);
     c.glVertexAttribPointer().?(0, 2, c.GL_FLOAT, c.GL_FALSE, color_stride, null);
     c.glVertexAttribPointer().?(1, 4, c.GL_FLOAT, c.GL_FALSE, color_stride, @ptrFromInt(2 * @sizeOf(f32)));
 
-    // Switch back to color shader
     if (ctx.ui_shader) |shader| {
         ctx.active_shader = shader;
         shader.use();
@@ -1133,6 +1156,7 @@ fn drawClouds(ctx_ptr: *anyopaque, params: rhi.CloudParams) void {
     const shader = ctx.cloud_shader orelse return;
     if (ctx.cloud_vao == 0) return;
     ctx.active_shader = shader;
+    ctx.active_program = shader.handle;
 
     c.glDepthMask(c.GL_FALSE);
     c.glDisable(c.GL_CULL_FACE);
@@ -1168,6 +1192,7 @@ fn drawDebugShadowMap(ctx_ptr: *anyopaque, cascade_index: usize, depth_map_handl
     const shader = ctx.debug_shadow_shader orelse return;
     if (ctx.debug_shadow_vao == 0) return;
     ctx.active_shader = shader;
+    ctx.active_program = shader.handle;
 
     _ = cascade_index;
 
@@ -1251,6 +1276,7 @@ pub fn createRHI(allocator: std.mem.Allocator) !rhi.RHI {
         .debug_shadow_vbo = 0,
         .current_view_proj = Mat4.identity,
         .active_shader = null,
+        .active_program = 0,
     };
 
     return rhi.RHI{
