@@ -228,7 +228,7 @@ pub const App = struct {
 
     rhi: RHI,
     is_vulkan: bool,
-    shader: ?Shader,
+    shader: rhi_pkg.ShaderHandle,
     atlas: TextureAtlas,
     atmosphere: AtmosphereState,
     clouds: CloudState,
@@ -302,7 +302,30 @@ pub const App = struct {
 
         try rhi.init(allocator);
 
-        const shader: ?Shader = if (!actual_is_vulkan) try Shader.initFromFile(allocator, "assets/shaders/terrain.vert", "assets/shaders/terrain.frag") else null;
+        const terrain_vert = "assets/shaders/terrain.vert";
+        const terrain_frag = "assets/shaders/terrain.frag";
+        const shader = if (!actual_is_vulkan) blk: {
+            const vert_src = std.fs.cwd().readFileAlloc(terrain_vert, allocator, @enumFromInt(1024 * 1024)) catch {
+                break :blk rhi_pkg.InvalidShaderHandle;
+            };
+            defer allocator.free(vert_src);
+            const frag_src = std.fs.cwd().readFileAlloc(terrain_frag, allocator, @enumFromInt(1024 * 1024)) catch {
+                break :blk rhi_pkg.InvalidShaderHandle;
+            };
+            defer allocator.free(frag_src);
+            const vert_c = allocator.dupeZ(u8, vert_src) catch {
+                break :blk rhi_pkg.InvalidShaderHandle;
+            };
+            defer allocator.free(vert_c);
+            const frag_c = allocator.dupeZ(u8, frag_src) catch {
+                break :blk rhi_pkg.InvalidShaderHandle;
+            };
+            defer allocator.free(frag_c);
+            const handle = rhi.createShader(vert_c, frag_c) catch {
+                break :blk rhi_pkg.InvalidShaderHandle;
+            };
+            break :blk handle;
+        } else rhi_pkg.InvalidShaderHandle;
 
         const atlas = try TextureAtlas.init(allocator, rhi);
         var atmosphere = AtmosphereState{};
@@ -366,7 +389,7 @@ pub const App = struct {
 
         if (self.shadow_map) |*sm| sm.deinit();
         self.atlas.deinit();
-        if (self.shader) |*s| s.deinit();
+        if (self.shader != 0) self.rhi.destroyShader(self.shader);
         self.rhi.deinit();
 
         self.input.deinit();
@@ -525,8 +548,8 @@ pub const App = struct {
                         .moon_intensity = self.atmosphere.moon_intensity,
                         .time = self.atmosphere.time_of_day,
                     });
-                    if (self.shader) |*s| {
-                        s.use();
+                    if (self.shader != 0) {
+                        self.rhi.bindShader(self.shader);
                         self.atlas.bind(0);
                         if (self.shadow_map) |*sm| {
                             var shadow_map_handles: [3]rhi_pkg.TextureHandle = undefined;

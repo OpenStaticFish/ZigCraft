@@ -1,14 +1,17 @@
 //! Shader compilation and program management with uniform caching.
+//! This module provides a backend-agnostic interface for shader programs.
 
 const std = @import("std");
+const rhi = @import("rhi.zig");
 const c = @import("../../c.zig").c;
 
 const log = @import("../core/log.zig");
 
 pub const Shader = struct {
-    program: c.GLuint,
+    handle: rhi.ShaderHandle,
     uniform_cache: std.StringHashMap(c.GLint),
     allocator: std.mem.Allocator,
+    uses_opengl: bool,
 
     pub const Error = error{
         VertexCompileFailed,
@@ -18,40 +21,50 @@ pub const Shader = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, vertex_src: [*c]const u8, fragment_src: [*c]const u8) Error!Shader {
-        const vert = compileShader(c.GL_VERTEX_SHADER, vertex_src) catch |e| {
-            log.log.err("Vertex shader compilation failed", .{});
-            return e;
-        };
-        defer c.glDeleteShader().?(vert);
+        return Shader.initWithBackend(allocator, vertex_src, fragment_src, true);
+    }
 
-        const frag = compileShader(c.GL_FRAGMENT_SHADER, fragment_src) catch |e| {
-            log.log.err("Fragment shader compilation failed", .{});
-            return e;
-        };
-        defer c.glDeleteShader().?(frag);
+    /// Initialize shader with explicit backend flag
+    fn initWithBackend(allocator: std.mem.Allocator, vertex_src: [*c]const u8, fragment_src: [*c]const u8, uses_opengl: bool) Error!Shader {
+        if (uses_opengl) {
+            const vert = compileShader(c.GL_VERTEX_SHADER, vertex_src) catch |e| {
+                log.log.err("Vertex shader compilation failed", .{});
+                return e;
+            };
+            defer c.glDeleteShader().?(vert);
 
-        const program = c.glCreateProgram().?();
-        c.glAttachShader().?(program, vert);
-        c.glAttachShader().?(program, frag);
-        c.glLinkProgram().?(program);
+            const frag = compileShader(c.GL_FRAGMENT_SHADER, fragment_src) catch |e| {
+                log.log.err("Fragment shader compilation failed", .{});
+                return e;
+            };
+            defer c.glDeleteShader().?(frag);
 
-        var success: c.GLint = undefined;
-        c.glGetProgramiv().?(program, c.GL_LINK_STATUS, &success);
-        if (success == 0) {
-            var info_log: [512]u8 = undefined;
-            var length: c.GLsizei = undefined;
-            c.glGetProgramInfoLog().?(program, 512, &length, &info_log);
-            log.log.err("Shader link failed: {s}", .{info_log[0..@intCast(length)]});
+            const program = c.glCreateProgram().?();
+            c.glAttachShader().?(program, vert);
+            c.glAttachShader().?(program, frag);
+            c.glLinkProgram().?(program);
+
+            var success: c.GLint = undefined;
+            c.glGetProgramiv().?(program, c.GL_LINK_STATUS, &success);
+            if (success == 0) {
+                var info_log: [512]u8 = undefined;
+                var length: c.GLsizei = undefined;
+                c.glGetProgramInfoLog().?(program, 512, &length, &info_log);
+                log.log.err("Shader link failed: {s}", .{info_log[0..@intCast(length)]});
+                return Error.LinkFailed;
+            }
+
+            log.log.info("Shader program created (ID: {})", .{program});
+
+            return .{
+                .handle = @intCast(program),
+                .uniform_cache = std.StringHashMap(c.GLint).init(allocator),
+                .allocator = allocator,
+                .uses_opengl = true,
+            };
+        } else {
             return Error.LinkFailed;
         }
-
-        log.log.info("Shader program created (ID: {})", .{program});
-
-        return .{
-            .program = program,
-            .uniform_cache = std.StringHashMap(c.GLint).init(allocator),
-            .allocator = allocator,
-        };
     }
 
     /// Simplified init without allocator (no caching)
@@ -74,9 +87,10 @@ pub const Shader = struct {
         }
 
         return .{
-            .program = program,
+            .handle = @intCast(program),
             .uniform_cache = undefined,
             .allocator = undefined,
+            .uses_opengl = true,
         };
     }
 
@@ -121,19 +135,19 @@ pub const Shader = struct {
     }
 
     pub fn deinit(self: *Shader) void {
-        c.glDeleteProgram().?(self.program);
+        c.glDeleteProgram().?(self.handle);
         if (@TypeOf(self.uniform_cache) != @TypeOf(undefined)) {
             // Can't easily check if initialized, skip cleanup for simple init
         }
     }
 
     pub fn use(self: *const Shader) void {
-        c.glUseProgram().?(self.program);
+        c.glUseProgram().?(self.handle);
     }
 
     pub fn getUniformLocation(self: *const Shader, name: [*c]const u8) c.GLint {
         // Direct lookup without caching for now (cache requires mutable self)
-        return c.glGetUniformLocation().?(self.program, name);
+        return c.glGetUniformLocation().?(self.handle, name);
     }
 
     // Uniform setters

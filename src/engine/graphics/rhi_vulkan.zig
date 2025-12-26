@@ -2877,12 +2877,68 @@ fn drawSky(ctx_ptr: *anyopaque, params: rhi.SkyParams) void {
     c.vkCmdDraw(command_buffer, 3, 1, 0, 0);
 }
 
+// Shader stub implementations for Vulkan
+// Vulkan uses pre-compiled SPIR-V pipelines, so we don't support runtime shader compilation
+fn createShader(ctx_ptr: *anyopaque, vertex_src: [*c]const u8, fragment_src: [*c]const u8) rhi.RhiError!rhi.ShaderHandle {
+    _ = ctx_ptr;
+    _ = vertex_src;
+    _ = fragment_src;
+    return error.VulkanError;
+}
+
+fn destroyShader(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle) void {
+    _ = ctx_ptr;
+    _ = handle;
+}
+
+fn bindShader(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle) void {
+    _ = ctx_ptr;
+    _ = handle;
+}
+
+fn shaderSetMat4(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle, name: [*c]const u8, matrix: *const [4][4]f32) void {
+    _ = ctx_ptr;
+    _ = handle;
+    _ = name;
+    _ = matrix;
+}
+
+fn shaderSetVec3(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle, name: [*c]const u8, x: f32, y: f32, z: f32) void {
+    _ = ctx_ptr;
+    _ = handle;
+    _ = name;
+    _ = x;
+    _ = y;
+    _ = z;
+}
+
+fn shaderSetFloat(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle, name: [*c]const u8, value: f32) void {
+    _ = ctx_ptr;
+    _ = handle;
+    _ = name;
+    _ = value;
+}
+
+fn shaderSetInt(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle, name: [*c]const u8, value: i32) void {
+    _ = ctx_ptr;
+    _ = handle;
+    _ = name;
+    _ = value;
+}
+
 const vtable = rhi.RHI.VTable{
     .init = init,
     .deinit = deinit,
     .createBuffer = createBuffer,
     .uploadBuffer = uploadBuffer,
     .destroyBuffer = destroyBuffer,
+    .createShader = createShader,
+    .destroyShader = destroyShader,
+    .bindShader = bindShader,
+    .shaderSetMat4 = shaderSetMat4,
+    .shaderSetVec3 = shaderSetVec3,
+    .shaderSetFloat = shaderSetFloat,
+    .shaderSetInt = shaderSetInt,
     .beginFrame = beginFrame,
     .abortFrame = abortFrame,
     .setClearColor = setClearColor,
