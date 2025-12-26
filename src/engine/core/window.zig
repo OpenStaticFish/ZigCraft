@@ -46,6 +46,10 @@ pub const WindowManager = struct {
             if (gl_context == null) return error.GLContextCreationFailed;
             _ = c.SDL_GL_MakeCurrent(window, gl_context.?);
             c.glewExperimental = c.GL_TRUE;
+            if (c.glewInit() != c.GLEW_OK) {
+                log.log.err("GLEW Initialization Failed", .{});
+                return error.GLEWInitializationFailed;
+            }
         }
 
         return WindowManager{

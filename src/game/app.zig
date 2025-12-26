@@ -289,7 +289,6 @@ pub const App = struct {
                 break :blk RhiResult{ .rhi = v, .is_vulkan = true };
             } else |err| {
                 log.log.err("Failed to initialize Vulkan: {}. Falling back to OpenGL.", .{err});
-                if (c.glewInit() != c.GLEW_OK) return error.GLEWInitFailed;
                 break :blk RhiResult{ .rhi = try rhi_opengl.createRHI(allocator), .is_vulkan = false };
             }
         } else blk: {
