@@ -2214,13 +2214,10 @@ fn drawDebugShadowMap(ctx_ptr: *anyopaque, cascade_index: usize, depth_map_handl
 
     // Map and copy vertices
     var map_ptr: ?*anyopaque = null;
-    if (c.vkMapMemory(ctx.device, ui_vbo.memory, 0, @sizeOf(@TypeOf(debug_vertices)), 0, &map_ptr) == c.VK_SUCCESS) {
-        @memcpy(@as([*]u8, @ptrCast(map_ptr))[0..@sizeOf(@TypeOf(debug_vertices))], std.mem.asBytes(&debug_vertices));
-        c.vkUnmapMemory(ctx.device, ui_vbo.memory);
-
-        const offset: c.VkDeviceSize = 0;
-        c.vkCmdBindVertexBuffers(command_buffer, 0, 1, &ui_vbo.buffer, &offset);
-        c.vkCmdDraw(command_buffer, 6, 1, 0, 0);
+    if (c.vkMapMemory(ctx.vk_device, ui_vbo.memory, 0, @sizeOf(@TypeOf(debug_vertices)), 0, &map_ptr) == c.VK_SUCCESS) {
+        std.debug.assert(map_ptr != null);
+        @memcpy(@as([*]u8, @ptrCast(map_ptr.?)), std.mem.asBytes(&debug_vertices));
+        c.vkUnmapMemory(ctx.vk_device, ui_vbo.memory);
     }
 
     // Add border around debug shadow map
@@ -2235,9 +2232,9 @@ fn drawDebugShadowMap(ctx_ptr: *anyopaque, cascade_index: usize, depth_map_handl
         debug_x - border_size,              debug_y + debug_size + border_size, border_color.r, border_color.g, border_color.b, border_color.a,
     };
 
-    if (c.vkMapMemory(ctx.device, ui_vbo.memory, @sizeOf(@TypeOf(debug_vertices)), @sizeOf(@TypeOf(border_vertices)), 0, &map_ptr) == c.VK_SUCCESS) {
+    if (c.vkMapMemory(ctx.vk_device, ui_vbo.memory, @sizeOf(@TypeOf(debug_vertices)), @sizeOf(@TypeOf(border_vertices)), 0, &map_ptr) == c.VK_SUCCESS) {
         @memcpy(@as([*]u8, @ptrCast(map_ptr))[0..@sizeOf(@TypeOf(border_vertices))], std.mem.asBytes(&border_vertices));
-        c.vkUnmapMemory(ctx.device, ui_vbo.memory);
+        c.vkUnmapMemory(ctx.vk_device, ui_vbo.memory);
 
         const offset: c.VkDeviceSize = 0;
         c.vkCmdBindVertexBuffers(command_buffer, 0, 1, &ui_vbo.buffer, &offset);
