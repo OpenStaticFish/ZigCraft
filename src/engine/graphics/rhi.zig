@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Mat4 = @import("../math/mat4.zig").Mat4;
 const Vec3 = @import("../math/vec3.zig").Vec3;
+const RenderDevice = @import("render_device.zig").RenderDevice;
 
 /// Common RHI errors that backends may return.
 pub const RhiError = error{
@@ -170,18 +171,19 @@ pub const Rect = struct {
 pub const RHI = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
+    device: ?*RenderDevice,
 
     pub const VTable = struct {
         // Lifecycle
-        init: *const fn (ctx: *anyopaque, allocator: Allocator) anyerror!void,
+        init: *const fn (ctx: *anyopaque, allocator: Allocator, device: ?*RenderDevice) anyerror!void,
         deinit: *const fn (ctx: *anyopaque) void,
 
-        // Resource Management
+        // Resource Management (delegated to RenderDevice)
         createBuffer: *const fn (ctx: *anyopaque, size: usize, usage: BufferUsage) BufferHandle,
         uploadBuffer: *const fn (ctx: *anyopaque, handle: BufferHandle, data: []const u8) void,
         destroyBuffer: *const fn (ctx: *anyopaque, handle: BufferHandle) void,
 
-        // Shader Management
+        // Shader Management (delegated to RenderDevice)
         createShader: *const fn (ctx: *anyopaque, vertex_src: [*c]const u8, fragment_src: [*c]const u8) RhiError!ShaderHandle,
         destroyShader: *const fn (ctx: *anyopaque, handle: ShaderHandle) void,
         bindShader: *const fn (ctx: *anyopaque, handle: ShaderHandle) void,
@@ -240,12 +242,26 @@ pub const RHI = struct {
         drawDebugShadowMap: *const fn (ctx: *anyopaque, cascade_index: usize, depth_map_handle: TextureHandle) void,
     };
 
-    pub fn init(self: RHI, allocator: Allocator) !void {
-        return self.vtable.init(self.ptr, allocator);
+    pub fn init(self: RHI, allocator: Allocator, device: ?*RenderDevice) !void {
+        return self.vtable.init(self.ptr, allocator, device);
     }
 
     pub fn deinit(self: RHI) void {
         self.vtable.deinit(self.ptr);
+    }
+
+    pub fn setDevice(self: *RHI, device: ?*RenderDevice) void {
+        self.device = device;
+    }
+
+    pub fn gc(self: RHI) void {
+        if (self.device) |dev| {
+            dev.gc();
+        }
+    }
+
+    pub fn getStats(self: RHI) ?RenderDevice.Stats {
+        return if (self.device) |dev| dev.getStats() else null;
     }
 
     pub fn createBuffer(self: RHI, size: usize, usage: BufferUsage) BufferHandle {

@@ -15,6 +15,7 @@
 const std = @import("std");
 const c = @import("../../c.zig").c;
 const rhi = @import("rhi.zig");
+const RenderDevice = @import("render_device.zig").RenderDevice;
 const Mat4 = @import("../math/mat4.zig").Mat4;
 const Vec3 = @import("../math/vec3.zig").Vec3;
 const Shader = @import("shader.zig").Shader;
@@ -26,6 +27,7 @@ const BufferResource = struct {
 
 const OpenGLContext = struct {
     allocator: std.mem.Allocator,
+    device: ?*RenderDevice,
     buffers: std.ArrayListUnmanaged(BufferResource),
     free_indices: std.ArrayListUnmanaged(usize),
     mutex: std.Thread.Mutex,
@@ -335,9 +337,10 @@ const cloud_fragment_shader =
     \\}
 ;
 
-fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, device: ?*RenderDevice) anyerror!void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.allocator = allocator;
+    ctx.device = device;
     ctx.buffers = .empty;
     ctx.free_indices = .empty;
     ctx.mutex = .{};
@@ -637,7 +640,7 @@ fn beginMainPass(ctx_ptr: *anyopaque) void {
     c.glEnable(c.GL_DEPTH_TEST);
     c.glDepthMask(c.GL_TRUE);
     c.glDepthFunc(c.GL_LESS);
-    
+
     // Disable culling for now to ensure all voxel faces are visible regardless of winding
     c.glDisable(c.GL_CULL_FACE);
 
@@ -699,7 +702,6 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
     _ = cam_pos;
     _ = time;
 }
-
 
 fn setTextureUniforms(ctx_ptr: *anyopaque, texture_enabled: bool, shadow_map_handles: [3]rhi.TextureHandle) void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
@@ -1251,10 +1253,11 @@ const vtable = rhi.RHI.VTable{
     .drawDebugShadowMap = drawDebugShadowMap,
 };
 
-pub fn createRHI(allocator: std.mem.Allocator) !rhi.RHI {
+pub fn createRHI(allocator: std.mem.Allocator, device: ?*RenderDevice) !rhi.RHI {
     const ctx = try allocator.create(OpenGLContext);
     ctx.* = .{
         .allocator = allocator,
+        .device = device,
         .buffers = .empty,
         .free_indices = .empty,
         .mutex = .{},
@@ -1283,5 +1286,6 @@ pub fn createRHI(allocator: std.mem.Allocator) !rhi.RHI {
     return rhi.RHI{
         .ptr = ctx,
         .vtable = &vtable,
+        .device = device,
     };
 }

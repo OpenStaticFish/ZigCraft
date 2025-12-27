@@ -286,22 +286,22 @@ pub const App = struct {
 
         const rhi_and_type = if (use_vulkan) blk: {
             log.log.info("Attempting to initialize Vulkan backend...", .{});
-            const res = rhi_vulkan.createRHI(allocator, wm.window);
+            const res = rhi_vulkan.createRHI(allocator, wm.window, null);
             if (res) |v| {
                 break :blk RhiResult{ .rhi = v, .is_vulkan = true };
             } else |err| {
                 log.log.err("Failed to initialize Vulkan: {}. Falling back to OpenGL.", .{err});
-                break :blk RhiResult{ .rhi = try rhi_opengl.createRHI(allocator), .is_vulkan = false };
+                break :blk RhiResult{ .rhi = try rhi_opengl.createRHI(allocator, null), .is_vulkan = false };
             }
         } else blk: {
             log.log.info("Initializing OpenGL backend...", .{});
-            break :blk RhiResult{ .rhi = try rhi_opengl.createRHI(allocator), .is_vulkan = false };
+            break :blk RhiResult{ .rhi = try rhi_opengl.createRHI(allocator, null), .is_vulkan = false };
         };
 
         const rhi = rhi_and_type.rhi;
         const actual_is_vulkan = rhi_and_type.is_vulkan;
 
-        try rhi.init(allocator);
+        try rhi.init(allocator, null);
 
         const terrain_vert = "assets/shaders/terrain.vert";
         const terrain_frag = "assets/shaders/terrain.frag";

@@ -26,6 +26,7 @@ const std = @import("std");
 const c = @import("../../c.zig").c;
 const rhi = @import("rhi.zig");
 const shadows = @import("shadows.zig");
+const RenderDevice = @import("render_device.zig").RenderDevice;
 const Mat4 = @import("../math/mat4.zig").Mat4;
 const Vec3 = @import("../math/vec3.zig").Vec3;
 
@@ -103,10 +104,11 @@ const ZombieBuffer = struct {
 /// Owns Vulkan objects and manages their lifecycle.
 const VulkanContext = struct {
     allocator: std.mem.Allocator,
+    render_device: ?*RenderDevice,
     instance: c.VkInstance,
     surface: c.VkSurfaceKHR,
     physical_device: c.VkPhysicalDevice,
-    device: c.VkDevice,
+    vk_device: c.VkDevice,
     queue: c.VkQueue,
     graphics_family: u32,
     command_pool: c.VkCommandPool,
@@ -278,10 +280,10 @@ fn createVulkanBuffer(ctx: *VulkanContext, size: usize, usage: c.VkBufferUsageFl
     buffer_info.sharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
 
     var buffer: c.VkBuffer = null;
-    _ = c.vkCreateBuffer(ctx.device, &buffer_info, null, &buffer);
+    _ = c.vkCreateBuffer(ctx.vk_device, &buffer_info, null, &buffer);
 
     var mem_reqs: c.VkMemoryRequirements = undefined;
-    c.vkGetBufferMemoryRequirements(ctx.device, buffer, &mem_reqs);
+    c.vkGetBufferMemoryRequirements(ctx.vk_device, buffer, &mem_reqs);
 
     var alloc_info = std.mem.zeroes(c.VkMemoryAllocateInfo);
     alloc_info.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -291,19 +293,20 @@ fn createVulkanBuffer(ctx: *VulkanContext, size: usize, usage: c.VkBufferUsageFl
     var memory: c.VkDeviceMemory = null;
     // If allocation fails, we return null memory/buffer (handled by caller hopefully, or we should log/panic?)
     // Existing code ignored errors here mostly. Ideally we check result.
-    if (c.vkAllocateMemory(ctx.device, &alloc_info, null, &memory) != c.VK_SUCCESS) {
-        c.vkDestroyBuffer(ctx.device, buffer, null);
+    if (c.vkAllocateMemory(ctx.vk_device, &alloc_info, null, &memory) != c.VK_SUCCESS) {
+        c.vkDestroyBuffer(ctx.vk_device, buffer, null);
         return .{ .buffer = null, .memory = null, .size = 0, .is_host_visible = false };
     }
-    _ = c.vkBindBufferMemory(ctx.device, buffer, memory, 0);
+    _ = c.vkBindBufferMemory(ctx.vk_device, buffer, memory, 0);
 
     const is_host_visible = (properties & c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
     return .{ .buffer = buffer, .memory = memory, .size = mem_reqs.size, .is_host_visible = is_host_visible };
 }
 
-fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
+fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*RenderDevice) anyerror!void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
-    _ = allocator;
+    ctx.allocator = allocator;
+    ctx.render_device = render_device;
 
     // 1. Create Instance
     var count: u32 = 0;
@@ -414,8 +417,8 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     device_create_info.enabledExtensionCount = 1;
     device_create_info.ppEnabledExtensionNames = &device_extensions;
 
-    try checkVk(c.vkCreateDevice(ctx.physical_device, &device_create_info, null, &ctx.device));
-    c.vkGetDeviceQueue(ctx.device, graphics_family.?, 0, &ctx.queue);
+    try checkVk(c.vkCreateDevice(ctx.physical_device, &device_create_info, null, &ctx.vk_device));
+    c.vkGetDeviceQueue(ctx.vk_device, graphics_family.?, 0, &ctx.queue);
 
     // 5. Create Swapchain
     var cap: c.VkSurfaceCapabilitiesKHR = undefined;
@@ -460,12 +463,12 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     swapchain_info.presentMode = ctx.present_mode;
     swapchain_info.clipped = c.VK_TRUE;
 
-    try checkVk(c.vkCreateSwapchainKHR(ctx.device, &swapchain_info, null, &ctx.swapchain));
+    try checkVk(c.vkCreateSwapchainKHR(ctx.vk_device, &swapchain_info, null, &ctx.swapchain));
 
     var image_count: u32 = 0;
-    _ = c.vkGetSwapchainImagesKHR(ctx.device, ctx.swapchain, &image_count, null);
+    _ = c.vkGetSwapchainImagesKHR(ctx.vk_device, ctx.swapchain, &image_count, null);
     try ctx.swapchain_images.resize(ctx.allocator, image_count);
-    _ = c.vkGetSwapchainImagesKHR(ctx.device, ctx.swapchain, &image_count, ctx.swapchain_images.items.ptr);
+    _ = c.vkGetSwapchainImagesKHR(ctx.vk_device, ctx.swapchain, &image_count, ctx.swapchain_images.items.ptr);
 
     for (ctx.swapchain_images.items) |image| {
         var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
@@ -480,9 +483,9 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
         view_info.subresourceRange.layerCount = 1;
 
         var view: c.VkImageView = null;
-        try checkVk(c.vkCreateImageView(ctx.device, &view_info, null, &view));
+        try checkVk(c.vkCreateImageView(ctx.vk_device, &view_info, null, &view));
         ctx.swapchain_image_views.append(ctx.allocator, view) catch {
-            c.vkDestroyImageView(ctx.device, view, null);
+            c.vkDestroyImageView(ctx.vk_device, view, null);
             return error.OutOfMemory;
         };
     }
@@ -504,18 +507,18 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     depth_image_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
     depth_image_info.sharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
 
-    try checkVk(c.vkCreateImage(ctx.device, &depth_image_info, null, &ctx.depth_image));
+    try checkVk(c.vkCreateImage(ctx.vk_device, &depth_image_info, null, &ctx.depth_image));
 
     var depth_mem_reqs: c.VkMemoryRequirements = undefined;
-    c.vkGetImageMemoryRequirements(ctx.device, ctx.depth_image, &depth_mem_reqs);
+    c.vkGetImageMemoryRequirements(ctx.vk_device, ctx.depth_image, &depth_mem_reqs);
 
     var depth_alloc_info = std.mem.zeroes(c.VkMemoryAllocateInfo);
     depth_alloc_info.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     depth_alloc_info.allocationSize = depth_mem_reqs.size;
     depth_alloc_info.memoryTypeIndex = findMemoryType(ctx.physical_device, depth_mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-    try checkVk(c.vkAllocateMemory(ctx.device, &depth_alloc_info, null, &ctx.depth_image_memory));
-    try checkVk(c.vkBindImageMemory(ctx.device, ctx.depth_image, ctx.depth_image_memory, 0));
+    try checkVk(c.vkAllocateMemory(ctx.vk_device, &depth_alloc_info, null, &ctx.depth_image_memory));
+    try checkVk(c.vkBindImageMemory(ctx.vk_device, ctx.depth_image, ctx.depth_image_memory, 0));
 
     var depth_view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
     depth_view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -528,7 +531,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     depth_view_info.subresourceRange.baseArrayLayer = 0;
     depth_view_info.subresourceRange.layerCount = 1;
 
-    try checkVk(c.vkCreateImageView(ctx.device, &depth_view_info, null, &ctx.depth_image_view));
+    try checkVk(c.vkCreateImageView(ctx.vk_device, &depth_view_info, null, &ctx.depth_image_view));
 
     // 6. Create Render Pass
     var color_attachment = std.mem.zeroes(c.VkAttachmentDescription);
@@ -583,7 +586,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     render_pass_info.dependencyCount = 1;
     render_pass_info.pDependencies = &dependency;
 
-    try checkVk(c.vkCreateRenderPass(ctx.device, &render_pass_info, null, &ctx.render_pass));
+    try checkVk(c.vkCreateRenderPass(ctx.vk_device, &render_pass_info, null, &ctx.render_pass));
 
     // 7. Create Framebuffers
     for (ctx.swapchain_image_views.items) |iv| {
@@ -598,7 +601,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
         framebuffer_info.layers = 1;
 
         var fb: c.VkFramebuffer = null;
-        try checkVk(c.vkCreateFramebuffer(ctx.device, &framebuffer_info, null, &fb));
+        try checkVk(c.vkCreateFramebuffer(ctx.vk_device, &framebuffer_info, null, &fb));
         try ctx.swapchain_framebuffers.append(ctx.allocator, fb);
     }
 
@@ -607,28 +610,28 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     pool_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     pool_info.queueFamilyIndex = graphics_family.?;
     pool_info.flags = c.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    try checkVk(c.vkCreateCommandPool(ctx.device, &pool_info, null, &ctx.command_pool));
+    try checkVk(c.vkCreateCommandPool(ctx.vk_device, &pool_info, null, &ctx.command_pool));
 
     var cb_alloc_info = std.mem.zeroes(c.VkCommandBufferAllocateInfo);
     cb_alloc_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     cb_alloc_info.commandPool = ctx.command_pool;
     cb_alloc_info.level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     cb_alloc_info.commandBufferCount = MAX_FRAMES_IN_FLIGHT;
-    try checkVk(c.vkAllocateCommandBuffers(ctx.device, &cb_alloc_info, &ctx.command_buffers[0]));
+    try checkVk(c.vkAllocateCommandBuffers(ctx.vk_device, &cb_alloc_info, &ctx.command_buffers[0]));
 
     // Create Transfer Command Pool & Buffer
     var transfer_pool_info = std.mem.zeroes(c.VkCommandPoolCreateInfo);
     transfer_pool_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     transfer_pool_info.queueFamilyIndex = graphics_family.?;
     transfer_pool_info.flags = c.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    try checkVk(c.vkCreateCommandPool(ctx.device, &transfer_pool_info, null, &ctx.transfer_command_pool));
+    try checkVk(c.vkCreateCommandPool(ctx.vk_device, &transfer_pool_info, null, &ctx.transfer_command_pool));
 
     var tcb_alloc_info = std.mem.zeroes(c.VkCommandBufferAllocateInfo);
     tcb_alloc_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     tcb_alloc_info.commandPool = ctx.transfer_command_pool;
     tcb_alloc_info.level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     tcb_alloc_info.commandBufferCount = 1;
-    try checkVk(c.vkAllocateCommandBuffers(ctx.device, &tcb_alloc_info, &ctx.transfer_command_buffer));
+    try checkVk(c.vkAllocateCommandBuffers(ctx.vk_device, &tcb_alloc_info, &ctx.transfer_command_buffer));
 
     // 9. Sync Objects
     var semaphore_info = std.mem.zeroes(c.VkSemaphoreCreateInfo);
@@ -639,9 +642,9 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     fence_info.flags = c.VK_FENCE_CREATE_SIGNALED_BIT;
 
     for (0..MAX_FRAMES_IN_FLIGHT) |sync_i| {
-        try checkVk(c.vkCreateSemaphore(ctx.device, &semaphore_info, null, &ctx.image_available_semaphores[sync_i]));
-        try checkVk(c.vkCreateSemaphore(ctx.device, &semaphore_info, null, &ctx.render_finished_semaphores[sync_i]));
-        try checkVk(c.vkCreateFence(ctx.device, &fence_info, null, &ctx.in_flight_fences[sync_i]));
+        try checkVk(c.vkCreateSemaphore(ctx.vk_device, &semaphore_info, null, &ctx.image_available_semaphores[sync_i]));
+        try checkVk(c.vkCreateSemaphore(ctx.vk_device, &semaphore_info, null, &ctx.render_finished_semaphores[sync_i]));
+        try checkVk(c.vkCreateFence(ctx.vk_device, &fence_info, null, &ctx.in_flight_fences[sync_i]));
     }
 
     // 10. Uniform Buffers
@@ -702,7 +705,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     layout_info.bindingCount = 6;
     layout_info.pBindings = &layout_bindings[0];
 
-    try checkVk(c.vkCreateDescriptorSetLayout(ctx.device, &layout_info, null, &ctx.descriptor_set_layout));
+    try checkVk(c.vkCreateDescriptorSetLayout(ctx.vk_device, &layout_info, null, &ctx.descriptor_set_layout));
 
     var pool_sizes = [_]c.VkDescriptorPoolSize{
         .{ .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT },
@@ -715,7 +718,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     pool_info_desc.pPoolSizes = &pool_sizes[0];
     pool_info_desc.maxSets = 2 * MAX_FRAMES_IN_FLIGHT; // Enough for UI too
 
-    try checkVk(c.vkCreateDescriptorPool(ctx.device, &pool_info_desc, null, &ctx.descriptor_pool));
+    try checkVk(c.vkCreateDescriptorPool(ctx.vk_device, &pool_info_desc, null, &ctx.descriptor_pool));
 
     for (0..MAX_FRAMES_IN_FLIGHT) |ds_i| {
         var ds_alloc_info = std.mem.zeroes(c.VkDescriptorSetAllocateInfo);
@@ -724,7 +727,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
         ds_alloc_info.descriptorSetCount = 1;
         ds_alloc_info.pSetLayouts = &ctx.descriptor_set_layout;
 
-        try checkVk(c.vkAllocateDescriptorSets(ctx.device, &ds_alloc_info, &ctx.descriptor_sets[ds_i]));
+        try checkVk(c.vkAllocateDescriptorSets(ctx.vk_device, &ds_alloc_info, &ctx.descriptor_sets[ds_i]));
 
         var global_buffer_info = c.VkDescriptorBufferInfo{
             .buffer = ctx.global_ubos[ds_i].buffer,
@@ -755,7 +758,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
         write2.pBufferInfo = &shadow_buffer_info;
 
         var descriptor_writes = [_]c.VkWriteDescriptorSet{ write0, write2 };
-        c.vkUpdateDescriptorSets(ctx.device, 2, &descriptor_writes[0], 0, null);
+        c.vkUpdateDescriptorSets(ctx.vk_device, 2, &descriptor_writes[0], 0, null);
     }
 
     ctx.current_model = Mat4.identity;
@@ -775,7 +778,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     pipeline_layout_info.pushConstantRangeCount = 1;
     pipeline_layout_info.pPushConstantRanges = &push_constant_range;
 
-    try checkVk(c.vkCreatePipelineLayout(ctx.device, &pipeline_layout_info, null, &ctx.pipeline_layout));
+    try checkVk(c.vkCreatePipelineLayout(ctx.vk_device, &pipeline_layout_info, null, &ctx.pipeline_layout));
 
     // 13. Graphics Pipeline
     const vert_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/terrain.vert.spv", ctx.allocator, @enumFromInt(1024 * 1024));
@@ -783,10 +786,10 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     const frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/terrain.frag.spv", ctx.allocator, @enumFromInt(1024 * 1024));
     defer ctx.allocator.free(frag_code);
 
-    const vert_module = try createShaderModule(ctx.device, vert_code);
-    defer c.vkDestroyShaderModule(ctx.device, vert_module, null);
-    const frag_module = try createShaderModule(ctx.device, frag_code);
-    defer c.vkDestroyShaderModule(ctx.device, frag_module, null);
+    const vert_module = try createShaderModule(ctx.vk_device, vert_code);
+    defer c.vkDestroyShaderModule(ctx.vk_device, vert_module, null);
+    const frag_module = try createShaderModule(ctx.vk_device, frag_code);
+    defer c.vkDestroyShaderModule(ctx.vk_device, frag_module, null);
 
     var vert_stage = std.mem.zeroes(c.VkPipelineShaderStageCreateInfo);
     vert_stage.sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -897,7 +900,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     pipeline_info.renderPass = ctx.render_pass;
     pipeline_info.subpass = 0;
 
-    try checkVk(c.vkCreateGraphicsPipelines(ctx.device, null, 1, &pipeline_info, null, &ctx.pipeline));
+    try checkVk(c.vkCreateGraphicsPipelines(ctx.vk_device, null, 1, &pipeline_info, null, &ctx.pipeline));
 
     // 13a. Create wireframe pipeline variant if supported
     if (device_features.fillModeNonSolid == c.VK_TRUE) {
@@ -906,7 +909,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
         wireframe_rasterizer.lineWidth = 1.0;
 
         pipeline_info.pRasterizationState = &wireframe_rasterizer;
-        try checkVk(c.vkCreateGraphicsPipelines(ctx.device, null, 1, &pipeline_info, null, &ctx.wireframe_pipeline));
+        try checkVk(c.vkCreateGraphicsPipelines(ctx.vk_device, null, 1, &pipeline_info, null, &ctx.wireframe_pipeline));
     } else {
         ctx.wireframe_pipeline = null;
     }
@@ -954,7 +957,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     shadow_render_pass_info.dependencyCount = 1;
     shadow_render_pass_info.pDependencies = &shadow_dependency;
 
-    try checkVk(c.vkCreateRenderPass(ctx.device, &shadow_render_pass_info, null, &ctx.shadow_render_pass));
+    try checkVk(c.vkCreateRenderPass(ctx.vk_device, &shadow_render_pass_info, null, &ctx.shadow_render_pass));
 
     for (0..shadows.ShadowMap.CASCADE_COUNT) |si| {
         var shadow_image_info = std.mem.zeroes(c.VkImageCreateInfo);
@@ -972,18 +975,18 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
         shadow_image_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
         shadow_image_info.sharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
 
-        try checkVk(c.vkCreateImage(ctx.device, &shadow_image_info, null, &ctx.shadow_images[si]));
+        try checkVk(c.vkCreateImage(ctx.vk_device, &shadow_image_info, null, &ctx.shadow_images[si]));
 
         var shadow_mem_reqs: c.VkMemoryRequirements = undefined;
-        c.vkGetImageMemoryRequirements(ctx.device, ctx.shadow_images[si], &shadow_mem_reqs);
+        c.vkGetImageMemoryRequirements(ctx.vk_device, ctx.shadow_images[si], &shadow_mem_reqs);
 
         var shadow_alloc_info = std.mem.zeroes(c.VkMemoryAllocateInfo);
         shadow_alloc_info.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         shadow_alloc_info.allocationSize = shadow_mem_reqs.size;
         shadow_alloc_info.memoryTypeIndex = findMemoryType(ctx.physical_device, shadow_mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-        try checkVk(c.vkAllocateMemory(ctx.device, &shadow_alloc_info, null, &ctx.shadow_image_memory[si]));
-        try checkVk(c.vkBindImageMemory(ctx.device, ctx.shadow_images[si], ctx.shadow_image_memory[si], 0));
+        try checkVk(c.vkAllocateMemory(ctx.vk_device, &shadow_alloc_info, null, &ctx.shadow_image_memory[si]));
+        try checkVk(c.vkBindImageMemory(ctx.vk_device, ctx.shadow_images[si], ctx.shadow_image_memory[si], 0));
 
         var shadow_view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
         shadow_view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -996,7 +999,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
         shadow_view_info.subresourceRange.baseArrayLayer = 0;
         shadow_view_info.subresourceRange.layerCount = 1;
 
-        try checkVk(c.vkCreateImageView(ctx.device, &shadow_view_info, null, &ctx.shadow_image_views[si]));
+        try checkVk(c.vkCreateImageView(ctx.vk_device, &shadow_view_info, null, &ctx.shadow_image_views[si]));
 
         var shadow_fb_info = std.mem.zeroes(c.VkFramebufferCreateInfo);
         shadow_fb_info.sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -1007,7 +1010,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
         shadow_fb_info.height = ctx.shadow_extent.height;
         shadow_fb_info.layers = 1;
 
-        try checkVk(c.vkCreateFramebuffer(ctx.device, &shadow_fb_info, null, &ctx.shadow_framebuffers[si]));
+        try checkVk(c.vkCreateFramebuffer(ctx.vk_device, &shadow_fb_info, null, &ctx.shadow_framebuffers[si]));
     }
 
     const shadow_vert_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/shadow.vert.spv", ctx.allocator, @enumFromInt(1024 * 1024));
@@ -1015,10 +1018,10 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     const shadow_frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/shadow.frag.spv", ctx.allocator, @enumFromInt(1024 * 1024));
     defer ctx.allocator.free(shadow_frag_code);
 
-    const shadow_vert_module = try createShaderModule(ctx.device, shadow_vert_code);
-    defer c.vkDestroyShaderModule(ctx.device, shadow_vert_module, null);
-    const shadow_frag_module = try createShaderModule(ctx.device, shadow_frag_code);
-    defer c.vkDestroyShaderModule(ctx.device, shadow_frag_module, null);
+    const shadow_vert_module = try createShaderModule(ctx.vk_device, shadow_vert_code);
+    defer c.vkDestroyShaderModule(ctx.vk_device, shadow_vert_module, null);
+    const shadow_frag_module = try createShaderModule(ctx.vk_device, shadow_frag_code);
+    defer c.vkDestroyShaderModule(ctx.vk_device, shadow_frag_module, null);
 
     var shadow_vert_stage = std.mem.zeroes(c.VkPipelineShaderStageCreateInfo);
     shadow_vert_stage.sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -1080,7 +1083,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     shadow_pipeline_info.renderPass = ctx.shadow_render_pass;
     shadow_pipeline_info.subpass = 0;
 
-    try checkVk(c.vkCreateGraphicsPipelines(ctx.device, null, 1, &shadow_pipeline_info, null, &ctx.shadow_pipeline));
+    try checkVk(c.vkCreateGraphicsPipelines(ctx.vk_device, null, 1, &shadow_pipeline_info, null, &ctx.shadow_pipeline));
 
     // 13c. Sky Pipeline
     const sky_vert_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/sky.vert.spv", ctx.allocator, @enumFromInt(1024 * 1024));
@@ -1088,10 +1091,10 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     const sky_frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/sky.frag.spv", ctx.allocator, @enumFromInt(1024 * 1024));
     defer ctx.allocator.free(sky_frag_code);
 
-    const sky_vert_module = try createShaderModule(ctx.device, sky_vert_code);
-    defer c.vkDestroyShaderModule(ctx.device, sky_vert_module, null);
-    const sky_frag_module = try createShaderModule(ctx.device, sky_frag_code);
-    defer c.vkDestroyShaderModule(ctx.device, sky_frag_module, null);
+    const sky_vert_module = try createShaderModule(ctx.vk_device, sky_vert_code);
+    defer c.vkDestroyShaderModule(ctx.vk_device, sky_vert_module, null);
+    const sky_frag_module = try createShaderModule(ctx.vk_device, sky_frag_code);
+    defer c.vkDestroyShaderModule(ctx.vk_device, sky_frag_module, null);
 
     var sky_vert_stage = std.mem.zeroes(c.VkPipelineShaderStageCreateInfo);
     sky_vert_stage.sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -1121,7 +1124,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     sky_pipeline_layout_info.pushConstantRangeCount = 1;
     sky_pipeline_layout_info.pPushConstantRanges = &sky_push_constant;
 
-    try checkVk(c.vkCreatePipelineLayout(ctx.device, &sky_pipeline_layout_info, null, &ctx.sky_pipeline_layout));
+    try checkVk(c.vkCreatePipelineLayout(ctx.vk_device, &sky_pipeline_layout_info, null, &ctx.sky_pipeline_layout));
 
     var sky_depth_stencil = std.mem.zeroes(c.VkPipelineDepthStencilStateCreateInfo);
     sky_depth_stencil.sType = c.VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -1144,7 +1147,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     sky_pipeline_info.renderPass = ctx.render_pass;
     sky_pipeline_info.subpass = 0;
 
-    try checkVk(c.vkCreateGraphicsPipelines(ctx.device, null, 1, &sky_pipeline_info, null, &ctx.sky_pipeline));
+    try checkVk(c.vkCreateGraphicsPipelines(ctx.vk_device, null, 1, &sky_pipeline_info, null, &ctx.sky_pipeline));
 
     // 14. Create UI Pipeline
     const ui_vert_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/ui.vert.spv", ctx.allocator, @enumFromInt(1024 * 1024));
@@ -1152,10 +1155,10 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     const ui_frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/ui.frag.spv", ctx.allocator, @enumFromInt(1024 * 1024));
     defer ctx.allocator.free(ui_frag_code);
 
-    const ui_vert_module = try createShaderModule(ctx.device, ui_vert_code);
-    defer c.vkDestroyShaderModule(ctx.device, ui_vert_module, null);
-    const ui_frag_module = try createShaderModule(ctx.device, ui_frag_code);
-    defer c.vkDestroyShaderModule(ctx.device, ui_frag_module, null);
+    const ui_vert_module = try createShaderModule(ctx.vk_device, ui_vert_code);
+    defer c.vkDestroyShaderModule(ctx.vk_device, ui_vert_module, null);
+    const ui_frag_module = try createShaderModule(ctx.vk_device, ui_frag_code);
+    defer c.vkDestroyShaderModule(ctx.vk_device, ui_frag_module, null);
 
     var ui_vert_stage = std.mem.zeroes(c.VkPipelineShaderStageCreateInfo);
     ui_vert_stage.sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -1201,7 +1204,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     ui_pipeline_layout_info.pushConstantRangeCount = 1;
     ui_pipeline_layout_info.pPushConstantRanges = &ui_push_constant_range;
 
-    try checkVk(c.vkCreatePipelineLayout(ctx.device, &ui_pipeline_layout_info, null, &ctx.ui_pipeline_layout));
+    try checkVk(c.vkCreatePipelineLayout(ctx.vk_device, &ui_pipeline_layout_info, null, &ctx.ui_pipeline_layout));
 
     // UI depth/blend state - no depth test, alpha blending enabled
     var ui_depth_stencil = std.mem.zeroes(c.VkPipelineDepthStencilStateCreateInfo);
@@ -1240,7 +1243,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     ui_pipeline_info.renderPass = ctx.render_pass;
     ui_pipeline_info.subpass = 0;
 
-    try checkVk(c.vkCreateGraphicsPipelines(ctx.device, null, 1, &ui_pipeline_info, null, &ctx.ui_pipeline));
+    try checkVk(c.vkCreateGraphicsPipelines(ctx.vk_device, null, 1, &ui_pipeline_info, null, &ctx.ui_pipeline));
 
     // 14a. Create Textured UI Pipeline
     const ui_tex_vert_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/ui_tex.vert.spv", ctx.allocator, @enumFromInt(1024 * 1024));
@@ -1248,10 +1251,10 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     const ui_tex_frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/ui_tex.frag.spv", ctx.allocator, @enumFromInt(1024 * 1024));
     defer ctx.allocator.free(ui_tex_frag_code);
 
-    const ui_tex_vert_module = try createShaderModule(ctx.device, ui_tex_vert_code);
-    defer c.vkDestroyShaderModule(ctx.device, ui_tex_vert_module, null);
-    const ui_tex_frag_module = try createShaderModule(ctx.device, ui_tex_frag_code);
-    defer c.vkDestroyShaderModule(ctx.device, ui_tex_frag_module, null);
+    const ui_tex_vert_module = try createShaderModule(ctx.vk_device, ui_tex_vert_code);
+    defer c.vkDestroyShaderModule(ctx.vk_device, ui_tex_vert_module, null);
+    const ui_tex_frag_module = try createShaderModule(ctx.vk_device, ui_tex_frag_code);
+    defer c.vkDestroyShaderModule(ctx.vk_device, ui_tex_frag_module, null);
 
     var ui_tex_vert_stage = std.mem.zeroes(c.VkPipelineShaderStageCreateInfo);
     ui_tex_vert_stage.sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -1297,7 +1300,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     ui_tex_ds_layout_info.sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     ui_tex_ds_layout_info.bindingCount = 1;
     ui_tex_ds_layout_info.pBindings = &ui_tex_ds_binding;
-    try checkVk(c.vkCreateDescriptorSetLayout(ctx.device, &ui_tex_ds_layout_info, null, &ctx.ui_tex_descriptor_set_layout));
+    try checkVk(c.vkCreateDescriptorSetLayout(ctx.vk_device, &ui_tex_ds_layout_info, null, &ctx.ui_tex_descriptor_set_layout));
 
     var ui_tex_pipeline_layout_info = std.mem.zeroes(c.VkPipelineLayoutCreateInfo);
     ui_tex_pipeline_layout_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -1305,7 +1308,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     ui_tex_pipeline_layout_info.pSetLayouts = &ctx.ui_tex_descriptor_set_layout;
     ui_tex_pipeline_layout_info.pushConstantRangeCount = 1;
     ui_tex_pipeline_layout_info.pPushConstantRanges = &ui_push_constant_range;
-    try checkVk(c.vkCreatePipelineLayout(ctx.device, &ui_tex_pipeline_layout_info, null, &ctx.ui_tex_pipeline_layout));
+    try checkVk(c.vkCreatePipelineLayout(ctx.vk_device, &ui_tex_pipeline_layout_info, null, &ctx.ui_tex_pipeline_layout));
 
     var ui_tex_color_blend_attachment = std.mem.zeroes(c.VkPipelineColorBlendAttachmentState);
     ui_tex_color_blend_attachment.colorWriteMask = c.VK_COLOR_COMPONENT_R_BIT | c.VK_COLOR_COMPONENT_G_BIT | c.VK_COLOR_COMPONENT_B_BIT | c.VK_COLOR_COMPONENT_A_BIT;
@@ -1332,7 +1335,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     ui_tex_pipeline_info.renderPass = ctx.render_pass;
     ui_tex_pipeline_info.subpass = 0;
 
-    try checkVk(c.vkCreateGraphicsPipelines(ctx.device, null, 1, &ui_tex_pipeline_info, null, &ctx.ui_tex_pipeline));
+    try checkVk(c.vkCreateGraphicsPipelines(ctx.vk_device, null, 1, &ui_tex_pipeline_info, null, &ctx.ui_tex_pipeline));
 
     // Allocate UI Tex Descriptor Sets
     for (0..MAX_FRAMES_IN_FLIGHT) |ui_ds_i| {
@@ -1341,7 +1344,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
         ui_ds_alloc_info.descriptorPool = ctx.descriptor_pool;
         ui_ds_alloc_info.descriptorSetCount = 1;
         ui_ds_alloc_info.pSetLayouts = &ctx.ui_tex_descriptor_set_layout;
-        try checkVk(c.vkAllocateDescriptorSets(ctx.device, &ui_ds_alloc_info, &ctx.ui_tex_descriptor_sets[ui_ds_i]));
+        try checkVk(c.vkAllocateDescriptorSets(ctx.vk_device, &ui_ds_alloc_info, &ctx.ui_tex_descriptor_sets[ui_ds_i]));
     }
 
     // Create UI VBOs (enough for many quads)
@@ -1367,7 +1370,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
     shadow_sampler_info.addressModeW = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
     // Reverse-Z: border = 0.0 means "no occluder" (far plane), so out-of-bounds = no shadow
     shadow_sampler_info.borderColor = c.VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
-    try checkVk(c.vkCreateSampler(ctx.device, &shadow_sampler_info, null, &ctx.shadow_sampler));
+    try checkVk(c.vkCreateSampler(ctx.vk_device, &shadow_sampler_info, null, &ctx.shadow_sampler));
 
     // Initialize shadow layouts to undefined
     for (0..shadows.ShadowMap.CASCADE_COUNT) |si| {
@@ -1383,101 +1386,101 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator) anyerror!void {
 
 fn deinit(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
-    if (ctx.device != null) {
-        _ = c.vkDeviceWaitIdle(ctx.device);
+    if (ctx.vk_device != null) {
+        _ = c.vkDeviceWaitIdle(ctx.vk_device);
 
         // Clean up UI pipeline
-        if (ctx.ui_pipeline != null) c.vkDestroyPipeline(ctx.device, ctx.ui_pipeline, null);
-        if (ctx.ui_pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.device, ctx.ui_pipeline_layout, null);
-        if (ctx.ui_tex_pipeline != null) c.vkDestroyPipeline(ctx.device, ctx.ui_tex_pipeline, null);
-        if (ctx.ui_tex_pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.device, ctx.ui_tex_pipeline_layout, null);
-        if (ctx.ui_tex_descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(ctx.device, ctx.ui_tex_descriptor_set_layout, null);
+        if (ctx.ui_pipeline != null) c.vkDestroyPipeline(ctx.vk_device, ctx.ui_pipeline, null);
+        if (ctx.ui_pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.vk_device, ctx.ui_pipeline_layout, null);
+        if (ctx.ui_tex_pipeline != null) c.vkDestroyPipeline(ctx.vk_device, ctx.ui_tex_pipeline, null);
+        if (ctx.ui_tex_pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.vk_device, ctx.ui_tex_pipeline_layout, null);
+        if (ctx.ui_tex_descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(ctx.vk_device, ctx.ui_tex_descriptor_set_layout, null);
         for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-            if (ctx.ui_vbos[i].buffer != null) c.vkDestroyBuffer(ctx.device, ctx.ui_vbos[i].buffer, null);
-            if (ctx.ui_vbos[i].memory != null) c.vkFreeMemory(ctx.device, ctx.ui_vbos[i].memory, null);
+            if (ctx.ui_vbos[i].buffer != null) c.vkDestroyBuffer(ctx.vk_device, ctx.ui_vbos[i].buffer, null);
+            if (ctx.ui_vbos[i].memory != null) c.vkFreeMemory(ctx.vk_device, ctx.ui_vbos[i].memory, null);
         }
 
         // Clean up sky pipeline
-        if (ctx.sky_pipeline != null) c.vkDestroyPipeline(ctx.device, ctx.sky_pipeline, null);
-        if (ctx.sky_pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.device, ctx.sky_pipeline_layout, null);
+        if (ctx.sky_pipeline != null) c.vkDestroyPipeline(ctx.vk_device, ctx.sky_pipeline, null);
+        if (ctx.sky_pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.vk_device, ctx.sky_pipeline_layout, null);
 
         // Clean up shadow pipeline
-        if (ctx.shadow_pipeline != null) c.vkDestroyPipeline(ctx.device, ctx.shadow_pipeline, null);
+        if (ctx.shadow_pipeline != null) c.vkDestroyPipeline(ctx.vk_device, ctx.shadow_pipeline, null);
 
         for (0..shadows.ShadowMap.CASCADE_COUNT) |i| {
-            if (ctx.shadow_framebuffers[i] != null) c.vkDestroyFramebuffer(ctx.device, ctx.shadow_framebuffers[i], null);
-            if (ctx.shadow_image_views[i] != null) c.vkDestroyImageView(ctx.device, ctx.shadow_image_views[i], null);
-            if (ctx.shadow_images[i] != null) c.vkDestroyImage(ctx.device, ctx.shadow_images[i], null);
-            if (ctx.shadow_image_memory[i] != null) c.vkFreeMemory(ctx.device, ctx.shadow_image_memory[i], null);
+            if (ctx.shadow_framebuffers[i] != null) c.vkDestroyFramebuffer(ctx.vk_device, ctx.shadow_framebuffers[i], null);
+            if (ctx.shadow_image_views[i] != null) c.vkDestroyImageView(ctx.vk_device, ctx.shadow_image_views[i], null);
+            if (ctx.shadow_images[i] != null) c.vkDestroyImage(ctx.vk_device, ctx.shadow_images[i], null);
+            if (ctx.shadow_image_memory[i] != null) c.vkFreeMemory(ctx.vk_device, ctx.shadow_image_memory[i], null);
         }
-        if (ctx.shadow_render_pass != null) c.vkDestroyRenderPass(ctx.device, ctx.shadow_render_pass, null);
-        if (ctx.shadow_sampler != null) c.vkDestroySampler(ctx.device, ctx.shadow_sampler, null);
+        if (ctx.shadow_render_pass != null) c.vkDestroyRenderPass(ctx.vk_device, ctx.shadow_render_pass, null);
+        if (ctx.shadow_sampler != null) c.vkDestroySampler(ctx.vk_device, ctx.shadow_sampler, null);
 
-        if (ctx.pipeline != null) c.vkDestroyPipeline(ctx.device, ctx.pipeline, null);
-        if (ctx.wireframe_pipeline != null) c.vkDestroyPipeline(ctx.device, ctx.wireframe_pipeline, null);
-        if (ctx.pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.device, ctx.pipeline_layout, null);
+        if (ctx.pipeline != null) c.vkDestroyPipeline(ctx.vk_device, ctx.pipeline, null);
+        if (ctx.wireframe_pipeline != null) c.vkDestroyPipeline(ctx.vk_device, ctx.wireframe_pipeline, null);
+        if (ctx.pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.vk_device, ctx.pipeline_layout, null);
 
-        for (ctx.swapchain_framebuffers.items) |fb| if (fb != null) c.vkDestroyFramebuffer(ctx.device, fb, null);
+        for (ctx.swapchain_framebuffers.items) |fb| if (fb != null) c.vkDestroyFramebuffer(ctx.vk_device, fb, null);
         ctx.swapchain_framebuffers.deinit(ctx.allocator);
 
-        for (ctx.swapchain_image_views.items) |iv| if (iv != null) c.vkDestroyImageView(ctx.device, iv, null);
+        for (ctx.swapchain_image_views.items) |iv| if (iv != null) c.vkDestroyImageView(ctx.vk_device, iv, null);
         ctx.swapchain_image_views.deinit(ctx.allocator);
         ctx.swapchain_images.deinit(ctx.allocator);
 
-        if (ctx.depth_image_view != null) c.vkDestroyImageView(ctx.device, ctx.depth_image_view, null);
-        if (ctx.depth_image_memory != null) c.vkFreeMemory(ctx.device, ctx.depth_image_memory, null);
-        if (ctx.depth_image != null) c.vkDestroyImage(ctx.device, ctx.depth_image, null);
+        if (ctx.depth_image_view != null) c.vkDestroyImageView(ctx.vk_device, ctx.depth_image_view, null);
+        if (ctx.depth_image_memory != null) c.vkFreeMemory(ctx.vk_device, ctx.depth_image_memory, null);
+        if (ctx.depth_image != null) c.vkDestroyImage(ctx.vk_device, ctx.depth_image, null);
 
-        if (ctx.swapchain != null) c.vkDestroySwapchainKHR(ctx.device, ctx.swapchain, null);
-        if (ctx.render_pass != null) c.vkDestroyRenderPass(ctx.device, ctx.render_pass, null);
+        if (ctx.swapchain != null) c.vkDestroySwapchainKHR(ctx.vk_device, ctx.swapchain, null);
+        if (ctx.render_pass != null) c.vkDestroyRenderPass(ctx.vk_device, ctx.render_pass, null);
 
         for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-            if (ctx.image_available_semaphores[i] != null) c.vkDestroySemaphore(ctx.device, ctx.image_available_semaphores[i], null);
-            if (ctx.render_finished_semaphores[i] != null) c.vkDestroySemaphore(ctx.device, ctx.render_finished_semaphores[i], null);
-            if (ctx.in_flight_fences[i] != null) c.vkDestroyFence(ctx.device, ctx.in_flight_fences[i], null);
+            if (ctx.image_available_semaphores[i] != null) c.vkDestroySemaphore(ctx.vk_device, ctx.image_available_semaphores[i], null);
+            if (ctx.render_finished_semaphores[i] != null) c.vkDestroySemaphore(ctx.vk_device, ctx.render_finished_semaphores[i], null);
+            if (ctx.in_flight_fences[i] != null) c.vkDestroyFence(ctx.vk_device, ctx.in_flight_fences[i], null);
         }
 
-        if (ctx.command_pool != null) c.vkDestroyCommandPool(ctx.device, ctx.command_pool, null);
-        if (ctx.transfer_command_pool != null) c.vkDestroyCommandPool(ctx.device, ctx.transfer_command_pool, null);
+        if (ctx.command_pool != null) c.vkDestroyCommandPool(ctx.vk_device, ctx.command_pool, null);
+        if (ctx.transfer_command_pool != null) c.vkDestroyCommandPool(ctx.vk_device, ctx.transfer_command_pool, null);
 
         // Clean up UBOS
         for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-            if (ctx.global_ubos[i].buffer != null) c.vkDestroyBuffer(ctx.device, ctx.global_ubos[i].buffer, null);
-            if (ctx.global_ubos[i].memory != null) c.vkFreeMemory(ctx.device, ctx.global_ubos[i].memory, null);
-            if (ctx.shadow_ubos[i].buffer != null) c.vkDestroyBuffer(ctx.device, ctx.shadow_ubos[i].buffer, null);
-            if (ctx.shadow_ubos[i].memory != null) c.vkFreeMemory(ctx.device, ctx.shadow_ubos[i].memory, null);
+            if (ctx.global_ubos[i].buffer != null) c.vkDestroyBuffer(ctx.vk_device, ctx.global_ubos[i].buffer, null);
+            if (ctx.global_ubos[i].memory != null) c.vkFreeMemory(ctx.vk_device, ctx.global_ubos[i].memory, null);
+            if (ctx.shadow_ubos[i].buffer != null) c.vkDestroyBuffer(ctx.vk_device, ctx.shadow_ubos[i].buffer, null);
+            if (ctx.shadow_ubos[i].memory != null) c.vkFreeMemory(ctx.vk_device, ctx.shadow_ubos[i].memory, null);
         }
-        if (ctx.model_ubo.buffer != null) c.vkDestroyBuffer(ctx.device, ctx.model_ubo.buffer, null);
-        if (ctx.model_ubo.memory != null) c.vkFreeMemory(ctx.device, ctx.model_ubo.memory, null);
+        if (ctx.model_ubo.buffer != null) c.vkDestroyBuffer(ctx.vk_device, ctx.model_ubo.buffer, null);
+        if (ctx.model_ubo.memory != null) c.vkFreeMemory(ctx.vk_device, ctx.model_ubo.memory, null);
 
-        if (ctx.descriptor_pool != null) c.vkDestroyDescriptorPool(ctx.device, ctx.descriptor_pool, null);
-        if (ctx.descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(ctx.device, ctx.descriptor_set_layout, null);
+        if (ctx.descriptor_pool != null) c.vkDestroyDescriptorPool(ctx.vk_device, ctx.descriptor_pool, null);
+        if (ctx.descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(ctx.vk_device, ctx.descriptor_set_layout, null);
 
         var buf_iter = ctx.buffers.iterator();
         while (buf_iter.next()) |entry| {
-            c.vkDestroyBuffer(ctx.device, entry.value_ptr.buffer, null);
-            c.vkFreeMemory(ctx.device, entry.value_ptr.memory, null);
+            c.vkDestroyBuffer(ctx.vk_device, entry.value_ptr.buffer, null);
+            c.vkFreeMemory(ctx.vk_device, entry.value_ptr.memory, null);
         }
         ctx.buffers.deinit();
 
         var tex_iter = ctx.textures.iterator();
         while (tex_iter.next()) |entry| {
-            c.vkDestroySampler(ctx.device, entry.value_ptr.sampler, null);
-            c.vkDestroyImageView(ctx.device, entry.value_ptr.view, null);
-            c.vkFreeMemory(ctx.device, entry.value_ptr.memory, null);
-            c.vkDestroyImage(ctx.device, entry.value_ptr.image, null);
+            c.vkDestroySampler(ctx.vk_device, entry.value_ptr.sampler, null);
+            c.vkDestroyImageView(ctx.vk_device, entry.value_ptr.view, null);
+            c.vkFreeMemory(ctx.vk_device, entry.value_ptr.memory, null);
+            c.vkDestroyImage(ctx.vk_device, entry.value_ptr.image, null);
         }
         ctx.textures.deinit();
 
         for (0..MAX_FRAMES_IN_FLIGHT) |frame_i| {
             for (ctx.buffer_deletion_queue[frame_i].items) |zombie| {
-                if (zombie.buffer != null) c.vkDestroyBuffer(ctx.device, zombie.buffer, null);
-                if (zombie.memory != null) c.vkFreeMemory(ctx.device, zombie.memory, null);
+                if (zombie.buffer != null) c.vkDestroyBuffer(ctx.vk_device, zombie.buffer, null);
+                if (zombie.memory != null) c.vkFreeMemory(ctx.vk_device, zombie.memory, null);
             }
             ctx.buffer_deletion_queue[frame_i].deinit(ctx.allocator);
         }
 
-        c.vkDestroyDevice(ctx.device, null);
+        c.vkDestroyDevice(ctx.vk_device, null);
     }
     if (ctx.surface != null) c.vkDestroySurfaceKHR(ctx.instance, ctx.surface, null);
     if (ctx.instance != null) c.vkDestroyInstance(ctx.instance, null);
@@ -1523,10 +1526,10 @@ fn uploadBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, data: []const u8)
         // Try mapping directly first (for HOST_VISIBLE buffers like UBOs)
         if (buf.is_host_visible) {
             var map_ptr: ?*anyopaque = null;
-            const result = c.vkMapMemory(ctx.device, buf.memory, 0, @intCast(data.len), 0, &map_ptr);
+            const result = c.vkMapMemory(ctx.vk_device, buf.memory, 0, @intCast(data.len), 0, &map_ptr);
             if (result == c.VK_SUCCESS) {
                 @memcpy(@as([*]u8, @ptrCast(map_ptr))[0..data.len], data);
-                c.vkUnmapMemory(ctx.device, buf.memory);
+                c.vkUnmapMemory(ctx.vk_device, buf.memory);
                 return;
             }
         }
@@ -1534,8 +1537,8 @@ fn uploadBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, data: []const u8)
         // If mapping failed, assume DEVICE_LOCAL and use staging buffer
         const staging = createVulkanBuffer(ctx, data.len, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         defer {
-            if (staging.buffer != null) c.vkDestroyBuffer(ctx.device, staging.buffer, null);
-            if (staging.memory != null) c.vkFreeMemory(ctx.device, staging.memory, null);
+            if (staging.buffer != null) c.vkDestroyBuffer(ctx.vk_device, staging.buffer, null);
+            if (staging.memory != null) c.vkFreeMemory(ctx.vk_device, staging.memory, null);
         }
 
         if (staging.buffer == null) {
@@ -1545,9 +1548,9 @@ fn uploadBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, data: []const u8)
 
         // Copy to staging
         var map_ptr: ?*anyopaque = null;
-        if (c.vkMapMemory(ctx.device, staging.memory, 0, @intCast(data.len), 0, &map_ptr) == c.VK_SUCCESS) {
+        if (c.vkMapMemory(ctx.vk_device, staging.memory, 0, @intCast(data.len), 0, &map_ptr) == c.VK_SUCCESS) {
             @memcpy(@as([*]u8, @ptrCast(map_ptr))[0..data.len], data);
-            c.vkUnmapMemory(ctx.device, staging.memory);
+            c.vkUnmapMemory(ctx.vk_device, staging.memory);
         } else {
             std.log.err("Failed to map staging buffer memory", .{});
             return;
@@ -1595,28 +1598,28 @@ fn destroyBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle) void {
 }
 
 fn cleanupSwapchain(ctx: *VulkanContext) void {
-    for (ctx.swapchain_framebuffers.items) |fb| if (fb != null) c.vkDestroyFramebuffer(ctx.device, fb, null);
+    for (ctx.swapchain_framebuffers.items) |fb| if (fb != null) c.vkDestroyFramebuffer(ctx.vk_device, fb, null);
     ctx.swapchain_framebuffers.clearRetainingCapacity();
 
-    for (ctx.swapchain_image_views.items) |iv| if (iv != null) c.vkDestroyImageView(ctx.device, iv, null);
+    for (ctx.swapchain_image_views.items) |iv| if (iv != null) c.vkDestroyImageView(ctx.vk_device, iv, null);
     ctx.swapchain_image_views.clearRetainingCapacity();
     ctx.swapchain_images.clearRetainingCapacity();
 
     if (ctx.depth_image_view != null) {
-        c.vkDestroyImageView(ctx.device, ctx.depth_image_view, null);
+        c.vkDestroyImageView(ctx.vk_device, ctx.depth_image_view, null);
         ctx.depth_image_view = null;
     }
     if (ctx.depth_image_memory != null) {
-        c.vkFreeMemory(ctx.device, ctx.depth_image_memory, null);
+        c.vkFreeMemory(ctx.vk_device, ctx.depth_image_memory, null);
         ctx.depth_image_memory = null;
     }
     if (ctx.depth_image != null) {
-        c.vkDestroyImage(ctx.device, ctx.depth_image, null);
+        c.vkDestroyImage(ctx.vk_device, ctx.depth_image, null);
         ctx.depth_image = null;
     }
 
     if (ctx.swapchain != null) {
-        c.vkDestroySwapchainKHR(ctx.device, ctx.swapchain, null);
+        c.vkDestroySwapchainKHR(ctx.vk_device, ctx.swapchain, null);
         ctx.swapchain = null;
     }
 }
@@ -1625,7 +1628,7 @@ fn cleanupSwapchain(ctx: *VulkanContext) void {
 /// Returns true on success, false if recreation failed (caller should retry).
 fn recreateSwapchain(ctx: *VulkanContext) void {
     // Wait for device idle before destroying resources
-    _ = c.vkDeviceWaitIdle(ctx.device);
+    _ = c.vkDeviceWaitIdle(ctx.vk_device);
 
     // Get new window size
     var w: c_int = 0;
@@ -1639,19 +1642,19 @@ fn recreateSwapchain(ctx: *VulkanContext) void {
 
     // Recreate semaphores to reset their state
     for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-        c.vkDestroySemaphore(ctx.device, ctx.image_available_semaphores[i], null);
-        c.vkDestroySemaphore(ctx.device, ctx.render_finished_semaphores[i], null);
-        c.vkDestroyFence(ctx.device, ctx.in_flight_fences[i], null);
+        c.vkDestroySemaphore(ctx.vk_device, ctx.image_available_semaphores[i], null);
+        c.vkDestroySemaphore(ctx.vk_device, ctx.render_finished_semaphores[i], null);
+        c.vkDestroyFence(ctx.vk_device, ctx.in_flight_fences[i], null);
 
         var semaphore_info = std.mem.zeroes(c.VkSemaphoreCreateInfo);
         semaphore_info.sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-        _ = c.vkCreateSemaphore(ctx.device, &semaphore_info, null, &ctx.image_available_semaphores[i]);
-        _ = c.vkCreateSemaphore(ctx.device, &semaphore_info, null, &ctx.render_finished_semaphores[i]);
+        _ = c.vkCreateSemaphore(ctx.vk_device, &semaphore_info, null, &ctx.image_available_semaphores[i]);
+        _ = c.vkCreateSemaphore(ctx.vk_device, &semaphore_info, null, &ctx.render_finished_semaphores[i]);
 
         var fence_info = std.mem.zeroes(c.VkFenceCreateInfo);
         fence_info.sType = c.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         fence_info.flags = c.VK_FENCE_CREATE_SIGNALED_BIT;
-        _ = c.vkCreateFence(ctx.device, &fence_info, null, &ctx.in_flight_fences[i]);
+        _ = c.vkCreateFence(ctx.vk_device, &fence_info, null, &ctx.in_flight_fences[i]);
     }
     ctx.current_sync_frame = 0;
 
@@ -1687,7 +1690,7 @@ fn recreateSwapchain(ctx: *VulkanContext) void {
     swapchain_info.presentMode = ctx.present_mode;
     swapchain_info.clipped = c.VK_TRUE;
 
-    const create_result = c.vkCreateSwapchainKHR(ctx.device, &swapchain_info, null, &ctx.swapchain);
+    const create_result = c.vkCreateSwapchainKHR(ctx.vk_device, &swapchain_info, null, &ctx.swapchain);
     if (create_result != c.VK_SUCCESS) {
         std.log.err("Failed to create swapchain: {}", .{create_result});
         return;
@@ -1695,9 +1698,9 @@ fn recreateSwapchain(ctx: *VulkanContext) void {
 
     // Get swapchain images
     var image_count: u32 = 0;
-    _ = c.vkGetSwapchainImagesKHR(ctx.device, ctx.swapchain, &image_count, null);
+    _ = c.vkGetSwapchainImagesKHR(ctx.vk_device, ctx.swapchain, &image_count, null);
     ctx.swapchain_images.resize(ctx.allocator, image_count) catch return;
-    _ = c.vkGetSwapchainImagesKHR(ctx.device, ctx.swapchain, &image_count, ctx.swapchain_images.items.ptr);
+    _ = c.vkGetSwapchainImagesKHR(ctx.vk_device, ctx.swapchain, &image_count, ctx.swapchain_images.items.ptr);
 
     // Create image views
     for (ctx.swapchain_images.items) |image| {
@@ -1713,9 +1716,9 @@ fn recreateSwapchain(ctx: *VulkanContext) void {
         view_info.subresourceRange.layerCount = 1;
 
         var view: c.VkImageView = null;
-        if (c.vkCreateImageView(ctx.device, &view_info, null, &view) == c.VK_SUCCESS) {
+        if (c.vkCreateImageView(ctx.vk_device, &view_info, null, &view) == c.VK_SUCCESS) {
             ctx.swapchain_image_views.append(ctx.allocator, view) catch {
-                c.vkDestroyImageView(ctx.device, view, null);
+                c.vkDestroyImageView(ctx.vk_device, view, null);
             };
         }
     }
@@ -1737,18 +1740,18 @@ fn recreateSwapchain(ctx: *VulkanContext) void {
     depth_image_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
     depth_image_info.sharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
 
-    _ = c.vkCreateImage(ctx.device, &depth_image_info, null, &ctx.depth_image);
+    _ = c.vkCreateImage(ctx.vk_device, &depth_image_info, null, &ctx.depth_image);
 
     var depth_mem_reqs: c.VkMemoryRequirements = undefined;
-    c.vkGetImageMemoryRequirements(ctx.device, ctx.depth_image, &depth_mem_reqs);
+    c.vkGetImageMemoryRequirements(ctx.vk_device, ctx.depth_image, &depth_mem_reqs);
 
     var depth_alloc_info = std.mem.zeroes(c.VkMemoryAllocateInfo);
     depth_alloc_info.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     depth_alloc_info.allocationSize = depth_mem_reqs.size;
     depth_alloc_info.memoryTypeIndex = findMemoryType(ctx.physical_device, depth_mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-    _ = c.vkAllocateMemory(ctx.device, &depth_alloc_info, null, &ctx.depth_image_memory);
-    _ = c.vkBindImageMemory(ctx.device, ctx.depth_image, ctx.depth_image_memory, 0);
+    _ = c.vkAllocateMemory(ctx.vk_device, &depth_alloc_info, null, &ctx.depth_image_memory);
+    _ = c.vkBindImageMemory(ctx.vk_device, ctx.depth_image, ctx.depth_image_memory, 0);
 
     var depth_view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
     depth_view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -1761,7 +1764,7 @@ fn recreateSwapchain(ctx: *VulkanContext) void {
     depth_view_info.subresourceRange.baseArrayLayer = 0;
     depth_view_info.subresourceRange.layerCount = 1;
 
-    _ = c.vkCreateImageView(ctx.device, &depth_view_info, null, &ctx.depth_image_view);
+    _ = c.vkCreateImageView(ctx.vk_device, &depth_view_info, null, &ctx.depth_image_view);
 
     // Recreate framebuffers
     for (ctx.swapchain_image_views.items) |iv| {
@@ -1776,7 +1779,7 @@ fn recreateSwapchain(ctx: *VulkanContext) void {
         framebuffer_info.layers = 1;
 
         var fb: c.VkFramebuffer = null;
-        _ = c.vkCreateFramebuffer(ctx.device, &framebuffer_info, null, &fb);
+        _ = c.vkCreateFramebuffer(ctx.vk_device, &framebuffer_info, null, &fb);
         ctx.swapchain_framebuffers.append(ctx.allocator, fb) catch {};
     }
 
@@ -1800,17 +1803,17 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
     const fence = ctx.in_flight_fences[ctx.current_sync_frame];
     const acquire_semaphore = ctx.image_available_semaphores[ctx.current_sync_frame];
 
-    _ = c.vkWaitForFences(ctx.device, 1, &fence, c.VK_TRUE, std.math.maxInt(u64));
+    _ = c.vkWaitForFences(ctx.vk_device, 1, &fence, c.VK_TRUE, std.math.maxInt(u64));
 
     // Process deletion queue for this frame
     for (ctx.buffer_deletion_queue[ctx.current_sync_frame].items) |zombie| {
-        c.vkDestroyBuffer(ctx.device, zombie.buffer, null);
-        c.vkFreeMemory(ctx.device, zombie.memory, null);
+        c.vkDestroyBuffer(ctx.vk_device, zombie.buffer, null);
+        c.vkFreeMemory(ctx.vk_device, zombie.memory, null);
     }
     ctx.buffer_deletion_queue[ctx.current_sync_frame].clearRetainingCapacity();
 
     var image_index: u32 = 0;
-    const result = c.vkAcquireNextImageKHR(ctx.device, ctx.swapchain, 1000000000, acquire_semaphore, null, &image_index);
+    const result = c.vkAcquireNextImageKHR(ctx.vk_device, ctx.swapchain, 1000000000, acquire_semaphore, null, &image_index);
 
     if (result == c.VK_ERROR_OUT_OF_DATE_KHR) {
         recreateSwapchain(ctx);
@@ -1821,7 +1824,7 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
 
     ctx.image_index = image_index;
 
-    _ = c.vkResetFences(ctx.device, 1, &fence);
+    _ = c.vkResetFences(ctx.vk_device, 1, &fence);
 
     const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
     _ = c.vkResetCommandBuffer(command_buffer, 0);
@@ -1881,7 +1884,7 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
     }
 
     if (write_count > 0) {
-        c.vkUpdateDescriptorSets(ctx.device, write_count, &writes[0], 0, null);
+        c.vkUpdateDescriptorSets(ctx.vk_device, write_count, &writes[0], 0, null);
     }
 
     ctx.descriptors_updated = true;
@@ -1901,19 +1904,19 @@ fn abortFrame(ctx_ptr: *anyopaque) void {
     // We didn't submit, so we must manually signal the fence so we don't deadlock
     // on the next time this sync frame comes around.
     // However, it's safer to just reset the fence to a signaled state.
-    _ = c.vkResetFences(ctx.device, 1, &ctx.in_flight_fences[ctx.current_sync_frame]);
+    _ = c.vkResetFences(ctx.vk_device, 1, &ctx.in_flight_fences[ctx.current_sync_frame]);
     var fence_info = std.mem.zeroes(c.VkFenceCreateInfo);
     fence_info.sType = c.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     fence_info.flags = c.VK_FENCE_CREATE_SIGNALED_BIT;
 
     // Recreating semaphores is the most robust way to "abort" their pending status from AcquireNextImage
-    c.vkDestroySemaphore(ctx.device, ctx.image_available_semaphores[ctx.current_sync_frame], null);
-    c.vkDestroySemaphore(ctx.device, ctx.render_finished_semaphores[ctx.current_sync_frame], null);
+    c.vkDestroySemaphore(ctx.vk_device, ctx.image_available_semaphores[ctx.current_sync_frame], null);
+    c.vkDestroySemaphore(ctx.vk_device, ctx.render_finished_semaphores[ctx.current_sync_frame], null);
 
     var semaphore_info = std.mem.zeroes(c.VkSemaphoreCreateInfo);
     semaphore_info.sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    _ = c.vkCreateSemaphore(ctx.device, &semaphore_info, null, &ctx.image_available_semaphores[ctx.current_sync_frame]);
-    _ = c.vkCreateSemaphore(ctx.device, &semaphore_info, null, &ctx.render_finished_semaphores[ctx.current_sync_frame]);
+    _ = c.vkCreateSemaphore(ctx.vk_device, &semaphore_info, null, &ctx.image_available_semaphores[ctx.current_sync_frame]);
+    _ = c.vkCreateSemaphore(ctx.vk_device, &semaphore_info, null, &ctx.render_finished_semaphores[ctx.current_sync_frame]);
 
     ctx.frame_in_progress = false;
 }
@@ -2079,8 +2082,8 @@ fn endMainPass(ctx_ptr: *anyopaque) void {
 
 fn waitIdle(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
-    if (ctx.device != null) {
-        _ = c.vkDeviceWaitIdle(ctx.device);
+    if (ctx.vk_device != null) {
+        _ = c.vkDeviceWaitIdle(ctx.vk_device);
     }
 }
 
@@ -2116,10 +2119,10 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
 
     var map_ptr: ?*anyopaque = null;
     const global_ubo = ctx.global_ubos[ctx.current_sync_frame];
-    if (c.vkMapMemory(ctx.device, global_ubo.memory, 0, @sizeOf(GlobalUniforms), 0, &map_ptr) == c.VK_SUCCESS) {
+    if (c.vkMapMemory(ctx.vk_device, global_ubo.memory, 0, @sizeOf(GlobalUniforms), 0, &map_ptr) == c.VK_SUCCESS) {
         const mapped: *GlobalUniforms = @ptrCast(@alignCast(map_ptr));
         mapped.* = uniforms;
-        c.vkUnmapMemory(ctx.device, global_ubo.memory);
+        c.vkUnmapMemory(ctx.vk_device, global_ubo.memory);
     }
 }
 
@@ -2211,13 +2214,10 @@ fn drawDebugShadowMap(ctx_ptr: *anyopaque, cascade_index: usize, depth_map_handl
 
     // Map and copy vertices
     var map_ptr: ?*anyopaque = null;
-    if (c.vkMapMemory(ctx.device, ui_vbo.memory, 0, @sizeOf(@TypeOf(debug_vertices)), 0, &map_ptr) == c.VK_SUCCESS) {
-        @memcpy(@as([*]u8, @ptrCast(map_ptr))[0..@sizeOf(@TypeOf(debug_vertices))], std.mem.asBytes(&debug_vertices));
-        c.vkUnmapMemory(ctx.device, ui_vbo.memory);
-
-        const offset: c.VkDeviceSize = 0;
-        c.vkCmdBindVertexBuffers(command_buffer, 0, 1, &ui_vbo.buffer, &offset);
-        c.vkCmdDraw(command_buffer, 6, 1, 0, 0);
+    if (c.vkMapMemory(ctx.vk_device, ui_vbo.memory, 0, @sizeOf(@TypeOf(debug_vertices)), 0, &map_ptr) == c.VK_SUCCESS) {
+        std.debug.assert(map_ptr != null);
+        @memcpy(@as([*]u8, @ptrCast(map_ptr.?)), std.mem.asBytes(&debug_vertices));
+        c.vkUnmapMemory(ctx.vk_device, ui_vbo.memory);
     }
 
     // Add border around debug shadow map
@@ -2232,9 +2232,9 @@ fn drawDebugShadowMap(ctx_ptr: *anyopaque, cascade_index: usize, depth_map_handl
         debug_x - border_size,              debug_y + debug_size + border_size, border_color.r, border_color.g, border_color.b, border_color.a,
     };
 
-    if (c.vkMapMemory(ctx.device, ui_vbo.memory, @sizeOf(@TypeOf(debug_vertices)), @sizeOf(@TypeOf(border_vertices)), 0, &map_ptr) == c.VK_SUCCESS) {
+    if (c.vkMapMemory(ctx.vk_device, ui_vbo.memory, @sizeOf(@TypeOf(debug_vertices)), @sizeOf(@TypeOf(border_vertices)), 0, &map_ptr) == c.VK_SUCCESS) {
         @memcpy(@as([*]u8, @ptrCast(map_ptr))[0..@sizeOf(@TypeOf(border_vertices))], std.mem.asBytes(&border_vertices));
-        c.vkUnmapMemory(ctx.device, ui_vbo.memory);
+        c.vkUnmapMemory(ctx.vk_device, ui_vbo.memory);
 
         const offset: c.VkDeviceSize = 0;
         c.vkCmdBindVertexBuffers(command_buffer, 0, 1, &ui_vbo.buffer, &offset);
@@ -2263,10 +2263,10 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
     image_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
     image_info.sharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
 
-    if (c.vkCreateImage(ctx.device, &image_info, null, &image) != c.VK_SUCCESS) return 0;
+    if (c.vkCreateImage(ctx.vk_device, &image_info, null, &image) != c.VK_SUCCESS) return 0;
 
     var mem_reqs: c.VkMemoryRequirements = undefined;
-    c.vkGetImageMemoryRequirements(ctx.device, image, &mem_reqs);
+    c.vkGetImageMemoryRequirements(ctx.vk_device, image, &mem_reqs);
 
     var memory: c.VkDeviceMemory = null;
     var alloc_info = std.mem.zeroes(c.VkMemoryAllocateInfo);
@@ -2274,27 +2274,27 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
     alloc_info.allocationSize = mem_reqs.size;
     alloc_info.memoryTypeIndex = findMemoryType(ctx.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-    if (c.vkAllocateMemory(ctx.device, &alloc_info, null, &memory) != c.VK_SUCCESS) {
-        c.vkDestroyImage(ctx.device, image, null);
+    if (c.vkAllocateMemory(ctx.vk_device, &alloc_info, null, &memory) != c.VK_SUCCESS) {
+        c.vkDestroyImage(ctx.vk_device, image, null);
         return 0;
     }
-    if (c.vkBindImageMemory(ctx.device, image, memory, 0) != c.VK_SUCCESS) {
-        c.vkFreeMemory(ctx.device, memory, null);
-        c.vkDestroyImage(ctx.device, image, null);
+    if (c.vkBindImageMemory(ctx.vk_device, image, memory, 0) != c.VK_SUCCESS) {
+        c.vkFreeMemory(ctx.vk_device, memory, null);
+        c.vkDestroyImage(ctx.vk_device, image, null);
         return 0;
     }
 
     if (data_opt) |data| {
         const staging_buffer = createVulkanBuffer(ctx, data.len, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         defer {
-            c.vkDestroyBuffer(ctx.device, staging_buffer.buffer, null);
-            c.vkFreeMemory(ctx.device, staging_buffer.memory, null);
+            c.vkDestroyBuffer(ctx.vk_device, staging_buffer.buffer, null);
+            c.vkFreeMemory(ctx.vk_device, staging_buffer.memory, null);
         }
 
         var map_ptr: ?*anyopaque = null;
-        if (c.vkMapMemory(ctx.device, staging_buffer.memory, 0, data.len, 0, &map_ptr) == c.VK_SUCCESS) {
+        if (c.vkMapMemory(ctx.vk_device, staging_buffer.memory, 0, data.len, 0, &map_ptr) == c.VK_SUCCESS) {
             @memcpy(@as([*]u8, @ptrCast(map_ptr))[0..data.len], data);
-            c.vkUnmapMemory(ctx.device, staging_buffer.memory);
+            c.vkUnmapMemory(ctx.vk_device, staging_buffer.memory);
         }
 
         {
@@ -2399,7 +2399,7 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
     view_info.subresourceRange.baseArrayLayer = 0;
     view_info.subresourceRange.layerCount = 1;
 
-    _ = c.vkCreateImageView(ctx.device, &view_info, null, &view);
+    _ = c.vkCreateImageView(ctx.vk_device, &view_info, null, &view);
 
     var sampler: c.VkSampler = null;
     var sampler_info = std.mem.zeroes(c.VkSamplerCreateInfo);
@@ -2411,7 +2411,7 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
     sampler_info.addressModeW = c.VK_SAMPLER_ADDRESS_MODE_REPEAT;
     sampler_info.mipmapMode = c.VK_SAMPLER_MIPMAP_MODE_LINEAR;
 
-    _ = c.vkCreateSampler(ctx.device, &sampler_info, null, &sampler);
+    _ = c.vkCreateSampler(ctx.vk_device, &sampler_info, null, &sampler);
 
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
@@ -2429,10 +2429,10 @@ fn destroyTexture(ctx_ptr: *anyopaque, handle: rhi.TextureHandle) void {
     ctx.mutex.unlock();
 
     if (entry_opt) |entry| {
-        c.vkDestroySampler(ctx.device, entry.value.sampler, null);
-        c.vkDestroyImageView(ctx.device, entry.value.view, null);
-        c.vkFreeMemory(ctx.device, entry.value.memory, null);
-        c.vkDestroyImage(ctx.device, entry.value.image, null);
+        c.vkDestroySampler(ctx.vk_device, entry.value.sampler, null);
+        c.vkDestroyImageView(ctx.vk_device, entry.value.view, null);
+        c.vkFreeMemory(ctx.vk_device, entry.value.memory, null);
+        c.vkDestroyImage(ctx.vk_device, entry.value.image, null);
     }
 }
 
@@ -2455,14 +2455,14 @@ fn updateTexture(ctx_ptr: *anyopaque, handle: rhi.TextureHandle, data: []const u
 
     const staging_buffer = createVulkanBuffer(ctx, data.len, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     defer {
-        c.vkDestroyBuffer(ctx.device, staging_buffer.buffer, null);
-        c.vkFreeMemory(ctx.device, staging_buffer.memory, null);
+        c.vkDestroyBuffer(ctx.vk_device, staging_buffer.buffer, null);
+        c.vkFreeMemory(ctx.vk_device, staging_buffer.memory, null);
     }
 
     var map_ptr: ?*anyopaque = null;
-    if (c.vkMapMemory(ctx.device, staging_buffer.memory, 0, data.len, 0, &map_ptr) == c.VK_SUCCESS) {
+    if (c.vkMapMemory(ctx.vk_device, staging_buffer.memory, 0, data.len, 0, &map_ptr) == c.VK_SUCCESS) {
         @memcpy(@as([*]u8, @ptrCast(map_ptr))[0..data.len], data);
-        c.vkUnmapMemory(ctx.device, staging_buffer.memory);
+        c.vkUnmapMemory(ctx.vk_device, staging_buffer.memory);
     }
 
     {
@@ -2648,7 +2648,7 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
                         write.descriptorCount = 1;
                         write.pImageInfo = &image_info;
 
-                        c.vkUpdateDescriptorSets(ctx.device, 1, &write, 0, null);
+                        c.vkUpdateDescriptorSets(ctx.vk_device, 1, &write, 0, null);
                     }
 
                     // Update shadow map descriptors (bindings 3, 4, 5) if this is the first update of the frame
@@ -2674,7 +2674,7 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
                             write.descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                             write.descriptorCount = 1;
                             write.pImageInfo = &image_info;
-                            c.vkUpdateDescriptorSets(ctx.device, 1, &write, 0, null);
+                            c.vkUpdateDescriptorSets(ctx.vk_device, 1, &write, 0, null);
                         }
                     }
 
@@ -2726,7 +2726,7 @@ fn beginUI(ctx_ptr: *anyopaque, screen_width: f32, screen_height: f32) void {
 
     // Map current frame's UI VBO memory
     const ui_vbo = ctx.ui_vbos[ctx.current_sync_frame];
-    if (c.vkMapMemory(ctx.device, ui_vbo.memory, 0, ui_vbo.size, 0, &ctx.ui_mapped_ptr) != c.VK_SUCCESS) {
+    if (c.vkMapMemory(ctx.vk_device, ui_vbo.memory, 0, ui_vbo.size, 0, &ctx.ui_mapped_ptr) != c.VK_SUCCESS) {
         std.log.err("Failed to map UI VBO memory!", .{});
         ctx.ui_mapped_ptr = null;
     }
@@ -2749,7 +2749,7 @@ fn endUI(ctx_ptr: *anyopaque) void {
 
     if (ctx.ui_mapped_ptr != null) {
         const ui_vbo = ctx.ui_vbos[ctx.current_sync_frame];
-        c.vkUnmapMemory(ctx.device, ui_vbo.memory);
+        c.vkUnmapMemory(ctx.vk_device, ui_vbo.memory);
         ctx.ui_mapped_ptr = null;
     }
 
@@ -2823,7 +2823,7 @@ fn drawUITexturedQuad(ctx_ptr: *anyopaque, texture: rhi.TextureHandle, rect: rhi
     write.descriptorCount = 1;
     write.pImageInfo = &image_info;
 
-    c.vkUpdateDescriptorSets(ctx.device, 1, &write, 0, null);
+    c.vkUpdateDescriptorSets(ctx.vk_device, 1, &write, 0, null);
     c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.ui_tex_pipeline_layout, 0, 1, &ctx.ui_tex_descriptor_sets[ctx.current_sync_frame], 0, null);
 
     // 4. Set Push Constants (Projection)
@@ -2942,10 +2942,10 @@ fn updateShadowUniforms(ctx_ptr: *anyopaque, params: rhi.ShadowParams) void {
 
     var map_ptr: ?*anyopaque = null;
     const shadow_ubo = ctx.shadow_ubos[ctx.current_sync_frame];
-    if (c.vkMapMemory(ctx.device, shadow_ubo.memory, 0, @sizeOf(ShadowUniforms), 0, &map_ptr) == c.VK_SUCCESS) {
+    if (c.vkMapMemory(ctx.vk_device, shadow_ubo.memory, 0, @sizeOf(ShadowUniforms), 0, &map_ptr) == c.VK_SUCCESS) {
         const mapped: *ShadowUniforms = @ptrCast(@alignCast(map_ptr));
         mapped.* = shadow_uniforms;
-        c.vkUnmapMemory(ctx.device, shadow_ubo.memory);
+        c.vkUnmapMemory(ctx.vk_device, shadow_ubo.memory);
     }
 }
 
@@ -3067,10 +3067,11 @@ const vtable = rhi.RHI.VTable{
     .drawSky = drawSky,
 };
 
-pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window) !rhi.RHI {
+pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_device: ?*RenderDevice) !rhi.RHI {
     const ctx = try allocator.create(VulkanContext);
     // Initialize all fields to safe defaults
     ctx.allocator = allocator;
+    ctx.render_device = render_device;
     ctx.window = window;
     ctx.framebuffer_resized = false;
     ctx.draw_call_count = 0;
@@ -3127,6 +3128,9 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window) !rhi.RHI {
     ctx.sky_pipeline_layout = null;
     ctx.ui_pipeline = null;
     ctx.ui_pipeline_layout = null;
+    ctx.ui_tex_pipeline = null;
+    ctx.ui_tex_pipeline_layout = null;
+    ctx.ui_tex_descriptor_set_layout = null;
     ctx.shadow_sampler = null;
     for (0..shadows.ShadowMap.CASCADE_COUNT) |i| {
         ctx.shadow_images[i] = null;
@@ -3148,5 +3152,6 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window) !rhi.RHI {
     return rhi.RHI{
         .ptr = ctx,
         .vtable = &vtable,
+        .device = render_device,
     };
 }
