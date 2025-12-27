@@ -28,8 +28,6 @@ pub const RenderGraph = struct {
             .shadow_cascade_1,
             .shadow_cascade_2,
             .main_opaque,
-            .sky,
-            .clouds,
             .ui,
         };
         return .{
@@ -49,9 +47,9 @@ pub const RenderGraph = struct {
             .shadow_cascade_0 => RenderGraph.executeShadowPass(0, rhi, world, camera, shadow_map, is_vulkan, aspect),
             .shadow_cascade_1 => RenderGraph.executeShadowPass(1, rhi, world, camera, shadow_map, is_vulkan, aspect),
             .shadow_cascade_2 => RenderGraph.executeShadowPass(2, rhi, world, camera, shadow_map, is_vulkan, aspect),
-            .main_opaque => RenderGraph.executeMainPass(rhi, world, camera, aspect),
+            .main_opaque => RenderGraph.executeMainPass(rhi, world, camera, is_vulkan, aspect),
             .main_transparent => {},
-            .sky => RenderGraph.executeSkyPass(rhi, camera, aspect),
+            .sky => RenderGraph.executeSkyPass(rhi, camera, is_vulkan, aspect),
             .clouds => RenderGraph.executeCloudsPass(rhi, camera, is_vulkan, aspect),
             .ui => {},
             .post_process => {},
@@ -90,14 +88,17 @@ pub const RenderGraph = struct {
         rhi.endShadowPass();
     }
 
-    fn executeMainPass(rhi: RHI, world: *World, camera: *Camera, aspect: f32) void {
+    fn executeMainPass(rhi: RHI, world: *World, camera: *Camera, is_vulkan: bool, aspect: f32) void {
         rhi.beginMainPass();
-        defer rhi.endMainPass();
-        const view_proj = camera.getViewProjectionMatrixOriginCentered(aspect);
+        const view_proj = if (is_vulkan)
+            Mat4.perspectiveReverseZ(camera.fov, aspect, camera.near, camera.far).multiply(camera.getViewMatrixOriginCentered())
+        else
+            camera.getViewProjectionMatrixOriginCentered(aspect);
         world.render(view_proj, camera.position);
     }
 
-    fn executeSkyPass(rhi: RHI, camera: *Camera, aspect: f32) void {
+    fn executeSkyPass(rhi: RHI, camera: *Camera, is_vulkan: bool, aspect: f32) void {
+        _ = is_vulkan;
         rhi.drawSky(.{
             .cam_pos = camera.position,
             .cam_forward = camera.forward,

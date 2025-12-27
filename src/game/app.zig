@@ -663,7 +663,7 @@ pub const App = struct {
                 const p = self.clouds.getShadowParams();
                 self.rhi.drawClouds(.{
                     .cam_pos = self.camera.position,
-                    .view_proj = view_proj_cull,
+                    .view_proj = view_proj_render,
                     .sun_dir = self.atmosphere.sun_dir,
                     .sun_intensity = self.atmosphere.sun_intensity,
                     .fog_color = self.atmosphere.fog_color,
@@ -1036,7 +1036,7 @@ pub const App = struct {
                     const p = self.clouds.getShadowParams();
                     self.rhi.drawClouds(.{
                         .cam_pos = self.camera.position,
-                        .view_proj = view_proj_cull,
+                        .view_proj = view_proj_render,
                         .sun_dir = self.atmosphere.sun_dir,
                         .sun_intensity = self.atmosphere.sun_intensity,
                         .fog_color = self.atmosphere.fog_color,
