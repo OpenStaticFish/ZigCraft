@@ -97,6 +97,15 @@ pub const ChunkMesh = struct {
         }
     }
 
+    pub fn deinitWithoutRHI(self: *ChunkMesh) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (0..NUM_SUBCHUNKS) |i| {
+            if (self.pending_solid[i]) |p| self.allocator.free(p);
+            if (self.pending_fluid[i]) |p| self.allocator.free(p);
+        }
+    }
+
     pub fn buildWithNeighbors(self: *ChunkMesh, chunk: *const Chunk, neighbors: NeighborChunks) !void {
         for (0..NUM_SUBCHUNKS) |i| {
             try self.buildSubchunk(chunk, neighbors, @intCast(i));
