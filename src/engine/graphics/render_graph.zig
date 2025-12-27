@@ -52,7 +52,7 @@ pub const RenderGraph = struct {
             .main_opaque => RenderGraph.executeMainPass(rhi, world, camera, aspect),
             .main_transparent => {},
             .sky => RenderGraph.executeSkyPass(rhi, camera, aspect),
-            .clouds => RenderGraph.executeCloudsPass(rhi, camera, aspect),
+            .clouds => RenderGraph.executeCloudsPass(rhi, camera, is_vulkan, aspect),
             .ui => {},
             .post_process => {},
         }
@@ -114,8 +114,12 @@ pub const RenderGraph = struct {
         });
     }
 
-    fn executeCloudsPass(rhi: RHI, camera: *Camera, aspect: f32) void {
-        const view_proj = camera.getViewProjectionMatrixOriginCentered(aspect);
+    fn executeCloudsPass(rhi: RHI, camera: *Camera, is_vulkan: bool, aspect: f32) void {
+        // Use reverse-Z projection for Vulkan to match the depth buffer setup
+        const view_proj = if (is_vulkan)
+            Mat4.perspectiveReverseZ(camera.fov, aspect, camera.near, camera.far).multiply(camera.getViewMatrixOriginCentered())
+        else
+            camera.getViewProjectionMatrixOriginCentered(aspect);
         rhi.drawClouds(.{
             .cam_pos = camera.position,
             .view_proj = view_proj,

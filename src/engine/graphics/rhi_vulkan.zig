@@ -1531,11 +1531,12 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
     try checkVk(c.vkCreatePipelineLayout(ctx.vk_device, &cloud_pipeline_layout_info, null, &ctx.cloud_pipeline_layout));
 
     // Cloud depth/stencil: depth test enabled, depth write disabled (transparent)
+    // Use GREATER_OR_EQUAL to match reverse-Z depth buffer used by terrain pipeline
     var cloud_depth_stencil = std.mem.zeroes(c.VkPipelineDepthStencilStateCreateInfo);
     cloud_depth_stencil.sType = c.VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     cloud_depth_stencil.depthTestEnable = c.VK_TRUE;
     cloud_depth_stencil.depthWriteEnable = c.VK_FALSE;
-    cloud_depth_stencil.depthCompareOp = c.VK_COMPARE_OP_LESS_OR_EQUAL;
+    cloud_depth_stencil.depthCompareOp = c.VK_COMPARE_OP_GREATER_OR_EQUAL;
 
     // Cloud blending: alpha blending enabled
     var cloud_color_blend_attachment = std.mem.zeroes(c.VkPipelineColorBlendAttachmentState);
