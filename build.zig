@@ -64,4 +64,26 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     const run_exe_tests = b.addRunArtifact(exe_tests);
     test_step.dependOn(&run_exe_tests.step);
+
+    const validate_vulkan_terrain_vert = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/terrain.vert"});
+    const validate_vulkan_terrain_frag = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/terrain.frag"});
+    const validate_vulkan_shadow_vert = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/shadow.vert"});
+    const validate_vulkan_shadow_frag = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/shadow.frag"});
+    const validate_vulkan_sky_vert = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/sky.vert"});
+    const validate_vulkan_sky_frag = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/sky.frag"});
+    const validate_vulkan_ui_vert = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/ui.vert"});
+    const validate_vulkan_ui_frag = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/ui.frag"});
+    const validate_vulkan_ui_tex_vert = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/ui_tex.vert"});
+    const validate_vulkan_ui_tex_frag = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/ui_tex.frag"});
+
+    test_step.dependOn(&validate_vulkan_terrain_vert.step);
+    test_step.dependOn(&validate_vulkan_terrain_frag.step);
+    test_step.dependOn(&validate_vulkan_shadow_vert.step);
+    test_step.dependOn(&validate_vulkan_shadow_frag.step);
+    test_step.dependOn(&validate_vulkan_sky_vert.step);
+    test_step.dependOn(&validate_vulkan_sky_frag.step);
+    test_step.dependOn(&validate_vulkan_ui_vert.step);
+    test_step.dependOn(&validate_vulkan_ui_frag.step);
+    test_step.dependOn(&validate_vulkan_ui_tex_vert.step);
+    test_step.dependOn(&validate_vulkan_ui_tex_frag.step);
 }
