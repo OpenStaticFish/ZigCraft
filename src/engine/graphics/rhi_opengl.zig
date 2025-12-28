@@ -898,13 +898,16 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
 fn drawSky(ctx_ptr: *anyopaque, params: rhi.SkyParams) void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     const shader = ctx.sky_shader orelse return;
+    
+    const prev_shader = ctx.active_shader;
+    const prev_program = ctx.active_program;
+    
     ctx.active_shader = shader;
     ctx.active_program = shader.handle;
 
     // Disable depth write, keep depth test
     c.glDepthMask(c.GL_FALSE);
-    defer c.glDepthMask(c.GL_TRUE);
-
+    
     shader.use();
     shader.setVec3("uCamForward", params.cam_forward.x, params.cam_forward.y, params.cam_forward.z);
     shader.setVec3("uCamRight", params.cam_right.x, params.cam_right.y, params.cam_right.z);
@@ -921,6 +924,18 @@ fn drawSky(ctx_ptr: *anyopaque, params: rhi.SkyParams) void {
     c.glBindVertexArray().?(ctx.sky_vao);
     c.glDrawArrays(c.GL_TRIANGLES, 0, 3);
     c.glBindVertexArray().?(0);
+
+    // Restore state
+    c.glDepthMask(c.GL_TRUE);
+    if (prev_shader) |s| {
+        s.use();
+        ctx.active_shader = s;
+        ctx.active_program = prev_program;
+    } else {
+        c.glUseProgram().?(0);
+        ctx.active_shader = null;
+        ctx.active_program = 0;
+    }
 }
 
 fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.TextureFormat, config: rhi.TextureConfig, data: ?[]const u8) rhi.TextureHandle {
@@ -1157,37 +1172,47 @@ fn drawUITexturedQuad(ctx_ptr: *anyopaque, texture: rhi.TextureHandle, rect: rhi
 fn drawClouds(ctx_ptr: *anyopaque, params: rhi.CloudParams) void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     const shader = ctx.cloud_shader orelse return;
-    if (ctx.cloud_vao == 0) return;
+    
+    const prev_shader = ctx.active_shader;
+    const prev_program = ctx.active_program;
+
     ctx.active_shader = shader;
     ctx.active_program = shader.handle;
 
-    c.glDepthMask(c.GL_FALSE);
-    c.glDisable(c.GL_CULL_FACE);
-    c.glEnable(c.GL_BLEND);
-    c.glBlendFunc(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
-    c.glDepthFunc(c.GL_LEQUAL);
-    defer c.glDepthMask(c.GL_TRUE);
-    defer c.glDisable(c.GL_BLEND);
-    defer c.glEnable(c.GL_CULL_FACE);
-    defer c.glDepthFunc(c.GL_LESS);
-
     shader.use();
+    shader.setMat4("uViewProj", &params.view_proj.data);
     shader.setVec3("uCameraPos", params.cam_pos.x, params.cam_pos.y, params.cam_pos.z);
+    shader.setVec3("uSunDir", params.sun_dir.x, params.sun_dir.y, params.sun_dir.z);
+    shader.setFloat("uSunIntensity", params.sun_intensity);
+    shader.setVec3("uFogColor", params.fog_color.x, params.fog_color.y, params.fog_color.z);
+    shader.setFloat("uFogDensity", params.fog_density);
     shader.setFloat("uCloudHeight", params.cloud_height);
     shader.setFloat("uCloudCoverage", params.cloud_coverage);
     shader.setFloat("uCloudScale", params.cloud_scale);
     shader.setFloat("uWindOffsetX", params.wind_offset_x);
     shader.setFloat("uWindOffsetZ", params.wind_offset_z);
-    shader.setVec3("uSunDir", params.sun_dir.x, params.sun_dir.y, params.sun_dir.z);
-    shader.setFloat("uSunIntensity", params.sun_intensity);
     shader.setVec3("uBaseColor", params.base_color.x, params.base_color.y, params.base_color.z);
-    shader.setVec3("uFogColor", params.fog_color.x, params.fog_color.y, params.fog_color.z);
-    shader.setFloat("uFogDensity", params.fog_density);
-    shader.setMat4("uViewProj", &params.view_proj.data);
+
+    c.glEnable(c.GL_BLEND);
+    c.glBlendFunc(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
+    c.glDepthMask(c.GL_FALSE);
 
     c.glBindVertexArray().?(ctx.cloud_vao);
     c.glDrawElements(c.GL_TRIANGLES, 6, c.GL_UNSIGNED_SHORT, null);
     c.glBindVertexArray().?(0);
+
+    c.glDisable(c.GL_BLEND);
+    c.glDepthMask(c.GL_TRUE);
+
+    if (prev_shader) |s| {
+        s.use();
+        ctx.active_shader = s;
+        ctx.active_program = prev_program;
+    } else {
+        c.glUseProgram().?(0);
+        ctx.active_shader = null;
+        ctx.active_program = 0;
+    }
 }
 
 fn drawDebugShadowMap(ctx_ptr: *anyopaque, cascade_index: usize, depth_map_handle: rhi.TextureHandle) void {

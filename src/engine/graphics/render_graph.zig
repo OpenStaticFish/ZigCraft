@@ -25,6 +25,9 @@ pub const RenderGraph = struct {
     pub fn init(allocator: std.mem.Allocator) RenderGraph {
         _ = allocator;
         const default_passes = &[_]RenderPass{
+            .shadow_cascade_0,
+            .shadow_cascade_1,
+            .shadow_cascade_2,
             .sky,
             .main_opaque,
             .clouds,
@@ -34,19 +37,42 @@ pub const RenderGraph = struct {
         };
     }
 
-    pub fn execute(self: *const RenderGraph, rhi: RHI, world: *World, camera: *Camera, shadow_map: ?ShadowMap, is_vulkan: bool, aspect: f32, sky_params: rhi_pkg.SkyParams, cloud_params: rhi_pkg.CloudParams) void {
+    pub fn execute(
+        self: *const RenderGraph,
+        rhi: RHI,
+        world: *World,
+        camera: *Camera,
+        shadow_map: ?ShadowMap,
+        is_vulkan: bool,
+        aspect: f32,
+        sky_params: rhi_pkg.SkyParams,
+        cloud_params: rhi_pkg.CloudParams,
+        main_shader: rhi_pkg.ShaderHandle,
+    ) void {
         for (self.passes) |pass| {
-            self.executePass(pass, rhi, world, camera, shadow_map, is_vulkan, aspect, sky_params, cloud_params);
+            self.executePass(pass, rhi, world, camera, shadow_map, is_vulkan, aspect, sky_params, cloud_params, main_shader);
         }
     }
 
-    fn executePass(self: *const RenderGraph, pass: RenderPass, rhi: RHI, world: *World, camera: *Camera, shadow_map: ?ShadowMap, is_vulkan: bool, aspect: f32, sky_params: rhi_pkg.SkyParams, cloud_params: rhi_pkg.CloudParams) void {
+    fn executePass(
+        self: *const RenderGraph,
+        pass: RenderPass,
+        rhi: RHI,
+        world: *World,
+        camera: *Camera,
+        shadow_map: ?ShadowMap,
+        is_vulkan: bool,
+        aspect: f32,
+        sky_params: rhi_pkg.SkyParams,
+        cloud_params: rhi_pkg.CloudParams,
+        main_shader: rhi_pkg.ShaderHandle,
+    ) void {
         _ = self;
         switch (pass) {
-            .shadow_cascade_0 => RenderGraph.executeShadowPass(0, rhi, world, camera, shadow_map, is_vulkan, aspect),
-            .shadow_cascade_1 => RenderGraph.executeShadowPass(1, rhi, world, camera, shadow_map, is_vulkan, aspect),
-            .shadow_cascade_2 => RenderGraph.executeShadowPass(2, rhi, world, camera, shadow_map, is_vulkan, aspect),
-            .main_opaque => RenderGraph.executeMainPass(rhi, world, camera, is_vulkan, aspect),
+            .shadow_cascade_0 => if (is_vulkan) RenderGraph.executeShadowPass(0, rhi, world, camera, shadow_map, is_vulkan, aspect, sky_params.sun_dir),
+            .shadow_cascade_1 => if (is_vulkan) RenderGraph.executeShadowPass(1, rhi, world, camera, shadow_map, is_vulkan, aspect, sky_params.sun_dir),
+            .shadow_cascade_2 => if (is_vulkan) RenderGraph.executeShadowPass(2, rhi, world, camera, shadow_map, is_vulkan, aspect, sky_params.sun_dir),
+            .main_opaque => RenderGraph.executeMainPass(rhi, world, camera, is_vulkan, aspect, main_shader),
             .main_transparent => {},
             .sky => RenderGraph.executeSkyPass(rhi, camera, is_vulkan, aspect, sky_params),
             .clouds => RenderGraph.executeCloudsPass(rhi, camera, is_vulkan, aspect, cloud_params),
@@ -55,9 +81,8 @@ pub const RenderGraph = struct {
         }
     }
 
-    fn executeShadowPass(cascade_idx: usize, rhi: RHI, world: *World, camera: *Camera, shadow_map: ?ShadowMap, is_vulkan: bool, aspect: f32) void {
+    fn executeShadowPass(cascade_idx: usize, rhi: RHI, world: *World, camera: *Camera, shadow_map: ?ShadowMap, is_vulkan: bool, aspect: f32, light_dir: Vec3) void {
         var light_space_matrix = Mat4.identity;
-        const light_dir = Vec3.init(0, 1, 0);
 
         if (is_vulkan) {
             const cascades = ShadowMap.computeCascades(
@@ -87,8 +112,10 @@ pub const RenderGraph = struct {
         rhi.endShadowPass();
     }
 
-    fn executeMainPass(rhi: RHI, world: *World, camera: *Camera, is_vulkan: bool, aspect: f32) void {
+    fn executeMainPass(rhi: RHI, world: *World, camera: *Camera, is_vulkan: bool, aspect: f32, shader: rhi_pkg.ShaderHandle) void {
         rhi.beginMainPass();
+        if (!is_vulkan and shader != 0) rhi.bindShader(shader);
+        
         const view_proj = if (is_vulkan)
             Mat4.perspectiveReverseZ(camera.fov, aspect, camera.near, camera.far).multiply(camera.getViewMatrixOriginCentered())
         else
