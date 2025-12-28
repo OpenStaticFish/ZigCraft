@@ -2401,7 +2401,8 @@ fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4) void {
 fn setTextureUniforms(ctx_ptr: *anyopaque, texture_enabled: bool, shadow_map_handles: [3]rhi.TextureHandle) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.textures_enabled = texture_enabled;
-    ctx.descriptors_updated = false; // Force descriptor update to include shadow maps
+    // Force descriptor update so internal shadow maps are bound even if handles are 0
+    ctx.descriptors_updated = false;
 
     for (0..3) |i| {
         if (shadow_map_handles[i] != 0) {
