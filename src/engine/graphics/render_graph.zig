@@ -144,9 +144,11 @@ pub const RenderGraph = struct {
     }
 
     fn executeMainPass(rhi: RHI, world: *World, camera: *Camera, is_vulkan: bool, aspect: f32, shader: rhi_pkg.ShaderHandle, atlas_handle: rhi_pkg.TextureHandle) void {
-        rhi.beginMainPass();
+        // rhi.beginMainPass() is now called in execute() to prevent clearing sky
         if (!is_vulkan and shader != 0) {
             rhi.bindShader(shader);
+            // Force update texture uniforms for OpenGL to ensure uUseTexture is set on the active shader
+            rhi.setTextureUniforms(true, .{ 0, 0, 0 });
             // Re-bind atlas for OpenGL to ensure it's on unit 0
             if (atlas_handle != 0) rhi.bindTexture(atlas_handle, 0);
         }
@@ -157,8 +159,6 @@ pub const RenderGraph = struct {
             camera.getViewProjectionMatrixOriginCentered(aspect);
         world.render(view_proj, camera.position);
     }
-
-
 
     fn executeSkyPass(rhi: RHI, camera: *Camera, is_vulkan: bool, aspect: f32, params: rhi_pkg.SkyParams) void {
         _ = is_vulkan;
