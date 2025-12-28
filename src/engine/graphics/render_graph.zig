@@ -49,7 +49,18 @@ pub const RenderGraph = struct {
         cloud_params: rhi_pkg.CloudParams,
         main_shader: rhi_pkg.ShaderHandle,
     ) void {
+        var main_pass_started = false;
         for (self.passes) |pass| {
+            // Start main render pass (clears buffer) only once before the first non-shadow pass
+            switch (pass) {
+                .shadow_cascade_0, .shadow_cascade_1, .shadow_cascade_2 => {},
+                else => {
+                    if (!main_pass_started) {
+                        rhi.beginMainPass();
+                        main_pass_started = true;
+                    }
+                },
+            }
             self.executePass(pass, rhi, world, camera, shadow_map, is_vulkan, aspect, sky_params, cloud_params, main_shader);
         }
     }
@@ -96,11 +107,23 @@ pub const RenderGraph = struct {
                 true,
             );
             light_space_matrix = cascades.light_space_matrices[cascade_idx];
+            
+            // Update shadow uniforms UBO (binding 2)
             rhi.updateShadowUniforms(.{
                 .light_space_matrices = cascades.light_space_matrices,
                 .cascade_splits = cascades.cascade_splits,
                 .shadow_texel_sizes = cascades.texel_sizes,
             });
+            
+            // CRITICAL: Update Global Uniforms (binding 0) because terrain shader might need them,
+            // BUT MORE IMPORTANTLY: rhi_vulkan.zig uses this to set ctx.shadow_pass_matrix!
+            // We pass dummy values for everything else as only the matrix matters for shadow pass.
+            rhi.updateGlobalUniforms(
+                light_space_matrix, 
+                camera.position, 
+                Vec3.zero, 0, Vec3.zero, 0, false, 0, 0, false, 
+                .{}
+            );
         } else if (shadow_map) |sm| {
             light_space_matrix = sm.light_space_matrices[cascade_idx];
         } else {
@@ -113,7 +136,7 @@ pub const RenderGraph = struct {
     }
 
     fn executeMainPass(rhi: RHI, world: *World, camera: *Camera, is_vulkan: bool, aspect: f32, shader: rhi_pkg.ShaderHandle) void {
-        rhi.beginMainPass();
+        // rhi.beginMainPass() is now called in execute() to prevent clearing sky
         if (!is_vulkan and shader != 0) rhi.bindShader(shader);
         
         const view_proj = if (is_vulkan)
