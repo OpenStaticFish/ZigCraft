@@ -3867,6 +3867,7 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_dev
         ctx.shadow_ubos[i] = .{ .buffer = null, .memory = null, .size = 0, .is_host_visible = false };
         ctx.ui_vbos[i] = .{ .buffer = null, .memory = null, .size = 0, .is_host_visible = false };
         ctx.descriptor_sets[i] = null;
+        ctx.buffer_deletion_queue[i] = .empty;
     }
     ctx.model_ubo = .{ .buffer = null, .memory = null, .size = 0, .is_host_visible = false };
 
