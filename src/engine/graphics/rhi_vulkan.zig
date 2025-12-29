@@ -2534,6 +2534,12 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
         .depth => c.VK_FORMAT_D32_SFLOAT,
     };
 
+    // Calculate mip levels
+    const mip_levels: u32 = if (config.generate_mipmaps and format != .depth)
+        @as(u32, @intFromFloat(@floor(std.math.log2(@as(f32, @floatFromInt(@max(width, height))))))) + 1
+    else
+        1;
+
     // Determine image aspect mask based on format
     const aspect_mask: c.VkImageAspectFlags = if (format == .depth)
         c.VK_IMAGE_ASPECT_DEPTH_BIT
@@ -2541,10 +2547,14 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
         c.VK_IMAGE_ASPECT_COLOR_BIT;
 
     // Determine usage flags based on format
-    const usage_flags: c.VkImageUsageFlags = if (format == .depth)
+    var usage_flags: c.VkImageUsageFlags = if (format == .depth)
         c.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT
     else
         c.VK_IMAGE_USAGE_TRANSFER_DST_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT;
+
+    if (mip_levels > 1) {
+        usage_flags |= c.VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    }
 
     var image: c.VkImage = null;
     var image_info = std.mem.zeroes(c.VkImageCreateInfo);
@@ -2553,7 +2563,7 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
     image_info.extent.width = width;
     image_info.extent.height = height;
     image_info.extent.depth = 1;
-    image_info.mipLevels = 1;
+    image_info.mipLevels = mip_levels;
     image_info.arrayLayers = 1;
     image_info.format = vk_format;
     image_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
@@ -2615,7 +2625,7 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
             barrier.image = image;
             barrier.subresourceRange.aspectMask = aspect_mask;
             barrier.subresourceRange.baseMipLevel = 0;
-            barrier.subresourceRange.levelCount = 1;
+            barrier.subresourceRange.levelCount = mip_levels;
             barrier.subresourceRange.baseArrayLayer = 0;
             barrier.subresourceRange.layerCount = 1;
             barrier.srcAccessMask = 0;
@@ -2630,12 +2640,69 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
 
             c.vkCmdCopyBufferToImage(ctx.transfer_command_buffer, staging_buffer.buffer, image, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-            barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
-            barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+            if (mip_levels > 1) {
+                // Generate mipmaps
+                var mip_width: i32 = @intCast(width);
+                var mip_height: i32 = @intCast(height);
 
-            c.vkCmdPipelineBarrier(ctx.transfer_command_buffer, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
+                for (1..mip_levels) |i| {
+                    barrier.subresourceRange.baseMipLevel = @intCast(i - 1);
+                    barrier.subresourceRange.levelCount = 1;
+                    barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    barrier.newLayout = c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                    barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+                    barrier.dstAccessMask = c.VK_ACCESS_TRANSFER_READ_BIT;
+
+                    c.vkCmdPipelineBarrier(ctx.transfer_command_buffer, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, &barrier);
+
+                    var blit = std.mem.zeroes(c.VkImageBlit);
+                    blit.srcOffsets[0] = .{ .x = 0, .y = 0, .z = 0 };
+                    blit.srcOffsets[1] = .{ .x = mip_width, .y = mip_height, .z = 1 };
+                    blit.srcSubresource.aspectMask = aspect_mask;
+                    blit.srcSubresource.mipLevel = @intCast(i - 1);
+                    blit.srcSubresource.baseArrayLayer = 0;
+                    blit.srcSubresource.layerCount = 1;
+
+                    const next_width = if (mip_width > 1) @divFloor(mip_width, 2) else 1;
+                    const next_height = if (mip_height > 1) @divFloor(mip_height, 2) else 1;
+
+                    blit.dstOffsets[0] = .{ .x = 0, .y = 0, .z = 0 };
+                    blit.dstOffsets[1] = .{ .x = next_width, .y = next_height, .z = 1 };
+                    blit.dstSubresource.aspectMask = aspect_mask;
+                    blit.dstSubresource.mipLevel = @intCast(i);
+                    blit.dstSubresource.baseArrayLayer = 0;
+                    blit.dstSubresource.layerCount = 1;
+
+                    c.vkCmdBlitImage(ctx.transfer_command_buffer, image, c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, c.VK_FILTER_LINEAR);
+
+                    barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                    barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_READ_BIT;
+                    barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+
+                    c.vkCmdPipelineBarrier(ctx.transfer_command_buffer, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
+
+                    mip_width = next_width;
+                    mip_height = next_height;
+                }
+
+                // Transition last mip level
+                barrier.subresourceRange.baseMipLevel = mip_levels - 1;
+                barrier.subresourceRange.levelCount = 1;
+                barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+                barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+
+                c.vkCmdPipelineBarrier(ctx.transfer_command_buffer, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
+            } else {
+                barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+                barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+
+                c.vkCmdPipelineBarrier(ctx.transfer_command_buffer, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
+            }
 
             _ = c.vkEndCommandBuffer(ctx.transfer_command_buffer);
 
@@ -2667,7 +2734,7 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
         barrier.image = image;
         barrier.subresourceRange.aspectMask = aspect_mask;
         barrier.subresourceRange.baseMipLevel = 0;
-        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.levelCount = mip_levels;
         barrier.subresourceRange.baseArrayLayer = 0;
         barrier.subresourceRange.layerCount = 1;
         barrier.srcAccessMask = 0;
