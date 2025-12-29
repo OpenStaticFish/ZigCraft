@@ -28,14 +28,38 @@ const MAX_LIGHT = @import("../chunk.zig").MAX_LIGHT;
 const BlockType = @import("../block.zig").BlockType;
 const Biome = @import("../block.zig").Biome;
 
+/// Explicit continentalness zones for terrain structure
+pub const ContinentalZone = enum {
+    deep_ocean,
+    ocean,
+    coast,
+    inland_low,
+    inland_high,
+    mountain_core,
+
+    /// Get zone name as string for debugging
+    pub fn name(self: ContinentalZone) []const u8 {
+        return switch (self) {
+            .deep_ocean => "Deep Ocean",
+            .ocean => "Ocean",
+            .coast => "Coast",
+            .inland_low => "Inland Low",
+            .inland_high => "Inland High",
+            .mountain_core => "Mountain Core",
+        };
+    }
+};
+
 /// Terrain generation parameters
 const Params = struct {
     warp_scale: f32 = 1.0 / 1100.0,
     warp_amplitude: f32 = 50.0,
     continental_scale: f32 = 1.0 / 800.0,
-    deep_ocean_threshold: f32 = 0.35,
-    shallow_ocean_threshold: f32 = 0.45,
-    coast_threshold: f32 = 0.50,
+    continental_deep_ocean_max: f32 = 0.35,
+    continental_ocean_max: f32 = 0.45,
+    continental_coast_max: f32 = 0.50,
+    continental_inland_low_max: f32 = 0.65,
+    continental_inland_high_max: f32 = 0.80,
     erosion_scale: f32 = 1.0 / 600.0,
     peaks_scale: f32 = 1.0 / 900.0,
     temperature_macro_scale: f32 = 1.0 / 600.0,
@@ -150,7 +174,7 @@ pub const TerrainGenerator = struct {
             terrain_height = @min(terrain_height, terrain_height - river_depth);
         }
         if (terrain_height < sea) {
-            const deep_factor = 1.0 - smoothstep(p.deep_ocean_threshold, 0.5, c_jittered);
+            const deep_factor = 1.0 - smoothstep(p.continental_deep_ocean_max, 0.5, c_jittered);
             const seabed_detail = self.seabed_noise.fbm2D(xw, zw, 5, 2.0, 0.5, p.seabed_scale) * p.seabed_amp;
             const base_seabed = sea - 18.0 - deep_factor * 35.0;
             terrain_height = @min(terrain_height, base_seabed + seabed_detail);
@@ -213,7 +237,7 @@ pub const TerrainGenerator = struct {
                     terrain_height = @min(terrain_height, terrain_height - river_depth);
                 }
                 if (terrain_height < sea) {
-                    const deep_factor = 1.0 - smoothstep(p.deep_ocean_threshold, 0.5, c_jittered);
+                    const deep_factor = 1.0 - smoothstep(p.continental_deep_ocean_max, 0.5, c_jittered);
                     const seabed_detail = self.seabed_noise.fbm2D(xw, zw, 5, 2.0, 0.5, p.seabed_scale) * p.seabed_amp;
                     const base_seabed = sea - 18.0 - deep_factor * 35.0;
                     terrain_height = @min(terrain_height, base_seabed + seabed_detail);
@@ -281,7 +305,7 @@ pub const TerrainGenerator = struct {
                                     const nwz: f32 = @floatFromInt(world_z + nz);
                                     const warp = self.computeWarp(nwx, nwz);
                                     const nc = self.getContinentalness(nwx + warp.x, nwz + warp.z);
-                                    if (nc < p.coast_threshold) {
+                                    if (nc < p.continental_coast_max) {
                                         const dist = @max(@abs(dx), @abs(dz));
                                         min_dist = @min(min_dist, dist);
                                     }
@@ -428,7 +452,6 @@ pub const TerrainGenerator = struct {
     }
 
     fn printDebugStats(self: *const TerrainGenerator, world_x: i32, world_z: i32, t_vals: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, h_vals: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, c_vals: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, b_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId, beach_count: u32) void {
-        _ = self;
         const chunk_id = @as(u32, @bitCast(world_x)) +% @as(u32, @bitCast(world_z));
         if (chunk_id % 64 != 0) return;
         var t_min: f32 = 1.0;
@@ -441,6 +464,7 @@ pub const TerrainGenerator = struct {
         var c_max: f32 = 0.0;
         var c_sum: f32 = 0.0;
         var biome_counts: [21]u32 = [_]u32{0} ** 21;
+        var zone_counts: [6]u32 = [_]u32{0} ** 6;
         var t_hot: u32 = 0;
         var h_dry: u32 = 0;
         for (0..CHUNK_SIZE_X * CHUNK_SIZE_Z) |i| {
@@ -457,6 +481,9 @@ pub const TerrainGenerator = struct {
             if (h_vals[i] < 0.25) h_dry += 1;
             const bid = @intFromEnum(b_ids[i]);
             if (bid < 21) biome_counts[bid] += 1;
+            const zone = self.getContinentalZone(c_vals[i]);
+            const zone_idx: u32 = @intFromEnum(zone);
+            if (zone_idx < 6) zone_counts[zone_idx] += 1;
         }
         const n: f32 = @floatFromInt(CHUNK_SIZE_X * CHUNK_SIZE_Z);
         std.debug.print("\n=== WORLDGEN DEBUG @ chunk ({}, {}) ===\n", .{ world_x, world_z });
@@ -464,6 +491,14 @@ pub const TerrainGenerator = struct {
         std.debug.print("H: min={d:.2} max={d:.2} avg={d:.2} | dry(<0.25): {}%\n", .{ h_min, h_max, h_sum / n, h_dry * 100 / @as(u32, @intCast(CHUNK_SIZE_X * CHUNK_SIZE_Z)) });
         std.debug.print("C: min={d:.2} max={d:.2} avg={d:.2}\n", .{ c_min, c_max, c_sum / n });
         std.debug.print("Beach triggers: {} / {}\n", .{ beach_count, CHUNK_SIZE_X * CHUNK_SIZE_Z });
+        std.debug.print("Continental Zones: ", .{});
+        for (zone_counts, 0..) |count, zi| {
+            if (count > 0) {
+                const zone: ContinentalZone = @enumFromInt(@as(u8, @intCast(zi)));
+                std.debug.print("{s}={} ", .{ zone.name(), count });
+            }
+        }
+        std.debug.print("\n", .{});
         std.debug.print("Biomes: ", .{});
         const biome_names = [_][]const u8{ "deep_ocean", "ocean", "beach", "plains", "forest", "taiga", "desert", "snow_tundra", "mountains", "snowy_mountains", "river", "swamp", "mangrove", "jungle", "savanna", "badlands", "mushroom", "foothills", "marsh", "dry_plains", "coastal" };
         for (biome_counts, 0..) |count, bi| {
@@ -482,6 +517,24 @@ pub const TerrainGenerator = struct {
     fn getContinentalness(self: *const TerrainGenerator, x: f32, z: f32) f32 {
         const val = self.continentalness_noise.fbm2D(x, z, 4, 2.0, 0.5, self.params.continental_scale);
         return (val + 1.0) * 0.5;
+    }
+
+    /// Map continentalness value (0-1) to explicit zone
+    pub fn getContinentalZone(self: *const TerrainGenerator, c: f32) ContinentalZone {
+        const p = self.params;
+        if (c < p.continental_deep_ocean_max) {
+            return .deep_ocean;
+        } else if (c < p.continental_ocean_max) {
+            return .ocean;
+        } else if (c < p.continental_coast_max) {
+            return .coast;
+        } else if (c < p.continental_inland_low_max) {
+            return .inland_low;
+        } else if (c < p.continental_inland_high_max) {
+            return .inland_high;
+        } else {
+            return .mountain_core;
+        }
     }
 
     fn getErosion(self: *const TerrainGenerator, x: f32, z: f32) f32 {
