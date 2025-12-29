@@ -29,6 +29,17 @@ jobs:
 
     - name: Build
       run: nix build -L
+
+    - name: Validate OpenGL shaders
+      run: |
+        nix develop --command sh -c '
+          echo "Validating OpenGL shaders..."
+          for shader in assets/shaders/*.vert assets/shaders/*.frag; do
+            echo "  Checking $shader"
+            glslangValidator "$shader"
+          done
+          echo "All OpenGL shaders valid!"
+        '
       
     - name: Prepare Artifact
       run: |

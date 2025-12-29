@@ -72,270 +72,24 @@ fn checkError(label: []const u8) void {
     }
 }
 
-// UI Shaders (embedded GLSL)
-const ui_vertex_shader =
-    \\#version 330 core
-    \\layout (location = 0) in vec2 aPos;
-    \\layout (location = 1) in vec4 aColor;
-    \\out vec4 vColor;
-    \\uniform mat4 projection;
-    \\void main() {
-    \\    gl_Position = projection * vec4(aPos, 0.0, 1.0);
-    \\    vColor = aColor;
-    \\}
-;
+// UI Shaders (loaded from external files for validation)
+const shaders = @import("shader_sources");
+const ui_vertex_shader = shaders.ui_vert;
+const ui_fragment_shader = shaders.ui_frag;
+const ui_tex_vertex_shader = shaders.ui_tex_vert;
+const ui_tex_fragment_shader = shaders.ui_tex_frag;
 
-const ui_fragment_shader =
-    \\#version 330 core
-    \\in vec4 vColor;
-    \\out vec4 FragColor;
-    \\void main() {
-    \\    FragColor = vColor;
-    \\}
-;
-
-const ui_tex_vertex_shader =
-    \\#version 330 core
-    \\layout (location = 0) in vec2 aPos;
-    \\layout (location = 1) in vec2 aTexCoord;
-    \\out vec2 vTexCoord;
-    \\uniform mat4 projection;
-    \\void main() {
-    \\    gl_Position = projection * vec4(aPos, 0.0, 1.0);
-    \\    vTexCoord = aTexCoord;
-    \\}
-;
-
-const ui_tex_fragment_shader =
-    \\#version 330 core
-    \\in vec2 vTexCoord;
-    \\out vec4 FragColor;
-    \\uniform sampler2D uTexture;
-    \\void main() {
-    \\    FragColor = texture(uTexture, vTexCoord);
-    \\}
-;
-
-// Sky shaders (shared with Atmosphere)
-const sky_vertex_shader =
-    \\#version 330 core
-    \\layout (location = 0) in vec2 aPos;
-    \\out vec3 vWorldDir;
-    \\uniform vec3 uCamForward;
-    \\uniform vec3 uCamRight;
-    \\uniform vec3 uCamUp;
-    \\uniform float uAspect;
-    \\uniform float uTanHalfFov;
-    \\void main() {
-    \\    gl_Position = vec4(aPos, 0.9999, 1.0);
-    \\    vec3 rayDir = uCamForward
-    \\                + uCamRight * aPos.x * uAspect * uTanHalfFov
-    \\                + uCamUp * aPos.y * uTanHalfFov;
-    \\    vWorldDir = rayDir;
-    \\}
-;
-
-const sky_fragment_shader =
-    \\#version 330 core
-    \\in vec3 vWorldDir;
-    \\out vec4 FragColor;
-    \\
-    \\uniform vec3 uSunDir;
-    \\uniform vec3 uSkyColor;
-    \\uniform vec3 uHorizonColor;
-    \\uniform float uSunIntensity;
-    \\uniform float uMoonIntensity;
-    \\uniform float uTime;
-    \\
-    \\float hash21(vec2 p) {
-    \\    p = fract(p * vec2(234.34, 435.345));
-    \\    p += dot(p, p + 34.23);
-    \\    return fract(p.x * p.y);
-    \\}
-    \\
-    \\vec2 hash22(vec2 p) {
-    \\    float n = hash21(p);
-    \\    return vec2(n, hash21(p + n));
-    \\}
-    \\
-    \\float stars(vec3 dir) {
-    \\    float theta = atan(dir.z, dir.x);
-    \\    float phi = asin(clamp(dir.y, -1.0, 1.0));
-    \\
-    \\    vec2 gridCoord = vec2(theta * 15.0, phi * 30.0);
-    \\    vec2 cell = floor(gridCoord);
-    \\    vec2 cellFrac = fract(gridCoord);
-    \\
-    \\    float brightness = 0.0;
-    \\
-    \\    for (int dy = -1; dy <= 1; dy++) {
-    \\        for (int dx = -1; dx <= 1; dx++) {
-    \\            vec2 neighbor = cell + vec2(float(dx), float(dy));
-    \\
-    \\            float starChance = hash21(neighbor);
-    \\            if (starChance > 0.92) {
-    \\                vec2 starPos = hash22(neighbor * 1.7);
-    \\                vec2 offset = vec2(float(dx), float(dy)) + starPos - cellFrac;
-    \\                float dist = length(offset);
-    \\
-    \\                float starBright = smoothstep(0.08, 0.0, dist);
-    \\
-    \\                starBright *= 0.5 + 0.5 * hash21(neighbor * 3.14);
-    \\
-    \\                float twinkle = 0.7 + 0.3 * sin(hash21(neighbor) * 50.0 + uTime * 8.0);
-    \\                starBright *= twinkle;
-    \\
-    \\                brightness = max(brightness, starBright);
-    \\            }
-    \\        }
-    \\    }
-    \\
-    \\    return brightness;
-    \\}
-    \\
-    \\void main() {
-    \\    vec3 dir = normalize(vWorldDir);
-    \\
-    \\    float horizon = 1.0 - abs(dir.y);
-    \\    horizon = pow(horizon, 1.5);
-    \\    vec3 sky = mix(uSkyColor, uHorizonColor, horizon);
-    \\
-    \\    float sunDot = dot(dir, uSunDir);
-    \\    float sunDisc = smoothstep(0.9995, 0.9999, sunDot);
-    \\    vec3 sunColor = vec3(1.0, 0.95, 0.8);
-    \\
-    \\    float sunGlow = pow(max(sunDot, 0.0), 8.0) * 0.5;
-    \\    sunGlow += pow(max(sunDot, 0.0), 64.0) * 0.3;
-    \\
-    \\    float moonDot = dot(dir, -uSunDir);
-    \\    float moonDisc = smoothstep(0.9990, 0.9995, moonDot);
-    \\    vec3 moonColor = vec3(0.9, 0.9, 1.0);
-    \\
-    \\    float starIntensity = 0.0;
-    \\    if (uSunIntensity < 0.3 && dir.y > 0.0) {
-    \\        float nightFactor = 1.0 - uSunIntensity * 3.33;
-    \\        starIntensity = stars(dir) * nightFactor * 1.5;
-    \\    }
-    \\
-    \\    vec3 finalColor = sky;
-    \\    finalColor += sunGlow * uSunIntensity * vec3(1.0, 0.8, 0.4);
-    \\    finalColor += sunDisc * sunColor * uSunIntensity;
-    \\    finalColor += moonDisc * moonColor * uMoonIntensity * 3.0;
-    \\    finalColor += vec3(starIntensity);
-    \\
-    \\    FragColor = vec4(finalColor, 1.0);
-    \\}
-;
+// Sky shaders
+const sky_vertex_shader = shaders.sky_vert;
+const sky_fragment_shader = shaders.sky_frag;
 
 // Debug shadow map visualization shader
-const debug_shadow_vertex_shader =
-    \\#version 330 core
-    \\layout (location = 0) in vec2 aPos;
-    \\layout (location = 1) in vec2 aTexCoord;
-    \\out vec2 vTexCoord;
-    \\void main() {
-    \\    gl_Position = vec4(aPos, 0.0, 1.0);
-    \\    vTexCoord = aTexCoord;
-    \\}
-;
-
-const debug_shadow_fragment_shader =
-    \\#version 330 core
-    \\out vec4 FragColor;
-    \\in vec2 vTexCoord;
-    \\uniform sampler2D uDepthMap;
-    \\void main() {
-    \\    float depth = texture(uDepthMap, vTexCoord).r;
-    \\    FragColor = vec4(vec3(depth), 1.0);
-    \\}
-;
+const debug_shadow_vertex_shader = shaders.debug_shadow_vert;
+const debug_shadow_fragment_shader = shaders.debug_shadow_frag;
 
 // Cloud shaders (2D layered clouds)
-const cloud_vertex_shader =
-    \\#version 330 core
-    \\layout (location = 0) in vec2 aPos;
-    \\out vec3 vWorldPos;
-    \\out float vDistance;
-    \\uniform vec3 uCameraPos;
-    \\uniform float uCloudHeight;
-    \\uniform mat4 uViewProj;
-    \\void main() {
-    \\    vec3 relPos = vec3(
-    \\        aPos.x,
-    \\        uCloudHeight - uCameraPos.y,
-    \\        aPos.y
-    \\    );
-    \\    vWorldPos = vec3(aPos.x + uCameraPos.x, uCloudHeight, aPos.y + uCameraPos.z);
-    \\    vDistance = length(relPos);
-    \\    gl_Position = uViewProj * vec4(relPos, 1.0);
-    \\}
-;
-
-const cloud_fragment_shader =
-    \\#version 330 core
-    \\in vec3 vWorldPos;
-    \\in float vDistance;
-    \\out vec4 FragColor;
-    \\uniform vec3 uCameraPos;
-    \\uniform float uCloudHeight;
-    \\uniform float uCloudCoverage;
-    \\uniform float uCloudScale;
-    \\uniform float uWindOffsetX;
-    \\uniform float uWindOffsetZ;
-    \\uniform vec3 uSunDir;
-    \\uniform float uSunIntensity;
-    \\uniform vec3 uBaseColor;
-    \\uniform vec3 uFogColor;
-    \\uniform float uFogDensity;
-    \\float hash(vec2 p) {
-    \\    p = fract(p * vec2(234.34, 435.345));
-    \\    p += dot(p, p + 34.23);
-    \\    return fract(p.x * p.y);
-    \\}
-    \\float noise(vec2 p) {
-    \\    vec2 i = floor(p);
-    \\    vec2 f = fract(p);
-    \\    float a = hash(i);
-    \\    float b = hash(i + vec2(1.0, 0.0));
-    \\    float c = hash(i + vec2(0.0, 1.0));
-    \\    float d = hash(i + vec2(1.0, 1.0));
-    \\    vec2 u = f * f * (3.0 - 2.0 * f);
-    \\    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-    \\}
-    \\float fbm(vec2 p, int octaves) {
-    \\    float value = 0.0;
-    \\    float amplitude = 0.5;
-    \\    float frequency = 1.0;
-    \\    for (int i = 0; i < octaves; i++) {
-    \\        value += amplitude * noise(p * frequency);
-    \\        amplitude *= 0.5;
-    \\        frequency *= 2.0;
-    \\    }
-    \\    return value;
-    \\}
-    \\void main() {
-    \\    float cloudBlockSize = 12.0;
-    \\    vec2 worldXZ = vWorldPos.xz + vec2(uWindOffsetX, uWindOffsetZ);
-    \\    vec2 pixelPos = floor(worldXZ / cloudBlockSize) * cloudBlockSize;
-    \\    vec2 samplePos = pixelPos * uCloudScale;
-    \\    float cloudValue = fbm(samplePos, 3);
-    \\    float threshold = 1.0 - uCloudCoverage;
-    \\    if (cloudValue < threshold) discard;
-    \\    vec3 nightTint = vec3(0.1, 0.12, 0.2);
-    \\    vec3 dayColor = uBaseColor;
-    \\    vec3 cloudColor = mix(nightTint, dayColor, uSunIntensity);
-    \\    float lightFactor = clamp(uSunDir.y, 0.0, 1.0);
-    \\    cloudColor *= (0.7 + 0.3 * lightFactor);
-    \\    float fogFactor = 1.0 - exp(-vDistance * uFogDensity * 0.4);
-    \\    cloudColor = mix(cloudColor, uFogColor, fogFactor);
-    \\    float alpha = 1.0 * (1.0 - fogFactor * 0.8);
-    \\    float altitudeDiff = uCameraPos.y - uCloudHeight;
-    \\    if (altitudeDiff > 0.0) {
-    \\        alpha *= 1.0 - smoothstep(10.0, 400.0, altitudeDiff);
-    \\    }
-    \\    FragColor = vec4(cloudColor, alpha);
-    \\}
-;
+const cloud_vertex_shader = shaders.cloud_vert;
+const cloud_fragment_shader = shaders.cloud_frag;
 
 fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, device: ?*RenderDevice) anyerror!void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
@@ -898,16 +652,16 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
 fn drawSky(ctx_ptr: *anyopaque, params: rhi.SkyParams) void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     const shader = ctx.sky_shader orelse return;
-    
+
     const prev_shader = ctx.active_shader;
     const prev_program = ctx.active_program;
-    
+
     ctx.active_shader = shader;
     ctx.active_program = shader.handle;
 
     // Disable depth write, keep depth test
     c.glDepthMask(c.GL_FALSE);
-    
+
     shader.use();
     shader.setVec3("uCamForward", params.cam_forward.x, params.cam_forward.y, params.cam_forward.z);
     shader.setVec3("uCamRight", params.cam_right.x, params.cam_right.y, params.cam_right.z);
@@ -1172,7 +926,7 @@ fn drawUITexturedQuad(ctx_ptr: *anyopaque, texture: rhi.TextureHandle, rect: rhi
 fn drawClouds(ctx_ptr: *anyopaque, params: rhi.CloudParams) void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     const shader = ctx.cloud_shader orelse return;
-    
+
     const prev_shader = ctx.active_shader;
     const prev_program = ctx.active_program;
 

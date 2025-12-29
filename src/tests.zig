@@ -920,3 +920,71 @@ test "adjacent transparent blocks share face" {
     }
     try testing.expect(total_verts < 72);
 }
+
+// ============================================================================
+// GLSL Shader Validation Tests
+// ============================================================================
+
+// All OpenGL shader sources (12 files: 6 pairs)
+const shader_sources = @import("shader_sources");
+
+test "GLSL shader version directives" {
+    const version_directive = "#version 330 core";
+
+    for (shader_sources.all) |src| {
+        // Find end of first line
+        var first_line_end: usize = 0;
+        for (src, 0..) |ch, i| {
+            if (ch == '\n' or ch == '\r') {
+                first_line_end = i;
+                break;
+            }
+        }
+        const first_line = src[0..first_line_end];
+
+        // Verify version directive is present at start
+        try testing.expect(std.mem.startsWith(u8, first_line, version_directive));
+    }
+}
+
+test "GLSL shader in/out consistency - terrain" {
+    const vert_src = shader_sources.terrain_vert;
+    const frag_src = shader_sources.terrain_frag;
+
+    // Verify required uniforms exist
+    try testing.expect(std.mem.indexOf(u8, vert_src, "uniform mat4 transform") != null);
+    try testing.expect(std.mem.indexOf(u8, frag_src, "uniform sampler2D uTexture") != null);
+    try testing.expect(std.mem.indexOf(u8, frag_src, "uniform sampler2D uShadowMap0") != null);
+
+    // Verify varyings match between vertex output and fragment input
+    const varyings = [_][]const u8{
+        "vColor",
+        "vNormal",
+        "vTexCoord",
+        "vTileID",
+        "vDistance",
+        "vSkyLight",
+        "vBlockLight",
+        "vFragPosWorld",
+        "vViewDepth",
+    };
+
+    for (varyings) |varying| {
+        // Vertex shader should have the varying
+        try testing.expect(std.mem.indexOf(u8, vert_src, varying) != null);
+        // Fragment shader should have the varying
+        try testing.expect(std.mem.indexOf(u8, frag_src, varying) != null);
+    }
+}
+
+test "GLSL shader brace matching" {
+    for (shader_sources.all) |src| {
+        var open: usize = 0;
+        var close: usize = 0;
+        for (src) |ch| {
+            if (ch == '{') open += 1;
+            if (ch == '}') close += 1;
+        }
+        try testing.expectEqual(open, close);
+    }
+}

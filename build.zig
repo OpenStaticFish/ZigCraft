@@ -16,6 +16,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const shader_sources = b.createModule(.{
+        .root_source_file = b.path("shader_sources.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -23,6 +29,7 @@ pub fn build(b: *std.Build) void {
     });
     root_module.addImport("zig-math", zig_math);
     root_module.addImport("zig-noise", zig_noise);
+    root_module.addImport("shader_sources", shader_sources);
 
     const exe = b.addExecutable(.{
         .name = "zig-triangle",
@@ -55,6 +62,7 @@ pub fn build(b: *std.Build) void {
     });
     test_root_module.addImport("zig-math", zig_math);
     test_root_module.addImport("zig-noise", zig_noise);
+    test_root_module.addImport("shader_sources", shader_sources);
 
     const exe_tests = b.addTest(.{
         .root_module = test_root_module,
@@ -72,6 +80,7 @@ pub fn build(b: *std.Build) void {
     });
     integration_root_module.addImport("zig-math", zig_math);
     integration_root_module.addImport("zig-noise", zig_noise);
+    integration_root_module.addImport("shader_sources", shader_sources);
 
     const exe_integration_tests = b.addTest(.{
         .root_module = integration_root_module,
@@ -86,20 +95,20 @@ pub fn build(b: *std.Build) void {
     const run_integration_tests = b.addRunArtifact(exe_integration_tests);
     test_integration_step.dependOn(&run_integration_tests.step);
 
-    const validate_vulkan_terrain_vert = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/terrain.vert"});
-    const validate_vulkan_terrain_frag = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/terrain.frag"});
-    const validate_vulkan_shadow_vert = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/shadow.vert"});
-    const validate_vulkan_shadow_frag = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/shadow.frag"});
-    const validate_vulkan_sky_vert = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/sky.vert"});
-    const validate_vulkan_sky_frag = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/sky.frag"});
-    const validate_vulkan_ui_vert = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/ui.vert"});
-    const validate_vulkan_ui_frag = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/ui.frag"});
-    const validate_vulkan_ui_tex_vert = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/ui_tex.vert"});
-    const validate_vulkan_ui_tex_frag = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/ui_tex.frag"});
-    const validate_vulkan_cloud_vert = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/cloud.vert"});
-    const validate_vulkan_cloud_frag = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/cloud.frag"});
-    const validate_vulkan_debug_shadow_vert = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/debug_shadow.vert"});
-    const validate_vulkan_debug_shadow_frag = b.addSystemCommand(&.{"glslangValidator", "-V", "assets/shaders/vulkan/debug_shadow.frag"});
+    const validate_vulkan_terrain_vert = b.addSystemCommand(&.{ "glslangValidator", "-V", "assets/shaders/vulkan/terrain.vert" });
+    const validate_vulkan_terrain_frag = b.addSystemCommand(&.{ "glslangValidator", "-V", "assets/shaders/vulkan/terrain.frag" });
+    const validate_vulkan_shadow_vert = b.addSystemCommand(&.{ "glslangValidator", "-V", "assets/shaders/vulkan/shadow.vert" });
+    const validate_vulkan_shadow_frag = b.addSystemCommand(&.{ "glslangValidator", "-V", "assets/shaders/vulkan/shadow.frag" });
+    const validate_vulkan_sky_vert = b.addSystemCommand(&.{ "glslangValidator", "-V", "assets/shaders/vulkan/sky.vert" });
+    const validate_vulkan_sky_frag = b.addSystemCommand(&.{ "glslangValidator", "-V", "assets/shaders/vulkan/sky.frag" });
+    const validate_vulkan_ui_vert = b.addSystemCommand(&.{ "glslangValidator", "-V", "assets/shaders/vulkan/ui.vert" });
+    const validate_vulkan_ui_frag = b.addSystemCommand(&.{ "glslangValidator", "-V", "assets/shaders/vulkan/ui.frag" });
+    const validate_vulkan_ui_tex_vert = b.addSystemCommand(&.{ "glslangValidator", "-V", "assets/shaders/vulkan/ui_tex.vert" });
+    const validate_vulkan_ui_tex_frag = b.addSystemCommand(&.{ "glslangValidator", "-V", "assets/shaders/vulkan/ui_tex.frag" });
+    const validate_vulkan_cloud_vert = b.addSystemCommand(&.{ "glslangValidator", "-V", "assets/shaders/vulkan/cloud.vert" });
+    const validate_vulkan_cloud_frag = b.addSystemCommand(&.{ "glslangValidator", "-V", "assets/shaders/vulkan/cloud.frag" });
+    const validate_vulkan_debug_shadow_vert = b.addSystemCommand(&.{ "glslangValidator", "-V", "assets/shaders/vulkan/debug_shadow.vert" });
+    const validate_vulkan_debug_shadow_frag = b.addSystemCommand(&.{ "glslangValidator", "-V", "assets/shaders/vulkan/debug_shadow.frag" });
 
     test_step.dependOn(&validate_vulkan_terrain_vert.step);
     test_step.dependOn(&validate_vulkan_terrain_frag.step);
@@ -115,5 +124,4 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&validate_vulkan_cloud_frag.step);
     test_step.dependOn(&validate_vulkan_debug_shadow_vert.step);
     test_step.dependOn(&validate_vulkan_debug_shadow_frag.step);
-
 }
