@@ -20,6 +20,48 @@ const Mat4 = @import("../math/mat4.zig").Mat4;
 const Vec3 = @import("../math/vec3.zig").Vec3;
 const Shader = @import("shader.zig").Shader;
 
+/// Compile-time constants for shadow cascade uniform names.
+/// Eliminates per-frame string formatting overhead in updateShadowUniforms.
+const shadow_uniform_names = struct {
+    const light_space_matrices = [_][:0]const u8{
+        "uLightSpaceMatrices[0]",
+        "uLightSpaceMatrices[1]",
+        "uLightSpaceMatrices[2]",
+    };
+    const cascade_splits = [_][:0]const u8{
+        "uCascadeSplits[0]",
+        "uCascadeSplits[1]",
+        "uCascadeSplits[2]",
+    };
+    const shadow_texel_sizes = [_][:0]const u8{
+        "uShadowTexelSizes[0]",
+        "uShadowTexelSizes[1]",
+        "uShadowTexelSizes[2]",
+    };
+};
+
+/// Direct GL uniform setters for fallback path (when no Shader pointer available).
+/// These are uncached and should only be used when active_shader is null.
+fn setUniformFloatDirect(program: rhi.ShaderHandle, name: [:0]const u8, value: f32) void {
+    const loc = c.glGetUniformLocation().?(program, name.ptr);
+    c.glUniform1f().?(loc, value);
+}
+
+fn setUniformIntDirect(program: rhi.ShaderHandle, name: [:0]const u8, value: i32) void {
+    const loc = c.glGetUniformLocation().?(program, name.ptr);
+    c.glUniform1i().?(loc, value);
+}
+
+fn setUniformVec3Direct(program: rhi.ShaderHandle, name: [:0]const u8, x: f32, y: f32, z: f32) void {
+    const loc = c.glGetUniformLocation().?(program, name.ptr);
+    c.glUniform3f().?(loc, x, y, z);
+}
+
+fn setUniformMat4Direct(program: rhi.ShaderHandle, name: [:0]const u8, matrix: *const [4][4]f32) void {
+    const loc = c.glGetUniformLocation().?(program, name.ptr);
+    c.glUniformMatrix4fv().?(loc, 1, c.GL_FALSE, @ptrCast(matrix));
+}
+
 const BufferResource = struct {
     vao: c.GLuint,
     vbo: c.GLuint,
@@ -31,6 +73,9 @@ const OpenGLContext = struct {
     buffers: std.ArrayListUnmanaged(BufferResource),
     free_indices: std.ArrayListUnmanaged(usize),
     mutex: std.Thread.Mutex,
+
+    // Shader registry for uniform caching - maps handles to Shader pointers
+    shader_registry: std.AutoHashMap(rhi.ShaderHandle, *Shader),
 
     // UI rendering state
     ui_shader: ?*Shader,
@@ -102,12 +147,14 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, device: ?*RenderDevic
     // Initialize UI shaders
     std.log.info("Creating OpenGL UI shaders...", .{});
     const ui_shader_ptr = try allocator.create(Shader);
-    ui_shader_ptr.* = try Shader.initSimple(ui_vertex_shader, ui_fragment_shader);
+    ui_shader_ptr.* = try Shader.init(allocator, ui_vertex_shader, ui_fragment_shader);
     ctx.ui_shader = ui_shader_ptr;
+    try ctx.shader_registry.put(ui_shader_ptr.handle, ui_shader_ptr);
 
     const ui_tex_shader_ptr = try allocator.create(Shader);
-    ui_tex_shader_ptr.* = try Shader.initSimple(ui_tex_vertex_shader, ui_tex_fragment_shader);
+    ui_tex_shader_ptr.* = try Shader.init(allocator, ui_tex_vertex_shader, ui_tex_fragment_shader);
     ctx.ui_tex_shader = ui_tex_shader_ptr;
+    try ctx.shader_registry.put(ui_tex_shader_ptr.handle, ui_tex_shader_ptr);
     std.log.info("OpenGL UI shaders created", .{});
 
     // Create UI VAO/VBO
@@ -129,8 +176,9 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, device: ?*RenderDevic
 
     // Initialize sky shader and fullscreen triangle
     const sky_shader_ptr = try allocator.create(Shader);
-    sky_shader_ptr.* = try Shader.initSimple(sky_vertex_shader, sky_fragment_shader);
+    sky_shader_ptr.* = try Shader.init(allocator, sky_vertex_shader, sky_fragment_shader);
     ctx.sky_shader = sky_shader_ptr;
+    try ctx.shader_registry.put(sky_shader_ptr.handle, sky_shader_ptr);
 
     const sky_vertices = [_]f32{
         -1.0, -1.0,
@@ -149,8 +197,9 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, device: ?*RenderDevic
 
     // Initialize cloud shader and quad
     const cloud_shader_ptr = try allocator.create(Shader);
-    cloud_shader_ptr.* = try Shader.initSimple(cloud_vertex_shader, cloud_fragment_shader);
+    cloud_shader_ptr.* = try Shader.init(allocator, cloud_vertex_shader, cloud_fragment_shader);
     ctx.cloud_shader = cloud_shader_ptr;
+    try ctx.shader_registry.put(cloud_shader_ptr.handle, cloud_shader_ptr);
     ctx.cloud_mesh_size = 10000.0;
 
     const cloud_vertices = [_]f32{
@@ -176,8 +225,9 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, device: ?*RenderDevic
 
     // Initialize debug shadow map visualization shader and quad
     const debug_shadow_shader_ptr = try allocator.create(Shader);
-    debug_shadow_shader_ptr.* = try Shader.initSimple(debug_shadow_vertex_shader, debug_shadow_fragment_shader);
+    debug_shadow_shader_ptr.* = try Shader.init(allocator, debug_shadow_vertex_shader, debug_shadow_fragment_shader);
     ctx.debug_shadow_shader = debug_shadow_shader_ptr;
+    try ctx.shader_registry.put(debug_shadow_shader_ptr.handle, debug_shadow_shader_ptr);
 
     const debug_quad_vertices = [_]f32{
         -1.0, 1.0,  0.0, 1.0,
@@ -257,6 +307,7 @@ fn deinit(ctx_ptr: *anyopaque) void {
     if (ctx.debug_shadow_vao != 0) c.glDeleteVertexArrays().?(1, &ctx.debug_shadow_vao);
     if (ctx.debug_shadow_vbo != 0) c.glDeleteBuffers().?(1, &ctx.debug_shadow_vbo);
 
+    ctx.shader_registry.deinit();
     ctx.allocator.destroy(ctx);
 }
 
@@ -427,31 +478,42 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.current_view_proj = view_proj;
 
-    const program = if (ctx.active_shader) |s| s.handle else ctx.active_program;
-    if (program == 0) return;
+    // Use active shader with caching if available
+    if (ctx.active_shader) |shader| {
+        shader.use();
 
-    const shader = Shader{
-        .handle = program,
-        .uniform_cache = undefined,
-        .allocator = undefined,
-        .uses_opengl = true,
-    };
-    shader.use();
+        shader.setVec3Cached("uSunDir", sun_dir.x, sun_dir.y, sun_dir.z);
+        shader.setFloatCached("uSunIntensity", sun_intensity);
+        shader.setFloatCached("uAmbient", ambient);
+        shader.setVec3Cached("uFogColor", fog_color.x, fog_color.y, fog_color.z);
+        shader.setFloatCached("uFogDensity", fog_density);
+        shader.setIntCached("uFogEnabled", if (fog_enabled) 1 else 0);
+        shader.setIntCached("uUseTexture", if (use_texture) 1 else 0);
 
-    shader.setVec3("uSunDir", sun_dir.x, sun_dir.y, sun_dir.z);
-    shader.setFloat("uSunIntensity", sun_intensity);
-    shader.setFloat("uAmbient", ambient);
-    shader.setVec3("uFogColor", fog_color.x, fog_color.y, fog_color.z);
-    shader.setFloat("uFogDensity", fog_density);
-    shader.setBool("uFogEnabled", fog_enabled);
-    shader.setBool("uUseTexture", use_texture);
+        shader.setFloatCached("uCloudWindOffsetX", cloud_params.wind_offset_x);
+        shader.setFloatCached("uCloudWindOffsetZ", cloud_params.wind_offset_z);
+        shader.setFloatCached("uCloudScale", cloud_params.cloud_scale);
+        shader.setFloatCached("uCloudCoverage", cloud_params.cloud_coverage);
+        shader.setFloatCached("uCloudShadowStrength", 0.15);
+        shader.setFloatCached("uCloudHeight", cloud_params.cloud_height);
+    } else if (ctx.active_program != 0) {
+        // Fallback: no shader pointer, use direct GL calls
+        c.glUseProgram().?(ctx.active_program);
+        setUniformVec3Direct(ctx.active_program, "uSunDir", sun_dir.x, sun_dir.y, sun_dir.z);
+        setUniformFloatDirect(ctx.active_program, "uSunIntensity", sun_intensity);
+        setUniformFloatDirect(ctx.active_program, "uAmbient", ambient);
+        setUniformVec3Direct(ctx.active_program, "uFogColor", fog_color.x, fog_color.y, fog_color.z);
+        setUniformFloatDirect(ctx.active_program, "uFogDensity", fog_density);
+        setUniformIntDirect(ctx.active_program, "uFogEnabled", if (fog_enabled) 1 else 0);
+        setUniformIntDirect(ctx.active_program, "uUseTexture", if (use_texture) 1 else 0);
 
-    shader.setFloat("uCloudWindOffsetX", cloud_params.wind_offset_x);
-    shader.setFloat("uCloudWindOffsetZ", cloud_params.wind_offset_z);
-    shader.setFloat("uCloudScale", cloud_params.cloud_scale);
-    shader.setFloat("uCloudCoverage", cloud_params.cloud_coverage);
-    shader.setFloat("uCloudShadowStrength", 0.15);
-    shader.setFloat("uCloudHeight", cloud_params.cloud_height);
+        setUniformFloatDirect(ctx.active_program, "uCloudWindOffsetX", cloud_params.wind_offset_x);
+        setUniformFloatDirect(ctx.active_program, "uCloudWindOffsetZ", cloud_params.wind_offset_z);
+        setUniformFloatDirect(ctx.active_program, "uCloudScale", cloud_params.cloud_scale);
+        setUniformFloatDirect(ctx.active_program, "uCloudCoverage", cloud_params.cloud_coverage);
+        setUniformFloatDirect(ctx.active_program, "uCloudShadowStrength", 0.15);
+        setUniformFloatDirect(ctx.active_program, "uCloudHeight", cloud_params.cloud_height);
+    }
 
     _ = cam_pos;
     _ = time;
@@ -459,72 +521,72 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
 
 fn setTextureUniforms(ctx_ptr: *anyopaque, texture_enabled: bool, shadow_map_handles: [3]rhi.TextureHandle) void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
-    const program = if (ctx.active_shader) |s| s.handle else ctx.active_program;
-    if (program == 0) return;
-
-    const shader = Shader{
-        .handle = program,
-        .uniform_cache = undefined,
-        .allocator = undefined,
-        .uses_opengl = true,
-    };
-    shader.use();
-
-    shader.setInt("uTexture", 0);
-    shader.setBool("uUseTexture", texture_enabled);
 
     const shadow_map_names = [_][:0]const u8{ "uShadowMap0", "uShadowMap1", "uShadowMap2" };
-    for (0..3) |i| {
-        const slot = @as(c.GLint, 1 + @as(c_int, @intCast(i)));
-        c.glActiveTexture().?(@as(c.GLenum, @intCast(@as(u32, @intCast(c.GL_TEXTURE0)) + @as(u32, @intCast(slot)))));
-        c.glBindTexture(c.GL_TEXTURE_2D, @intCast(shadow_map_handles[i]));
-        shader.setInt(shadow_map_names[i], slot);
+
+    if (ctx.active_shader) |shader| {
+        shader.use();
+
+        shader.setIntCached("uTexture", 0);
+        shader.setIntCached("uUseTexture", if (texture_enabled) 1 else 0);
+
+        for (0..3) |i| {
+            const slot: i32 = 1 + @as(i32, @intCast(i));
+            c.glActiveTexture().?(@as(c.GLenum, @intCast(@as(u32, @intCast(c.GL_TEXTURE0)) + @as(u32, @intCast(slot)))));
+            c.glBindTexture(c.GL_TEXTURE_2D, @intCast(shadow_map_handles[i]));
+            shader.setIntCached(shadow_map_names[i], slot);
+        }
+    } else if (ctx.active_program != 0) {
+        c.glUseProgram().?(ctx.active_program);
+
+        setUniformIntDirect(ctx.active_program, "uTexture", 0);
+        setUniformIntDirect(ctx.active_program, "uUseTexture", if (texture_enabled) 1 else 0);
+
+        for (0..3) |i| {
+            const slot: i32 = 1 + @as(i32, @intCast(i));
+            c.glActiveTexture().?(@as(c.GLenum, @intCast(@as(u32, @intCast(c.GL_TEXTURE0)) + @as(u32, @intCast(slot)))));
+            c.glBindTexture(c.GL_TEXTURE_2D, @intCast(shadow_map_handles[i]));
+            setUniformIntDirect(ctx.active_program, shadow_map_names[i], slot);
+        }
     }
     c.glActiveTexture().?(c.GL_TEXTURE0);
 }
 
 fn updateShadowUniforms(ctx_ptr: *anyopaque, params: rhi.ShadowParams) void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
-    const program = if (ctx.active_shader) |s| s.handle else ctx.active_program;
-    if (program == 0) return;
 
-    const shader = Shader{
-        .handle = program,
-        .uniform_cache = undefined,
-        .allocator = undefined,
-        .uses_opengl = true,
-    };
-    shader.use();
+    if (ctx.active_shader) |shader| {
+        shader.use();
 
-    for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
-        var buf: [64]u8 = undefined;
-        const name_mat = std.fmt.bufPrintZ(&buf, "uLightSpaceMatrices[{}]", .{i}) catch continue;
-        shader.setMat4(name_mat.ptr, &params.light_space_matrices[i].data);
+        for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
+            shader.setMat4Cached(shadow_uniform_names.light_space_matrices[i], &params.light_space_matrices[i].data);
+            shader.setFloatCached(shadow_uniform_names.cascade_splits[i], params.cascade_splits[i]);
+            shader.setFloatCached(shadow_uniform_names.shadow_texel_sizes[i], params.shadow_texel_sizes[i]);
+        }
+    } else if (ctx.active_program != 0) {
+        c.glUseProgram().?(ctx.active_program);
 
-        const name_split = std.fmt.bufPrintZ(&buf, "uCascadeSplits[{}]", .{i}) catch continue;
-        shader.setFloat(name_split.ptr, params.cascade_splits[i]);
-
-        const name_size = std.fmt.bufPrintZ(&buf, "uShadowTexelSizes[{}]", .{i}) catch continue;
-        shader.setFloat(name_size.ptr, params.shadow_texel_sizes[i]);
+        for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
+            setUniformMat4Direct(ctx.active_program, shadow_uniform_names.light_space_matrices[i], &params.light_space_matrices[i].data);
+            setUniformFloatDirect(ctx.active_program, shadow_uniform_names.cascade_splits[i], params.cascade_splits[i]);
+            setUniformFloatDirect(ctx.active_program, shadow_uniform_names.shadow_texel_sizes[i], params.shadow_texel_sizes[i]);
+        }
     }
 }
 
 fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4) void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
-    const program = if (ctx.active_shader) |s| s.handle else ctx.active_program;
-    if (program == 0) return;
-
-    const shader = Shader{
-        .handle = program,
-        .uniform_cache = undefined,
-        .allocator = undefined,
-        .uses_opengl = true,
-    };
-    shader.use();
-
     const mvp = ctx.current_view_proj.multiply(model);
-    shader.setMat4("transform", &mvp.data);
-    shader.setMat4("uModel", &model.data);
+
+    if (ctx.active_shader) |shader| {
+        shader.use();
+        shader.setMat4Cached("transform", &mvp.data);
+        shader.setMat4Cached("uModel", &model.data);
+    } else if (ctx.active_program != 0) {
+        c.glUseProgram().?(ctx.active_program);
+        setUniformMat4Direct(ctx.active_program, "transform", &mvp.data);
+        setUniformMat4Direct(ctx.active_program, "uModel", &model.data);
+    }
 }
 
 fn compileShaderGL(shader_type: c.GLenum, source: [*c]const u8) Shader.Error!c.GLuint {
@@ -573,24 +635,42 @@ fn createShaderGL(vertex_src: [*c]const u8, fragment_src: [*c]const u8) Shader.E
 }
 
 fn createShader(ctx_ptr: *anyopaque, vertex_src: [*c]const u8, fragment_src: [*c]const u8) rhi.RhiError!rhi.ShaderHandle {
-    _ = ctx_ptr;
-    const program = createShaderGL(vertex_src, fragment_src) catch {
-        return error.OpenGLError;
+    const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
+
+    const shader_ptr = ctx.allocator.create(Shader) catch return error.OutOfMemory;
+    shader_ptr.* = Shader.init(ctx.allocator, vertex_src, fragment_src) catch |err| {
+        ctx.allocator.destroy(shader_ptr);
+        return if (err == error.OutOfMemory) error.OutOfMemory else error.OpenGLError;
     };
-    return @intCast(program);
+
+    ctx.shader_registry.put(shader_ptr.handle, shader_ptr) catch {
+        shader_ptr.deinit();
+        ctx.allocator.destroy(shader_ptr);
+        return error.OutOfMemory;
+    };
+
+    return shader_ptr.handle;
 }
 
 fn destroyShader(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle) void {
-    _ = ctx_ptr;
+    const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     if (handle != 0) {
-        c.glDeleteProgram().?(@intCast(handle));
+        if (ctx.shader_registry.fetchRemove(handle)) |entry| {
+            const shader_ptr = entry.value;
+            shader_ptr.deinit();
+            ctx.allocator.destroy(shader_ptr);
+        } else {
+            // Fallback for shaders not in registry (shouldn't happen with new code, but safe)
+            c.glDeleteProgram().?(@intCast(handle));
+        }
     }
 }
 
 fn bindShader(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle) void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.active_program = handle;
-    ctx.active_shader = null;
+    ctx.active_shader = ctx.shader_registry.get(handle);
+
     if (handle != 0) {
         c.glUseProgram().?(@intCast(handle));
     } else {
@@ -663,17 +743,17 @@ fn drawSky(ctx_ptr: *anyopaque, params: rhi.SkyParams) void {
     c.glDepthMask(c.GL_FALSE);
 
     shader.use();
-    shader.setVec3("uCamForward", params.cam_forward.x, params.cam_forward.y, params.cam_forward.z);
-    shader.setVec3("uCamRight", params.cam_right.x, params.cam_right.y, params.cam_right.z);
-    shader.setVec3("uCamUp", params.cam_up.x, params.cam_up.y, params.cam_up.z);
-    shader.setFloat("uAspect", params.aspect);
-    shader.setFloat("uTanHalfFov", params.tan_half_fov);
-    shader.setVec3("uSunDir", params.sun_dir.x, params.sun_dir.y, params.sun_dir.z);
-    shader.setVec3("uSkyColor", params.sky_color.x, params.sky_color.y, params.sky_color.z);
-    shader.setVec3("uHorizonColor", params.horizon_color.x, params.horizon_color.y, params.horizon_color.z);
-    shader.setFloat("uSunIntensity", params.sun_intensity);
-    shader.setFloat("uMoonIntensity", params.moon_intensity);
-    shader.setFloat("uTime", params.time);
+    shader.setVec3Cached("uCamForward", params.cam_forward.x, params.cam_forward.y, params.cam_forward.z);
+    shader.setVec3Cached("uCamRight", params.cam_right.x, params.cam_right.y, params.cam_right.z);
+    shader.setVec3Cached("uCamUp", params.cam_up.x, params.cam_up.y, params.cam_up.z);
+    shader.setFloatCached("uAspect", params.aspect);
+    shader.setFloatCached("uTanHalfFov", params.tan_half_fov);
+    shader.setVec3Cached("uSunDir", params.sun_dir.x, params.sun_dir.y, params.sun_dir.z);
+    shader.setVec3Cached("uSkyColor", params.sky_color.x, params.sky_color.y, params.sky_color.z);
+    shader.setVec3Cached("uHorizonColor", params.horizon_color.x, params.horizon_color.y, params.horizon_color.z);
+    shader.setFloatCached("uSunIntensity", params.sun_intensity);
+    shader.setFloatCached("uMoonIntensity", params.moon_intensity);
+    shader.setFloatCached("uTime", params.time);
 
     c.glBindVertexArray().?(ctx.sky_vao);
     c.glDrawArrays(c.GL_TRIANGLES, 0, 3);
@@ -685,6 +765,11 @@ fn drawSky(ctx_ptr: *anyopaque, params: rhi.SkyParams) void {
         s.use();
         ctx.active_shader = s;
         ctx.active_program = prev_program;
+    } else if (prev_program != 0) {
+        c.glUseProgram().?(@intCast(prev_program));
+        ctx.active_program = prev_program;
+        // Try to restore active_shader from registry if possible
+        ctx.active_shader = ctx.shader_registry.get(prev_program);
     } else {
         c.glUseProgram().?(0);
         ctx.active_shader = null;
@@ -839,7 +924,7 @@ fn beginUI(ctx_ptr: *anyopaque, screen_width: f32, screen_height: f32) void {
         ctx.active_program = shader.handle;
         shader.use();
         const proj = Mat4.orthographic(0, screen_width, screen_height, 0, -1, 1);
-        shader.setMat4("projection", &proj.data);
+        shader.setMat4Cached("projection", &proj.data);
     }
 
     c.glBindVertexArray().?(ctx.ui_vao);
@@ -888,11 +973,11 @@ fn drawUITexturedQuad(ctx_ptr: *anyopaque, texture: rhi.TextureHandle, rect: rhi
         ctx.active_program = tex_shader.handle;
         tex_shader.use();
         const proj = Mat4.orthographic(0, ctx.ui_screen_width, ctx.ui_screen_height, 0, -1, 1);
-        tex_shader.setMat4("projection", &proj.data);
+        tex_shader.setMat4Cached("projection", &proj.data);
 
         c.glActiveTexture().?(c.GL_TEXTURE0);
         c.glBindTexture(c.GL_TEXTURE_2D, @intCast(texture));
-        tex_shader.setInt("uTexture", 0);
+        tex_shader.setIntCached("uTexture", 0);
     }
 
     const vertices = [_]f32{
@@ -934,18 +1019,18 @@ fn drawClouds(ctx_ptr: *anyopaque, params: rhi.CloudParams) void {
     ctx.active_program = shader.handle;
 
     shader.use();
-    shader.setMat4("uViewProj", &params.view_proj.data);
-    shader.setVec3("uCameraPos", params.cam_pos.x, params.cam_pos.y, params.cam_pos.z);
-    shader.setVec3("uSunDir", params.sun_dir.x, params.sun_dir.y, params.sun_dir.z);
-    shader.setFloat("uSunIntensity", params.sun_intensity);
-    shader.setVec3("uFogColor", params.fog_color.x, params.fog_color.y, params.fog_color.z);
-    shader.setFloat("uFogDensity", params.fog_density);
-    shader.setFloat("uCloudHeight", params.cloud_height);
-    shader.setFloat("uCloudCoverage", params.cloud_coverage);
-    shader.setFloat("uCloudScale", params.cloud_scale);
-    shader.setFloat("uWindOffsetX", params.wind_offset_x);
-    shader.setFloat("uWindOffsetZ", params.wind_offset_z);
-    shader.setVec3("uBaseColor", params.base_color.x, params.base_color.y, params.base_color.z);
+    shader.setMat4Cached("uViewProj", &params.view_proj.data);
+    shader.setVec3Cached("uCameraPos", params.cam_pos.x, params.cam_pos.y, params.cam_pos.z);
+    shader.setVec3Cached("uSunDir", params.sun_dir.x, params.sun_dir.y, params.sun_dir.z);
+    shader.setFloatCached("uSunIntensity", params.sun_intensity);
+    shader.setVec3Cached("uFogColor", params.fog_color.x, params.fog_color.y, params.fog_color.z);
+    shader.setFloatCached("uFogDensity", params.fog_density);
+    shader.setFloatCached("uCloudHeight", params.cloud_height);
+    shader.setFloatCached("uCloudCoverage", params.cloud_coverage);
+    shader.setFloatCached("uCloudScale", params.cloud_scale);
+    shader.setFloatCached("uWindOffsetX", params.wind_offset_x);
+    shader.setFloatCached("uWindOffsetZ", params.wind_offset_z);
+    shader.setVec3Cached("uBaseColor", params.base_color.x, params.base_color.y, params.base_color.z);
 
     c.glEnable(c.GL_BLEND);
     c.glBlendFunc(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
@@ -962,6 +1047,10 @@ fn drawClouds(ctx_ptr: *anyopaque, params: rhi.CloudParams) void {
         s.use();
         ctx.active_shader = s;
         ctx.active_program = prev_program;
+    } else if (prev_program != 0) {
+        c.glUseProgram().?(@intCast(prev_program));
+        ctx.active_program = prev_program;
+        ctx.active_shader = ctx.shader_registry.get(prev_program);
     } else {
         c.glUseProgram().?(0);
         ctx.active_shader = null;
@@ -981,7 +1070,7 @@ fn drawDebugShadowMap(ctx_ptr: *anyopaque, cascade_index: usize, depth_map_handl
     shader.use();
     c.glActiveTexture().?(c.GL_TEXTURE0);
     c.glBindTexture(c.GL_TEXTURE_2D, @intCast(depth_map_handle));
-    shader.setInt("uDepthMap", 0);
+    shader.setIntCached("uDepthMap", 0);
     c.glBindVertexArray().?(ctx.debug_shadow_vao);
     c.glDrawArrays(c.GL_TRIANGLES, 0, 6);
     c.glBindVertexArray().?(0);
@@ -1040,6 +1129,7 @@ pub fn createRHI(allocator: std.mem.Allocator, device: ?*RenderDevice) !rhi.RHI 
         .buffers = .empty,
         .free_indices = .empty,
         .mutex = .{},
+        .shader_registry = std.AutoHashMap(rhi.ShaderHandle, *Shader).init(allocator),
         .ui_shader = null,
         .ui_tex_shader = null,
         .ui_vao = 0,

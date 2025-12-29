@@ -9,8 +9,8 @@ const log = @import("../core/log.zig");
 
 pub const Shader = struct {
     handle: rhi.ShaderHandle,
-    uniform_cache: std.StringHashMap(c.GLint),
-    allocator: std.mem.Allocator,
+    uniform_cache: ?std.StringHashMap(i32),
+    allocator: ?std.mem.Allocator,
     uses_opengl: bool,
 
     pub const Error = error{
@@ -58,7 +58,7 @@ pub const Shader = struct {
 
             return .{
                 .handle = @intCast(program),
-                .uniform_cache = std.StringHashMap(c.GLint).init(allocator),
+                .uniform_cache = std.StringHashMap(i32).init(allocator),
                 .allocator = allocator,
                 .uses_opengl = true,
             };
@@ -88,37 +88,14 @@ pub const Shader = struct {
 
         return .{
             .handle = @intCast(program),
-            .uniform_cache = undefined,
-            .allocator = undefined,
+            .uniform_cache = null,
+            .allocator = null,
             .uses_opengl = true,
         };
     }
 
     pub fn initFromFile(allocator: std.mem.Allocator, vert_path: []const u8, frag_path: []const u8) !Shader {
         var dir = std.fs.cwd();
-        // Swapped args: allocator, sub_path (or sub_path, allocator depending on Zig version)
-        // The error `expected type 'Io.Limit', found 'comptime_int'` means the size limit is now wrapped in an enum/struct or not simply a usize.
-        // It seems typically it is passed as a usize, but here it expects `Io.Limit`.
-        // Wait, checking the error message again: `expected type 'Io.Limit', found 'comptime_int'`.
-        // This suggests `limit: Io.Limit`.
-        // I will try to use the raw usize if I can find the way to construct it, or look for `.unlimited` or similar if appropriate, but standard is to pass a size.
-        // Actually, maybe `readFileAlloc` signature changed significantly.
-        // Let's assume the error is correct and it wants `std.io.Limit`.
-        // But usually standard library functions take `max_bytes: usize`.
-        // Ah, this is Zig Nightly/Dev (0.16). Things change fast.
-
-        // Let's try `std.fs.cwd().readFileAlloc(allocator, path, 1024*1024)` again but maybe I got the argument order wrong *again* or the error message was misleading?
-        // First error: expected []const u8 found Allocator. -> Means 1st arg should be path.
-        // My fix: `readFileAlloc(path, allocator, size)`.
-        // Second error: expected Io.Limit found int. -> Means 3rd arg is Io.Limit.
-
-        // Let's look at `std.fs.Dir.readFileAlloc` usage in recent Zig.
-        // It seems `std.fs.Dir.readFileAlloc` now takes `limit: std.io.Limit`.
-        // `std.io.Limit` is an enum(usize)? No, the error says `enum(usize)`.
-        // So I can probably cast it or use `.none` / `.max`.
-
-        // Let's try `@enumFromInt(1024 * 1024)`.
-
         const vert_src = try dir.readFileAlloc(vert_path, allocator, @enumFromInt(1024 * 1024));
         defer allocator.free(vert_src);
 
@@ -136,8 +113,8 @@ pub const Shader = struct {
 
     pub fn deinit(self: *Shader) void {
         c.glDeleteProgram().?(self.handle);
-        if (@TypeOf(self.uniform_cache) != @TypeOf(undefined)) {
-            // Can't easily check if initialized, skip cleanup for simple init
+        if (self.uniform_cache) |*cache| {
+            cache.deinit();
         }
     }
 
@@ -145,44 +122,87 @@ pub const Shader = struct {
         c.glUseProgram().?(self.handle);
     }
 
-    pub fn getUniformLocation(self: *const Shader, name: [*c]const u8) c.GLint {
-        // Direct lookup without caching for now (cache requires mutable self)
-        return c.glGetUniformLocation().?(self.handle, name);
+    /// Get uniform location with caching. On first call for a given name,
+    /// queries OpenGL and caches the result. Subsequent calls return cached value.
+    pub fn getUniformLocation(self: *Shader, name: [:0]const u8) i32 {
+        // Check cache first (if caching is enabled)
+        if (self.uniform_cache) |*cache| {
+            if (cache.get(name)) |cached_loc| {
+                return cached_loc;
+            }
+
+            // Cache miss - query OpenGL
+            const loc: i32 = c.glGetUniformLocation().?(self.handle, name.ptr);
+
+            // Store in cache (best effort, ignore allocation failure)
+            cache.put(name, loc) catch {};
+
+            return loc;
+        }
+
+        // No cache available - direct lookup
+        return c.glGetUniformLocation().?(self.handle, name.ptr);
     }
 
-    // Uniform setters
-    pub fn setMat4(self: *const Shader, name: [*c]const u8, matrix: *const [4][4]f32) void {
+    /// Get uniform location without caching (const version for temporary shaders)
+    pub fn getUniformLocationUncached(self: *const Shader, name: [:0]const u8) i32 {
+        return c.glGetUniformLocation().?(self.handle, name.ptr);
+    }
+
+    // Uniform setters - use uncached version since these take const self
+    pub fn setMat4(self: *const Shader, name: [:0]const u8, matrix: *const [4][4]f32) void {
+        const loc = self.getUniformLocationUncached(name);
+        c.glUniformMatrix4fv().?(loc, 1, c.GL_FALSE, @ptrCast(matrix));
+    }
+
+    pub fn setVec3(self: *const Shader, name: [:0]const u8, x: f32, y: f32, z: f32) void {
+        const loc = self.getUniformLocationUncached(name);
+        c.glUniform3f().?(loc, x, y, z);
+    }
+
+    pub fn setVec3v(self: *const Shader, name: [:0]const u8, v: [3]f32) void {
+        self.setVec3(name, v[0], v[1], v[2]);
+    }
+
+    pub fn setVec4(self: *const Shader, name: [:0]const u8, x: f32, y: f32, z: f32, w: f32) void {
+        const loc = self.getUniformLocationUncached(name);
+        c.glUniform4f().?(loc, x, y, z, w);
+    }
+
+    pub fn setFloat(self: *const Shader, name: [:0]const u8, value: f32) void {
+        const loc = self.getUniformLocationUncached(name);
+        c.glUniform1f().?(loc, value);
+    }
+
+    pub fn setInt(self: *const Shader, name: [:0]const u8, value: i32) void {
+        const loc = self.getUniformLocationUncached(name);
+        c.glUniform1i().?(loc, value);
+    }
+
+    pub fn setBool(self: *const Shader, name: [:0]const u8, value: bool) void {
+        const loc = self.getUniformLocationUncached(name);
+        c.glUniform1i().?(loc, if (value) 1 else 0);
+    }
+
+    // Cached versions of uniform setters for persistent shaders
+    pub fn setMat4Cached(self: *Shader, name: [:0]const u8, matrix: *const [4][4]f32) void {
         const loc = self.getUniformLocation(name);
         c.glUniformMatrix4fv().?(loc, 1, c.GL_FALSE, @ptrCast(matrix));
     }
 
-    pub fn setVec3(self: *const Shader, name: [*c]const u8, x: f32, y: f32, z: f32) void {
+    pub fn setVec3Cached(self: *Shader, name: [:0]const u8, x: f32, y: f32, z: f32) void {
         const loc = self.getUniformLocation(name);
         c.glUniform3f().?(loc, x, y, z);
     }
 
-    pub fn setVec3v(self: *const Shader, name: [*c]const u8, v: [3]f32) void {
-        self.setVec3(name, v[0], v[1], v[2]);
-    }
-
-    pub fn setVec4(self: *const Shader, name: [*c]const u8, x: f32, y: f32, z: f32, w: f32) void {
-        const loc = self.getUniformLocation(name);
-        c.glUniform4f().?(loc, x, y, z, w);
-    }
-
-    pub fn setFloat(self: *const Shader, name: [*c]const u8, value: f32) void {
+    pub fn setFloatCached(self: *Shader, name: [:0]const u8, value: f32) void {
         const loc = self.getUniformLocation(name);
         c.glUniform1f().?(loc, value);
     }
 
-    pub fn setInt(self: *const Shader, name: [*c]const u8, value: i32) void {
+    pub fn setIntCached(self: *Shader, name: [:0]const u8, value: i32) void {
         const loc = self.getUniformLocation(name);
         c.glUniform1i().?(loc, value);
-    }
-
-    pub fn setBool(self: *const Shader, name: [*c]const u8, value: bool) void {
-        const loc = self.getUniformLocation(name);
-        c.glUniform1i().?(loc, if (value) 1 else 0);
     }
 
     fn compileShader(shader_type: c.GLenum, source: [*c]const u8) Error!c.GLuint {
