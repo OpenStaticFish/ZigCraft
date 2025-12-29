@@ -81,10 +81,13 @@ const Params = struct {
     river_min: f32 = 0.74,
     river_max: f32 = 0.84,
     river_depth_max: f32 = 12.0,
-    beach_min_width: i32 = 2,
-    beach_max_width: i32 = 5,
-    beach_max_height_above_sea: i32 = 4,
-    beach_max_slope: i32 = 2,
+    // Structural coastline parameters (replaces post-process shore_dist search)
+    coast_continentalness_min: f32 = 0.45, // Where coast zone begins
+    coast_continentalness_max: f32 = 0.52, // Where coast zone ends
+    beach_max_height_above_sea: i32 = 4, // Max blocks above sea level for beach
+    beach_max_slope: i32 = 2, // Gentle slopes become sand beaches
+    cliff_min_slope: i32 = 5, // Steep slopes become stone cliffs
+    gravel_erosion_threshold: f32 = 0.7, // High erosion areas get gravel
     coastal_no_tree_min: i32 = 8,
     coastal_no_tree_max: i32 = 18,
     mount_inland_min: f32 = 0.48,
@@ -340,10 +343,10 @@ pub const TerrainGenerator = struct {
             }
         }
 
-        var shore_distances: [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32 = undefined;
+        var coastal_types: [CHUNK_SIZE_X * CHUNK_SIZE_Z]CoastalSurfaceType = undefined;
         var exposure_values: [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32 = undefined;
-        const shore_search_radius: i32 = 12;
 
+        // Compute structural coastal surface types (replaces shore_dist search - Issue #95)
         local_z = 0;
         while (local_z < CHUNK_SIZE_Z) : (local_z += 1) {
             if (stop_flag) |sf| if (sf.*) return;
@@ -353,38 +356,19 @@ pub const TerrainGenerator = struct {
                 const wx: f32 = @floatFromInt(world_x + @as(i32, @intCast(local_x)));
                 const wz: f32 = @floatFromInt(world_z + @as(i32, @intCast(local_z)));
                 exposure_values[idx] = self.beach_exposure_noise.fbm2DNormalized(wx, wz, 2, 2.0, 0.5, 1.0 / 200.0);
-                if (is_ocean_flags[idx]) {
-                    shore_distances[idx] = 0;
-                } else {
-                    var min_dist: i32 = 9999;
-                    var dz: i32 = -shore_search_radius;
-                    while (dz <= shore_search_radius) : (dz += 1) {
-                        var dx: i32 = -shore_search_radius;
-                        while (dx <= shore_search_radius) : (dx += 1) {
-                            const nx = @as(i32, @intCast(local_x)) + dx;
-                            const nz = @as(i32, @intCast(local_z)) + dz;
-                            if (nx >= 0 and nx < CHUNK_SIZE_X and nz >= 0 and nz < CHUNK_SIZE_Z) {
-                                const nidx = @as(usize, @intCast(nx)) + @as(usize, @intCast(nz)) * CHUNK_SIZE_X;
-                                if (is_ocean_flags[nidx]) {
-                                    const nwx: f32 = @floatFromInt(world_x + nx);
-                                    const nwz: f32 = @floatFromInt(world_z + nz);
-                                    const warp = self.computeWarp(nwx, nwz);
-                                    const nc = self.getContinentalness(nwx + warp.x, nwz + warp.z);
-                                    if (nc < p.continental_coast_max) {
-                                        const dist = @max(@abs(dx), @abs(dz));
-                                        min_dist = @min(min_dist, dist);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    shore_distances[idx] = min_dist;
-                }
+
+                // Use structural signals instead of distance search
+                const continentalness = continentalness_values[idx];
+                const slope = slopes[idx];
+                const height = surface_heights[idx];
+                const erosion = erosion_values[idx];
+
+                coastal_types[idx] = self.getCoastalSurfaceType(continentalness, slope, height, erosion);
             }
         }
 
         var worm_carve_map = self.cave_system.generateWormCaves(chunk, &surface_heights, self.allocator) catch {
-            self.generateWithoutWormCavesInternal(chunk, &surface_heights, &biome_ids, &secondary_biome_ids, &biome_blends, &filler_depths, &is_ocean_flags, &cave_region_values, &shore_distances, &slopes, &exposure_values, sea);
+            self.generateWithoutWormCavesInternal(chunk, &surface_heights, &biome_ids, &secondary_biome_ids, &biome_blends, &filler_depths, &is_ocean_flags, &cave_region_values, &coastal_types, &slopes, &exposure_values, sea);
             return;
         };
         defer worm_carve_map.deinit();
@@ -400,14 +384,16 @@ pub const TerrainGenerator = struct {
                 const filler_depth = filler_depths[idx];
                 const is_ocean = is_ocean_flags[idx];
                 const cave_region = cave_region_values[idx];
-                const shore_dist = shore_distances[idx];
-                const slope = slopes[idx];
+                const coastal_type = coastal_types[idx];
                 const wx: f32 = @floatFromInt(world_x + @as(i32, @intCast(local_x)));
                 const wz: f32 = @floatFromInt(world_z + @as(i32, @intCast(local_z)));
-                const depth_above_sea = terrain_height_i - p.sea_level;
-                const is_beach_surface = !is_ocean and shore_dist >= 1 and shore_dist <= 3 and depth_above_sea >= 0 and depth_above_sea <= 2 and slope <= 2;
-                if (is_beach_surface) debug_beach_count += 1;
-                const is_cliff = false;
+
+                // Structural coastal surface detection (Issue #95)
+                const is_sand_beach = coastal_type == .sand_beach;
+                const is_gravel_beach = coastal_type == .gravel_beach;
+                const is_cliff = coastal_type == .cliff;
+                if (is_sand_beach or is_gravel_beach) debug_beach_count += 1;
+
                 var y: i32 = 0;
                 const primary_biome_id = biome_ids[idx];
                 const secondary_biome_id = secondary_biome_ids[idx];
@@ -420,14 +406,18 @@ pub const TerrainGenerator = struct {
                     var block = self.getBlockAt(y, terrain_height_i, active_biome, filler_depth, is_ocean, sea);
                     const is_surface = (y == terrain_height_i);
                     const is_near_surface = (y > terrain_height_i - 3 and y <= terrain_height_i);
+
+                    // Apply structural coastal surface types
                     if (is_surface and block != .air and block != .water and block != .bedrock) {
-                        if (is_beach_surface) {
+                        if (is_sand_beach) {
                             block = .sand;
+                        } else if (is_gravel_beach) {
+                            block = .gravel;
                         } else if (is_cliff) {
                             block = .stone;
                         }
-                    } else if (is_near_surface and is_beach_surface and block == .dirt) {
-                        block = .sand;
+                    } else if (is_near_surface and (is_sand_beach or is_gravel_beach) and block == .dirt) {
+                        block = if (is_gravel_beach) .gravel else .sand;
                     }
                     if (block != .air and block != .water and block != .bedrock) {
                         const wy: f32 = @floatFromInt(y);
@@ -456,8 +446,9 @@ pub const TerrainGenerator = struct {
         self.printDebugStats(world_x, world_z, &debug_temperatures, &debug_humidities, &debug_continentalness, &biome_ids, debug_beach_count);
     }
 
-    fn generateWithoutWormCavesInternal(self: *const TerrainGenerator, chunk: *Chunk, surface_heights: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, biome_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId, secondary_biome_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId, biome_blends: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, filler_depths: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, is_ocean_flags: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]bool, cave_region_values: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, shore_distances: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, slopes: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, exposure_values: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, sea: f32) void {
+    fn generateWithoutWormCavesInternal(self: *const TerrainGenerator, chunk: *Chunk, surface_heights: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, biome_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId, secondary_biome_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId, biome_blends: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, filler_depths: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, is_ocean_flags: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]bool, cave_region_values: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, coastal_types: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]CoastalSurfaceType, slopes: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, exposure_values: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, sea: f32) void {
         _ = exposure_values;
+        _ = slopes;
         const world_x = chunk.getWorldX();
         const world_z = chunk.getWorldZ();
         const p = self.params;
@@ -470,13 +461,15 @@ pub const TerrainGenerator = struct {
                 const filler_depth = filler_depths[idx];
                 const is_ocean = is_ocean_flags[idx];
                 const cave_region = cave_region_values[idx];
-                const shore_dist = shore_distances[idx];
-                const slope = slopes[idx];
+                const coastal_type = coastal_types[idx];
                 const wx: f32 = @floatFromInt(world_x + @as(i32, @intCast(local_x)));
                 const wz: f32 = @floatFromInt(world_z + @as(i32, @intCast(local_z)));
-                const depth_above_sea = terrain_height_i - p.sea_level;
-                const is_beach_surface = !is_ocean and shore_dist >= 1 and shore_dist <= 3 and depth_above_sea >= 0 and depth_above_sea <= 2 and slope <= 2;
-                const is_cliff = false;
+
+                // Structural coastal surface detection (Issue #95)
+                const is_sand_beach = coastal_type == .sand_beach;
+                const is_gravel_beach = coastal_type == .gravel_beach;
+                const is_cliff = coastal_type == .cliff;
+
                 var y: i32 = 0;
                 const primary_biome_id = biome_ids[idx];
                 const secondary_biome_id = secondary_biome_ids[idx];
@@ -489,14 +482,18 @@ pub const TerrainGenerator = struct {
                     var block = self.getBlockAt(y, terrain_height_i, active_biome, filler_depth, is_ocean, sea);
                     const is_surface = (y == terrain_height_i);
                     const is_near_surface = (y > terrain_height_i - 3 and y <= terrain_height_i);
+
+                    // Apply structural coastal surface types
                     if (is_surface and block != .air and block != .water and block != .bedrock) {
-                        if (is_beach_surface) {
+                        if (is_sand_beach) {
                             block = .sand;
+                        } else if (is_gravel_beach) {
+                            block = .gravel;
                         } else if (is_cliff) {
                             block = .stone;
                         }
-                    } else if (is_near_surface and is_beach_surface and block == .dirt) {
-                        block = .sand;
+                    } else if (is_near_surface and (is_sand_beach or is_gravel_beach) and block == .dirt) {
+                        block = if (is_gravel_beach) .gravel else .sand;
                     }
                     if (block != .air and block != .water and block != .bedrock) {
                         const wy: f32 = @floatFromInt(y);
@@ -694,6 +691,54 @@ pub const TerrainGenerator = struct {
         const r = self.river_noise.ridged2D(x, z, 4, 2.0, 0.5, p.river_scale);
         const river_val = 1.0 - r;
         return smoothstep(p.river_min, p.river_max, river_val);
+    }
+
+    /// Coastal surface type determined by structural signals (continentalness, slope, erosion)
+    /// Replaces the post-process shore_dist search with structure-first approach
+    pub const CoastalSurfaceType = enum {
+        none, // Not in coastal zone
+        sand_beach, // Gentle slope near sea level -> sand
+        gravel_beach, // High erosion coastal area -> gravel
+        cliff, // Steep slope in coastal zone -> stone
+    };
+
+    /// Determine coastal surface type based on structural signals
+    /// This is the core of the structure-first beach generation (Issue #95)
+    pub fn getCoastalSurfaceType(self: *const TerrainGenerator, continentalness: f32, slope: i32, height: i32, erosion: f32) CoastalSurfaceType {
+        const p = self.params;
+        const sea_level = p.sea_level;
+
+        // Check if we're in the coastal zone based on continentalness
+        const in_coast_zone = continentalness >= p.coast_continentalness_min and
+            continentalness <= p.coast_continentalness_max;
+
+        if (!in_coast_zone) {
+            return .none;
+        }
+
+        // Check height - must be near sea level
+        const height_above_sea = height - sea_level;
+        if (height_above_sea < 0 or height_above_sea > p.beach_max_height_above_sea) {
+            return .none;
+        }
+
+        // Steep slopes become cliffs (stone)
+        if (slope >= p.cliff_min_slope) {
+            return .cliff;
+        }
+
+        // High erosion areas become gravel beaches
+        if (erosion >= p.gravel_erosion_threshold and slope <= p.beach_max_slope + 1) {
+            return .gravel_beach;
+        }
+
+        // Gentle slopes become sand beaches
+        if (slope <= p.beach_max_slope) {
+            return .sand_beach;
+        }
+
+        // Moderate slopes in coast zone - no special treatment
+        return .none;
     }
 
     fn getBlockAt(self: *const TerrainGenerator, y: i32, terrain_height: i32, biome: Biome, filler_depth: i32, is_ocean: bool, sea: f32) BlockType {

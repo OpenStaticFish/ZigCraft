@@ -212,10 +212,11 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .name = "Beach",
         .temperature = .{ .min = 0.2, .max = 1.0 },
         .humidity = Range.any(),
-        .elevation = .{ .min = 0.295, .max = 0.305 }, // EXTREMELY TIGHT range (height 64-65)
-        // Now allows matching naturally at coastal edge
-        .continentalness = .{ .min = 0.47, .max = 0.52 },
-        .priority = 10, // High priority to win at exactly the coastline
+        .elevation = .{ .min = 0.28, .max = 0.35 }, // Near sea level
+        // Structural beach: coast zone with gentle slopes (Issue #95)
+        .continentalness = .{ .min = 0.45, .max = 0.52 },
+        .max_slope = 2, // Only gentle slopes - structural detection handles steeper
+        .priority = 10, // High priority to win at coastal edges
         .surface = .{ .top = .sand, .filler = .sand, .depth_range = 2 },
         .vegetation = .{ .tree_types = &.{}, .tree_density = 0 },
     },
@@ -277,8 +278,10 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .temperature = .{ .min = 0.3, .max = 1.0 },
         .humidity = Range.any(),
         .elevation = .{ .min = 0.28, .max = 0.35 },
-        // FIXED: Revert to procedural only to avoid taking over land
-        .continentalness = .{ .min = -1.0, .max = -0.5 },
+        // Secondary beach definition for cold beaches (gravel)
+        // Structural approach: continentalness-based with slope constraint (Issue #95)
+        .continentalness = .{ .min = 0.45, .max = 0.52 },
+        .max_slope = 2, // Gentle slopes only
         .priority = 5,
         .surface = .{ .top = .sand, .filler = .sand, .depth_range = 2 },
         .vegetation = .{ .tree_types = &.{}, .tree_density = 0 },
