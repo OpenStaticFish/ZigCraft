@@ -90,8 +90,8 @@ const Params = struct {
     // Mountains: AGGRESSIVELY GATED - only in continental cores
     mount_amp: f32 = 140.0, // Dramatic when they do appear
     mount_cap: f32 = 200.0,
-    detail_scale: f32 = 1.0 / 180.0, // Slightly larger detail scale
-    detail_amp: f32 = 8.0, // Reduced detail amplitude
+    detail_scale: f32 = 1.0 / 120.0, // Smaller scale for more visible detail
+    detail_amp: f32 = 12.0, // Increased detail amplitude
     highland_range: f32 = 100.0,
     coast_jitter_scale: f32 = 1.0 / 800.0, // Larger scale jitter
     seabed_scale: f32 = 1.0 / 400.0, // Larger, smoother seabed
@@ -102,9 +102,9 @@ const Params = struct {
     river_depth_max: f32 = 10.0,
 
     // Structural coastline parameters
-    coast_continentalness_min: f32 = 0.45,
-    coast_continentalness_max: f32 = 0.58,
-    beach_max_height_above_sea: i32 = 3,
+    coast_continentalness_min: f32 = 0.38, // Updated to match ocean_threshold
+    coast_continentalness_max: f32 = 0.50, // Narrower beach band
+    beach_max_height_above_sea: i32 = 4, // Slightly higher beach band
     beach_max_slope: i32 = 2,
     cliff_min_slope: i32 = 5,
     gravel_erosion_threshold: f32 = 0.7,
@@ -123,16 +123,16 @@ const Params = struct {
     mount_rugged_min: f32 = 0.50,
     mount_rugged_max: f32 = 0.85,
 
-    mid_freq_hill_scale: f32 = 1.0 / 400.0, // Larger hill patterns
-    mid_freq_hill_amp: f32 = 15.0, // Reduced hill amplitude
+    mid_freq_hill_scale: f32 = 1.0 / 250.0, // Smaller scale for more visible hills
+    mid_freq_hill_amp: f32 = 22.0, // Increased hill amplitude
     peak_compression_offset: f32 = 90.0,
     peak_compression_range: f32 = 100.0,
     terrace_step: f32 = 4.0,
     ridge_scale: f32 = 1.0 / 1800.0, // Larger ridge scale
     ridge_amp: f32 = 50.0,
-    ridge_inland_min: f32 = 0.70, // Ridges also require being inland
-    ridge_inland_max: f32 = 0.90,
-    ridge_sparsity: f32 = 0.70, // More sparse ridges
+    ridge_inland_min: f32 = 0.65, // Lower threshold so ridges appear more often
+    ridge_inland_max: f32 = 0.85,
+    ridge_sparsity: f32 = 0.60, // Less sparse ridges
 };
 
 pub const TerrainGenerator = struct {
@@ -734,12 +734,20 @@ pub const TerrainGenerator = struct {
         const sea: f32 = @floatFromInt(p.sea_level);
 
         // Coastal shelf zone: ocean_threshold to coast_max
-        // Creates flat beaches near sea level
+        // Beach-eligible area is VERY narrow (just the first bit)
+        // Then terrain rises quickly above beach height
         if (c < p.continental_coast_max) {
             const range = p.continental_coast_max - p.ocean_threshold;
             const t = (c - p.ocean_threshold) / range;
-            // Shallow water to just above sea level (very flat shelf)
-            return sea - 5.0 + t * 10.0; // -5 to +5 around sea level
+            // First 30% of coast zone: flat beach area (sea level to +4)
+            // Remaining 70%: rise quickly to +15
+            if (t < 0.3) {
+                const beach_t = t / 0.3;
+                return sea + beach_t * 4.0; // 0 to +4 (beach zone)
+            } else {
+                const inland_t = (t - 0.3) / 0.7;
+                return sea + 4.0 + inland_t * 16.0; // +4 to +20
+            }
         }
 
         // Inland Low: coast_max to inland_low_max
@@ -747,7 +755,7 @@ pub const TerrainGenerator = struct {
         if (c < p.continental_inland_low_max) {
             const range = p.continental_inland_low_max - p.continental_coast_max;
             const t = (c - p.continental_coast_max) / range;
-            return sea + 5.0 + t * 20.0; // +5 to +25 above sea
+            return sea + 20.0 + t * 25.0; // +20 to +45 above sea
         }
 
         // Inland High: inland_low_max to inland_high_max
@@ -755,13 +763,13 @@ pub const TerrainGenerator = struct {
         if (c < p.continental_inland_high_max) {
             const range = p.continental_inland_high_max - p.continental_inland_low_max;
             const t = (c - p.continental_inland_low_max) / range;
-            return sea + 25.0 + t * 30.0; // +25 to +55 above sea
+            return sea + 45.0 + t * 35.0; // +45 to +80 above sea
         }
 
         // Continental Core: > inland_high_max
         // High plateaus where mountains can form
         const t = smoothstep(p.continental_inland_high_max, 1.0, c);
-        return sea + 55.0 + t * 25.0; // +55 to +80 base (mountains add on top)
+        return sea + 80.0 + t * 30.0; // +80 to +110 base (mountains add on top)
     }
 
     /// STRUCTURE-FIRST height computation.
@@ -896,18 +904,19 @@ pub const TerrainGenerator = struct {
         }
 
         // CONSTRAINT 2: Must be adjacent to OCEAN, not just any water
-        // Ocean is defined by continentalness < ocean_threshold (0.30)
+        // Ocean is defined by continentalness < ocean_threshold (0.38)
         //
         // The key insight: if we're on LAND (height > sea) but near the ocean threshold,
         // we're on the ocean shore. If continentalness is high (inland), any water
         // is a lake/river, not ocean.
         //
         // Beach zone: land just above the ocean_threshold where ocean is nearby
-        // - c = 0.30 is the hard ocean cutoff
-        // - Beach forms in c = 0.30 to ~0.40 (just above ocean, near shore)
-        // - Above 0.40, we're too far inland for ocean beaches
+        // - c = 0.38 is the hard ocean cutoff
+        // - Beach forms in c = 0.38 to ~0.45 (very narrow band - just the actual shore)
+        // - Above 0.45, we're too far inland for ocean beaches
+        const beach_band = 0.07; // Very narrow beach band
         const near_ocean = continentalness >= p.ocean_threshold and
-            continentalness < (p.ocean_threshold + 0.12); // ~0.30 to 0.42
+            continentalness < (p.ocean_threshold + beach_band); // ~0.38 to 0.45
 
         if (!near_ocean) {
             return .none;
