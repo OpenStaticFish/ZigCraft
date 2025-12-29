@@ -80,6 +80,7 @@ pub fn build(b: *std.Build) void {
     });
     integration_root_module.addImport("zig-math", zig_math);
     integration_root_module.addImport("zig-noise", zig_noise);
+    integration_root_module.addImport("shader_sources", shader_sources);
 
     const exe_integration_tests = b.addTest(.{
         .root_module = integration_root_module,
