@@ -98,6 +98,11 @@ const Params = struct {
     peak_compression_offset: f32 = 90.0,
     peak_compression_range: f32 = 100.0,
     terrace_step: f32 = 4.0,
+    ridge_scale: f32 = 1.0 / 1400.0,
+    ridge_amp: f32 = 60.0,
+    ridge_inland_min: f32 = 0.50,
+    ridge_inland_max: f32 = 0.85,
+    ridge_sparsity: f32 = 0.65,
 };
 
 pub const TerrainGenerator = struct {
@@ -118,6 +123,7 @@ pub const TerrainGenerator = struct {
     cave_system: CaveSystem,
     filler_depth_noise: Noise,
     mountain_lift_noise: Noise,
+    ridge_noise: Noise,
     params: Params,
     allocator: std.mem.Allocator,
 
@@ -142,6 +148,7 @@ pub const TerrainGenerator = struct {
             .cave_system = CaveSystem.init(seed),
             .filler_depth_noise = Noise.init(random.int(u64)),
             .mountain_lift_noise = Noise.init(random.int(u64)),
+            .ridge_noise = Noise.init(random.int(u64)),
             .params = .{},
             .allocator = allocator,
         };
@@ -572,6 +579,14 @@ pub const TerrainGenerator = struct {
         return inland * peak_factor * rugged_factor;
     }
 
+    fn getRidgeFactor(self: *const TerrainGenerator, x: f32, z: f32, c: f32) f32 {
+        const p = self.params;
+        const inland_factor = smoothstep(p.ridge_inland_min, p.ridge_inland_max, c);
+        const ridge_val = self.ridge_noise.ridged2D(x, z, 5, 2.0, 0.5, p.ridge_scale);
+        const sparsity_mask = smoothstep(p.ridge_sparsity - 0.15, p.ridge_sparsity + 0.15, ridge_val);
+        return inland_factor * sparsity_mask * ridge_val;
+    }
+
     fn computeHeight(self: *const TerrainGenerator, c: f32, e: f32, pv: f32, x: f32, z: f32) f32 {
         const p = self.params;
         const sea: f32 = @floatFromInt(p.sea_level);
@@ -592,6 +607,9 @@ pub const TerrainGenerator = struct {
         const mount_lift_raw = m_mask * lift_noise * p.mount_amp;
         const mount_lift = mount_lift_raw / (1.0 + mount_lift_raw / p.mount_cap);
         base_height += mount_lift;
+        const ridge_factor = self.getRidgeFactor(x, z, c);
+        const ridge_lift = ridge_factor * p.ridge_amp;
+        base_height += ridge_lift;
         const mid_noise = self.detail_noise.fbm2D(x + 5000.0, z + 5000.0, 3, 2.0, 0.5, p.mid_freq_hill_scale);
         const land_mult = smoothstep(0.50, 0.65, c);
         base_height += mid_noise * p.mid_freq_hill_amp * land_mult;
