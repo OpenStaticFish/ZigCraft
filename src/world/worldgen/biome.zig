@@ -368,7 +368,8 @@ pub fn selectBiomeVoronoiWithRiver(
     river_mask: f32,
 ) BiomeId {
     // River biome takes priority when river mask is active
-    if (river_mask > 0.5 and height < 68) {
+    // Issue #110: Allow rivers at higher elevations (canyons)
+    if (river_mask > 0.5 and height < 120) {
         return .river;
     }
     return selectBiomeVoronoi(heat, humidity, height, continentalness, slope);

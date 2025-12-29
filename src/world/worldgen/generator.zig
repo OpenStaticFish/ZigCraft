@@ -168,6 +168,8 @@ pub const TerrainGenerator = struct {
     terrain_alt: ConfiguredNoise,
     height_select: ConfiguredNoise,
     terrain_persist: ConfiguredNoise,
+    // Variant noise for sub-biomes (Issue #110)
+    variant_noise: ConfiguredNoise,
 
     pub fn init(seed: u64, allocator: std.mem.Allocator) TerrainGenerator {
         var prng = std.Random.DefaultPrng.init(seed);
@@ -210,6 +212,10 @@ pub const TerrainGenerator = struct {
             // terrain_persist: Detail variation multiplier
             // Modulates how much fine detail appears in different areas
             .terrain_persist = ConfiguredNoise.init(makeNoiseParams(seed, 1004, 1000, 0.15, 0.6, 3, 0.6)),
+
+            // variant_noise: Low-frequency noise for sub-biomes (Issue #110)
+            // Spread 250 blocks for reasonably sized patches
+            .variant_noise = ConfiguredNoise.init(makeNoiseParams(seed, 1008, 250, 1.0, 0.0, 3, 0.5)),
         };
     }
 
@@ -1042,6 +1048,17 @@ pub const TerrainGenerator = struct {
         }
 
         if (y == terrain_height) {
+            // Elevation-aware surface morphing (Issue #110)
+            // Plains -> Grassland (low) -> Rolling Hills (mid) -> Windswept/Rocky (high)
+            if (biome == .plains) {
+                if (y > 110) return .stone; // High windswept areas
+                if (y > 90) return .gravel; // Transition
+            }
+            // Forest -> Standard -> Rocky peaks
+            if (biome == .forest) {
+                if (y > 120) return .stone;
+            }
+
             if (biome == .snowy_mountains or biome == .snow_tundra) return .snow_block;
             return biome.getSurfaceBlock();
         }
@@ -1093,8 +1110,13 @@ pub const TerrainGenerator = struct {
                 const surface_y = chunk.getSurfaceHeight(local_x, local_z);
                 if (surface_y <= 0 or surface_y >= CHUNK_SIZE_Y - 1) continue;
 
-                // Use the biome stored in the chunk (populated during terrain gen)
+                // Use the biome stored in the chunk
                 const biome = chunk.biomes[local_x + local_z * CHUNK_SIZE_X];
+
+                // Sample variant noise for sub-biomes (Issue #110)
+                const wx: f32 = @floatFromInt(chunk.getWorldX() + @as(i32, @intCast(local_x)));
+                const wz: f32 = @floatFromInt(chunk.getWorldZ() + @as(i32, @intCast(local_z)));
+                const variant_val = self.variant_noise.get2D(wx, wz);
 
                 // Get surface block to check if we can place on it
                 const surface_block = chunk.getBlock(local_x, @intCast(surface_y), local_z);
@@ -1104,6 +1126,7 @@ pub const TerrainGenerator = struct {
                     switch (deco) {
                         .simple => |s| {
                             if (!self.isBiomeAllowed(s.biomes, biome)) continue;
+                            if (variant_val < s.variant_min or variant_val > s.variant_max) continue;
                             if (!self.isBlockAllowed(s.place_on, surface_block)) continue;
                             if (random.float(f32) >= s.probability) continue;
 
@@ -1113,6 +1136,7 @@ pub const TerrainGenerator = struct {
                         },
                         .schematic => |s| {
                             if (!self.isBiomeAllowed(s.biomes, biome)) continue;
+                            if (variant_val < s.variant_min or variant_val > s.variant_max) continue;
                             if (!self.isBlockAllowed(s.place_on, surface_block)) continue;
                             if (random.float(f32) >= s.probability) continue;
 

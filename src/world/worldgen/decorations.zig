@@ -18,6 +18,11 @@ pub const SimpleDecoration = struct {
     y_max: i32 = 256,
     probability: f32, // Chance per column (0.0 - 1.0)
 
+    // Variant noise constraints (Issue #110)
+    // Range -1.0 to 1.0. Decoration only spawns if variant noise is within range.
+    variant_min: f32 = -1.0,
+    variant_max: f32 = 1.0,
+
     // Optional: required neighbor blocks (like cactus needs sand around?)
 };
 
@@ -45,6 +50,10 @@ pub const SchematicDecoration = struct {
     probability: f32,
     rotation: Rotation = .random_90,
     spacing_radius: i32 = 0, // Minimum distance to other schematics
+
+    // Variant noise constraints (Issue #110)
+    variant_min: f32 = -1.0,
+    variant_max: f32 = 1.0,
 };
 
 pub const Decoration = union(enum) {
@@ -115,13 +124,27 @@ pub const DECORATIONS = [_]Decoration{
         .probability = 0.5,
     } },
 
-    // === Flowers ===
-    .{ .simple = .{
-        .block = .flower_red,
-        .place_on = &.{.grass},
-        .biomes = &.{ .plains, .forest },
-        .probability = 0.05,
-    } },
+    // === Flowers (Standard) ===
+    .{
+        .simple = .{
+            .block = .flower_red,
+            .place_on = &.{.grass},
+            .biomes = &.{ .plains, .forest },
+            .probability = 0.02,
+            .variant_min = -0.6, // Normal distribution
+        },
+    },
+
+    // === Flower Patches (Variant < -0.6) ===
+    .{
+        .simple = .{
+            .block = .flower_yellow, // Use yellow for density? Or mixed.
+            .place_on = &.{.grass},
+            .biomes = &.{ .plains, .forest },
+            .probability = 0.4, // Dense!
+            .variant_max = -0.6,
+        },
+    },
 
     // === Dead Bush ===
     .{ .simple = .{
@@ -139,30 +162,50 @@ pub const DECORATIONS = [_]Decoration{
         .probability = 0.01,
     } },
 
-    // === Trees ===
+    // === Boulders (Rocky Patches: Variant > 0.6) ===
+    .{
+        .simple = .{
+            .block = .cobblestone, // Boulders
+            .place_on = &.{.grass},
+            .biomes = &.{ .plains, .mountains, .taiga },
+            .probability = 0.05,
+            .variant_min = 0.6,
+        },
+    },
+
+    // === Trees: Sparse (Plains, Swamp, Mountains) ===
     .{
         .schematic = .{
             .schematic = OAK_TREE,
             .place_on = &.{ .grass, .dirt },
-            .biomes = &.{ .forest, .plains, .swamp, .mountains },
-            .probability = 0.005, // 0.5% chance per block (plains/sparse)
+            .biomes = &.{ .plains, .swamp, .mountains },
+            .probability = 0.002, // Very sparse
             .spacing_radius = 4,
         },
     },
-    // Forest tree (higher density? No, registry entries are unique.
-    // To have different densities, we need different entries or logic.
-    // For now, this puts trees in both, but sparse.
-    // Ideally, we'd have Forest Tree entry with high prob, Plains Tree with low prob.
-    // But DECORATIONS is a flat list.
-    // Let's add another entry for Forest specifically?
-    // "Forest Tree" -> restricted to Forest, prob = 0.05.
+
+    // === Trees: Standard Forest (Variant -0.4 to 0.4) ===
+    .{ .schematic = .{
+        .schematic = OAK_TREE,
+        .place_on = &.{ .grass, .dirt },
+        .biomes = &.{.forest},
+        .probability = 0.02,
+        .spacing_radius = 3,
+        .variant_min = -0.4,
+        .variant_max = 0.4,
+    } },
+
+    // === Trees: Dense Forest (Variant > 0.4) ===
     .{
         .schematic = .{
             .schematic = OAK_TREE,
             .place_on = &.{ .grass, .dirt },
             .biomes = &.{.forest},
-            .probability = 0.05, // 10x denser in forest
-            .spacing_radius = 3,
+            .probability = 0.15, // Dense!
+            .spacing_radius = 2,
+            .variant_min = 0.4,
         },
     },
+
+    // Note: Forest with variant < -0.4 has NO trees (Clearing)
 };
