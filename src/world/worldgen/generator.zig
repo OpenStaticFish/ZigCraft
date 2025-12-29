@@ -52,38 +52,38 @@ pub const ContinentalZone = enum {
 
 /// Terrain generation parameters
 const Params = struct {
-    warp_scale: f32 = 1.0 / 800.0,
-    warp_amplitude: f32 = 80.0,
-    continental_scale: f32 = 1.0 / 3500.0, // ENLARGED: "thousands of blocks" -> ~3500 for huge continents
+    warp_scale: f32 = 1.0 / 1200.0, // Larger warp for more organic coastlines
+    warp_amplitude: f32 = 100.0,
+    continental_scale: f32 = 1.0 / 10000.0, // HUGE: 10km+ continent features
 
     // STRUCTURE-FIRST Continental Zones:
     // The KEY insight: ocean vs land is decided by continentalness ALONE.
     // Land logic NEVER runs in ocean zones.
     //
     // Raw noise: -1..+1, normalized to 0..1
-    // < 0.30 : FORCED OCEAN (no land logic runs here at all)
-    // 0.30..0.45 : Shallow Ocean / Shelf
-    // 0.45..0.55 : Coast (beach shelf, very flat near sea level)
-    // 0.55..0.75 : Inland Low (plains, forests)
-    // 0.75..0.90 : Inland High (hills, foothills)
-    // > 0.90 : Continental Core (mountains allowed here)
+    // < 0.38 : FORCED OCEAN (no land logic runs here at all)
+    // 0.38..0.48 : Shallow Ocean / Shelf
+    // 0.48..0.55 : Coast (beach shelf, very flat near sea level)
+    // 0.55..0.72 : Inland Low (plains, forests)
+    // 0.72..0.85 : Inland High (hills, foothills)
+    // > 0.85 : Continental Core (mountains allowed here)
     //
     // CRITICAL: ocean_threshold is the HARD cutoff. Below this = ocean, period.
-    ocean_threshold: f32 = 0.30, // HARD ocean decision - below this, FORCE ocean
-    continental_deep_ocean_max: f32 = 0.20, // Within ocean: deep vs shallow
-    continental_ocean_max: f32 = 0.30, // Ocean ends here (same as ocean_threshold)
+    ocean_threshold: f32 = 0.38, // RAISED: More land, less ocean fragmentation
+    continental_deep_ocean_max: f32 = 0.25, // Within ocean: deep vs shallow
+    continental_ocean_max: f32 = 0.38, // Ocean ends here (same as ocean_threshold)
     continental_coast_max: f32 = 0.55, // Coast/beach shelf zone
-    continental_inland_low_max: f32 = 0.75, // Plains/forests
-    continental_inland_high_max: f32 = 0.90, // Hills, start of mountain eligibility
+    continental_inland_low_max: f32 = 0.72, // Plains/forests (narrower band)
+    continental_inland_high_max: f32 = 0.85, // Hills, start of mountain eligibility
 
-    erosion_scale: f32 = 1.0 / 1500.0, // Slightly larger for smoother erosion patterns
-    peaks_scale: f32 = 1.0 / 1200.0, // Larger scale = fewer, bigger mountain ranges
-    // ENLARGED 3-4x: Climate should look "blurry" at 512x512 zoom
-    temperature_macro_scale: f32 = 1.0 / 6000.0, // Was 1/2000, now 3x larger
-    temperature_local_scale: f32 = 1.0 / 800.0, // Was 1/400, now 2x larger
-    humidity_macro_scale: f32 = 1.0 / 6000.0, // Was 1/2000, now 3x larger
-    humidity_local_scale: f32 = 1.0 / 800.0, // Was 1/400, now 2x larger
-    climate_macro_weight: f32 = 0.85, // Increased macro influence (was 0.75)
+    erosion_scale: f32 = 1.0 / 2500.0, // Larger for smoother erosion patterns
+    peaks_scale: f32 = 1.0 / 2000.0, // Larger scale = fewer, bigger mountain ranges
+    // MASSIVELY ENLARGED: Climate zones should span thousands of blocks
+    temperature_macro_scale: f32 = 1.0 / 12000.0, // 12km temperature bands
+    temperature_local_scale: f32 = 1.0 / 1500.0, // Local variation within bands
+    humidity_macro_scale: f32 = 1.0 / 12000.0, // 12km humidity bands
+    humidity_local_scale: f32 = 1.0 / 1500.0, // Local variation within bands
+    climate_macro_weight: f32 = 0.92, // Even more macro influence (was 0.85)
     temp_lapse: f32 = 0.25,
     sea_level: i32 = 64,
 
