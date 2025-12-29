@@ -793,14 +793,36 @@ test "WorldGen different seeds produce different biomes" {
     const gen1 = TerrainGenerator.init(11111, allocator);
     const gen2 = TerrainGenerator.init(99999, allocator);
 
-    var chunk1 = Chunk.init(0, 0);
-    var chunk2 = Chunk.init(0, 0);
+    // With structure-first generation (Issue #92), noise scales are much larger
+    // (continental scale = 1/3500). To see biome differences, we need to test
+    // at multiple distant locations spanning different continental zones.
+    // Use chunk coordinates (world = chunk * 16) that sample different noise phases.
+    // Test locations ~10000+ blocks apart in world space.
+    const test_locations = [_][2]i32{
+        .{ -300, 200 }, // ~5000 blocks from origin
+        .{ 500, -400 }, // Different direction
+        .{ 700, 300 }, // ~11000 blocks from origin
+        .{ -600, -500 }, // Negative quadrant
+        .{ 1000, 1000 }, // ~22000 blocks from origin
+    };
 
-    gen1.generate(&chunk1, null);
-    gen2.generate(&chunk2, null);
+    var differences_found: u32 = 0;
 
-    const all_same = std.mem.eql(BiomeId, &chunk1.biomes, &chunk2.biomes);
-    try testing.expect(!all_same);
+    for (test_locations) |loc| {
+        var chunk1 = Chunk.init(loc[0], loc[1]);
+        var chunk2 = Chunk.init(loc[0], loc[1]);
+
+        gen1.generate(&chunk1, null);
+        gen2.generate(&chunk2, null);
+
+        if (!std.mem.eql(BiomeId, &chunk1.biomes, &chunk2.biomes)) {
+            differences_found += 1;
+        }
+    }
+
+    // With large-scale noise, we expect at least SOME locations to differ
+    // Even if individual chunks look similar, across 5 samples there should be variance
+    try testing.expect(differences_found >= 1);
 }
 
 test "WorldGen determinism across multiple chunks with same seed" {
@@ -850,15 +872,20 @@ test "WorldGen golden output for known seed at origin" {
     try testing.expect(chunk.generated);
     try testing.expect(chunk.dirty);
 
-    const top_block = chunk.getBlock(8, 64, 8);
-    try testing.expect(top_block.isSolid());
-
+    // With the coastal terrain fixes (Issue #92), the terrain shape has changed.
+    // Instead of checking a fixed Y coordinate, verify terrain generation is valid:
+    // 1. Bedrock must be present at y=0
     const bedrock_present = chunk.getBlock(0, 0, 0) == .bedrock;
     try testing.expect(bedrock_present);
 
+    // 2. There must be a valid surface somewhere in the chunk
     const surface_height = chunk.getHighestSolidY(8, 8);
     try testing.expect(surface_height > 0);
     try testing.expect(surface_height < CHUNK_SIZE_Y);
+
+    // 3. The surface block should be solid (not air/water)
+    const surface_block = chunk.getBlock(8, surface_height, 8);
+    try testing.expect(surface_block.isSolid());
 }
 
 // ============================================================================
@@ -996,36 +1023,41 @@ test "Biome structural constraints - height filter" {
     const getBiomeDefinition = biome_mod.getBiomeDefinition;
     const selectBiomeWithConstraints = biome_mod.selectBiomeWithConstraints;
 
+    // Updated for structure-first thresholds (Issue #92):
+    // - snowy_mountains requires min_height = 110 (updated from 100)
+    // - Mountains require continentalness >= 0.75 (inland high or core)
     const snowy_mountains = getBiomeDefinition(.snowy_mountains);
-    try testing.expect(snowy_mountains.min_height == 100);
+    try testing.expect(snowy_mountains.min_height == 110);
 
+    // Low elevation test - should NOT get snowy_mountains
     const climate_low = ClimateParams{
         .temperature = 0.3,
         .humidity = 0.5,
         .elevation = 0.5,
-        .continentalness = 0.7,
+        .continentalness = 0.85, // Continental core (>0.75)
         .ruggedness = 0.8,
     };
     const structural_low = StructuralParams{
-        .height = 50,
+        .height = 50, // Below min_height = 110
         .slope = 5,
-        .continentalness = 0.7,
+        .continentalness = 0.85,
         .ridge_mask = 0.3,
     };
     const biome_at_low_elev = selectBiomeWithConstraints(climate_low, structural_low);
     try testing.expect(biome_at_low_elev != .snowy_mountains);
 
+    // High elevation test - should get snowy_mountains
     const climate_high = ClimateParams{
         .temperature = 0.3,
         .humidity = 0.5,
         .elevation = 0.8,
-        .continentalness = 0.7,
+        .continentalness = 0.85, // Continental core (>0.75)
         .ruggedness = 0.8,
     };
     const structural_high = StructuralParams{
-        .height = 120,
+        .height = 120, // Above min_height = 110
         .slope = 5,
-        .continentalness = 0.7,
+        .continentalness = 0.85, // Must be >= 0.75 for mountains
         .ridge_mask = 0.3,
     };
     const biome_at_high_elev = selectBiomeWithConstraints(climate_high, structural_high);

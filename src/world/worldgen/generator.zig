@@ -52,60 +52,87 @@ pub const ContinentalZone = enum {
 
 /// Terrain generation parameters
 const Params = struct {
-    warp_scale: f32 = 1.0 / 1100.0,
-    warp_amplitude: f32 = 50.0,
-    continental_scale: f32 = 1.0 / 800.0,
-    continental_deep_ocean_max: f32 = 0.35,
-    continental_ocean_max: f32 = 0.45,
-    continental_coast_max: f32 = 0.50,
-    continental_inland_low_max: f32 = 0.65,
-    continental_inland_high_max: f32 = 0.80,
-    erosion_scale: f32 = 1.0 / 600.0,
-    peaks_scale: f32 = 1.0 / 900.0,
-    temperature_macro_scale: f32 = 1.0 / 600.0,
-    temperature_local_scale: f32 = 1.0 / 120.0,
-    humidity_macro_scale: f32 = 1.0 / 500.0,
-    humidity_local_scale: f32 = 1.0 / 100.0,
-    climate_macro_weight: f32 = 0.60,
+    warp_scale: f32 = 1.0 / 800.0,
+    warp_amplitude: f32 = 80.0,
+    continental_scale: f32 = 1.0 / 3500.0, // ENLARGED: "thousands of blocks" -> ~3500 for huge continents
+
+    // STRUCTURE-FIRST Continental Zones:
+    // The KEY insight: ocean vs land is decided by continentalness ALONE.
+    // Land logic NEVER runs in ocean zones.
+    //
+    // Raw noise: -1..+1, normalized to 0..1
+    // < 0.30 : FORCED OCEAN (no land logic runs here at all)
+    // 0.30..0.45 : Shallow Ocean / Shelf
+    // 0.45..0.55 : Coast (beach shelf, very flat near sea level)
+    // 0.55..0.75 : Inland Low (plains, forests)
+    // 0.75..0.90 : Inland High (hills, foothills)
+    // > 0.90 : Continental Core (mountains allowed here)
+    //
+    // CRITICAL: ocean_threshold is the HARD cutoff. Below this = ocean, period.
+    ocean_threshold: f32 = 0.30, // HARD ocean decision - below this, FORCE ocean
+    continental_deep_ocean_max: f32 = 0.20, // Within ocean: deep vs shallow
+    continental_ocean_max: f32 = 0.30, // Ocean ends here (same as ocean_threshold)
+    continental_coast_max: f32 = 0.55, // Coast/beach shelf zone
+    continental_inland_low_max: f32 = 0.75, // Plains/forests
+    continental_inland_high_max: f32 = 0.90, // Hills, start of mountain eligibility
+
+    erosion_scale: f32 = 1.0 / 1500.0, // Slightly larger for smoother erosion patterns
+    peaks_scale: f32 = 1.0 / 1200.0, // Larger scale = fewer, bigger mountain ranges
+    // ENLARGED 3-4x: Climate should look "blurry" at 512x512 zoom
+    temperature_macro_scale: f32 = 1.0 / 6000.0, // Was 1/2000, now 3x larger
+    temperature_local_scale: f32 = 1.0 / 800.0, // Was 1/400, now 2x larger
+    humidity_macro_scale: f32 = 1.0 / 6000.0, // Was 1/2000, now 3x larger
+    humidity_local_scale: f32 = 1.0 / 800.0, // Was 1/400, now 2x larger
+    climate_macro_weight: f32 = 0.85, // Increased macro influence (was 0.75)
     temp_lapse: f32 = 0.25,
     sea_level: i32 = 64,
-    mount_amp: f32 = 90.0,
+
+    // Mountains: AGGRESSIVELY GATED - only in continental cores
+    mount_amp: f32 = 140.0, // Dramatic when they do appear
     mount_cap: f32 = 200.0,
-    detail_scale: f32 = 1.0 / 150.0,
-    detail_amp: f32 = 12.0,
+    detail_scale: f32 = 1.0 / 180.0, // Slightly larger detail scale
+    detail_amp: f32 = 8.0, // Reduced detail amplitude
     highland_range: f32 = 100.0,
-    coast_jitter_scale: f32 = 1.0 / 650.0,
-    seabed_scale: f32 = 1.0 / 280.0,
-    seabed_amp: f32 = 6.0,
-    river_scale: f32 = 1.0 / 1200.0,
-    river_min: f32 = 0.74,
-    river_max: f32 = 0.84,
-    river_depth_max: f32 = 12.0,
-    // Structural coastline parameters (replaces post-process shore_dist search)
-    coast_continentalness_min: f32 = 0.45, // Where coast zone begins
-    coast_continentalness_max: f32 = 0.52, // Where coast zone ends
-    beach_max_height_above_sea: i32 = 4, // Max blocks above sea level for beach
-    beach_max_slope: i32 = 2, // Gentle slopes become sand beaches
-    cliff_min_slope: i32 = 5, // Steep slopes become stone cliffs
-    gravel_erosion_threshold: f32 = 0.7, // High erosion areas get gravel
+    coast_jitter_scale: f32 = 1.0 / 800.0, // Larger scale jitter
+    seabed_scale: f32 = 1.0 / 400.0, // Larger, smoother seabed
+    seabed_amp: f32 = 3.0, // REDUCED: Oceans should be boring/flat
+    river_scale: f32 = 1.0 / 3000.0, // Larger rivers
+    river_min: f32 = 0.90,
+    river_max: f32 = 0.95,
+    river_depth_max: f32 = 10.0,
+
+    // Structural coastline parameters
+    coast_continentalness_min: f32 = 0.45,
+    coast_continentalness_max: f32 = 0.58,
+    beach_max_height_above_sea: i32 = 3,
+    beach_max_slope: i32 = 2,
+    cliff_min_slope: i32 = 5,
+    gravel_erosion_threshold: f32 = 0.7,
     coastal_no_tree_min: i32 = 8,
     coastal_no_tree_max: i32 = 18,
-    mount_inland_min: f32 = 0.48,
-    mount_inland_max: f32 = 0.70,
-    mount_peak_min: f32 = 0.60,
-    mount_peak_max: f32 = 0.90,
-    mount_rugged_min: f32 = 0.45,
+
+    // AGGRESSIVE MOUNTAIN GATING:
+    // Mountains ONLY appear when:
+    // 1. continentalness > 0.75 (inland high or core)
+    // 2. AND peak_noise > 0.70 (sparse occurrence)
+    // This creates rare, large mountain ranges deep inland
+    mount_inland_min: f32 = 0.75, // Raised: must be well inland
+    mount_inland_max: f32 = 0.95, // Full strength only in deep cores
+    mount_peak_min: f32 = 0.70, // Raised: mountains are rare
+    mount_peak_max: f32 = 0.95,
+    mount_rugged_min: f32 = 0.50,
     mount_rugged_max: f32 = 0.85,
-    mid_freq_hill_scale: f32 = 1.0 / 100.0,
-    mid_freq_hill_amp: f32 = 20.0,
+
+    mid_freq_hill_scale: f32 = 1.0 / 400.0, // Larger hill patterns
+    mid_freq_hill_amp: f32 = 15.0, // Reduced hill amplitude
     peak_compression_offset: f32 = 90.0,
     peak_compression_range: f32 = 100.0,
     terrace_step: f32 = 4.0,
-    ridge_scale: f32 = 1.0 / 1400.0,
-    ridge_amp: f32 = 60.0,
-    ridge_inland_min: f32 = 0.50,
-    ridge_inland_max: f32 = 0.85,
-    ridge_sparsity: f32 = 0.65,
+    ridge_scale: f32 = 1.0 / 1800.0, // Larger ridge scale
+    ridge_amp: f32 = 50.0,
+    ridge_inland_min: f32 = 0.70, // Ridges also require being inland
+    ridge_inland_max: f32 = 0.90,
+    ridge_sparsity: f32 = 0.70, // More sparse ridges
 };
 
 pub const TerrainGenerator = struct {
@@ -175,21 +202,12 @@ pub const TerrainGenerator = struct {
         const c = self.getContinentalness(xw, zw);
         const e = self.getErosion(xw, zw);
         const pv = self.getPeaksValleys(xw, zw);
-        const coast_jitter = self.coast_jitter_noise.fbm2D(xw, zw, 3, 2.0, 0.5, p.coast_jitter_scale) * 0.05;
+        const coast_jitter = self.coast_jitter_noise.fbm2D(xw, zw, 2, 2.0, 0.5, p.coast_jitter_scale) * 0.03;
         const c_jittered = clamp01(c + coast_jitter);
-        var terrain_height = self.computeHeight(c_jittered, e, pv, xw, zw);
         const river_mask = self.getRiverMask(xw, zw);
+        // computeHeight now handles ocean vs land decision internally
+        const terrain_height = self.computeHeight(c_jittered, e, pv, xw, zw, river_mask);
         const ridge_mask = self.getRidgeFactor(xw, zw, c_jittered);
-        if (river_mask > 0 and terrain_height > sea - 5) {
-            const river_depth = river_mask * p.river_depth_max;
-            terrain_height = @min(terrain_height, terrain_height - river_depth);
-        }
-        if (terrain_height < sea) {
-            const deep_factor = 1.0 - smoothstep(p.continental_deep_ocean_max, 0.5, c_jittered);
-            const seabed_detail = self.seabed_noise.fbm2D(xw, zw, 5, 2.0, 0.5, p.seabed_scale) * p.seabed_amp;
-            const base_seabed = sea - 18.0 - deep_factor * 35.0;
-            terrain_height = @min(terrain_height, base_seabed + seabed_detail);
-        }
         const terrain_height_i: i32 = @intFromFloat(terrain_height);
         const is_ocean = terrain_height < sea;
         const altitude_offset: f32 = @max(0, terrain_height - sea);
@@ -228,7 +246,8 @@ pub const TerrainGenerator = struct {
         var secondary_biome_ids: [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId = undefined;
         var biome_blends: [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32 = undefined;
         var filler_depths: [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32 = undefined;
-        var is_ocean_flags: [CHUNK_SIZE_X * CHUNK_SIZE_Z]bool = undefined;
+        var is_underwater_flags: [CHUNK_SIZE_X * CHUNK_SIZE_Z]bool = undefined; // Any water (ocean or lake)
+        var is_ocean_water_flags: [CHUNK_SIZE_X * CHUNK_SIZE_Z]bool = undefined; // True ocean (c < threshold)
         var cave_region_values: [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32 = undefined;
         var debug_temperatures: [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32 = undefined;
         var debug_humidities: [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32 = undefined;
@@ -254,23 +273,14 @@ pub const TerrainGenerator = struct {
                 const c = self.getContinentalness(xw, zw);
                 const e_val = self.getErosion(xw, zw);
                 const pv = self.getPeaksValleys(xw, zw);
-                const coast_jitter = self.coast_jitter_noise.fbm2D(xw, zw, 3, 2.0, 0.5, p.coast_jitter_scale) * 0.05;
+                const coast_jitter = self.coast_jitter_noise.fbm2D(xw, zw, 2, 2.0, 0.5, p.coast_jitter_scale) * 0.03;
                 const c_jittered = clamp01(c + coast_jitter);
                 erosion_values[idx] = e_val;
-                var terrain_height = self.computeHeight(c_jittered, e_val, pv, xw, zw);
                 const river_mask = self.getRiverMask(xw, zw);
+                // computeHeight now handles ocean vs land decision internally
+                const terrain_height = self.computeHeight(c_jittered, e_val, pv, xw, zw, river_mask);
                 const ridge_mask = self.getRidgeFactor(xw, zw, c_jittered);
-                if (river_mask > 0 and terrain_height > sea - 5) {
-                    const river_depth = river_mask * p.river_depth_max;
-                    terrain_height = @min(terrain_height, terrain_height - river_depth);
-                }
-                if (terrain_height < sea) {
-                    const deep_factor = 1.0 - smoothstep(p.continental_deep_ocean_max, 0.5, c_jittered);
-                    const seabed_detail = self.seabed_noise.fbm2D(xw, zw, 5, 2.0, 0.5, p.seabed_scale) * p.seabed_amp;
-                    const base_seabed = sea - 18.0 - deep_factor * 35.0;
-                    terrain_height = @min(terrain_height, base_seabed + seabed_detail);
-                }
-                var terrain_height_i: i32 = @intFromFloat(terrain_height);
+                const terrain_height_i: i32 = @intFromFloat(terrain_height);
                 const altitude_offset: f32 = @max(0, terrain_height - sea);
                 var temperature = self.getTemperature(xw, zw);
                 temperature = clamp01(temperature - (altitude_offset / 512.0) * p.temp_lapse);
@@ -283,10 +293,11 @@ pub const TerrainGenerator = struct {
                 continentalness_values[idx] = c_jittered;
                 ridge_masks[idx] = ridge_mask;
                 river_masks[idx] = river_mask;
-                terrain_height_i = @intFromFloat(terrain_height);
-                const is_ocean = terrain_height < sea;
+                const is_underwater = terrain_height < sea;
+                const is_ocean_water = c_jittered < p.ocean_threshold;
                 surface_heights[idx] = terrain_height_i;
-                is_ocean_flags[idx] = is_ocean;
+                is_underwater_flags[idx] = is_underwater;
+                is_ocean_water_flags[idx] = is_ocean_water;
                 cave_region_values[idx] = self.cave_system.getCaveRegionValue(wx, wz);
             }
         }
@@ -368,7 +379,7 @@ pub const TerrainGenerator = struct {
         }
 
         var worm_carve_map = self.cave_system.generateWormCaves(chunk, &surface_heights, self.allocator) catch {
-            self.generateWithoutWormCavesInternal(chunk, &surface_heights, &biome_ids, &secondary_biome_ids, &biome_blends, &filler_depths, &is_ocean_flags, &cave_region_values, &coastal_types, &slopes, &exposure_values, sea);
+            self.generateWithoutWormCavesInternal(chunk, &surface_heights, &biome_ids, &secondary_biome_ids, &biome_blends, &filler_depths, &is_underwater_flags, &is_ocean_water_flags, &cave_region_values, &coastal_types, &slopes, &exposure_values, sea);
             return;
         };
         defer worm_carve_map.deinit();
@@ -382,7 +393,8 @@ pub const TerrainGenerator = struct {
                 const idx = local_x + local_z * CHUNK_SIZE_X;
                 const terrain_height_i = surface_heights[idx];
                 const filler_depth = filler_depths[idx];
-                const is_ocean = is_ocean_flags[idx];
+                const is_underwater = is_underwater_flags[idx];
+                const is_ocean_water = is_ocean_water_flags[idx];
                 const cave_region = cave_region_values[idx];
                 const coastal_type = coastal_types[idx];
                 const wx: f32 = @floatFromInt(world_x + @as(i32, @intCast(local_x)));
@@ -403,11 +415,11 @@ pub const TerrainGenerator = struct {
                 const active_biome_id = if (use_secondary) secondary_biome_id else primary_biome_id;
                 const active_biome: Biome = @enumFromInt(@intFromEnum(active_biome_id));
                 while (y < CHUNK_SIZE_Y) : (y += 1) {
-                    var block = self.getBlockAt(y, terrain_height_i, active_biome, filler_depth, is_ocean, sea);
+                    var block = self.getBlockAt(y, terrain_height_i, active_biome, filler_depth, is_ocean_water, is_underwater, sea);
                     const is_surface = (y == terrain_height_i);
                     const is_near_surface = (y > terrain_height_i - 3 and y <= terrain_height_i);
 
-                    // Apply structural coastal surface types
+                    // Apply structural coastal surface types (ocean beaches only)
                     if (is_surface and block != .air and block != .water and block != .bedrock) {
                         if (is_sand_beach) {
                             block = .sand;
@@ -446,7 +458,7 @@ pub const TerrainGenerator = struct {
         self.printDebugStats(world_x, world_z, &debug_temperatures, &debug_humidities, &debug_continentalness, &biome_ids, debug_beach_count);
     }
 
-    fn generateWithoutWormCavesInternal(self: *const TerrainGenerator, chunk: *Chunk, surface_heights: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, biome_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId, secondary_biome_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId, biome_blends: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, filler_depths: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, is_ocean_flags: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]bool, cave_region_values: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, coastal_types: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]CoastalSurfaceType, slopes: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, exposure_values: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, sea: f32) void {
+    fn generateWithoutWormCavesInternal(self: *const TerrainGenerator, chunk: *Chunk, surface_heights: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, biome_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId, secondary_biome_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId, biome_blends: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, filler_depths: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, is_underwater_flags: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]bool, is_ocean_water_flags: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]bool, cave_region_values: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, coastal_types: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]CoastalSurfaceType, slopes: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, exposure_values: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, sea: f32) void {
         _ = exposure_values;
         _ = slopes;
         const world_x = chunk.getWorldX();
@@ -459,7 +471,8 @@ pub const TerrainGenerator = struct {
                 const idx = local_x + local_z * CHUNK_SIZE_X;
                 const terrain_height_i = surface_heights[idx];
                 const filler_depth = filler_depths[idx];
-                const is_ocean = is_ocean_flags[idx];
+                const is_underwater = is_underwater_flags[idx];
+                const is_ocean_water = is_ocean_water_flags[idx];
                 const cave_region = cave_region_values[idx];
                 const coastal_type = coastal_types[idx];
                 const wx: f32 = @floatFromInt(world_x + @as(i32, @intCast(local_x)));
@@ -479,11 +492,11 @@ pub const TerrainGenerator = struct {
                 const active_biome_id = if (use_secondary) secondary_biome_id else primary_biome_id;
                 const active_biome: Biome = @enumFromInt(@intFromEnum(active_biome_id));
                 while (y < CHUNK_SIZE_Y) : (y += 1) {
-                    var block = self.getBlockAt(y, terrain_height_i, active_biome, filler_depth, is_ocean, sea);
+                    var block = self.getBlockAt(y, terrain_height_i, active_biome, filler_depth, is_ocean_water, is_underwater, sea);
                     const is_surface = (y == terrain_height_i);
                     const is_near_surface = (y > terrain_height_i - 3 and y <= terrain_height_i);
 
-                    // Apply structural coastal surface types
+                    // Apply structural coastal surface types (ocean beaches only)
                     if (is_surface and block != .air and block != .water and block != .bedrock) {
                         if (is_sand_beach) {
                             block = .sand;
@@ -514,6 +527,10 @@ pub const TerrainGenerator = struct {
     }
 
     fn printDebugStats(self: *const TerrainGenerator, world_x: i32, world_z: i32, t_vals: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, h_vals: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, c_vals: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, b_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId, beach_count: u32) void {
+        // Debug output disabled by default. Set to true to enable debugging.
+        const debug_enabled = false;
+        if (!debug_enabled) return;
+
         const chunk_id = @as(u32, @bitCast(world_x)) +% @as(u32, @bitCast(world_z));
         if (chunk_id % 64 != 0) return;
         var t_min: f32 = 1.0;
@@ -582,17 +599,18 @@ pub const TerrainGenerator = struct {
     }
 
     /// Map continentalness value (0-1) to explicit zone
+    /// Updated to match STRUCTURE-FIRST thresholds
     pub fn getContinentalZone(self: *const TerrainGenerator, c: f32) ContinentalZone {
         const p = self.params;
-        if (c < p.continental_deep_ocean_max) {
+        if (c < p.continental_deep_ocean_max) { // 0.20
             return .deep_ocean;
-        } else if (c < p.continental_ocean_max) {
+        } else if (c < p.ocean_threshold) { // 0.30 - HARD ocean cutoff
             return .ocean;
-        } else if (c < p.continental_coast_max) {
+        } else if (c < p.continental_coast_max) { // 0.55
             return .coast;
-        } else if (c < p.continental_inland_low_max) {
+        } else if (c < p.continental_inland_low_max) { // 0.75
             return .inland_low;
-        } else if (c < p.continental_inland_high_max) {
+        } else if (c < p.continental_inland_high_max) { // 0.90
             return .inland_high;
         } else {
             return .mountain_core;
@@ -642,48 +660,130 @@ pub const TerrainGenerator = struct {
         return inland_factor * sparsity_mask * ridge_val;
     }
 
-    fn computeHeight(self: *const TerrainGenerator, c: f32, e: f32, pv: f32, x: f32, z: f32) f32 {
+    /// Base height from continentalness - only called for LAND (c >= ocean_threshold)
+    /// This creates the continental shelf and land elevations.
+    fn getBaseHeight(self: *const TerrainGenerator, c: f32) f32 {
         const p = self.params;
         const sea: f32 = @floatFromInt(p.sea_level);
-        var base_height: f32 = undefined;
-        if (c < 0.45) {
-            const ocean_t = c / 0.45;
-            base_height = sea - 45.0 + ocean_t * 40.0;
-        } else if (c < 0.52) {
-            const coast_t = (c - 0.45) / 0.07;
-            base_height = sea - 5.0 + coast_t * 13.0;
-        } else {
-            const inland_t = smoothstep(0.52, 0.90, c);
-            base_height = sea + 8.0 + inland_t * 42.0;
+
+        // Coastal shelf zone: ocean_threshold to coast_max
+        // Creates flat beaches near sea level
+        if (c < p.continental_coast_max) {
+            const range = p.continental_coast_max - p.ocean_threshold;
+            const t = (c - p.ocean_threshold) / range;
+            // Shallow water to just above sea level (very flat shelf)
+            return sea - 5.0 + t * 10.0; // -5 to +5 around sea level
         }
-        const m_mask = self.getMountainMask(pv, e, c);
-        const lift_scale: f32 = 1.0 / 800.0;
-        const lift_noise = (self.mountain_lift_noise.fbm2D(x, z, 4, 2.0, 0.5, lift_scale) + 1.0) * 0.5;
-        const mount_lift_raw = m_mask * lift_noise * p.mount_amp;
-        const mount_lift = mount_lift_raw / (1.0 + mount_lift_raw / p.mount_cap);
-        base_height += mount_lift;
-        const ridge_factor = self.getRidgeFactor(x, z, c);
-        const ridge_lift = ridge_factor * p.ridge_amp;
-        base_height += ridge_lift;
-        const mid_noise = self.detail_noise.fbm2D(x + 5000.0, z + 5000.0, 3, 2.0, 0.5, p.mid_freq_hill_scale);
-        const land_mult = smoothstep(0.50, 0.65, c);
-        base_height += mid_noise * p.mid_freq_hill_amp * land_mult;
-        const elev01 = clamp01((base_height - sea) / p.highland_range);
+
+        // Inland Low: coast_max to inland_low_max
+        // Gentle rise into interior lowlands
+        if (c < p.continental_inland_low_max) {
+            const range = p.continental_inland_low_max - p.continental_coast_max;
+            const t = (c - p.continental_coast_max) / range;
+            return sea + 5.0 + t * 20.0; // +5 to +25 above sea
+        }
+
+        // Inland High: inland_low_max to inland_high_max
+        // Rising terrain towards continental cores
+        if (c < p.continental_inland_high_max) {
+            const range = p.continental_inland_high_max - p.continental_inland_low_max;
+            const t = (c - p.continental_inland_low_max) / range;
+            return sea + 25.0 + t * 30.0; // +25 to +55 above sea
+        }
+
+        // Continental Core: > inland_high_max
+        // High plateaus where mountains can form
+        const t = smoothstep(p.continental_inland_high_max, 1.0, c);
+        return sea + 55.0 + t * 25.0; // +55 to +80 base (mountains add on top)
+    }
+
+    /// STRUCTURE-FIRST height computation.
+    /// The KEY change: Ocean is decided by continentalness ALONE.
+    /// Land logic (mountains, hills, detail) NEVER runs in ocean zones.
+    fn computeHeight(self: *const TerrainGenerator, c: f32, e: f32, pv: f32, x: f32, z: f32, river_mask: f32) f32 {
+        const p = self.params;
+        const sea: f32 = @floatFromInt(p.sea_level);
+
+        // ============================================================
+        // STEP 1: HARD OCEAN DECISION
+        // If continentalness < ocean_threshold, this is OCEAN.
+        // Return ocean depth and STOP. No land logic runs here.
+        // ============================================================
+        if (c < p.ocean_threshold) {
+            // Ocean depth varies smoothly with continentalness
+            // c=0.0 -> deepest (-50 from sea)
+            // c=ocean_threshold -> shallow (-15 from sea)
+            const ocean_depth_factor = c / p.ocean_threshold; // 0..1 within ocean
+            const deep_ocean_depth = sea - 55.0;
+            const shallow_ocean_depth = sea - 12.0;
+
+            // Very minimal seabed variation - oceans should be BORING
+            const seabed_detail = self.seabed_noise.fbm2D(x, z, 2, 2.0, 0.5, p.seabed_scale) * p.seabed_amp;
+
+            return std.math.lerp(deep_ocean_depth, shallow_ocean_depth, ocean_depth_factor) + seabed_detail;
+        }
+
+        // ============================================================
+        // STEP 2: LAND - Base Height from Continentalness
+        // Only reaches here if c >= ocean_threshold
+        // ============================================================
+        var height = self.getBaseHeight(c);
+
+        // ============================================================
+        // STEP 3: Mountains & Ridges - AGGRESSIVELY GATED
+        // Only apply in inland zones (c > coast_max)
+        // Mountains require: deep inland + high peak noise
+        // ============================================================
+        const land_factor = smoothstep(p.continental_coast_max, p.continental_inland_low_max, c);
+
+        // Mountains only in continental cores
+        if (c > p.continental_inland_low_max) {
+            const m_mask = self.getMountainMask(pv, e, c);
+            const lift_scale: f32 = 1.0 / 1000.0;
+            const lift_noise = (self.mountain_lift_noise.fbm2D(x, z, 3, 2.0, 0.5, lift_scale) + 1.0) * 0.5;
+            const mount_lift = (m_mask * lift_noise * p.mount_amp) / (1.0 + (m_mask * lift_noise * p.mount_amp) / p.mount_cap);
+            height += mount_lift;
+
+            const ridge_val = self.getRidgeFactor(x, z, c);
+            height += ridge_val * p.ridge_amp;
+        }
+
+        // ============================================================
+        // STEP 4: Hills & Detail - only on land, attenuated by erosion
+        // ============================================================
+        const erosion_smooth = smoothstep(0.5, 0.75, e);
+        const hills_atten = (1.0 - erosion_smooth) * land_factor;
+
+        const mid_noise = self.detail_noise.fbm2D(x + 5000.0, z + 5000.0, 2, 2.0, 0.5, p.mid_freq_hill_scale);
+        height += mid_noise * p.mid_freq_hill_amp * hills_atten;
+
+        const elev01 = clamp01((height - sea) / p.highland_range);
         const detail_atten = 1.0 - smoothstep(0.3, 0.85, elev01);
-        const detail = self.detail_noise.fbm2D(x, z, 5, 2.0, 0.5, p.detail_scale) * p.detail_amp;
-        base_height += detail * detail_atten;
+        const detail = self.detail_noise.fbm2D(x, z, 3, 2.0, 0.5, p.detail_scale) * p.detail_amp;
+        height += detail * detail_atten * hills_atten;
+
+        // ============================================================
+        // STEP 5: Post-Processing
+        // ============================================================
         const peak_start = sea + p.peak_compression_offset;
-        if (base_height > peak_start) {
-            const h_above = base_height - peak_start;
+        if (height > peak_start) {
+            const h_above = height - peak_start;
             const compressed = p.peak_compression_range * (1.0 - std.math.exp(-h_above / p.peak_compression_range));
-            base_height = peak_start + compressed;
+            height = peak_start + compressed;
         }
-        if (m_mask > 0.3 and e < 0.4) {
-            const terrace_strength: f32 = 0.2 * (1.0 - e);
-            const terraced = @round(base_height / p.terrace_step) * p.terrace_step;
-            base_height = std.math.lerp(base_height, terraced, terrace_strength);
+
+        // ============================================================
+        // STEP 6: River Carving - only on land
+        // ============================================================
+        if (river_mask > 0.001 and c > p.continental_coast_max) {
+            const river_bed = sea - 4.0;
+            const carve_alpha = smoothstep(0.0, 1.0, river_mask);
+            if (height > river_bed) {
+                height = std.math.lerp(height, river_bed, carve_alpha);
+            }
         }
-        return base_height;
+
+        return height;
     }
 
     fn getRiverMask(self: *const TerrainGenerator, x: f32, z: f32) f32 {
@@ -696,32 +796,57 @@ pub const TerrainGenerator = struct {
     /// Coastal surface type determined by structural signals (continentalness, slope, erosion)
     /// Replaces the post-process shore_dist search with structure-first approach
     pub const CoastalSurfaceType = enum {
-        none, // Not in coastal zone
-        sand_beach, // Gentle slope near sea level -> sand
-        gravel_beach, // High erosion coastal area -> gravel
+        none, // Not in coastal zone OR near inland water (use biome default)
+        sand_beach, // Gentle slope near sea level, adjacent to OCEAN -> sand
+        gravel_beach, // High erosion coastal area adjacent to OCEAN -> gravel
         cliff, // Steep slope in coastal zone -> stone
     };
 
     /// Determine coastal surface type based on structural signals
-    /// This is the core of the structure-first beach generation (Issue #95)
+    ///
+    /// KEY FIX (Issue #92): Beach requires adjacency to OCEAN water, not just any water.
+    /// - Ocean water: continentalness < ocean_threshold (0.30)
+    /// - Inland water (lakes/rivers): continentalness >= ocean_threshold but below sea level
+    ///
+    /// Beach forms ONLY when:
+    /// 1. This block is LAND (above sea level)
+    /// 2. This block is near OCEAN (continentalness indicates ocean proximity)
+    /// 3. Height is within beach_max_height_above_sea of sea level
+    /// 4. Slope is gentle
+    ///
+    /// Inland water (lakes/rivers) get grass/dirt banks, NOT sand.
     pub fn getCoastalSurfaceType(self: *const TerrainGenerator, continentalness: f32, slope: i32, height: i32, erosion: f32) CoastalSurfaceType {
         const p = self.params;
         const sea_level = p.sea_level;
 
-        // Check if we're in the coastal zone based on continentalness
-        const in_coast_zone = continentalness >= p.coast_continentalness_min and
-            continentalness <= p.coast_continentalness_max;
-
-        if (!in_coast_zone) {
-            return .none;
-        }
-
-        // Check height - must be near sea level
+        // CONSTRAINT 1: Height above sea level
+        // Beaches only exist in a tight band around sea level
         const height_above_sea = height - sea_level;
-        if (height_above_sea < 0 or height_above_sea > p.beach_max_height_above_sea) {
+
+        // If underwater or more than 3 blocks above sea, never a beach
+        if (height_above_sea < -1 or height_above_sea > p.beach_max_height_above_sea) {
             return .none;
         }
 
+        // CONSTRAINT 2: Must be adjacent to OCEAN, not just any water
+        // Ocean is defined by continentalness < ocean_threshold (0.30)
+        //
+        // The key insight: if we're on LAND (height > sea) but near the ocean threshold,
+        // we're on the ocean shore. If continentalness is high (inland), any water
+        // is a lake/river, not ocean.
+        //
+        // Beach zone: land just above the ocean_threshold where ocean is nearby
+        // - c = 0.30 is the hard ocean cutoff
+        // - Beach forms in c = 0.30 to ~0.40 (just above ocean, near shore)
+        // - Above 0.40, we're too far inland for ocean beaches
+        const near_ocean = continentalness >= p.ocean_threshold and
+            continentalness < (p.ocean_threshold + 0.12); // ~0.30 to 0.42
+
+        if (!near_ocean) {
+            return .none;
+        }
+
+        // CONSTRAINT 3: Classify based on slope and erosion
         // Steep slopes become cliffs (stone)
         if (slope >= p.cliff_min_slope) {
             return .cliff;
@@ -732,16 +857,47 @@ pub const TerrainGenerator = struct {
             return .gravel_beach;
         }
 
-        // Gentle slopes become sand beaches
+        // Gentle slopes at sea level become sand beaches
         if (slope <= p.beach_max_slope) {
             return .sand_beach;
         }
 
-        // Moderate slopes in coast zone - no special treatment
+        // Moderate slopes - no special treatment
         return .none;
     }
 
-    fn getBlockAt(self: *const TerrainGenerator, y: i32, terrain_height: i32, biome: Biome, filler_depth: i32, is_ocean: bool, sea: f32) BlockType {
+    /// Check if a position is ocean water (used for beach adjacency checks)
+    /// Ocean = continentalness < ocean_threshold (structure-first definition)
+    pub fn isOceanWater(self: *const TerrainGenerator, wx: f32, wz: f32) bool {
+        const p = self.params;
+        const warp = self.computeWarp(wx, wz);
+        const xw = wx + warp.x;
+        const zw = wz + warp.z;
+        const c = self.getContinentalness(xw, zw);
+
+        // Ocean is defined by continentalness alone in structure-first approach
+        return c < p.ocean_threshold;
+    }
+
+    /// Check if a position is inland water (lake/river)
+    /// Inland water = underwater BUT continentalness >= ocean_threshold
+    pub fn isInlandWater(self: *const TerrainGenerator, wx: f32, wz: f32, height: i32) bool {
+        const p = self.params;
+        const warp = self.computeWarp(wx, wz);
+        const xw = wx + warp.x;
+        const zw = wz + warp.z;
+        const c = self.getContinentalness(xw, zw);
+
+        // Inland water: below sea level but in a land zone
+        return height < p.sea_level and c >= p.ocean_threshold;
+    }
+
+    /// Get block type at a specific Y coordinate
+    ///
+    /// KEY FIX: Distinguish between ocean floor and inland water floor:
+    /// - Ocean floor: sand in shallow water, gravel/clay in deep water
+    /// - Inland water floor (lakes/rivers): dirt/gravel, NOT sand (no lake beaches)
+    fn getBlockAt(self: *const TerrainGenerator, y: i32, terrain_height: i32, biome: Biome, filler_depth: i32, is_ocean_water: bool, is_underwater: bool, sea: f32) BlockType {
         _ = self;
         const sea_level: i32 = @intFromFloat(sea);
         if (y == 0) return .bedrock;
@@ -749,12 +905,29 @@ pub const TerrainGenerator = struct {
             if (y <= sea_level) return .water;
             return .air;
         }
-        if (is_ocean and y == terrain_height) {
+
+        // Ocean floor: sand in shallow water, clay/gravel in deep
+        if (is_ocean_water and is_underwater and y == terrain_height) {
             const depth: f32 = sea - @as(f32, @floatFromInt(terrain_height));
-            if (depth <= 8) return .sand;
-            if (depth <= 20) return .clay;
-            return .gravel;
+            if (depth <= 12) return .sand; // Shallow ocean: sand
+            if (depth <= 30) return .clay; // Medium depth: clay
+            return .gravel; // Deep: gravel
         }
+        // Ocean shallow underwater filler for continuity
+        if (is_ocean_water and is_underwater and y > terrain_height - 3) {
+            const depth: f32 = sea - @as(f32, @floatFromInt(terrain_height));
+            if (depth <= 12) return .sand;
+        }
+
+        // INLAND WATER (lakes/rivers): dirt/gravel banks, NOT sand
+        // This prevents "lake beaches" - inland water should look natural
+        if (!is_ocean_water and is_underwater and y == terrain_height) {
+            const depth: f32 = sea - @as(f32, @floatFromInt(terrain_height));
+            if (depth <= 8) return .dirt; // Shallow lake: dirt banks
+            if (depth <= 20) return .gravel; // Medium: gravel
+            return .clay; // Deep lake: clay
+        }
+
         if (y == terrain_height) {
             if (biome == .snowy_mountains or biome == .snow_tundra) return .snow_block;
             return biome.getSurfaceBlock();

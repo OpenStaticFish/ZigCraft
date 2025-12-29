@@ -184,13 +184,15 @@ pub const BiomeId = enum(u8) {
 
 pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
     // === Ocean Biomes ===
+    // STRUCTURE-FIRST: Ocean is FORCED when continentalness < 0.30
+    // These biome definitions are for surface block selection, not height
     .{
         .id = .deep_ocean,
         .name = "Deep Ocean",
         .temperature = Range.any(),
         .humidity = Range.any(),
         .elevation = .{ .min = 0.0, .max = 0.25 },
-        .continentalness = .{ .min = 0.0, .max = 0.45 }, // Deep underwater
+        .continentalness = .{ .min = 0.0, .max = 0.20 }, // Deep ocean zone
         .priority = 2,
         .surface = .{ .top = .gravel, .filler = .gravel, .depth_range = 4 },
         .vegetation = .{ .tree_types = &.{}, .tree_density = 0 },
@@ -202,7 +204,7 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .temperature = Range.any(),
         .humidity = Range.any(),
         .elevation = .{ .min = 0.0, .max = 0.30 },
-        .continentalness = .{ .min = 0.0, .max = 0.50 }, // Underwater to coast edge
+        .continentalness = .{ .min = 0.0, .max = 0.30 }, // Ocean zone (hard cutoff)
         .priority = 1,
         .surface = .{ .top = .sand, .filler = .sand, .depth_range = 3 },
         .vegetation = .{ .tree_types = &.{}, .tree_density = 0 },
@@ -212,28 +214,27 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .name = "Beach",
         .temperature = .{ .min = 0.2, .max = 1.0 },
         .humidity = Range.any(),
-        .elevation = .{ .min = 0.28, .max = 0.35 }, // Near sea level
-        // Structural beach: coast zone with gentle slopes (Issue #95)
-        .continentalness = .{ .min = 0.45, .max = 0.52 },
-        .max_slope = 2, // Only gentle slopes - structural detection handles steeper
-        .priority = 10, // High priority to win at coastal edges
+        .elevation = .{ .min = 0.28, .max = 0.38 },
+        // Coastal shelf zone (0.30 - 0.55)
+        .continentalness = .{ .min = 0.30, .max = 0.55 },
+        .max_slope = 2,
+        .priority = 10,
         .surface = .{ .top = .sand, .filler = .sand, .depth_range = 2 },
         .vegetation = .{ .tree_types = &.{}, .tree_density = 0 },
     },
 
-    // === Land Biomes ===
+    // === Land Biomes (continentalness > 0.55) ===
     .{
         .id = .plains,
         .name = "Plains",
         .temperature = Range.any(), // Catch-all temp
         .humidity = Range.any(), // Catch-all humidity
         .elevation = .{ .min = 0.25, .max = 0.70 },
-        // FIXED: Wide continentalness to cover all land area
-        .continentalness = .{ .min = 0.45, .max = 1.0 },
+        .continentalness = .{ .min = 0.55, .max = 1.0 }, // Land zone
         .ruggedness = Range.any(), // Catch-all ruggedness
         .priority = 0, // Absolute fallback land biome
         .surface = .{ .top = .grass, .filler = .dirt, .depth_range = 3 },
-        .vegetation = .{ .tree_types = &.{.oak}, .tree_density = 0.25, .grass_density = 0.3 },
+        .vegetation = .{ .tree_types = &.{.oak}, .tree_density = 0.02, .grass_density = 0.3 },
         .terrain = .{ .height_amplitude = 0.7, .smoothing = 0.2 },
     },
     .{
@@ -242,11 +243,11 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .temperature = .{ .min = 0.35, .max = 0.75 },
         .humidity = .{ .min = 0.40, .max = 1.0 },
         .elevation = .{ .min = 0.25, .max = 0.70 },
-        .continentalness = .{ .min = 0.45, .max = 1.0 },
+        .continentalness = .{ .min = 0.55, .max = 1.0 },
         .ruggedness = .{ .min = 0.0, .max = 0.60 },
         .priority = 5,
         .surface = .{ .top = .grass, .filler = .dirt, .depth_range = 3 },
-        .vegetation = .{ .tree_types = &.{ .oak, .birch }, .tree_density = 0.35, .bush_density = 0.10, .grass_density = 0.4 },
+        .vegetation = .{ .tree_types = &.{ .oak, .birch }, .tree_density = 0.12, .bush_density = 0.05, .grass_density = 0.4 },
         .colors = .{ .grass = .{ 0.25, 0.55, 0.18 }, .foliage = .{ 0.18, 0.45, 0.12 } },
     },
     .{
@@ -255,74 +256,8 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .temperature = .{ .min = 0.15, .max = 0.45 },
         .humidity = .{ .min = 0.30, .max = 0.90 },
         .elevation = .{ .min = 0.25, .max = 0.75 },
-        .continentalness = .{ .min = 0.45, .max = 1.0 },
+        .continentalness = .{ .min = 0.55, .max = 1.0 },
         .priority = 6,
-        .surface = .{ .top = .grass, .filler = .dirt, .depth_range = 3 },
-        .vegetation = .{ .tree_types = &.{.spruce}, .tree_density = 0.30, .grass_density = 0.2 },
-        .colors = .{ .grass = .{ 0.35, 0.55, 0.25 }, .foliage = .{ 0.28, 0.48, 0.20 } },
-    },
-    .{
-        .id = .ocean,
-        .name = "Ocean",
-        .temperature = Range.any(),
-        .humidity = Range.any(),
-        .elevation = .{ .min = 0.0, .max = 0.30 },
-        .continentalness = .{ .min = 0.0, .max = 0.48 }, // Underwater to coast edge
-        .priority = 8,
-        .surface = .{ .top = .sand, .filler = .sand, .depth_range = 3 },
-        .vegetation = .{ .tree_types = &.{}, .tree_density = 0 },
-    },
-    .{
-        .id = .beach,
-        .name = "Beach",
-        .temperature = .{ .min = 0.3, .max = 1.0 },
-        .humidity = Range.any(),
-        .elevation = .{ .min = 0.28, .max = 0.35 },
-        // Secondary beach definition for cold beaches (gravel)
-        // Structural approach: continentalness-based with slope constraint (Issue #95)
-        .continentalness = .{ .min = 0.45, .max = 0.52 },
-        .max_slope = 2, // Gentle slopes only
-        .priority = 5,
-        .surface = .{ .top = .sand, .filler = .sand, .depth_range = 2 },
-        .vegetation = .{ .tree_types = &.{}, .tree_density = 0 },
-    },
-
-    // === Land Biomes ===
-    .{
-        .id = .plains,
-        .name = "Plains",
-        .temperature = Range.any(), // Catch-all temp
-        .humidity = Range.any(), // Catch-all humidity
-        .elevation = .{ .min = 0.25, .max = 0.70 },
-        // FIXED: Wide continentalness to cover all land area
-        .continentalness = .{ .min = 0.45, .max = 1.0 },
-        .ruggedness = Range.any(), // Catch-all ruggedness
-        .priority = 1, // Lowest priority land biome
-        .surface = .{ .top = .grass, .filler = .dirt, .depth_range = 3 },
-        .vegetation = .{ .tree_types = &.{.oak}, .tree_density = 0.02, .grass_density = 0.3 },
-        .terrain = .{ .height_amplitude = 0.7, .smoothing = 0.2 },
-    },
-    .{
-        .id = .forest,
-        .name = "Forest",
-        .temperature = .{ .min = 0.35, .max = 0.70 },
-        .humidity = .{ .min = 0.45, .max = 1.0 },
-        .elevation = .{ .min = 0.25, .max = 0.70 },
-        .continentalness = .{ .min = 0.45, .max = 1.0 },
-        .ruggedness = .{ .min = 0.0, .max = 0.60 },
-        .priority = 2,
-        .surface = .{ .top = .grass, .filler = .dirt, .depth_range = 3 },
-        .vegetation = .{ .tree_types = &.{ .oak, .birch }, .tree_density = 0.12, .bush_density = 0.05, .grass_density = 0.4 },
-        .colors = .{ .grass = .{ 0.25, 0.55, 0.18 }, .foliage = .{ 0.18, 0.45, 0.12 } },
-    },
-    .{
-        .id = .taiga,
-        .name = "Taiga",
-        .temperature = .{ .min = 0.20, .max = 0.42 },
-        .humidity = .{ .min = 0.35, .max = 0.80 },
-        .elevation = .{ .min = 0.25, .max = 0.75 },
-        .continentalness = .{ .min = 0.45, .max = 1.0 },
-        .priority = 3,
         .surface = .{ .top = .grass, .filler = .dirt, .depth_range = 3 },
         .vegetation = .{ .tree_types = &.{.spruce}, .tree_density = 0.10, .grass_density = 0.2 },
         .colors = .{ .grass = .{ 0.35, 0.55, 0.25 }, .foliage = .{ 0.28, 0.48, 0.20 } },
@@ -333,10 +268,10 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .temperature = .{ .min = 0.75, .max = 1.0 }, // Hot
         .humidity = .{ .min = 0.0, .max = 0.25 }, // Dry
         .elevation = .{ .min = 0.35, .max = 0.60 },
-        .continentalness = .{ .min = 0.70, .max = 1.0 }, // Deep inland only
+        .continentalness = .{ .min = 0.75, .max = 1.0 }, // Deep inland only
         .ruggedness = .{ .min = 0.0, .max = 0.35 },
-        .max_height = 90, // Deserts don't appear at high elevations (no desert mountains!)
-        .max_slope = 4, // Deserts on flat terrain
+        .max_height = 90,
+        .max_slope = 4,
         .priority = 4,
         .surface = .{ .top = .sand, .filler = .sand, .depth_range = 6 },
         .vegetation = .{ .tree_types = &.{}, .tree_density = 0, .cactus_density = 0.015, .dead_bush_density = 0.02 },
@@ -349,9 +284,9 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .temperature = .{ .min = 0.50, .max = 0.80 },
         .humidity = .{ .min = 0.70, .max = 1.0 },
         .elevation = .{ .min = 0.28, .max = 0.40 },
-        .continentalness = .{ .min = 0.52, .max = 0.75 }, // Coastal to mid-inland
+        .continentalness = .{ .min = 0.55, .max = 0.75 }, // Coastal to mid-inland
         .ruggedness = .{ .min = 0.0, .max = 0.30 },
-        .max_slope = 3, // Swamps only on very flat terrain
+        .max_slope = 3,
         .priority = 5,
         .surface = .{ .top = .grass, .filler = .dirt, .depth_range = 2 },
         .vegetation = .{ .tree_types = &.{.swamp_oak}, .tree_density = 0.08 },
@@ -368,26 +303,27 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .temperature = .{ .min = 0.0, .max = 0.25 },
         .humidity = Range.any(),
         .elevation = .{ .min = 0.30, .max = 0.70 },
-        .continentalness = .{ .min = 0.55, .max = 1.0 }, // Inland
-        .min_height = 70, // Tundra at moderate elevations
-        .max_slope = 255, // Any slope allowed
+        .continentalness = .{ .min = 0.60, .max = 1.0 }, // Inland
+        .min_height = 70,
+        .max_slope = 255,
         .priority = 4,
         .surface = .{ .top = .snow_block, .filler = .dirt, .depth_range = 3 },
         .vegetation = .{ .tree_types = &.{.spruce}, .tree_density = 0.01 },
         .colors = .{ .grass = .{ 0.7, 0.75, 0.8 } },
     },
 
-    // === Mountain Biomes ===
+    // === Mountain Biomes (continentalness > 0.75) ===
     .{
         .id = .mountains,
         .name = "Mountains",
         .temperature = .{ .min = 0.25, .max = 1.0 },
         .humidity = Range.any(),
-        .elevation = .{ .min = 0.58, .max = 1.0 }, // Higher min elevation
-        .ruggedness = .{ .min = 0.60, .max = 1.0 }, // More rugged required
-        .min_height = 80, // Mountains start at moderate elevation
-        .min_ridge_mask = 0.1, // Mountains have some ridge influence
-        .priority = 2, // Lower priority - let specific land biomes win if they match
+        .elevation = .{ .min = 0.58, .max = 1.0 },
+        .continentalness = .{ .min = 0.75, .max = 1.0 }, // Must be inland high or core
+        .ruggedness = .{ .min = 0.60, .max = 1.0 },
+        .min_height = 90,
+        .min_ridge_mask = 0.1,
+        .priority = 2,
         .surface = .{ .top = .stone, .filler = .stone, .depth_range = 1 },
         .vegetation = .{ .tree_types = &.{}, .tree_density = 0 },
         .terrain = .{ .height_amplitude = 1.5 },
@@ -398,9 +334,10 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .temperature = .{ .min = 0.0, .max = 0.35 },
         .humidity = Range.any(),
         .elevation = .{ .min = 0.58, .max = 1.0 },
+        .continentalness = .{ .min = 0.75, .max = 1.0 },
         .ruggedness = .{ .min = 0.55, .max = 1.0 },
-        .min_height = 100, // Snow only above Y=100
-        .max_slope = 255, // Any slope allowed in mountains
+        .min_height = 110,
+        .max_slope = 255,
         .priority = 2,
         .surface = .{ .top = .snow_block, .filler = .stone, .depth_range = 1 },
         .vegetation = .{ .tree_types = &.{}, .tree_density = 0 },
@@ -408,14 +345,14 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .colors = .{ .grass = .{ 0.85, 0.90, 0.95 } },
     },
 
-    // === New Biomes ===
+    // === Special Biomes ===
     .{
         .id = .mangrove_swamp,
         .name = "Mangrove Swamp",
         .temperature = .{ .min = 0.7, .max = 0.9 },
         .humidity = .{ .min = 0.8, .max = 1.0 },
         .elevation = .{ .min = 0.2, .max = 0.4 },
-        .continentalness = .{ .min = 0.50, .max = 0.60 }, // Coastal swamp
+        .continentalness = .{ .min = 0.45, .max = 0.60 }, // Coastal swamp
         .priority = 6,
         .surface = .{ .top = .mud, .filler = .mud, .depth_range = 4 },
         .vegetation = .{ .tree_types = &.{.mangrove}, .tree_density = 0.15 },
@@ -428,10 +365,10 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .temperature = .{ .min = 0.75, .max = 1.0 },
         .humidity = .{ .min = 0.7, .max = 1.0 },
         .elevation = .{ .min = 0.30, .max = 0.75 },
-        .continentalness = .{ .min = 0.55, .max = 1.0 }, // Inland
+        .continentalness = .{ .min = 0.60, .max = 1.0 }, // Inland
         .priority = 5,
         .surface = .{ .top = .grass, .filler = .dirt, .depth_range = 3 },
-        .vegetation = .{ .tree_types = &.{.jungle}, .tree_density = 0.25, .bamboo_density = 0.1, .melon_density = 0.05 },
+        .vegetation = .{ .tree_types = &.{.jungle}, .tree_density = 0.20, .bamboo_density = 0.08, .melon_density = 0.04 },
         .colors = .{ .grass = .{ 0.2, 0.8, 0.1 }, .foliage = .{ 0.1, 0.7, 0.1 } },
     },
     .{
@@ -440,7 +377,7 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .temperature = .{ .min = 0.7, .max = 1.0 },
         .humidity = .{ .min = 0.3, .max = 0.5 },
         .elevation = .{ .min = 0.30, .max = 0.65 },
-        .continentalness = .{ .min = 0.55, .max = 1.0 }, // Inland
+        .continentalness = .{ .min = 0.60, .max = 1.0 }, // Inland
         .priority = 4,
         .surface = .{ .top = .grass, .filler = .dirt, .depth_range = 3 },
         .vegetation = .{ .tree_types = &.{.acacia}, .tree_density = 0.01, .grass_density = 0.5 },
@@ -452,7 +389,7 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .temperature = .{ .min = 0.7, .max = 1.0 },
         .humidity = .{ .min = 0.0, .max = 0.3 },
         .elevation = .{ .min = 0.4, .max = 0.8 },
-        .continentalness = .{ .min = 0.60, .max = 1.0 }, // Inland only
+        .continentalness = .{ .min = 0.70, .max = 1.0 }, // Deep inland
         .ruggedness = .{ .min = 0.4, .max = 1.0 },
         .priority = 6,
         .surface = .{ .top = .red_sand, .filler = .terracotta, .depth_range = 5 },
@@ -464,43 +401,38 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .name = "Mushroom Fields",
         .temperature = .{ .min = 0.4, .max = 0.7 },
         .humidity = .{ .min = 0.7, .max = 1.0 },
-        .continentalness = .{ .min = 0.0, .max = 0.2 }, // Deep ocean only
-        .max_height = 50, // Very low elevation (underwater or shallow)
+        .continentalness = .{ .min = 0.0, .max = 0.15 }, // Deep ocean islands only
+        .max_height = 50,
         .priority = 20,
         .surface = .{ .top = .mycelium, .filler = .dirt, .depth_range = 3 },
         .vegetation = .{ .tree_types = &.{ .huge_red_mushroom, .huge_brown_mushroom }, .tree_density = 0.05, .red_mushroom_density = 0.1, .brown_mushroom_density = 0.1 },
         .colors = .{ .grass = .{ 0.4, 0.8, 0.4 } },
     },
-
-    // === Special Biomes ===
     .{
         .id = .river,
         .name = "River",
         .temperature = Range.any(),
         .humidity = Range.any(),
         .elevation = .{ .min = 0.0, .max = 0.35 },
-        // FIXED: River should NEVER win normal biome scoring!
-        // It's only applied via river_mask override in selectBiomeWithRiverBlended.
-        // Use impossible continentalness range to prevent matching.
-        .continentalness = .{ .min = -1.0, .max = -0.5 }, // Impossible range
-        .priority = 15, // High priority when river mask active
+        // River should NEVER win normal biome scoring - impossible range
+        .continentalness = .{ .min = -1.0, .max = -0.5 },
+        .priority = 15,
         .surface = .{ .top = .sand, .filler = .sand, .depth_range = 2 },
         .vegetation = .{ .tree_types = &.{}, .tree_density = 0 },
     },
 
-    // === Per worldgen-revamp.md Section 4.3: Transition Micro-Biomes ===
-    // These are selected near 50/50 blends between harsh biome pairs
+    // === Transition Micro-Biomes ===
     .{
         .id = .foothills,
         .name = "Foothills",
         .temperature = .{ .min = 0.20, .max = 0.90 },
         .humidity = Range.any(),
         .elevation = .{ .min = 0.25, .max = 0.65 },
-        .continentalness = .{ .min = 0.48, .max = 1.0 },
+        .continentalness = .{ .min = 0.65, .max = 0.85 }, // Between inland low and high
         .ruggedness = .{ .min = 0.30, .max = 0.80 },
         .priority = 4,
         .surface = .{ .top = .grass, .filler = .dirt, .depth_range = 3 },
-        .vegetation = .{ .tree_types = &.{ .oak, .spruce }, .tree_density = 0.30, .grass_density = 0.4 },
+        .vegetation = .{ .tree_types = &.{ .oak, .spruce }, .tree_density = 0.08, .grass_density = 0.4 },
         .terrain = .{ .height_amplitude = 1.1, .smoothing = 0.1 },
         .colors = .{ .grass = .{ 0.35, 0.60, 0.25 } },
     },
@@ -508,9 +440,9 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .id = .marsh,
         .name = "Marsh",
         .temperature = .{ .min = 0.40, .max = 0.75 },
-        .humidity = .{ .min = 0.55, .max = 0.80 }, // Between forest and swamp humidity
+        .humidity = .{ .min = 0.55, .max = 0.80 },
         .elevation = .{ .min = 0.28, .max = 0.42 },
-        .continentalness = .{ .min = 0.58, .max = 0.80 },
+        .continentalness = .{ .min = 0.55, .max = 0.70 },
         .ruggedness = .{ .min = 0.0, .max = 0.30 },
         .priority = 4,
         .surface = .{ .top = .grass, .filler = .dirt, .depth_range = 2 },
@@ -525,10 +457,10 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
     .{
         .id = .dry_plains,
         .name = "Dry Plains",
-        .temperature = .{ .min = 0.60, .max = 0.85 }, // Between plains and desert temp
-        .humidity = .{ .min = 0.20, .max = 0.40 }, // Between plains and desert humidity
+        .temperature = .{ .min = 0.60, .max = 0.85 },
+        .humidity = .{ .min = 0.20, .max = 0.40 },
         .elevation = .{ .min = 0.32, .max = 0.58 },
-        .continentalness = .{ .min = 0.65, .max = 1.0 },
+        .continentalness = .{ .min = 0.60, .max = 1.0 },
         .ruggedness = .{ .min = 0.0, .max = 0.40 },
         .priority = 3,
         .surface = .{ .top = .grass, .filler = .dirt, .depth_range = 3 },
@@ -541,12 +473,12 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .name = "Coastal Plains",
         .temperature = .{ .min = 0.30, .max = 0.80 },
         .humidity = .{ .min = 0.30, .max = 0.70 },
-        .elevation = .{ .min = 0.28, .max = 0.42 }, // Expanded elevation
-        .continentalness = .{ .min = 0.45, .max = 0.65 }, // Expanded coastal band
+        .elevation = .{ .min = 0.28, .max = 0.45 },
+        .continentalness = .{ .min = 0.45, .max = 0.60 }, // Coastal band
         .ruggedness = .{ .min = 0.0, .max = 0.35 },
         .priority = 3,
         .surface = .{ .top = .grass, .filler = .dirt, .depth_range = 3 },
-        .vegetation = .{ .tree_types = &.{}, .tree_density = 0, .grass_density = 0.4 }, // No trees - coastal suppression
+        .vegetation = .{ .tree_types = &.{}, .tree_density = 0, .grass_density = 0.4 }, // No trees
         .terrain = .{ .height_amplitude = 0.5, .smoothing = 0.3 },
         .colors = .{ .grass = .{ 0.35, 0.60, 0.28 } },
     },
