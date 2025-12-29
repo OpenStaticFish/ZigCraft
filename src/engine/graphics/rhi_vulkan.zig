@@ -100,6 +100,55 @@ const ZombieBuffer = struct {
     memory: c.VkDeviceMemory,
 };
 
+/// Per-frame linear staging buffer for async uploads.
+const StagingBuffer = struct {
+    buffer: c.VkBuffer,
+    memory: c.VkDeviceMemory,
+    size: u64,
+    current_offset: u64,
+    mapped_ptr: ?*anyopaque,
+
+    fn init(ctx: *VulkanContext, size: u64) !StagingBuffer {
+        const buf = createVulkanBuffer(ctx, size, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (buf.buffer == null) return error.VulkanError;
+
+        var mapped: ?*anyopaque = null;
+        try checkVk(c.vkMapMemory(ctx.vk_device, buf.memory, 0, size, 0, &mapped));
+
+        return StagingBuffer{
+            .buffer = buf.buffer,
+            .memory = buf.memory,
+            .size = size,
+            .current_offset = 0,
+            .mapped_ptr = mapped,
+        };
+    }
+
+    fn deinit(self: *StagingBuffer, device: c.VkDevice) void {
+        if (self.mapped_ptr != null) {
+            c.vkUnmapMemory(device, self.memory);
+        }
+        c.vkDestroyBuffer(device, self.buffer, null);
+        c.vkFreeMemory(device, self.memory, null);
+    }
+
+    fn reset(self: *StagingBuffer) void {
+        self.current_offset = 0;
+    }
+
+    /// Allocates space in the staging buffer. Returns offset if successful, null if full.
+    /// Aligns allocation to 256 bytes (common minUniformBufferOffsetAlignment/optimal copy offset).
+    fn allocate(self: *StagingBuffer, size: u64) ?u64 {
+        const alignment = 256; // Safe alignment for most GPU copy operations
+        const aligned_offset = std.mem.alignForward(u64, self.current_offset, alignment);
+
+        if (aligned_offset + size > self.size) return null;
+
+        self.current_offset = aligned_offset + size;
+        return aligned_offset;
+    }
+};
+
 /// Core Vulkan context containing all renderer state.
 /// Owns Vulkan objects and manages their lifecycle.
 const VulkanContext = struct {
@@ -113,8 +162,12 @@ const VulkanContext = struct {
     graphics_family: u32,
     command_pool: c.VkCommandPool,
     command_buffers: [MAX_FRAMES_IN_FLIGHT]c.VkCommandBuffer,
+
+    // Per-frame transfer command buffers for async uploads
     transfer_command_pool: c.VkCommandPool,
-    transfer_command_buffer: c.VkCommandBuffer,
+    transfer_command_buffers: [MAX_FRAMES_IN_FLIGHT]c.VkCommandBuffer,
+    staging_buffers: [MAX_FRAMES_IN_FLIGHT]StagingBuffer,
+    transfer_ready: bool, // True if current frame's transfer buffer is begun and ready for recording
 
     buffer_deletion_queue: [MAX_FRAMES_IN_FLIGHT]std.ArrayListUnmanaged(ZombieBuffer),
 
@@ -632,8 +685,15 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
     tcb_alloc_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     tcb_alloc_info.commandPool = ctx.transfer_command_pool;
     tcb_alloc_info.level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    tcb_alloc_info.commandBufferCount = 1;
-    try checkVk(c.vkAllocateCommandBuffers(ctx.vk_device, &tcb_alloc_info, &ctx.transfer_command_buffer));
+    tcb_alloc_info.commandBufferCount = MAX_FRAMES_IN_FLIGHT;
+    try checkVk(c.vkAllocateCommandBuffers(ctx.vk_device, &tcb_alloc_info, &ctx.transfer_command_buffers[0]));
+
+    // Initialize staging buffers (8MB per frame)
+    const STAGING_SIZE = 8 * 1024 * 1024;
+    for (0..MAX_FRAMES_IN_FLIGHT) |frame_i| {
+        ctx.staging_buffers[frame_i] = try StagingBuffer.init(ctx, STAGING_SIZE);
+    }
+    ctx.transfer_ready = false;
 
     // 9. Sync Objects
     var semaphore_info = std.mem.zeroes(c.VkSemaphoreCreateInfo);
@@ -1710,6 +1770,11 @@ fn deinit(ctx_ptr: *anyopaque) void {
         if (ctx.command_pool != null) c.vkDestroyCommandPool(ctx.vk_device, ctx.command_pool, null);
         if (ctx.transfer_command_pool != null) c.vkDestroyCommandPool(ctx.vk_device, ctx.transfer_command_pool, null);
 
+        // Clean up Staging Buffers
+        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+            ctx.staging_buffers[i].deinit(ctx.vk_device);
+        }
+
         // Clean up UBOS
         for (0..MAX_FRAMES_IN_FLIGHT) |i| {
             if (ctx.global_ubos[i].buffer != null) c.vkDestroyBuffer(ctx.vk_device, ctx.global_ubos[i].buffer, null);
@@ -1785,6 +1850,9 @@ fn uploadBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, data: []const u8)
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (data.len == 0 or handle == 0) return;
 
+    // Ensure we have a command buffer ready for transfers
+    ensureFrameReady(ctx);
+
     ctx.mutex.lock();
     const buf_opt = ctx.buffers.get(handle);
     ctx.mutex.unlock();
@@ -1801,53 +1869,88 @@ fn uploadBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, data: []const u8)
             }
         }
 
-        // If mapping failed, assume DEVICE_LOCAL and use staging buffer
-        const staging = createVulkanBuffer(ctx, data.len, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        defer {
-            if (staging.buffer != null) c.vkDestroyBuffer(ctx.vk_device, staging.buffer, null);
-            if (staging.memory != null) c.vkFreeMemory(ctx.vk_device, staging.memory, null);
-        }
+        // Try async upload via staging ring
+        const staging = &ctx.staging_buffers[ctx.current_sync_frame];
+        if (staging.allocate(data.len)) |offset| {
+            // Copy to staging memory
+            const dest = @as([*]u8, @ptrCast(staging.mapped_ptr.?)) + offset;
+            @memcpy(dest[0..data.len], data);
 
-        if (staging.buffer == null) {
-            std.log.err("Failed to create staging buffer for upload", .{});
+            // Record copy command
+            const transfer_cb = ctx.transfer_command_buffers[ctx.current_sync_frame];
+
+            var copy_region = std.mem.zeroes(c.VkBufferCopy);
+            copy_region.srcOffset = offset;
+            copy_region.dstOffset = 0;
+            copy_region.size = @intCast(data.len);
+            c.vkCmdCopyBuffer(transfer_cb, staging.buffer, buf.buffer, 1, &copy_region);
+
+            // Add barrier to ensure copy finishes before vertex/index input
+            var barrier = std.mem.zeroes(c.VkBufferMemoryBarrier);
+            barrier.sType = c.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = c.VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | c.VK_ACCESS_INDEX_READ_BIT;
+            barrier.srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+            barrier.buffer = buf.buffer;
+            barrier.offset = 0;
+            barrier.size = @intCast(data.len);
+
+            c.vkCmdPipelineBarrier(transfer_cb, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 0, null, 1, &barrier, 0, null);
             return;
         }
+
+        // Fallback to synchronous upload if staging buffer is full
+        // std.log.warn("Staging buffer full, falling back to synchronous upload", .{});
+        const staging_temp = createVulkanBuffer(ctx, data.len, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        defer {
+            if (staging_temp.buffer != null) c.vkDestroyBuffer(ctx.vk_device, staging_temp.buffer, null);
+            if (staging_temp.memory != null) c.vkFreeMemory(ctx.vk_device, staging_temp.memory, null);
+        }
+
+        if (staging_temp.buffer == null) return;
 
         // Copy to staging
         var map_ptr: ?*anyopaque = null;
-        if (c.vkMapMemory(ctx.vk_device, staging.memory, 0, @intCast(data.len), 0, &map_ptr) == c.VK_SUCCESS) {
+        if (c.vkMapMemory(ctx.vk_device, staging_temp.memory, 0, @intCast(data.len), 0, &map_ptr) == c.VK_SUCCESS) {
             @memcpy(@as([*]u8, @ptrCast(map_ptr))[0..data.len], data);
-            c.vkUnmapMemory(ctx.vk_device, staging.memory);
-        } else {
-            std.log.err("Failed to map staging buffer memory", .{});
-            return;
+            c.vkUnmapMemory(ctx.vk_device, staging_temp.memory);
         }
 
-        // Copy from staging to device buffer
-        {
-            ctx.mutex.lock();
-            defer ctx.mutex.unlock();
+        // Use the old single-use transfer buffer if we are here (WaitIdle!)
+        // Note: we can't use the per-frame transfer CB here because we are going to wait immediately.
+        // We'll allocate a temporary command buffer.
 
-            var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
-            begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-            begin_info.flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        var alloc_info = std.mem.zeroes(c.VkCommandBufferAllocateInfo);
+        alloc_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        alloc_info.level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        alloc_info.commandPool = ctx.transfer_command_pool; // Reuse pool
+        alloc_info.commandBufferCount = 1;
 
-            _ = c.vkBeginCommandBuffer(ctx.transfer_command_buffer, &begin_info);
+        var temp_cb: c.VkCommandBuffer = null;
+        _ = c.vkAllocateCommandBuffers(ctx.vk_device, &alloc_info, &temp_cb);
 
-            var copy_region = std.mem.zeroes(c.VkBufferCopy);
-            copy_region.size = @intCast(data.len);
-            c.vkCmdCopyBuffer(ctx.transfer_command_buffer, staging.buffer, buf.buffer, 1, &copy_region);
+        var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
+        begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin_info.flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-            _ = c.vkEndCommandBuffer(ctx.transfer_command_buffer);
+        _ = c.vkBeginCommandBuffer(temp_cb, &begin_info);
 
-            var submit_info = std.mem.zeroes(c.VkSubmitInfo);
-            submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
-            submit_info.commandBufferCount = 1;
-            submit_info.pCommandBuffers = &ctx.transfer_command_buffer;
+        var copy_region = std.mem.zeroes(c.VkBufferCopy);
+        copy_region.size = @intCast(data.len);
+        c.vkCmdCopyBuffer(temp_cb, staging_temp.buffer, buf.buffer, 1, &copy_region);
 
-            _ = c.vkQueueSubmit(ctx.queue, 1, &submit_info, null);
-            _ = c.vkQueueWaitIdle(ctx.queue);
-        }
+        _ = c.vkEndCommandBuffer(temp_cb);
+
+        var submit_info = std.mem.zeroes(c.VkSubmitInfo);
+        submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit_info.commandBufferCount = 1;
+        submit_info.pCommandBuffers = &temp_cb;
+
+        _ = c.vkQueueSubmit(ctx.queue, 1, &submit_info, null);
+        _ = c.vkQueueWaitIdle(ctx.queue);
+
+        c.vkFreeCommandBuffers(ctx.vk_device, ctx.transfer_command_pool, 1, &temp_cb);
     }
 }
 
@@ -2053,8 +2156,43 @@ fn recreateSwapchain(ctx: *VulkanContext) void {
     ctx.framebuffer_resized = false;
 }
 
+fn ensureFrameReady(ctx: *VulkanContext) void {
+    if (ctx.transfer_ready) return;
+
+    const fence = ctx.in_flight_fences[ctx.current_sync_frame];
+
+    // Wait for the frame to be available
+    _ = c.vkWaitForFences(ctx.vk_device, 1, &fence, c.VK_TRUE, std.math.maxInt(u64));
+
+    // Reset fence
+    _ = c.vkResetFences(ctx.vk_device, 1, &fence);
+
+    // Process deletion queue
+    for (ctx.buffer_deletion_queue[ctx.current_sync_frame].items) |zombie| {
+        c.vkDestroyBuffer(ctx.vk_device, zombie.buffer, null);
+        c.vkFreeMemory(ctx.vk_device, zombie.memory, null);
+    }
+    ctx.buffer_deletion_queue[ctx.current_sync_frame].clearRetainingCapacity();
+
+    // Reset staging buffer
+    ctx.staging_buffers[ctx.current_sync_frame].reset();
+
+    // Begin transfer command buffer
+    const transfer_cb = ctx.transfer_command_buffers[ctx.current_sync_frame];
+    _ = c.vkResetCommandBuffer(transfer_cb, 0);
+
+    var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
+    begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    _ = c.vkBeginCommandBuffer(transfer_cb, &begin_info);
+
+    ctx.transfer_ready = true;
+}
+
 fn beginFrame(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+
+    ensureFrameReady(ctx);
 
     ctx.frame_in_progress = false;
     ctx.draw_call_count = 0;
@@ -2067,17 +2205,7 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
     ctx.descriptors_updated = false;
     ctx.bound_texture = 0;
 
-    const fence = ctx.in_flight_fences[ctx.current_sync_frame];
     const acquire_semaphore = ctx.image_available_semaphores[ctx.current_sync_frame];
-
-    _ = c.vkWaitForFences(ctx.vk_device, 1, &fence, c.VK_TRUE, std.math.maxInt(u64));
-
-    // Process deletion queue for this frame
-    for (ctx.buffer_deletion_queue[ctx.current_sync_frame].items) |zombie| {
-        c.vkDestroyBuffer(ctx.vk_device, zombie.buffer, null);
-        c.vkFreeMemory(ctx.vk_device, zombie.memory, null);
-    }
-    ctx.buffer_deletion_queue[ctx.current_sync_frame].clearRetainingCapacity();
 
     var image_index: u32 = 0;
     const result = c.vkAcquireNextImageKHR(ctx.vk_device, ctx.swapchain, 1000000000, acquire_semaphore, null, &image_index);
@@ -2090,8 +2218,6 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
     }
 
     ctx.image_index = image_index;
-
-    _ = c.vkResetFences(ctx.vk_device, 1, &fence);
 
     const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
     _ = c.vkResetCommandBuffer(command_buffer, 0);
@@ -2168,6 +2294,12 @@ fn abortFrame(ctx_ptr: *anyopaque) void {
     const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
     _ = c.vkEndCommandBuffer(command_buffer);
 
+    // End transfer buffer if it was started
+    if (ctx.transfer_ready) {
+        _ = c.vkEndCommandBuffer(ctx.transfer_command_buffers[ctx.current_sync_frame]);
+        ctx.transfer_ready = false;
+    }
+
     // We didn't submit, so we must manually signal the fence so we don't deadlock
     // on the next time this sync frame comes around.
     // However, it's safer to just reset the fence to a signaled state.
@@ -2202,6 +2334,12 @@ fn endFrame(ctx_ptr: *anyopaque) void {
     const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
     _ = c.vkEndCommandBuffer(command_buffer);
 
+    // End transfer command buffer
+    const transfer_cb = ctx.transfer_command_buffers[ctx.current_sync_frame];
+    if (ctx.transfer_ready) {
+        _ = c.vkEndCommandBuffer(transfer_cb);
+    }
+
     var submit_info = std.mem.zeroes(c.VkSubmitInfo);
     submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
@@ -2211,8 +2349,19 @@ fn endFrame(ctx_ptr: *anyopaque) void {
     submit_info.pWaitSemaphores = &wait_semaphores;
     submit_info.pWaitDstStageMask = &wait_stages;
 
-    submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &command_buffer;
+    // Submit transfer buffer (if ready) AND graphics buffer
+    var command_buffers: [2]c.VkCommandBuffer = undefined;
+    var cb_count: u32 = 0;
+
+    if (ctx.transfer_ready) {
+        command_buffers[cb_count] = transfer_cb;
+        cb_count += 1;
+    }
+    command_buffers[cb_count] = command_buffer;
+    cb_count += 1;
+
+    submit_info.commandBufferCount = cb_count;
+    submit_info.pCommandBuffers = &command_buffers[0];
 
     const signal_semaphores = [_]c.VkSemaphore{ctx.render_finished_semaphores[ctx.current_sync_frame]};
     submit_info.signalSemaphoreCount = 1;
@@ -2237,6 +2386,7 @@ fn endFrame(ctx_ptr: *anyopaque) void {
         recreateSwapchain(ctx);
     }
 
+    ctx.transfer_ready = false;
     ctx.current_sync_frame = (ctx.current_sync_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     ctx.frame_index += 1;
     ctx.frame_in_progress = false;
@@ -2594,27 +2744,16 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
     }
 
     if (data_opt) |data| {
-        const staging_buffer = createVulkanBuffer(ctx, data.len, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        defer {
-            c.vkDestroyBuffer(ctx.vk_device, staging_buffer.buffer, null);
-            c.vkFreeMemory(ctx.vk_device, staging_buffer.memory, null);
-        }
+        ensureFrameReady(ctx);
+        const staging = &ctx.staging_buffers[ctx.current_sync_frame];
+        const offset = staging.allocate(data.len);
 
-        var map_ptr: ?*anyopaque = null;
-        if (c.vkMapMemory(ctx.vk_device, staging_buffer.memory, 0, data.len, 0, &map_ptr) == c.VK_SUCCESS) {
-            @memcpy(@as([*]u8, @ptrCast(map_ptr))[0..data.len], data);
-            c.vkUnmapMemory(ctx.vk_device, staging_buffer.memory);
-        }
+        if (offset) |off| {
+            // Async Path
+            const dest = @as([*]u8, @ptrCast(staging.mapped_ptr.?)) + off;
+            @memcpy(dest[0..data.len], data);
 
-        {
-            ctx.mutex.lock();
-            defer ctx.mutex.unlock();
-
-            var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
-            begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-            begin_info.flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-            _ = c.vkBeginCommandBuffer(ctx.transfer_command_buffer, &begin_info);
+            const transfer_cb = ctx.transfer_command_buffers[ctx.current_sync_frame];
 
             var barrier = std.mem.zeroes(c.VkImageMemoryBarrier);
             barrier.sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -2631,14 +2770,15 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
             barrier.srcAccessMask = 0;
             barrier.dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
 
-            c.vkCmdPipelineBarrier(ctx.transfer_command_buffer, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, &barrier);
+            c.vkCmdPipelineBarrier(transfer_cb, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, &barrier);
 
             var region = std.mem.zeroes(c.VkBufferImageCopy);
+            region.bufferOffset = off;
             region.imageSubresource.aspectMask = aspect_mask;
             region.imageSubresource.layerCount = 1;
             region.imageExtent = .{ .width = width, .height = height, .depth = 1 };
 
-            c.vkCmdCopyBufferToImage(ctx.transfer_command_buffer, staging_buffer.buffer, image, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            c.vkCmdCopyBufferToImage(transfer_cb, staging.buffer, image, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
             if (mip_levels > 1) {
                 // Generate mipmaps
@@ -2653,7 +2793,7 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
                     barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
                     barrier.dstAccessMask = c.VK_ACCESS_TRANSFER_READ_BIT;
 
-                    c.vkCmdPipelineBarrier(ctx.transfer_command_buffer, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, &barrier);
+                    c.vkCmdPipelineBarrier(transfer_cb, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, &barrier);
 
                     var blit = std.mem.zeroes(c.VkImageBlit);
                     blit.srcOffsets[0] = .{ .x = 0, .y = 0, .z = 0 };
@@ -2673,14 +2813,14 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
                     blit.dstSubresource.baseArrayLayer = 0;
                     blit.dstSubresource.layerCount = 1;
 
-                    c.vkCmdBlitImage(ctx.transfer_command_buffer, image, c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, c.VK_FILTER_LINEAR);
+                    c.vkCmdBlitImage(transfer_cb, image, c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, c.VK_FILTER_LINEAR);
 
                     barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
                     barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                     barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_READ_BIT;
                     barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
 
-                    c.vkCmdPipelineBarrier(ctx.transfer_command_buffer, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
+                    c.vkCmdPipelineBarrier(transfer_cb, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
 
                     mip_width = next_width;
                     mip_height = next_height;
@@ -2694,36 +2834,153 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
                 barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
                 barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
 
-                c.vkCmdPipelineBarrier(ctx.transfer_command_buffer, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
+                c.vkCmdPipelineBarrier(transfer_cb, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
             } else {
                 barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
                 barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                 barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
                 barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
 
-                c.vkCmdPipelineBarrier(ctx.transfer_command_buffer, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
+                c.vkCmdPipelineBarrier(transfer_cb, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
+            }
+        } else {
+            // Fallback (Sync)
+            const staging_buffer = createVulkanBuffer(ctx, data.len, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            defer {
+                c.vkDestroyBuffer(ctx.vk_device, staging_buffer.buffer, null);
+                c.vkFreeMemory(ctx.vk_device, staging_buffer.memory, null);
             }
 
-            _ = c.vkEndCommandBuffer(ctx.transfer_command_buffer);
+            var map_ptr: ?*anyopaque = null;
+            if (c.vkMapMemory(ctx.vk_device, staging_buffer.memory, 0, data.len, 0, &map_ptr) == c.VK_SUCCESS) {
+                @memcpy(@as([*]u8, @ptrCast(map_ptr))[0..data.len], data);
+                c.vkUnmapMemory(ctx.vk_device, staging_buffer.memory);
+            }
+
+            // Alloc temp command buffer
+            var temp_alloc_info = std.mem.zeroes(c.VkCommandBufferAllocateInfo);
+            temp_alloc_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            temp_alloc_info.level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            temp_alloc_info.commandPool = ctx.transfer_command_pool;
+            temp_alloc_info.commandBufferCount = 1;
+
+            var temp_cb: c.VkCommandBuffer = null;
+            _ = c.vkAllocateCommandBuffers(ctx.vk_device, &temp_alloc_info, &temp_cb);
+
+            var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
+            begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            begin_info.flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+            _ = c.vkBeginCommandBuffer(temp_cb, &begin_info);
+
+            var barrier = std.mem.zeroes(c.VkImageMemoryBarrier);
+            barrier.sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.oldLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+            barrier.newLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = image;
+            barrier.subresourceRange.aspectMask = aspect_mask;
+            barrier.subresourceRange.baseMipLevel = 0;
+            barrier.subresourceRange.levelCount = mip_levels;
+            barrier.subresourceRange.baseArrayLayer = 0;
+            barrier.subresourceRange.layerCount = 1;
+            barrier.srcAccessMask = 0;
+            barrier.dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+
+            c.vkCmdPipelineBarrier(temp_cb, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, &barrier);
+
+            var region = std.mem.zeroes(c.VkBufferImageCopy);
+            region.imageSubresource.aspectMask = aspect_mask;
+            region.imageSubresource.layerCount = 1;
+            region.imageExtent = .{ .width = width, .height = height, .depth = 1 };
+
+            c.vkCmdCopyBufferToImage(temp_cb, staging_buffer.buffer, image, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+            if (mip_levels > 1) {
+                // Generate mipmaps
+                var mip_width: i32 = @intCast(width);
+                var mip_height: i32 = @intCast(height);
+
+                for (1..mip_levels) |i| {
+                    barrier.subresourceRange.baseMipLevel = @intCast(i - 1);
+                    barrier.subresourceRange.levelCount = 1;
+                    barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    barrier.newLayout = c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                    barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+                    barrier.dstAccessMask = c.VK_ACCESS_TRANSFER_READ_BIT;
+
+                    c.vkCmdPipelineBarrier(temp_cb, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, &barrier);
+
+                    var blit = std.mem.zeroes(c.VkImageBlit);
+                    blit.srcOffsets[0] = .{ .x = 0, .y = 0, .z = 0 };
+                    blit.srcOffsets[1] = .{ .x = mip_width, .y = mip_height, .z = 1 };
+                    blit.srcSubresource.aspectMask = aspect_mask;
+                    blit.srcSubresource.mipLevel = @intCast(i - 1);
+                    blit.srcSubresource.baseArrayLayer = 0;
+                    blit.srcSubresource.layerCount = 1;
+
+                    const next_width = if (mip_width > 1) @divFloor(mip_width, 2) else 1;
+                    const next_height = if (mip_height > 1) @divFloor(mip_height, 2) else 1;
+
+                    blit.dstOffsets[0] = .{ .x = 0, .y = 0, .z = 0 };
+                    blit.dstOffsets[1] = .{ .x = next_width, .y = next_height, .z = 1 };
+                    blit.dstSubresource.aspectMask = aspect_mask;
+                    blit.dstSubresource.mipLevel = @intCast(i);
+                    blit.dstSubresource.baseArrayLayer = 0;
+                    blit.dstSubresource.layerCount = 1;
+
+                    c.vkCmdBlitImage(temp_cb, image, c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, c.VK_FILTER_LINEAR);
+
+                    barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                    barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_READ_BIT;
+                    barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+
+                    c.vkCmdPipelineBarrier(temp_cb, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
+
+                    mip_width = next_width;
+                    mip_height = next_height;
+                }
+
+                // Transition last mip level
+                barrier.subresourceRange.baseMipLevel = mip_levels - 1;
+                barrier.subresourceRange.levelCount = 1;
+                barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+                barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+
+                c.vkCmdPipelineBarrier(temp_cb, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
+            } else {
+                barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+                barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+
+                c.vkCmdPipelineBarrier(temp_cb, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
+            }
+
+            _ = c.vkEndCommandBuffer(temp_cb);
 
             var submit_info = std.mem.zeroes(c.VkSubmitInfo);
             submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
             submit_info.commandBufferCount = 1;
-            submit_info.pCommandBuffers = &ctx.transfer_command_buffer;
+            submit_info.pCommandBuffers = &temp_cb;
 
             _ = c.vkQueueSubmit(ctx.queue, 1, &submit_info, null);
             _ = c.vkQueueWaitIdle(ctx.queue);
+
+            c.vkFreeCommandBuffers(ctx.vk_device, ctx.transfer_command_pool, 1, &temp_cb);
         }
     } else {
         // Transition from UNDEFINED to SHADER_READ_ONLY_OPTIMAL directly
-        ctx.mutex.lock();
-        defer ctx.mutex.unlock();
+        // This is fast enough to do on the main command buffer usually, but we use transfer CB to be safe with image layout transitions.
+        // Actually this block uses a temporary command buffer too in the old code.
+        // We should use the async transfer buffer if possible.
 
-        var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
-        begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        begin_info.flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-        _ = c.vkBeginCommandBuffer(ctx.transfer_command_buffer, &begin_info);
+        ensureFrameReady(ctx);
+        const transfer_cb = ctx.transfer_command_buffers[ctx.current_sync_frame];
 
         var barrier = std.mem.zeroes(c.VkImageMemoryBarrier);
         barrier.sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -2740,17 +2997,7 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
         barrier.srcAccessMask = 0;
         barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
 
-        c.vkCmdPipelineBarrier(ctx.transfer_command_buffer, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
-
-        _ = c.vkEndCommandBuffer(ctx.transfer_command_buffer);
-
-        var submit_info = std.mem.zeroes(c.VkSubmitInfo);
-        submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit_info.commandBufferCount = 1;
-        submit_info.pCommandBuffers = &ctx.transfer_command_buffer;
-
-        _ = c.vkQueueSubmit(ctx.queue, 1, &submit_info, null);
-        _ = c.vkQueueWaitIdle(ctx.queue);
+        c.vkCmdPipelineBarrier(transfer_cb, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
     }
 
     var view: c.VkImageView = null;
@@ -2853,27 +3100,15 @@ fn updateTexture(ctx_ptr: *anyopaque, handle: rhi.TextureHandle, data: []const u
 
     const tex = tex_opt orelse return;
 
-    const staging_buffer = createVulkanBuffer(ctx, data.len, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    defer {
-        c.vkDestroyBuffer(ctx.vk_device, staging_buffer.buffer, null);
-        c.vkFreeMemory(ctx.vk_device, staging_buffer.memory, null);
-    }
+    ensureFrameReady(ctx);
+    const staging = &ctx.staging_buffers[ctx.current_sync_frame];
 
-    var map_ptr: ?*anyopaque = null;
-    if (c.vkMapMemory(ctx.vk_device, staging_buffer.memory, 0, data.len, 0, &map_ptr) == c.VK_SUCCESS) {
-        @memcpy(@as([*]u8, @ptrCast(map_ptr))[0..data.len], data);
-        c.vkUnmapMemory(ctx.vk_device, staging_buffer.memory);
-    }
+    if (staging.allocate(data.len)) |offset| {
+        // Async Path
+        const dest = @as([*]u8, @ptrCast(staging.mapped_ptr.?)) + offset;
+        @memcpy(dest[0..data.len], data);
 
-    {
-        ctx.mutex.lock();
-        defer ctx.mutex.unlock();
-
-        var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
-        begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        begin_info.flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-        _ = c.vkBeginCommandBuffer(ctx.transfer_command_buffer, &begin_info);
+        const transfer_cb = ctx.transfer_command_buffers[ctx.current_sync_frame];
 
         var barrier = std.mem.zeroes(c.VkImageMemoryBarrier);
         barrier.sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -2888,31 +3123,92 @@ fn updateTexture(ctx_ptr: *anyopaque, handle: rhi.TextureHandle, data: []const u
         barrier.srcAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
         barrier.dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
 
-        c.vkCmdPipelineBarrier(ctx.transfer_command_buffer, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, &barrier);
+        c.vkCmdPipelineBarrier(transfer_cb, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, &barrier);
 
         var region = std.mem.zeroes(c.VkBufferImageCopy);
+        region.bufferOffset = offset;
         region.imageSubresource.aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT;
         region.imageSubresource.layerCount = 1;
         region.imageExtent = .{ .width = tex.width, .height = tex.height, .depth = 1 };
 
-        c.vkCmdCopyBufferToImage(ctx.transfer_command_buffer, staging_buffer.buffer, tex.image, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        c.vkCmdCopyBufferToImage(transfer_cb, staging.buffer, tex.image, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
         barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
         barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
 
-        c.vkCmdPipelineBarrier(ctx.transfer_command_buffer, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
+        c.vkCmdPipelineBarrier(transfer_cb, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
+    } else {
+        // Fallback (Sync)
+        const staging_buffer = createVulkanBuffer(ctx, data.len, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        defer {
+            c.vkDestroyBuffer(ctx.vk_device, staging_buffer.buffer, null);
+            c.vkFreeMemory(ctx.vk_device, staging_buffer.memory, null);
+        }
 
-        _ = c.vkEndCommandBuffer(ctx.transfer_command_buffer);
+        var map_ptr: ?*anyopaque = null;
+        if (c.vkMapMemory(ctx.vk_device, staging_buffer.memory, 0, data.len, 0, &map_ptr) == c.VK_SUCCESS) {
+            @memcpy(@as([*]u8, @ptrCast(map_ptr))[0..data.len], data);
+            c.vkUnmapMemory(ctx.vk_device, staging_buffer.memory);
+        }
+
+        // Alloc temp command buffer
+        var alloc_info = std.mem.zeroes(c.VkCommandBufferAllocateInfo);
+        alloc_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        alloc_info.level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        alloc_info.commandPool = ctx.transfer_command_pool;
+        alloc_info.commandBufferCount = 1;
+
+        var temp_cb: c.VkCommandBuffer = null;
+        _ = c.vkAllocateCommandBuffers(ctx.vk_device, &alloc_info, &temp_cb);
+
+        var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
+        begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin_info.flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+        _ = c.vkBeginCommandBuffer(temp_cb, &begin_info);
+
+        var barrier = std.mem.zeroes(c.VkImageMemoryBarrier);
+        barrier.sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.newLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.image = tex.image;
+        barrier.subresourceRange.aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.baseMipLevel = 0;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = 1;
+        barrier.srcAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+        barrier.dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+
+        c.vkCmdPipelineBarrier(temp_cb, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, &barrier);
+
+        var region = std.mem.zeroes(c.VkBufferImageCopy);
+        region.imageSubresource.aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = .{ .width = tex.width, .height = tex.height, .depth = 1 };
+
+        c.vkCmdCopyBufferToImage(temp_cb, staging_buffer.buffer, tex.image, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+        barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+
+        c.vkCmdPipelineBarrier(temp_cb, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
+
+        _ = c.vkEndCommandBuffer(temp_cb);
 
         var submit_info = std.mem.zeroes(c.VkSubmitInfo);
         submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit_info.commandBufferCount = 1;
-        submit_info.pCommandBuffers = &ctx.transfer_command_buffer;
+        submit_info.pCommandBuffers = &temp_cb;
 
         _ = c.vkQueueSubmit(ctx.queue, 1, &submit_info, null);
         _ = c.vkQueueWaitIdle(ctx.queue);
+
+        c.vkFreeCommandBuffers(ctx.vk_device, ctx.transfer_command_pool, 1, &temp_cb);
     }
 }
 
@@ -3524,10 +3820,12 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_dev
 
     for (0..MAX_FRAMES_IN_FLIGHT) |i| {
         ctx.command_buffers[i] = null;
+        ctx.transfer_command_buffers[i] = null;
+        ctx.staging_buffers[i] = .{ .buffer = null, .memory = null, .size = 0, .current_offset = 0, .mapped_ptr = null };
     }
     ctx.command_pool = null;
-    ctx.transfer_command_buffer = null;
     ctx.transfer_command_pool = null;
+    ctx.transfer_ready = false;
     ctx.render_pass = null;
     ctx.swapchain = null;
     ctx.depth_image = null;
