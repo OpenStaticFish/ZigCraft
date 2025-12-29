@@ -110,6 +110,10 @@ pub const BlockType = enum(u8) {
     mushroom_stem = 33,
     red_mushroom_block = 34,
     brown_mushroom_block = 35,
+    tall_grass = 36,
+    flower_red = 37,
+    flower_yellow = 38,
+    dead_bush = 39,
 
     _,
 
@@ -126,7 +130,7 @@ pub const BlockType = enum(u8) {
 
     pub fn isTransparent(self: BlockType) bool {
         return switch (self) {
-            .air, .water, .glass, .leaves, .mangrove_leaves, .mangrove_roots, .jungle_leaves, .bamboo, .acacia_leaves, .acacia_sapling => true,
+            .air, .water, .glass, .leaves, .mangrove_leaves, .mangrove_roots, .jungle_leaves, .bamboo, .acacia_leaves, .acacia_sapling, .tall_grass, .flower_red, .flower_yellow, .dead_bush, .cactus, .melon => true,
             else => false,
         };
     }
@@ -134,7 +138,7 @@ pub const BlockType = enum(u8) {
     /// Returns true if block completely blocks light propagation
     pub fn isOpaque(self: BlockType) bool {
         return switch (self) {
-            .air, .water, .glass, .leaves, .mangrove_leaves, .mangrove_roots, .jungle_leaves, .bamboo, .acacia_leaves, .acacia_sapling => false,
+            .air, .water, .glass, .leaves, .mangrove_leaves, .mangrove_roots, .jungle_leaves, .bamboo, .acacia_leaves, .acacia_sapling, .tall_grass, .flower_red, .flower_yellow, .dead_bush, .cactus, .melon => false,
             else => true,
         };
     }
@@ -188,6 +192,10 @@ pub const BlockType = enum(u8) {
             .mushroom_stem => .{ 0.9, 0.9, 0.85 },
             .red_mushroom_block => .{ 0.8, 0.2, 0.2 },
             .brown_mushroom_block => .{ 0.6, 0.4, 0.3 },
+            .tall_grass => .{ 0.3, 0.65, 0.2 },
+            .flower_red => .{ 0.9, 0.1, 0.1 },
+            .flower_yellow => .{ 0.9, 0.9, 0.1 },
+            .dead_bush => .{ 0.4, 0.3, 0.1 },
             _ => .{ 1, 0, 1 }, // Magenta for unknown
         };
     }

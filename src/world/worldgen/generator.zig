@@ -14,6 +14,7 @@ const ConfiguredNoise = noise_mod.ConfiguredNoise;
 const NoiseParams = noise_mod.NoiseParams;
 const Vec3f = noise_mod.Vec3f;
 const CaveSystem = @import("caves.zig").CaveSystem;
+const deco_mod = @import("decorations.zig");
 const biome_mod = @import("biome.zig");
 const BiomeId = biome_mod.BiomeId;
 const BiomeDefinition = biome_mod.BiomeDefinition;
@@ -548,7 +549,7 @@ pub const TerrainGenerator = struct {
         if (stop_flag) |sf| if (sf.*) return;
         self.generateOres(chunk);
         if (stop_flag) |sf| if (sf.*) return;
-        self.generateFeatures(chunk, &biome_ids, &secondary_biome_ids, &biome_blends);
+        self.generateFeatures(chunk);
         if (stop_flag) |sf| if (sf.*) return;
         self.computeSkylight(chunk);
         if (stop_flag) |sf| if (sf.*) return;
@@ -626,7 +627,7 @@ pub const TerrainGenerator = struct {
         }
         chunk.generated = true;
         self.generateOres(chunk);
-        self.generateFeatures(chunk, biome_ids, secondary_biome_ids, biome_blends);
+        self.generateFeatures(chunk);
         self.computeSkylight(chunk);
         self.computeBlockLight(chunk) catch {};
         chunk.dirty = true;
@@ -1081,232 +1082,86 @@ pub const TerrainGenerator = struct {
         }
     }
 
-    fn generateFeatures(self: *const TerrainGenerator, chunk: *Chunk, biome_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId, secondary_biome_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId, biome_blends: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32) void {
+    pub fn generateFeatures(self: *const TerrainGenerator, chunk: *Chunk) void {
         var prng = std.Random.DefaultPrng.init(self.continentalness_noise.seed ^ @as(u64, @bitCast(@as(i64, chunk.chunk_x))) ^ (@as(u64, @bitCast(@as(i64, chunk.chunk_z))) << 32));
         const random = prng.random();
-        const p = self.params;
+
         var local_z: u32 = 0;
         while (local_z < CHUNK_SIZE_Z) : (local_z += 1) {
             var local_x: u32 = 0;
             while (local_x < CHUNK_SIZE_X) : (local_x += 1) {
-                const idx = local_x + local_z * CHUNK_SIZE_X;
-                const wx: f32 = @floatFromInt(chunk.getWorldX() + @as(i32, @intCast(local_x)));
-                const wz: f32 = @floatFromInt(chunk.getWorldZ() + @as(i32, @intCast(local_z)));
-                const warp = self.computeWarp(wx, wz);
-                const c_val = self.getContinentalness(wx + warp.x, wz + warp.z);
-                const surface_y = self.findSurface(chunk, local_x, local_z);
-                const sea_level_u: u32 = @intCast(p.sea_level);
-                const near_sea_level = surface_y <= sea_level_u + 6;
-                const coastal_factor = smoothstep(0.45, 0.52, c_val);
-                const elevation_factor: f32 = if (near_sea_level and c_val < 0.48) 0.5 else 1.0;
-                const tree_suppress_final = coastal_factor * elevation_factor;
-                const primary = biome_ids[idx];
-                const secondary = secondary_biome_ids[idx];
-                const blend = biome_blends[idx];
-                const prim_def = biome_mod.getBiomeDefinition(primary);
-                const sec_def = biome_mod.getBiomeDefinition(secondary);
-                const dither = self.detail_noise.perlin2D(wx * 0.02, wz * 0.02) * 0.5 + 0.5;
-                const active_def = if (dither < blend) sec_def else prim_def;
-                const profile = active_def.vegetation;
-                const tree_density = std.math.lerp(prim_def.vegetation.tree_density, sec_def.vegetation.tree_density, blend) * tree_suppress_final;
-                const cactus_density = std.math.lerp(prim_def.vegetation.cactus_density, sec_def.vegetation.cactus_density, blend);
-                const bamboo_density = std.math.lerp(prim_def.vegetation.bamboo_density, sec_def.vegetation.bamboo_density, blend) * tree_suppress_final;
-                const melon_density = std.math.lerp(prim_def.vegetation.melon_density, sec_def.vegetation.melon_density, blend);
-                var placed = false;
-                const tree_spacing_check = self.checkTreeSpacing(chunk, local_x, local_z);
-                if (!placed and tree_density > 0 and tree_spacing_check and random.float(f32) < tree_density) {
-                    if (profile.tree_types.len > 0) {
-                        const idx_t = random.uintLessThan(usize, profile.tree_types.len);
-                        const tree_type = profile.tree_types[idx_t];
-                        const y = self.findSurface(chunk, local_x, local_z);
-                        if (y > 0) {
-                            const surface_block = chunk.getBlock(local_x, @intCast(y), local_z);
-                            if (surface_block == .grass or surface_block == .dirt or surface_block == .mud or surface_block == .mycelium) {
-                                self.placeTree(chunk, local_x, @intCast(y + 1), local_z, tree_type, random);
-                                placed = true;
-                            }
-                        }
-                    }
-                }
-                if (!placed and bamboo_density > 0 and random.float(f32) < bamboo_density) {
-                    const y = self.findSurface(chunk, local_x, local_z);
-                    if (y > 0) {
-                        const h = 4 + random.uintLessThan(u32, 8);
-                        for (0..h) |i| {
-                            const ty = y + 1 + @as(u32, @intCast(i));
-                            if (ty < CHUNK_SIZE_Y) chunk.setBlock(local_x, ty, local_z, .bamboo);
-                        }
-                        placed = true;
-                    }
-                }
-                if (!placed and melon_density > 0 and random.float(f32) < melon_density) {
-                    const y = self.findSurface(chunk, local_x, local_z);
-                    if (y > 0 and y < CHUNK_SIZE_Y - 1) {
-                        chunk.setBlock(local_x, y + 1, local_z, .melon);
-                        placed = true;
-                    }
-                }
-                if (!placed and cactus_density > 0 and random.float(f32) < cactus_density) {
-                    const y = self.findSurface(chunk, local_x, local_z);
-                    if (y > 0) {
-                        const surface_block = chunk.getBlock(local_x, @intCast(y), local_z);
-                        if ((surface_block == .sand or surface_block == .red_sand) and @as(i32, @intCast(y)) >= self.params.sea_level) {
-                            self.placeCactus(chunk, local_x, @intCast(y + 1), local_z, random);
-                            placed = true;
-                        }
+                const surface_y = chunk.getSurfaceHeight(local_x, local_z);
+                if (surface_y <= 0 or surface_y >= CHUNK_SIZE_Y - 1) continue;
+
+                // Use the biome stored in the chunk (populated during terrain gen)
+                const biome = chunk.biomes[local_x + local_z * CHUNK_SIZE_X];
+
+                // Get surface block to check if we can place on it
+                const surface_block = chunk.getBlock(local_x, @intCast(surface_y), local_z);
+
+                // Try decorations
+                for (deco_mod.DECORATIONS) |deco| {
+                    switch (deco) {
+                        .simple => |s| {
+                            if (!self.isBiomeAllowed(s.biomes, biome)) continue;
+                            if (!self.isBlockAllowed(s.place_on, surface_block)) continue;
+                            if (random.float(f32) >= s.probability) continue;
+
+                            // Place simple decoration
+                            chunk.setBlock(local_x, @intCast(surface_y + 1), local_z, s.block);
+                            break; // Only one decoration per column
+                        },
+                        .schematic => |s| {
+                            if (!self.isBiomeAllowed(s.biomes, biome)) continue;
+                            if (!self.isBlockAllowed(s.place_on, surface_block)) continue;
+                            if (random.float(f32) >= s.probability) continue;
+
+                            // Place schematic
+                            self.placeSchematic(chunk, local_x, @intCast(surface_y + 1), local_z, s.schematic, random);
+                            break;
+                        },
                     }
                 }
             }
         }
     }
 
-    fn findSurface(self: *const TerrainGenerator, chunk: *const Chunk, x: u32, z: u32) u32 {
+    fn isBiomeAllowed(self: *const TerrainGenerator, allowed: []const BiomeId, current: BiomeId) bool {
         _ = self;
-        var y: i32 = CHUNK_SIZE_Y - 1;
-        while (y > 0) : (y -= 1) {
-            if (chunk.getBlock(x, @intCast(y), z) != .air) return @intCast(y);
+        if (allowed.len == 0) return true;
+        for (allowed) |b| {
+            if (b == current) return true;
         }
-        return 0;
+        return false;
     }
 
-    fn checkTreeSpacing(self: *const TerrainGenerator, chunk: *const Chunk, x: u32, z: u32) bool {
+    fn isBlockAllowed(self: *const TerrainGenerator, allowed: []const BlockType, current: BlockType) bool {
         _ = self;
-        const min_spacing: i32 = 2;
-        var dz: i32 = -min_spacing;
-        while (dz <= min_spacing) : (dz += 1) {
-            var dx: i32 = -min_spacing;
-            while (dx <= min_spacing) : (dx += 1) {
-                if (dx == 0 and dz == 0) continue;
-                const nx = @as(i32, @intCast(x)) + dx;
-                const nz = @as(i32, @intCast(z)) + dz;
-                if (nx >= 0 and nx < CHUNK_SIZE_X and nz >= 0 and nz < CHUNK_SIZE_Z) {
-                    const surface_y = chunk.getHighestSolidY(@intCast(nx), @intCast(nz));
-                    var check_y: i32 = @as(i32, @intCast(surface_y)) + 1;
-                    const max_check_y = check_y + 3;
-                    while (check_y <= max_check_y and check_y < CHUNK_SIZE_Y) : (check_y += 1) {
-                        const block = chunk.getBlock(@intCast(nx), @intCast(check_y), @intCast(nz));
-                        if (block == .wood or block == .mangrove_log or block == .jungle_log or block == .acacia_log) return false;
-                    }
+        for (allowed) |b| {
+            if (b == current) return true;
+        }
+        return false;
+    }
+
+    fn placeSchematic(self: *const TerrainGenerator, chunk: *Chunk, x: u32, y: u32, z: u32, schematic: deco_mod.Schematic, random: std.Random) void {
+        _ = self;
+        _ = random;
+        const center_x = @as(i32, @intCast(x));
+        const center_y = @as(i32, @intCast(y));
+        const center_z = @as(i32, @intCast(z));
+
+        for (schematic.blocks) |sb| {
+            const bx = center_x + sb.offset[0] - schematic.center_x;
+            const by = center_y + sb.offset[1];
+            const bz = center_z + sb.offset[2] - schematic.center_z;
+
+            if (bx >= 0 and bx < CHUNK_SIZE_X and bz >= 0 and bz < CHUNK_SIZE_Z and by >= 0 and by < CHUNK_SIZE_Y) {
+                // Don't overwrite existing solid blocks to avoid trees deleting ground
+                const existing = chunk.getBlock(@intCast(bx), @intCast(by), @intCast(bz));
+                if (existing == .air or existing.isTransparent()) {
+                    chunk.setBlock(@intCast(bx), @intCast(by), @intCast(bz), sb.block);
                 }
             }
-        }
-        return true;
-    }
-
-    fn placeTree(self: *const TerrainGenerator, chunk: *Chunk, x: u32, y: u32, z: u32, tree_type: biome_mod.TreeType, random: std.Random) void {
-        const log_type: BlockType = switch (tree_type) {
-            .mangrove => .mangrove_log,
-            .jungle => .jungle_log,
-            .acacia => .acacia_log,
-            .birch, .spruce => .wood,
-            else => .wood,
-        };
-        const leaf_type: BlockType = switch (tree_type) {
-            .mangrove => .mangrove_leaves,
-            .jungle => .jungle_leaves,
-            .acacia => .acacia_leaves,
-            .birch, .spruce => .leaves,
-            else => .leaves,
-        };
-        switch (tree_type) {
-            .huge_red_mushroom => {
-                const height = 5 + random.uintLessThan(u32, 3);
-                for (0..height) |i| {
-                    if (y + @as(u32, @intCast(i)) < CHUNK_SIZE_Y) chunk.setBlock(x, y + @as(u32, @intCast(i)), z, .mushroom_stem);
-                }
-                self.placeLeafDisk(chunk, x, y + height, z, 2, .red_mushroom_block);
-            },
-            .huge_brown_mushroom => {
-                const height = 5 + random.uintLessThan(u32, 3);
-                for (0..height) |i| {
-                    if (y + @as(u32, @intCast(i)) < CHUNK_SIZE_Y) chunk.setBlock(x, y + @as(u32, @intCast(i)), z, .mushroom_stem);
-                }
-                self.placeLeafDisk(chunk, x, y + height, z, 3, .brown_mushroom_block);
-            },
-            .mangrove => {
-                for (0..3) |i| {
-                    if (y + @as(u32, @intCast(i)) < CHUNK_SIZE_Y) chunk.setBlock(x, y + @as(u32, @intCast(i)), z, .mangrove_roots);
-                }
-                const trunk_start = y + 2;
-                const height = 4 + random.uintLessThan(u32, 3);
-                for (0..height) |i| {
-                    if (trunk_start + @as(u32, @intCast(i)) < CHUNK_SIZE_Y) chunk.setBlock(x, trunk_start + @as(u32, @intCast(i)), z, log_type);
-                }
-                self.placeLeafDisk(chunk, x, trunk_start + height, z, 2, leaf_type);
-            },
-            .jungle => {
-                const height = 10 + random.uintLessThan(u32, 10);
-                for (0..height) |i| {
-                    if (y + @as(u32, @intCast(i)) < CHUNK_SIZE_Y) chunk.setBlock(x, y + @as(u32, @intCast(i)), z, log_type);
-                }
-                self.placeLeafDisk(chunk, x, y + height, z, 3, leaf_type);
-                self.placeLeafDisk(chunk, x, y + height - 1, z, 2, leaf_type);
-            },
-            .acacia => {
-                const height = 5 + random.uintLessThan(u32, 3);
-                var cx = x;
-                for (0..height) |i| {
-                    if (y + @as(u32, @intCast(i)) < CHUNK_SIZE_Y and cx < CHUNK_SIZE_X) chunk.setBlock(cx, y + @as(u32, @intCast(i)), z, log_type);
-                    if (i > 2 and random.boolean()) cx = cx +% 1;
-                }
-                self.placeLeafDisk(chunk, cx, y + height, z, 3, leaf_type);
-            },
-            .spruce => {
-                const height = 6 + random.uintLessThan(u32, 4);
-                for (0..height) |i| {
-                    if (y + @as(u32, @intCast(i)) < CHUNK_SIZE_Y) chunk.setBlock(x, y + @as(u32, @intCast(i)), z, log_type);
-                }
-                const leaf_base = y + 2;
-                const leaf_top = y + height + 1;
-                var ly: u32 = leaf_base;
-                while (ly <= leaf_top) : (ly += 1) {
-                    const dist = leaf_top - ly;
-                    const r: i32 = if (dist > 5) 2 else if (dist > 1) 1 else 0;
-                    self.placeLeafDisk(chunk, x, ly, z, r, leaf_type);
-                }
-                if (leaf_top < CHUNK_SIZE_Y) chunk.setBlock(x, leaf_top, z, leaf_type);
-            },
-            else => {
-                const height = 4 + random.uintLessThan(u32, 3);
-                for (0..height) |i| {
-                    if (y + @as(u32, @intCast(i)) < CHUNK_SIZE_Y) chunk.setBlock(x, y + @as(u32, @intCast(i)), z, log_type);
-                }
-                const leaf_start = y + height - 2;
-                const leaf_end = y + height + 1;
-                var ly: u32 = leaf_start;
-                while (ly <= leaf_end) : (ly += 1) {
-                    const r: i32 = if (ly == leaf_end) 1 else 2;
-                    self.placeLeafDisk(chunk, x, ly, z, r, leaf_type);
-                }
-                if (leaf_end < CHUNK_SIZE_Y) chunk.setBlock(x, leaf_end, z, leaf_type);
-            },
-        }
-    }
-
-    fn placeLeafDisk(self: *const TerrainGenerator, chunk: *Chunk, x: u32, y: u32, z: u32, radius: i32, block: BlockType) void {
-        _ = self;
-        if (radius < 0) return;
-        var lz: i32 = -radius;
-        while (lz <= radius) : (lz += 1) {
-            var lx: i32 = -radius;
-            while (lx <= radius) : (lx += 1) {
-                if (lx * lx + lz * lz <= radius * radius + 1) {
-                    const target_x = @as(i32, @intCast(x)) + lx;
-                    const target_z = @as(i32, @intCast(z)) + lz;
-                    if (target_x >= 0 and target_x < CHUNK_SIZE_X and target_z >= 0 and target_z < CHUNK_SIZE_Z and y < CHUNK_SIZE_Y) {
-                        if (chunk.getBlock(@intCast(target_x), y, @intCast(target_z)) == .air) chunk.setBlock(@intCast(target_x), y, @intCast(target_z), block);
-                    }
-                }
-            }
-        }
-    }
-
-    fn placeCactus(self: *const TerrainGenerator, chunk: *Chunk, x: u32, y: u32, z: u32, random: std.Random) void {
-        _ = self;
-        const height = 2 + random.uintLessThan(u32, 3);
-        for (0..height) |i| {
-            const cy = y + @as(u32, @intCast(i));
-            if (cy < CHUNK_SIZE_Y) chunk.setBlock(x, cy, z, .cactus);
         }
     }
 

@@ -1106,6 +1106,38 @@ test "WorldGen populates heightmap and biomes" {
     try testing.expect(@intFromEnum(b) <= 20); // 20 is max ID currently
 }
 
+test "Decoration placement" {
+    const allocator = testing.allocator;
+    const gen = TerrainGenerator.init(42, allocator);
+    var chunk = Chunk.init(0, 0);
+
+    // Setup chunk for decorations
+    for (0..CHUNK_SIZE_Z) |z| {
+        for (0..CHUNK_SIZE_X) |x| {
+            chunk.setSurfaceHeight(@intCast(x), @intCast(z), 64);
+            chunk.biomes[x + z * CHUNK_SIZE_X] = .plains;
+            chunk.setBlock(@intCast(x), 64, @intCast(z), .grass);
+        }
+    }
+
+    gen.generateFeatures(&chunk);
+
+    // Verify some decorations placed
+    var deco_count: u32 = 0;
+    for (0..CHUNK_SIZE_Z) |z| {
+        for (0..CHUNK_SIZE_X) |x| {
+            const block = chunk.getBlock(@intCast(x), 65, @intCast(z));
+            if (block == .tall_grass or block == .flower_red) {
+                deco_count += 1;
+            }
+        }
+    }
+
+    // Plains has 0.5 prob for grass, 0.05 for flowers.
+    // 256 blocks * 0.55 ~= 140 decorations.
+    try testing.expect(deco_count > 50);
+}
+
 // ============================================================================
 // Chunk Meshing Tests
 // ============================================================================
