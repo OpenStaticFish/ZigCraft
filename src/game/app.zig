@@ -646,7 +646,7 @@ pub const App = struct {
                             const px: i32 = @intFromFloat(self.camera.position.x);
                             const pz: i32 = @intFromFloat(self.camera.position.z);
                             const region = world.generator.getRegionInfo(px, pz);
-                            const c3 = world.worldgen.region.getRoleColor(region.role);
+                            const c3 = region_pkg.getRoleColor(region.role);
                             Font.drawText(u, "ROLE:", 15, hy + 165, 1.5, Color.rgba(c3[0], c3[1], c3[2], 1.0));
                             var buf: [32]u8 = undefined;
                             const label = std.fmt.bufPrint(&buf, "{s}", .{@tagName(region.role)}) catch "???";
