@@ -95,6 +95,21 @@ pub const LODMesh = struct {
                 // Add top face quad (two triangles)
                 try addTopFaceQuad(self.allocator, &vertices, wx, wy, wz, size, r, g, b);
 
+                // Add skirts (perimeter) to hide gaps
+                const skirt_depth = size * 4.0;
+                if (gx == 0) {
+                    try addSideFaceQuad(self.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.6, g * 0.6, b * 0.6, .west);
+                }
+                if (gx == data.width - 1) {
+                    try addSideFaceQuad(self.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.6, g * 0.6, b * 0.6, .east);
+                }
+                if (gz == 0) {
+                    try addSideFaceQuad(self.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.7, g * 0.7, b * 0.7, .north);
+                }
+                if (gz == data.width - 1) {
+                    try addSideFaceQuad(self.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.7, g * 0.7, b * 0.7, .south);
+                }
+
                 // Add side faces if needed (for cliffs/height differences)
                 if (gx > 0) {
                     const neighbor_height = data.heightmap[(gx - 1) + gz * data.width];
@@ -159,6 +174,21 @@ pub const LODMesh = struct {
                 const size: f32 = @floatFromInt(cell_size);
 
                 try addTopFaceQuad(self.allocator, &vertices, wx, wy, wz, size, r, g, b);
+
+                // Add skirts
+                const skirt_depth = size * 4.0;
+                if (gx == 0) {
+                    try addSideFaceQuad(self.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.6, g * 0.6, b * 0.6, .west);
+                }
+                if (gx == width - 1) {
+                    try addSideFaceQuad(self.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.6, g * 0.6, b * 0.6, .east);
+                }
+                if (gz == 0) {
+                    try addSideFaceQuad(self.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.7, g * 0.7, b * 0.7, .north);
+                }
+                if (gz == width - 1) {
+                    try addSideFaceQuad(self.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.7, g * 0.7, b * 0.7, .south);
+                }
 
                 // Side faces for height differences
                 if (gx > 0) {
@@ -412,6 +442,13 @@ pub const LODMeshBuilder = struct {
                     const size: f32 = @floatFromInt(cell_size);
 
                     try addTopFaceQuad(mesh.allocator, &vertices, wx, wy, wz, size, r, g, b);
+
+                    // Skirts
+                    const skirt_depth = size * 4.0;
+                    if (gx == 0) try addSideFaceQuad(mesh.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.6, g * 0.6, b * 0.6, .west);
+                    if (gx == grid_per_chunk - 1) try addSideFaceQuad(mesh.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.6, g * 0.6, b * 0.6, .east);
+                    if (gz == 0) try addSideFaceQuad(mesh.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.7, g * 0.7, b * 0.7, .north);
+                    if (gz == grid_per_chunk - 1) try addSideFaceQuad(mesh.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.7, g * 0.7, b * 0.7, .south);
                 }
             }
         }
@@ -481,6 +518,13 @@ pub const LODMeshBuilder = struct {
                     const size: f32 = @floatFromInt(cell_size);
 
                     try addTopFaceQuad(mesh.allocator, &vertices, wx, wy, wz, size, r, g, b);
+
+                    // Skirts
+                    const skirt_depth = size * 4.0;
+                    if (gx == 0) try addSideFaceQuad(mesh.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.6, g * 0.6, b * 0.6, .west);
+                    if (gx == grid_per_chunk - 1) try addSideFaceQuad(mesh.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.6, g * 0.6, b * 0.6, .east);
+                    if (gz == 0) try addSideFaceQuad(mesh.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.7, g * 0.7, b * 0.7, .north);
+                    if (gz == grid_per_chunk - 1) try addSideFaceQuad(mesh.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.7, g * 0.7, b * 0.7, .south);
                 }
             }
         }
