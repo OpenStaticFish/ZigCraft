@@ -263,7 +263,7 @@ pub const LODConfig = struct {
     memory_budget_mb: u32 = 256,
 
     /// Maximum uploads per frame per LOD level
-    max_uploads_per_frame: u32 = 8,
+    max_uploads_per_frame: u32 = 16,
 
     /// Enable fog-masked transitions
     fog_transitions: bool = true,

@@ -1103,8 +1103,8 @@ pub const TerrainGenerator = struct {
     }
 
     fn getTemperatureLOD(self: *const TerrainGenerator, x: f32, z: f32) f32 {
-        // Only 2 octaves
-        const val = self.temperature_noise.fbm2D(x, z, 2, 2.0, 0.5, self.params.temp_scale);
+        // Only 2 octaves, use macro scale for LOD temperature
+        const val = self.temperature_noise.fbm2D(x, z, 2, 2.0, 0.5, self.params.temperature_macro_scale);
         return clamp01((val + 1.0) * 0.5);
     }
 

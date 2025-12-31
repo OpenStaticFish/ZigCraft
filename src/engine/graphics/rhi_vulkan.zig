@@ -3378,6 +3378,28 @@ fn getMaxMSAASamples(ctx_ptr: *anyopaque) u8 {
     return ctx.max_msaa_samples;
 }
 
+fn drawIndirect(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, command_buffer: rhi.BufferHandle, offset: usize, draw_count: u32, stride: u32) void {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    if (!ctx.frame_in_progress) return;
+    // Simple implementation for single draw or MDI if shader supports it
+    // For now, this is a placeholder that assumes the pipeline is bound
+    
+    ctx.mutex.lock();
+    const vbo_opt = ctx.buffers.get(handle);
+    const cmd_opt = ctx.buffers.get(command_buffer);
+    ctx.mutex.unlock();
+
+    if (vbo_opt) |vbo| {
+        if (cmd_opt) |cmd| {
+            ctx.draw_call_count += 1;
+            const cb = ctx.command_buffers[ctx.current_sync_frame];
+            const offset_vals = [_]c.VkDeviceSize{0};
+            c.vkCmdBindVertexBuffers(cb, 0, 1, &vbo.buffer, &offset_vals);
+            c.vkCmdDrawIndirect(cb, cmd.buffer, @intCast(offset), draw_count, stride);
+        }
+    }
+}
+
 fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.DrawMode) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
@@ -3834,6 +3856,7 @@ const vtable = rhi.RHI.VTable{
     .setModelMatrix = setModelMatrix,
     .setTextureUniforms = setTextureUniforms,
     .draw = draw,
+    .drawIndirect = drawIndirect,
     .createTexture = createTexture,
     .destroyTexture = destroyTexture,
     .bindTexture = bindTexture,

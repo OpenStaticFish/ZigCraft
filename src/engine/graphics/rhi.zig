@@ -85,6 +85,13 @@ pub const DrawMode = enum {
     points,
 };
 
+pub const DrawIndirectCommand = extern struct {
+    vertexCount: u32,
+    instanceCount: u32,
+    firstVertex: u32,
+    firstInstance: u32,
+};
+
 /// Sky rendering parameters
 pub const SkyParams = struct {
     cam_pos: Vec3,
@@ -213,6 +220,7 @@ pub const RHI = struct {
 
         // Draw Calls
         draw: *const fn (ctx: *anyopaque, handle: BufferHandle, count: u32, mode: DrawMode) void,
+        drawIndirect: *const fn (ctx: *anyopaque, handle: BufferHandle, command_buffer: BufferHandle, offset: usize, draw_count: u32, stride: u32) void,
         drawSky: *const fn (ctx: *anyopaque, params: SkyParams) void,
 
         // Textures
@@ -365,6 +373,10 @@ pub const RHI = struct {
 
     pub fn draw(self: RHI, handle: BufferHandle, count: u32, mode: DrawMode) void {
         self.vtable.draw(self.ptr, handle, count, mode);
+    }
+
+    pub fn drawIndirect(self: RHI, handle: BufferHandle, command_buffer: BufferHandle, offset: usize, draw_count: u32, stride: u32) void {
+        self.vtable.drawIndirect(self.ptr, handle, command_buffer, offset, draw_count, stride);
     }
 
     pub fn drawSky(self: RHI, params: SkyParams) void {

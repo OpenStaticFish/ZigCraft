@@ -68,8 +68,8 @@ pub const LODMesh = struct {
     pub fn buildFromSimplifiedData(self: *LODMesh, data: *const LODSimplifiedData, world_x: i32, world_z: i32) !void {
         const cell_size = getCellSize(self.lod_level);
         
-        var vertices = std.ArrayList(Vertex).init(self.allocator);
-        defer vertices.deinit();
+        var vertices = std.ArrayListUnmanaged(Vertex){};
+        defer vertices.deinit(self.allocator);
 
         // Generate a quad for each grid cell
         var gz: u32 = 0;
@@ -93,19 +93,19 @@ pub const LODMesh = struct {
                 const size: f32 = @floatFromInt(cell_size);
 
                 // Add top face quad (two triangles)
-                try addTopFaceQuad(&vertices, wx, wy, wz, size, r, g, b);
+                try addTopFaceQuad(self.allocator, &vertices, wx, wy, wz, size, r, g, b);
 
                 // Add side faces if needed (for cliffs/height differences)
                 if (gx > 0) {
                     const neighbor_height = data.heightmap[(gx - 1) + gz * data.width];
                     if (height > neighbor_height + 2) {
-                        try addSideFaceQuad(&vertices, wx, wy, wz, size, @floatFromInt(neighbor_height), r * 0.7, g * 0.7, b * 0.7, .west);
+                        try addSideFaceQuad(self.allocator, &vertices, wx, wy, wz, size, @floatFromInt(neighbor_height), r * 0.7, g * 0.7, b * 0.7, .west);
                     }
                 }
                 if (gz > 0) {
                     const neighbor_height = data.heightmap[gx + (gz - 1) * data.width];
                     if (height > neighbor_height + 2) {
-                        try addSideFaceQuad(&vertices, wx, wy, wz, size, @floatFromInt(neighbor_height), r * 0.8, g * 0.8, b * 0.8, .north);
+                        try addSideFaceQuad(self.allocator, &vertices, wx, wy, wz, size, @floatFromInt(neighbor_height), r * 0.8, g * 0.8, b * 0.8, .north);
                     }
                 }
             }
@@ -137,8 +137,8 @@ pub const LODMesh = struct {
     ) !void {
         const cell_size = getCellSize(self.lod_level);
 
-        var vertices = std.ArrayList(Vertex).init(self.allocator);
-        defer vertices.deinit();
+        var vertices = std.ArrayListUnmanaged(Vertex).empty;
+        defer vertices.deinit(self.allocator);
 
         var gz: u32 = 0;
         while (gz < width) : (gz += 1) {
@@ -158,19 +158,19 @@ pub const LODMesh = struct {
                 const wy: f32 = @floatFromInt(height);
                 const size: f32 = @floatFromInt(cell_size);
 
-                try addTopFaceQuad(&vertices, wx, wy, wz, size, r, g, b);
+                try addTopFaceQuad(self.allocator, &vertices, wx, wy, wz, size, r, g, b);
 
                 // Side faces for height differences
                 if (gx > 0) {
                     const nh = heightmap[(gx - 1) + gz * width];
                     if (height > nh + 2) {
-                        try addSideFaceQuad(&vertices, wx, wy, wz, size, @floatFromInt(nh), r * 0.7, g * 0.7, b * 0.7, .west);
+                        try addSideFaceQuad(self.allocator, &vertices, wx, wy, wz, size, @floatFromInt(nh), r * 0.7, g * 0.7, b * 0.7, .west);
                     }
                 }
                 if (gz > 0) {
                     const nh = heightmap[gx + (gz - 1) * width];
                     if (height > nh + 2) {
-                        try addSideFaceQuad(&vertices, wx, wy, wz, size, @floatFromInt(nh), r * 0.8, g * 0.8, b * 0.8, .north);
+                        try addSideFaceQuad(self.allocator, &vertices, wx, wy, wz, size, @floatFromInt(nh), r * 0.8, g * 0.8, b * 0.8, .north);
                     }
                 }
             }
@@ -214,12 +214,12 @@ pub const LODMesh = struct {
             if (self.buffer_handle != 0) {
                 rhi.destroyBuffer(self.buffer_handle);
             }
-            self.buffer_handle = rhi.createBuffer(.vertex, needed_capacity);
+            self.buffer_handle = rhi.createBuffer(needed_capacity, .vertex);
             self.capacity = @intCast(needed_capacity / @sizeOf(Vertex));
         }
 
         // Upload data
-        rhi.updateBuffer(self.buffer_handle, std.mem.sliceAsBytes(pending));
+        rhi.uploadBuffer(self.buffer_handle, std.mem.sliceAsBytes(pending));
         self.vertex_count = @intCast(pending.len);
 
         self.allocator.free(pending);
@@ -230,19 +230,19 @@ pub const LODMesh = struct {
     /// Draw the LOD mesh
     pub fn draw(self: *const LODMesh, rhi: RHI) void {
         if (!self.ready or self.buffer_handle == 0 or self.vertex_count == 0) return;
-        rhi.draw(self.buffer_handle, self.vertex_count);
+        rhi.draw(self.buffer_handle, self.vertex_count, .triangles);
     }
 };
 
 const FaceDir = enum { north, south, east, west };
 
 /// Add a top-facing quad (two triangles)
-fn addTopFaceQuad(vertices: *std.ArrayList(Vertex), x: f32, y: f32, z: f32, size: f32, r: f32, g: f32, b: f32) !void {
+fn addTopFaceQuad(allocator: std.mem.Allocator, vertices: *std.ArrayListUnmanaged(Vertex), x: f32, y: f32, z: f32, size: f32, r: f32, g: f32, b: f32) !void {
     const normal = [3]f32{ 0, 1, 0 };
     const color = [3]f32{ r, g, b };
 
     // Triangle 1: (0,0), (1,0), (1,1)
-    try vertices.append(.{
+    try vertices.append(allocator, .{
         .pos = .{ x, y, z },
         .color = color,
         .normal = normal,
@@ -251,7 +251,7 @@ fn addTopFaceQuad(vertices: *std.ArrayList(Vertex), x: f32, y: f32, z: f32, size
         .skylight = 15,
         .blocklight = 0,
     });
-    try vertices.append(.{
+    try vertices.append(allocator, .{
         .pos = .{ x + size, y, z },
         .color = color,
         .normal = normal,
@@ -260,7 +260,7 @@ fn addTopFaceQuad(vertices: *std.ArrayList(Vertex), x: f32, y: f32, z: f32, size
         .skylight = 15,
         .blocklight = 0,
     });
-    try vertices.append(.{
+    try vertices.append(allocator, .{
         .pos = .{ x + size, y, z + size },
         .color = color,
         .normal = normal,
@@ -271,7 +271,7 @@ fn addTopFaceQuad(vertices: *std.ArrayList(Vertex), x: f32, y: f32, z: f32, size
     });
 
     // Triangle 2: (0,0), (1,1), (0,1)
-    try vertices.append(.{
+    try vertices.append(allocator, .{
         .pos = .{ x, y, z },
         .color = color,
         .normal = normal,
@@ -280,7 +280,7 @@ fn addTopFaceQuad(vertices: *std.ArrayList(Vertex), x: f32, y: f32, z: f32, size
         .skylight = 15,
         .blocklight = 0,
     });
-    try vertices.append(.{
+    try vertices.append(allocator, .{
         .pos = .{ x + size, y, z + size },
         .color = color,
         .normal = normal,
@@ -289,7 +289,7 @@ fn addTopFaceQuad(vertices: *std.ArrayList(Vertex), x: f32, y: f32, z: f32, size
         .skylight = 15,
         .blocklight = 0,
     });
-    try vertices.append(.{
+    try vertices.append(allocator, .{
         .pos = .{ x, y, z + size },
         .color = color,
         .normal = normal,
@@ -301,7 +301,7 @@ fn addTopFaceQuad(vertices: *std.ArrayList(Vertex), x: f32, y: f32, z: f32, size
 }
 
 /// Add a side-facing quad for cliff faces
-fn addSideFaceQuad(vertices: *std.ArrayList(Vertex), x: f32, y_top: f32, z: f32, size: f32, y_bottom: f32, r: f32, g: f32, b: f32, dir: FaceDir) !void {
+fn addSideFaceQuad(allocator: std.mem.Allocator, vertices: *std.ArrayListUnmanaged(Vertex), x: f32, y_top: f32, z: f32, size: f32, y_bottom: f32, r: f32, g: f32, b: f32, dir: FaceDir) !void {
     const color = [3]f32{ r, g, b };
 
     const normal: [3]f32 = switch (dir) {
@@ -340,14 +340,14 @@ fn addSideFaceQuad(vertices: *std.ArrayList(Vertex), x: f32, y_top: f32, z: f32,
     };
 
     // Triangle 1
-    try vertices.append(.{ .pos = corners[0], .color = color, .normal = normal, .uv = .{ 0, 0 }, .tile_id = 0, .skylight = 12, .blocklight = 0 });
-    try vertices.append(.{ .pos = corners[1], .color = color, .normal = normal, .uv = .{ 1, 0 }, .tile_id = 0, .skylight = 12, .blocklight = 0 });
-    try vertices.append(.{ .pos = corners[2], .color = color, .normal = normal, .uv = .{ 1, 1 }, .tile_id = 0, .skylight = 12, .blocklight = 0 });
+    try vertices.append(allocator, .{ .pos = corners[0], .color = color, .normal = normal, .uv = .{ 0, 0 }, .tile_id = 0, .skylight = 12, .blocklight = 0 });
+    try vertices.append(allocator, .{ .pos = corners[1], .color = color, .normal = normal, .uv = .{ 1, 0 }, .tile_id = 0, .skylight = 12, .blocklight = 0 });
+    try vertices.append(allocator, .{ .pos = corners[2], .color = color, .normal = normal, .uv = .{ 1, 1 }, .tile_id = 0, .skylight = 12, .blocklight = 0 });
 
     // Triangle 2
-    try vertices.append(.{ .pos = corners[0], .color = color, .normal = normal, .uv = .{ 0, 0 }, .tile_id = 0, .skylight = 12, .blocklight = 0 });
-    try vertices.append(.{ .pos = corners[2], .color = color, .normal = normal, .uv = .{ 1, 1 }, .tile_id = 0, .skylight = 12, .blocklight = 0 });
-    try vertices.append(.{ .pos = corners[3], .color = color, .normal = normal, .uv = .{ 0, 1 }, .tile_id = 0, .skylight = 12, .blocklight = 0 });
+    try vertices.append(allocator, .{ .pos = corners[0], .color = color, .normal = normal, .uv = .{ 0, 0 }, .tile_id = 0, .skylight = 12, .blocklight = 0 });
+    try vertices.append(allocator, .{ .pos = corners[2], .color = color, .normal = normal, .uv = .{ 1, 1 }, .tile_id = 0, .skylight = 12, .blocklight = 0 });
+    try vertices.append(allocator, .{ .pos = corners[3], .color = color, .normal = normal, .uv = .{ 0, 1 }, .tile_id = 0, .skylight = 12, .blocklight = 0 });
 }
 
 /// LOD Mesh Builder - builds meshes for LOD regions
@@ -372,8 +372,8 @@ pub const LODMeshBuilder = struct {
         const cell_size: u32 = 2; // LOD1 = 2x scale
         const grid_per_chunk = chunk_size / cell_size; // 8 cells per chunk
 
-        var vertices = std.ArrayList(Vertex).init(mesh.allocator);
-        defer vertices.deinit();
+        var vertices = std.ArrayListUnmanaged(Vertex).empty;
+        defer vertices.deinit(mesh.allocator);
 
         // Process each of the 4 chunks
         const chunk_offsets = [4][2]i32{
@@ -411,7 +411,7 @@ pub const LODMeshBuilder = struct {
                     const wy: f32 = @floatFromInt(height);
                     const size: f32 = @floatFromInt(cell_size);
 
-                    try addTopFaceQuad(&vertices, wx, wy, wz, size, r, g, b);
+                    try addTopFaceQuad(mesh.allocator, &vertices, wx, wy, wz, size, r, g, b);
                 }
             }
         }
@@ -444,8 +444,8 @@ pub const LODMeshBuilder = struct {
         const cell_size: u32 = 4; // LOD2 = 4x scale
         const grid_per_chunk = chunk_size / cell_size; // 4 cells per chunk
 
-        var vertices = std.ArrayList(Vertex).init(mesh.allocator);
-        defer vertices.deinit();
+        var vertices = std.ArrayListUnmanaged(Vertex).empty;
+        defer vertices.deinit(mesh.allocator);
 
         // 4x4 grid of chunks
         for (0..16) |chunk_idx| {
@@ -480,7 +480,7 @@ pub const LODMeshBuilder = struct {
                     const wy: f32 = @floatFromInt(height);
                     const size: f32 = @floatFromInt(cell_size);
 
-                    try addTopFaceQuad(&vertices, wx, wy, wz, size, r, g, b);
+                    try addTopFaceQuad(mesh.allocator, &vertices, wx, wy, wz, size, r, g, b);
                 }
             }
         }

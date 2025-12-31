@@ -50,7 +50,7 @@ void main() {
     vNormal = aNormal;
     vTexCoord = aTexCoord;
     vTileID = int(aTileID);
-    vDistance = length(aPos);
+    vDistance = length(worldPos.xyz);
     vSkyLight = aSkyLight;
     vBlockLight = aBlockLight;
     

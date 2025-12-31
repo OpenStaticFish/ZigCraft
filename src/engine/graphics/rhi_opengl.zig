@@ -706,6 +706,16 @@ fn shaderSetInt(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle, name: [*c]const u
     if (loc != -1) c.glUniform1i().?(loc, value);
 }
 
+fn drawIndirect(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, command_buffer: rhi.BufferHandle, offset: usize, draw_count: u32, stride: u32) void {
+    _ = ctx_ptr;
+    _ = handle;
+    _ = command_buffer;
+    _ = offset;
+    _ = draw_count;
+    _ = stride;
+    // Not implemented for OpenGL backend yet
+}
+
 fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.DrawMode) void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.mutex.lock();
@@ -1133,6 +1143,7 @@ const vtable = rhi.RHI.VTable{
     .setModelMatrix = setModelMatrix,
     .setTextureUniforms = setTextureUniforms,
     .draw = draw,
+    .drawIndirect = drawIndirect,
     .drawSky = drawSky,
     .createTexture = createTexture,
     .destroyTexture = destroyTexture,
