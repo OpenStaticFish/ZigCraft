@@ -26,7 +26,7 @@ pub const LODLevel = enum(u3) {
     }
 
     pub fn chunksPerSide(self: LODLevel) u32 {
-        return self.scale();
+        return self.scale() * 2;
     }
 
     pub fn totalChunks(self: LODLevel) u32 {
@@ -288,20 +288,20 @@ test "LODLevel scale calculations" {
     try std.testing.expectEqual(@as(u32, 4), LODLevel.lod2.scale());
     try std.testing.expectEqual(@as(u32, 8), LODLevel.lod3.scale());
 
-    try std.testing.expectEqual(@as(u32, 1), LODLevel.lod0.totalChunks());
-    try std.testing.expectEqual(@as(u32, 4), LODLevel.lod1.totalChunks());
-    try std.testing.expectEqual(@as(u32, 16), LODLevel.lod2.totalChunks());
-    try std.testing.expectEqual(@as(u32, 64), LODLevel.lod3.totalChunks());
+    try std.testing.expectEqual(@as(u32, 4), LODLevel.lod0.totalChunks());
+    try std.testing.expectEqual(@as(u32, 16), LODLevel.lod1.totalChunks());
+    try std.testing.expectEqual(@as(u32, 64), LODLevel.lod2.totalChunks());
+    try std.testing.expectEqual(@as(u32, 256), LODLevel.lod3.totalChunks());
 }
 
 test "LODRegionKey from chunk coords" {
     const key1 = LODRegionKey.fromChunkCoords(5, 7, .lod1);
-    try std.testing.expectEqual(@as(i32, 2), key1.rx); // 5 / 2 = 2
-    try std.testing.expectEqual(@as(i32, 3), key1.rz); // 7 / 2 = 3
+    try std.testing.expectEqual(@as(i32, 1), key1.rx); // 5 / 4 = 1
+    try std.testing.expectEqual(@as(i32, 1), key1.rz); // 7 / 4 = 1
 
     const key2 = LODRegionKey.fromChunkCoords(-3, -5, .lod2);
-    try std.testing.expectEqual(@as(i32, -1), key2.rx); // -3 / 4 = -1
-    try std.testing.expectEqual(@as(i32, -2), key2.rz); // -5 / 4 = -2
+    try std.testing.expectEqual(@as(i32, -1), key2.rx); // -3 / 8 = -1
+    try std.testing.expectEqual(@as(i32, -1), key2.rz); // -5 / 8 = -1
 }
 
 test "LODConfig distance calculation" {
