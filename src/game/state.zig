@@ -21,6 +21,7 @@ pub const Settings = struct {
     msaa_samples: u8 = 4,
     window_width: u32 = 1920,
     window_height: u32 = 1080,
+    lod_enabled: bool = true,
 
     // Common resolution presets
     pub const Resolution = struct {

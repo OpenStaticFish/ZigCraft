@@ -19,6 +19,7 @@ const World = @import("../world/world.zig").World;
 const worldToChunk = @import("../world/chunk.zig").worldToChunk;
 const WorldMap = @import("../world/worldgen/world_map.zig").WorldMap;
 const region_pkg = @import("../world/worldgen/region.zig");
+const LODConfig = @import("../world/lod_chunk.zig").LODConfig;
 
 const rhi_pkg = @import("../engine/graphics/rhi.zig");
 const RHI = rhi_pkg.RHI;
@@ -417,11 +418,20 @@ pub const App = struct {
 
         if (self.pending_new_world_seed) |seed| {
             self.pending_new_world_seed = null;
-            self.world = World.init(self.allocator, self.settings.render_distance, seed, self.rhi) catch |err| {
-                log.log.err("Failed to create world: {}", .{err});
-                self.app_state = .home;
-                return;
-            };
+            if (self.settings.lod_enabled) {
+                const lod_config = LODConfig{};
+                self.world = World.initWithLOD(self.allocator, self.settings.render_distance, seed, self.rhi, lod_config) catch |err| {
+                    log.log.err("Failed to create world with LOD: {}", .{err});
+                    self.app_state = .home;
+                    return;
+                };
+            } else {
+                self.world = World.init(self.allocator, self.settings.render_distance, seed, self.rhi) catch |err| {
+                    log.log.err("Failed to create world: {}", .{err});
+                    self.app_state = .home;
+                    return;
+                };
+            }
             if (self.world_map == null) self.world_map = WorldMap.init(self.rhi, 256, 256);
             self.map_controller.show_map = false;
             self.map_controller.map_needs_update = true;
@@ -721,11 +731,20 @@ pub const App = struct {
 
             if (self.pending_new_world_seed) |seed| {
                 self.pending_new_world_seed = null;
-                self.world = World.init(self.allocator, self.settings.render_distance, seed, self.rhi) catch |err| {
-                    log.log.err("Failed to create world: {}", .{err});
-                    self.app_state = .home;
-                    continue;
-                };
+                if (self.settings.lod_enabled) {
+                    const lod_config = LODConfig{};
+                    self.world = World.initWithLOD(self.allocator, self.settings.render_distance, seed, self.rhi, lod_config) catch |err| {
+                        log.log.err("Failed to create world with LOD: {}", .{err});
+                        self.app_state = .home;
+                        continue;
+                    };
+                } else {
+                    self.world = World.init(self.allocator, self.settings.render_distance, seed, self.rhi) catch |err| {
+                        log.log.err("Failed to create world: {}", .{err});
+                        self.app_state = .home;
+                        continue;
+                    };
+                }
                 if (self.world_map == null) self.world_map = WorldMap.init(self.rhi, 256, 256);
                 self.map_controller.show_map = false;
                 self.map_controller.map_needs_update = true;

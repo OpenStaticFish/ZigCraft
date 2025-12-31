@@ -103,7 +103,7 @@ pub const LODManager = struct {
     lod3_upload_queue: RingBuffer(*LODChunk),
 
     // Transition queue for LOD upgrades/downgrades
-    transition_queue: std.ArrayList(LODTransition),
+    transition_queue: std.ArrayListUnmanaged(LODTransition),
 
     // Current player position (chunk coords)
     player_cx: i32,
@@ -159,7 +159,7 @@ pub const LODManager = struct {
             .lod1_upload_queue = try RingBuffer(*LODChunk).init(allocator, 32),
             .lod2_upload_queue = try RingBuffer(*LODChunk).init(allocator, 32),
             .lod3_upload_queue = try RingBuffer(*LODChunk).init(allocator, 32),
-            .transition_queue = std.ArrayList(LODTransition).init(allocator),
+            .transition_queue = .empty,
             .player_cx = 0,
             .player_cz = 0,
             .next_job_token = 1,

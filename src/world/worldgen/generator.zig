@@ -1147,7 +1147,7 @@ pub const TerrainGenerator = struct {
 
         return switch (biome_id) {
             .desert, .badlands => .sand,
-            .snow_tundra, .snowy_mountains => .snow,
+            .snow_tundra, .snowy_mountains => .snow_block,
             .beach => .sand,
             else => .grass,
         };
