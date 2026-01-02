@@ -177,7 +177,7 @@ void main() {
     lightLevel = clamp(lightLevel, 0.0, 1.0);
 
     vec3 color;
-    if (global.use_texture > 0.5) {
+    if (global.use_texture > 0.5 && vTileID >= 0) {
         vec2 atlasSize = vec2(16.0, 16.0);
         vec2 tileSize = 1.0 / atlasSize;
         vec2 tilePos = vec2(mod(float(vTileID), atlasSize.x), floor(float(vTileID) / atlasSize.x));
