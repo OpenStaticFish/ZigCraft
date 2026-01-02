@@ -32,9 +32,13 @@ const ClimateParams = biome_mod.ClimateParams;
 const gen_region = @import("gen_region.zig");
 const GenRegion = gen_region.GenRegion;
 const GenRegionCache = gen_region.GenRegionCache;
-const WorldClassMap = gen_region.WorldClassMap;
+const ClassificationCache = gen_region.ClassificationCache;
+const ClassCell = gen_region.ClassCell;
 const REGION_SIZE_X = gen_region.REGION_SIZE_X;
 const REGION_SIZE_Z = gen_region.REGION_SIZE_Z;
+const world_class = @import("world_class.zig");
+const ContinentalZone = world_class.ContinentalZone;
+const SurfaceType = world_class.SurfaceType;
 const Chunk = @import("../chunk.zig").Chunk;
 const CHUNK_SIZE_X = @import("../chunk.zig").CHUNK_SIZE_X;
 const CHUNK_SIZE_Y = @import("../chunk.zig").CHUNK_SIZE_Y;
@@ -142,28 +146,6 @@ fn makeNoiseParams(base_seed: u64, offset: u64, spread: f32, scale: f32, off: f3
     };
 }
 
-/// Explicit continentalness zones for terrain structure
-pub const ContinentalZone = enum {
-    deep_ocean,
-    ocean,
-    coast,
-    inland_low,
-    inland_high,
-    mountain_core,
-
-    /// Get zone name as string for debugging
-    pub fn name(self: ContinentalZone) []const u8 {
-        return switch (self) {
-            .deep_ocean => "Deep Ocean",
-            .ocean => "Ocean",
-            .coast => "Coast",
-            .inland_low => "Inland Low",
-            .inland_high => "Inland High",
-            .mountain_core => "Mountain Core",
-        };
-    }
-};
-
 // ============================================================================
 // Path System Constants (from region spec)
 // ============================================================================
@@ -259,7 +241,9 @@ pub const TerrainGenerator = struct {
     ridge_noise: Noise,
     params: Params,
     allocator: std.mem.Allocator,
-    classification_map: ?*WorldClassMap,
+
+    // Classification cache for LOD generation (Issue #119)
+    classification_cache: ClassificationCache,
 
     // V7-style multi-layer terrain noises (Issue #105)
     terrain_base: ConfiguredNoise,
@@ -293,6 +277,7 @@ pub const TerrainGenerator = struct {
             .ridge_noise = Noise.init(random.int(u64)),
             .params = .{},
             .allocator = allocator,
+            .classification_cache = ClassificationCache.init(),
 
             // V7-style terrain layers - spread values based on Luanti defaults
             // terrain_base: Base terrain shape, rolling hills character
@@ -380,7 +365,7 @@ pub const TerrainGenerator = struct {
         };
     }
 
-    pub fn generate(self: *const TerrainGenerator, chunk: *Chunk, stop_flag: ?*const bool) void {
+    pub fn generate(self: *TerrainGenerator, chunk: *Chunk, stop_flag: ?*const bool) void {
         const world_x = chunk.getWorldX();
         const world_z = chunk.getWorldZ();
         const p = self.params;
@@ -592,6 +577,19 @@ pub const TerrainGenerator = struct {
                 coastal_types[idx] = self.getCoastalSurfaceType(continentalness, slope, height, erosion);
             }
         }
+
+        // === Classification Cache Population (Issue #119 Phase 2) ===
+        // Populate the classification cache for LOD generation to sample from.
+        // This ensures all LOD levels use the same biome/surface/water decisions.
+        self.populateClassificationCache(
+            world_x,
+            world_z,
+            &surface_heights,
+            &biome_ids,
+            &continentalness_values,
+            &is_ocean_water_flags,
+            &coastal_types,
+        );
 
         var worm_carve_map = self.cave_system.generateWormCaves(chunk, &surface_heights, self.allocator) catch {
             self.generateWithoutWormCavesInternal(chunk, &surface_heights, &biome_ids, &secondary_biome_ids, &biome_blends, &filler_depths, &is_underwater_flags, &is_ocean_water_flags, &cave_region_values, &coastal_types, &slopes, &exposure_values, sea);
@@ -1057,6 +1055,7 @@ pub const TerrainGenerator = struct {
     }
 
     /// Generate heightmap data only (for LODSimplifiedData)
+    /// Uses classification cache when available to ensure LOD matches LOD0.
     pub fn generateHeightmapOnly(self: *const TerrainGenerator, data: *LODSimplifiedData, region_x: i32, region_z: i32, lod_level: LODLevel) void {
         // Cell size now depends on both LOD level and grid size
         const block_step = LODSimplifiedData.getCellSizeBlocks(lod_level);
@@ -1070,44 +1069,88 @@ pub const TerrainGenerator = struct {
             var gx: u32 = 0;
             while (gx < data.width) : (gx += 1) {
                 const idx = gx + gz * data.width;
-                const wx: f32 = @floatFromInt(world_x + @as(i32, @intCast(gx * block_step)));
-                const wz: f32 = @floatFromInt(world_z + @as(i32, @intCast(gz * block_step)));
+                const wx_i = world_x + @as(i32, @intCast(gx * block_step));
+                const wz_i = world_z + @as(i32, @intCast(gz * block_step));
+                const wx: f32 = @floatFromInt(wx_i);
+                const wz: f32 = @floatFromInt(wz_i);
 
-                // Fast terrain sampling
-                const c = self.getContinentalnessLOD(wx, wz);
-                const e_val = self.getErosionLOD(wx, wz);
-                const terrain_height = self.computeHeightLOD(c, e_val, wx, wz, sea);
-                const terrain_height_i: i32 = @intFromFloat(terrain_height);
-                const is_ocean_water = c < p.ocean_threshold;
+                // === Issue #119: Try classification cache first ===
+                // If this position was generated at LOD0, use the cached values
+                // to ensure biome/surface consistency across all LOD levels.
+                if (self.classification_cache.get(wx_i, wz_i)) |cached| {
+                    // Use cached biome and surface type from LOD0 generation
+                    data.biomes[idx] = cached.biome_id;
+                    data.top_blocks[idx] = self.surfaceTypeToBlock(cached.surface_type);
+                    data.colors[idx] = biome_mod.getBiomeColor(cached.biome_id);
 
-                const temperature = self.getTemperatureLOD(wx, wz);
-                const biome_id = self.getBiomeFromTemperature(temperature, is_ocean_water, terrain_height_i, p.sea_level);
+                    // Still need to compute height (it's always needed for mesh)
+                    // Use full-detail functions for consistency
+                    const c = self.getContinentalness(wx, wz);
+                    const e_val = self.getErosion(wx, wz);
+                    const pv = self.getPeaksValleys(wx, wz);
+                    const river_mask = self.getRiverMask(wx, wz);
+                    const region_info = region_pkg.getRegion(self.continentalness_noise.seed, wx_i, wz_i);
+                    const warp = self.computeWarp(wx, wz);
+                    const xw = wx + warp.x;
+                    const zw = wz + warp.z;
+                    const coast_jitter = self.coast_jitter_noise.fbm2D(xw, zw, 2, 2.0, 0.5, p.coast_jitter_scale) * 0.03;
+                    const c_jittered = clamp01(c + coast_jitter);
+                    const terrain_height = self.computeHeight(c_jittered, e_val, pv, xw, zw, river_mask, region_info);
+                    data.heightmap[idx] = @intCast(@as(i32, @intFromFloat(terrain_height)));
+                } else {
+                    // === Fallback: Compute from scratch using FULL-DETAIL functions ===
+                    // For chunks not yet visited, still use consistent noise functions
+                    const c = self.getContinentalness(wx, wz);
+                    const e_val = self.getErosion(wx, wz);
+                    const terrain_height = self.computeHeightLOD(c, e_val, wx, wz, sea);
+                    const terrain_height_i: i32 = @intFromFloat(terrain_height);
+                    const is_ocean_water = c < p.ocean_threshold;
 
-                data.heightmap[idx] = @intCast(terrain_height_i);
-                data.biomes[idx] = biome_id;
-                data.top_blocks[idx] = self.getSurfaceBlock(biome_id, is_ocean_water);
-                data.colors[idx] = biome_mod.getBiomeColor(biome_id);
+                    // Use full temperature calculation for biome consistency
+                    const temperature = self.getTemperature(wx, wz);
+                    const humidity = self.getHumidity(wx, wz);
+                    const climate = biome_mod.computeClimateParams(temperature, humidity, terrain_height_i, c, e_val, p.sea_level, CHUNK_SIZE_Y);
+                    const biome_id = biome_mod.selectBiomeSimple(climate);
+
+                    data.heightmap[idx] = @intCast(terrain_height_i);
+                    data.biomes[idx] = biome_id;
+                    data.top_blocks[idx] = self.getSurfaceBlock(biome_id, is_ocean_water);
+                    data.colors[idx] = biome_mod.getBiomeColor(biome_id);
+                }
             }
         }
     }
 
-    // LOD-optimized noise functions (more octaves for better terrain match)
+    /// Convert SurfaceType enum to BlockType for LOD rendering
+    fn surfaceTypeToBlock(self: *const TerrainGenerator, surface_type: SurfaceType) BlockType {
+        _ = self;
+        return switch (surface_type) {
+            .grass => .grass,
+            .sand => .sand,
+            .rock => .gravel,
+            .snow => .snow_block,
+            .water_deep, .water_shallow => .water,
+            .dirt => .dirt,
+            .stone => .stone,
+        };
+    }
+
+    // LOD-optimized noise functions
+    // Issue #119: These now call full-detail versions for semantic consistency.
+    // The performance difference is minimal and correctness is more important.
     fn getContinentalnessLOD(self: *const TerrainGenerator, x: f32, z: f32) f32 {
-        // 3 octaves instead of 4 (full terrain uses 4)
-        const val = self.continentalness_noise.fbm2D(x, z, 3, 2.0, 0.5, self.params.continental_scale);
-        return (val + 1.0) * 0.5;
+        // Use full-detail version for consistent biome/land/water decisions
+        return self.getContinentalness(x, z);
     }
 
     fn getErosionLOD(self: *const TerrainGenerator, x: f32, z: f32) f32 {
-        // 3 octaves instead of 4
-        const val = self.erosion_noise.fbm2D(x, z, 3, 2.0, 0.5, self.params.erosion_scale);
-        return (val + 1.0) * 0.5;
+        // Use full-detail version for consistent terrain shape
+        return self.getErosion(x, z);
     }
 
     fn getTemperatureLOD(self: *const TerrainGenerator, x: f32, z: f32) f32 {
-        // 3 octaves, use macro scale for LOD temperature
-        const val = self.temperature_noise.fbm2D(x, z, 3, 2.0, 0.5, self.params.temperature_macro_scale);
-        return clamp01((val + 1.0) * 0.5);
+        // Use full-detail version for consistent biome selection
+        return self.getTemperature(x, z);
     }
 
     fn computeHeightLOD(self: *const TerrainGenerator, c: f32, e: f32, x: f32, z: f32, sea: f32) f32 {
@@ -1920,6 +1963,102 @@ pub const TerrainGenerator = struct {
             .base_biome = center_biome,
             .neighbor_biome = detected_neighbor,
             .edge_band = closest_band,
+        };
+    }
+
+    // =========================================================================
+    // Classification Cache Population (Issue #119 Phase 2)
+    // =========================================================================
+
+    /// Populate classification cache with authoritative biome/surface/water data.
+    /// Called during LOD0 generation so LOD1-3 can sample consistent values.
+    fn populateClassificationCache(
+        self: *TerrainGenerator,
+        world_x: i32,
+        world_z: i32,
+        surface_heights: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32,
+        biome_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId,
+        continentalness_values: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32,
+        is_ocean_water_flags: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]bool,
+        coastal_types: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]CoastalSurfaceType,
+    ) void {
+        const p = self.params;
+
+        // Populate cache for each block in this chunk
+        var local_z: u32 = 0;
+        while (local_z < CHUNK_SIZE_Z) : (local_z += 1) {
+            var local_x: u32 = 0;
+            while (local_x < CHUNK_SIZE_X) : (local_x += 1) {
+                const idx = local_x + local_z * CHUNK_SIZE_X;
+                const wx = world_x + @as(i32, @intCast(local_x));
+                const wz = world_z + @as(i32, @intCast(local_z));
+
+                // Skip if already cached (shouldn't happen often, but be safe)
+                if (self.classification_cache.has(wx, wz)) continue;
+
+                const biome_id = biome_ids[idx];
+                const height = surface_heights[idx];
+                const continentalness = continentalness_values[idx];
+                const is_ocean = is_ocean_water_flags[idx];
+                const coastal_type = coastal_types[idx];
+
+                // Derive surface type from biome and coastal classification
+                const surface_type = self.deriveSurfaceTypeInternal(
+                    biome_id,
+                    height,
+                    is_ocean,
+                    coastal_type,
+                );
+
+                // Get continental zone
+                const continental_zone = self.getContinentalZone(continentalness);
+
+                // Get region info for role
+                const region_info = region_pkg.getRegion(self.continentalness_noise.seed, wx, wz);
+                const path_info = region_pkg.getPathInfo(self.continentalness_noise.seed, wx, wz, region_info);
+
+                // Store in cache
+                self.classification_cache.put(wx, wz, .{
+                    .biome_id = biome_id,
+                    .surface_type = surface_type,
+                    .is_water = height < p.sea_level,
+                    .continental_zone = continental_zone,
+                    .region_role = region_info.role,
+                    .path_type = path_info.path_type,
+                });
+            }
+        }
+    }
+
+    /// Derive surface type from biome and terrain parameters (internal helper)
+    fn deriveSurfaceTypeInternal(
+        self: *const TerrainGenerator,
+        biome_id: BiomeId,
+        height: i32,
+        is_ocean: bool,
+        coastal_type: CoastalSurfaceType,
+    ) SurfaceType {
+        const p = self.params;
+
+        // Water cases
+        if (is_ocean and height < p.sea_level - 30) return .water_deep;
+        if (is_ocean and height < p.sea_level) return .water_shallow;
+
+        // Coastal overrides
+        switch (coastal_type) {
+            .sand_beach => return .sand,
+            .gravel_beach => return .rock,
+            .cliff => return .stone,
+            .none => {},
+        }
+
+        // Biome-based surface
+        return switch (biome_id) {
+            .desert, .badlands, .beach => .sand,
+            .snow_tundra, .snowy_mountains => .snow,
+            .mountains => if (height > 120) .rock else .stone,
+            .deep_ocean, .ocean => .sand,
+            else => .grass,
         };
     }
 };

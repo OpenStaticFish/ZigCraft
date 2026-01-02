@@ -13,6 +13,11 @@
 
 const std = @import("std");
 const BiomeId = @import("biome.zig").BiomeId;
+const region = @import("region.zig");
+
+// Re-export region types for convenience
+pub const RegionRole = region.RegionRole;
+pub const PathType = region.PathType;
 
 pub const CELL_SIZE: u32 = 8;
 
@@ -28,21 +33,27 @@ pub const SurfaceType = enum(u8) {
     stone,
 };
 
-/// Region roles (from RegionMood system)
-pub const RegionRole = enum(u8) {
+/// Continental zones - structural terrain classification
+/// (distinct from RegionRole which is about gameplay/features)
+pub const ContinentalZone = enum(u8) {
+    deep_ocean,
+    ocean,
+    coast,
     inland_low,
     inland_high,
     mountain_core,
-    coast,
-    deep_ocean,
-};
 
-/// Path types (from path system)
-pub const PathType = enum(u8) {
-    none,
-    valley,
-    river,
-    plains_corridor,
+    /// Get zone name as string for debugging
+    pub fn name(self: ContinentalZone) []const u8 {
+        return switch (self) {
+            .deep_ocean => "Deep Ocean",
+            .ocean => "Ocean",
+            .coast => "Coast",
+            .inland_low => "Inland Low",
+            .inland_high => "Inland High",
+            .mountain_core => "Mountain Core",
+        };
+    }
 };
 
 /// Single classification cell
@@ -53,11 +64,34 @@ pub const ClassCell = struct {
     surface_type: SurfaceType,
     /// Is this position water (boolean)
     is_water: bool,
-    /// Region role for this area
+    /// Continental zone for terrain structure
+    continental_zone: ContinentalZone,
+    /// Region role for feature control (transit/destination/boundary)
     region_role: RegionRole,
     /// Path influence at this location
     path_type: PathType,
 };
+
+/// Derive surface type from biome and terrain parameters
+pub fn deriveSurfaceType(
+    biome_id: BiomeId,
+    height: i32,
+    sea_level: i32,
+    is_ocean: bool,
+) SurfaceType {
+    // Water cases
+    if (is_ocean and height < sea_level - 30) return .water_deep;
+    if (is_ocean and height < sea_level) return .water_shallow;
+
+    // Biome-based surface
+    return switch (biome_id) {
+        .desert, .badlands, .beach => .sand,
+        .snow_tundra, .snowy_mountains => .snow,
+        .mountains => if (height > 120) .rock else .stone,
+        .deep_ocean, .ocean => .sand,
+        else => .grass,
+    };
+}
 
 /// World Classification Map
 pub const WorldClassMap = struct {
@@ -80,11 +114,12 @@ pub const WorldClassMap = struct {
     pub fn getCell(self: *const WorldClassMap, gx: u32, gz: u32) *const ClassCell {
         if (gx >= GRID_SIZE_X or gz >= GRID_SIZE_Z) {
             // Return default cell for out of bounds
-            static const default_cell = ClassCell{
+            const default_cell = ClassCell{
                 .biome_id = .plains,
                 .surface_type = .grass,
                 .is_water = false,
-                .region_role = .inland_low,
+                .continental_zone = .inland_low,
+                .region_role = .transit,
                 .path_type = .none,
             };
             return &default_cell;

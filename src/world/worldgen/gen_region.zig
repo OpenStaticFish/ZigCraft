@@ -378,3 +378,90 @@ pub const ClimateCache = struct {
         return result;
     }
 };
+
+// ============================================================================
+// Classification Cache for LOD Generation (Issue #119 Phase 2)
+// ============================================================================
+
+const world_class = @import("world_class.zig");
+pub const ClassCell = world_class.ClassCell;
+pub const ContinentalZone = world_class.ContinentalZone;
+pub const SurfaceType = world_class.SurfaceType;
+
+/// Classification cache for LOD terrain generation.
+/// Stores authoritative biome/surface/water decisions at coarse resolution.
+/// LOD levels sample from this cache instead of recomputing.
+pub const ClassificationCache = struct {
+    /// Cell size in blocks (must match world_class.CELL_SIZE)
+    pub const CELL_SIZE: u32 = world_class.CELL_SIZE; // 8 blocks
+
+    /// Cache grid dimensions (covers 2048x2048 blocks = 128x128 chunks)
+    pub const GRID_SIZE: u32 = 256;
+
+    /// Optional cell - null means not yet computed
+    const OptionalCell = ?ClassCell;
+
+    cells: [GRID_SIZE * GRID_SIZE]OptionalCell,
+    origin_x: i32, // World X of grid origin (in blocks)
+    origin_z: i32, // World Z of grid origin (in blocks)
+
+    pub fn init() ClassificationCache {
+        return .{
+            .cells = [_]OptionalCell{null} ** (GRID_SIZE * GRID_SIZE),
+            .origin_x = 0,
+            .origin_z = 0,
+        };
+    }
+
+    /// Recenter the cache grid around a new origin.
+    /// Invalidates all cells.
+    pub fn recenter(self: *ClassificationCache, center_x: i32, center_z: i32) void {
+        const half_size: i32 = @intCast((GRID_SIZE * CELL_SIZE) / 2);
+        self.origin_x = center_x - half_size;
+        self.origin_z = center_z - half_size;
+
+        // Invalidate all cells
+        for (&self.cells) |*cell| {
+            cell.* = null;
+        }
+    }
+
+    /// Check if a world position is within the cache grid
+    pub fn contains(self: *const ClassificationCache, world_x: i32, world_z: i32) bool {
+        const grid_extent: i32 = @intCast(GRID_SIZE * CELL_SIZE);
+        return world_x >= self.origin_x and
+            world_x < self.origin_x + grid_extent and
+            world_z >= self.origin_z and
+            world_z < self.origin_z + grid_extent;
+    }
+
+    /// Get grid cell index for world position, or null if out of bounds
+    fn getCellIndex(self: *const ClassificationCache, world_x: i32, world_z: i32) ?usize {
+        if (!self.contains(world_x, world_z)) return null;
+
+        const local_x: u32 = @intCast(world_x - self.origin_x);
+        const local_z: u32 = @intCast(world_z - self.origin_z);
+        const cell_x = local_x / CELL_SIZE;
+        const cell_z = local_z / CELL_SIZE;
+
+        return cell_x + cell_z * GRID_SIZE;
+    }
+
+    /// Try to get cached classification at a world position
+    pub fn get(self: *const ClassificationCache, world_x: i32, world_z: i32) ?ClassCell {
+        const idx = self.getCellIndex(world_x, world_z) orelse return null;
+        return self.cells[idx];
+    }
+
+    /// Store classification at a world position
+    pub fn put(self: *ClassificationCache, world_x: i32, world_z: i32, cell: ClassCell) void {
+        const idx = self.getCellIndex(world_x, world_z) orelse return;
+        self.cells[idx] = cell;
+    }
+
+    /// Check if position has a cached value
+    pub fn has(self: *const ClassificationCache, world_x: i32, world_z: i32) bool {
+        const idx = self.getCellIndex(world_x, world_z) orelse return false;
+        return self.cells[idx] != null;
+    }
+};

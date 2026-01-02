@@ -900,8 +900,8 @@ const TerrainGenerator = @import("world/worldgen/generator.zig").TerrainGenerato
 test "WorldGen same seed produces identical blocks at origin" {
     const allocator = testing.allocator;
 
-    const gen1 = TerrainGenerator.init(12345, allocator);
-    const gen2 = TerrainGenerator.init(12345, allocator);
+    var gen1 = TerrainGenerator.init(12345, allocator);
+    var gen2 = TerrainGenerator.init(12345, allocator);
 
     var chunk1 = Chunk.init(0, 0);
     var chunk2 = Chunk.init(0, 0);
@@ -915,8 +915,8 @@ test "WorldGen same seed produces identical blocks at origin" {
 test "WorldGen same seed produces identical biomes at origin" {
     const allocator = testing.allocator;
 
-    const gen1 = TerrainGenerator.init(12345, allocator);
-    const gen2 = TerrainGenerator.init(12345, allocator);
+    var gen1 = TerrainGenerator.init(12345, allocator);
+    var gen2 = TerrainGenerator.init(12345, allocator);
 
     var chunk1 = Chunk.init(0, 0);
     var chunk2 = Chunk.init(0, 0);
@@ -961,8 +961,8 @@ test "WorldGen same seed produces identical blocks at different positions" {
 test "WorldGen different seeds produce different blocks" {
     const allocator = testing.allocator;
 
-    const gen1 = TerrainGenerator.init(11111, allocator);
-    const gen2 = TerrainGenerator.init(99999, allocator);
+    var gen1 = TerrainGenerator.init(11111, allocator);
+    var gen2 = TerrainGenerator.init(99999, allocator);
 
     var chunk1 = Chunk.init(0, 0);
     var chunk2 = Chunk.init(0, 0);
@@ -977,8 +977,8 @@ test "WorldGen different seeds produce different blocks" {
 test "WorldGen different seeds produce different biomes" {
     const allocator = testing.allocator;
 
-    const gen1 = TerrainGenerator.init(11111, allocator);
-    const gen2 = TerrainGenerator.init(99999, allocator);
+    var gen1 = TerrainGenerator.init(11111, allocator);
+    var gen2 = TerrainGenerator.init(99999, allocator);
 
     // With structure-first generation (Issue #92), noise scales are much larger
     // (continental scale = 1/3500). To see biome differences, we need to test
@@ -1016,7 +1016,7 @@ test "WorldGen determinism across multiple chunks with same seed" {
     const allocator = testing.allocator;
     const seed: u64 = 987654321;
 
-    const gens = [_]TerrainGenerator{
+    var gens = [_]TerrainGenerator{
         TerrainGenerator.init(seed, allocator),
         TerrainGenerator.init(seed, allocator),
         TerrainGenerator.init(seed, allocator),
@@ -1034,11 +1034,11 @@ test "WorldGen determinism across multiple chunks with same seed" {
         Chunk.init(-7, 12),
     };
 
-    for (gens, 0..) |gen, i| {
+    for (&gens, 0..) |*gen, i| {
         gen.generate(&chunks1[i], null);
     }
 
-    for (gens, 0..) |gen, i| {
+    for (&gens, 0..) |*gen, i| {
         gen.generate(&chunks2[i], null);
     }
 
@@ -1051,7 +1051,7 @@ test "WorldGen determinism across multiple chunks with same seed" {
 test "WorldGen golden output for known seed at origin" {
     const allocator = testing.allocator;
 
-    const gen = TerrainGenerator.init(42, allocator);
+    var gen = TerrainGenerator.init(42, allocator);
     var chunk = Chunk.init(0, 0);
 
     gen.generate(&chunk, null);
@@ -1077,7 +1077,7 @@ test "WorldGen golden output for known seed at origin" {
 
 test "WorldGen populates heightmap and biomes" {
     const allocator = testing.allocator;
-    const gen = TerrainGenerator.init(42, allocator);
+    var gen = TerrainGenerator.init(42, allocator);
     var chunk = Chunk.init(0, 0);
 
     gen.generate(&chunk, null);
