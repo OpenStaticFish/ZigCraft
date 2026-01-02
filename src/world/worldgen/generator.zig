@@ -811,248 +811,8 @@ pub const TerrainGenerator = struct {
     }
 
     // ============================================================================
-    // LOD Generation Functions (Issue #114)
+    // LOD Heightmap Generation (Issue #119 - Classification Cache)
     // ============================================================================
-
-    /// Generate a chunk with LOD-aware options.
-    /// This is the main entry point for LOD-controlled generation.
-    pub fn generateWithOptions(self: *const TerrainGenerator, chunk: *Chunk, options: GenerationOptions, stop_flag: ?*const bool) void {
-        switch (options.lod_level) {
-            .lod0 => {
-                // Full detail generation
-                if (options.enable_worm_caves) {
-                    self.generate(chunk, stop_flag);
-                } else {
-                    self.generateWithoutWormCaves(chunk, stop_flag);
-                }
-            },
-            .lod1 => {
-                // Reduced detail: no worm caves, simplified biome blending
-                self.generateLOD1(chunk, options, stop_flag);
-            },
-            .lod2 => {
-                // Minimal detail: no caves, no decorations
-                self.generateLOD2(chunk, options, stop_flag);
-            },
-            .lod3 => {
-                // Heightmap only: fastest possible generation
-                self.generateLOD3HeightmapOnly(chunk, stop_flag);
-            },
-        }
-    }
-
-    /// Generate LOD1 chunk - skip worm caves, reduced decoration density
-    fn generateLOD1(self: *const TerrainGenerator, chunk: *Chunk, options: GenerationOptions, stop_flag: ?*const bool) void {
-        const world_x = chunk.getWorldX();
-        const world_z = chunk.getWorldZ();
-        const p = self.params;
-        const sea: f32 = @floatFromInt(p.sea_level);
-
-        // Phase A: Terrain shape (same as full, but skip some noise octaves)
-        var surface_heights: [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32 = undefined;
-        var biome_ids: [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId = undefined;
-        var is_underwater_flags: [CHUNK_SIZE_X * CHUNK_SIZE_Z]bool = undefined;
-        var is_ocean_water_flags: [CHUNK_SIZE_X * CHUNK_SIZE_Z]bool = undefined;
-
-        var local_z: u32 = 0;
-        while (local_z < CHUNK_SIZE_Z) : (local_z += 1) {
-            if (stop_flag) |sf| if (sf.*) return;
-            var local_x: u32 = 0;
-            while (local_x < CHUNK_SIZE_X) : (local_x += 1) {
-                const idx = local_x + local_z * CHUNK_SIZE_X;
-                const wx: f32 = @floatFromInt(world_x + @as(i32, @intCast(local_x)));
-                const wz: f32 = @floatFromInt(world_z + @as(i32, @intCast(local_z)));
-
-                // Simplified terrain sampling (fewer octaves via LOD reduction)
-                const warp = self.computeWarp(wx, wz);
-                const xw = wx + warp.x;
-                const zw = wz + warp.z;
-                const c = self.getContinentalness(xw, zw);
-                const e_val = self.getErosion(xw, zw);
-                const pv = self.getPeaksValleys(xw, zw);
-                const river_mask = self.getRiverMask(xw, zw);
-                const region = region_pkg.getRegion(self.continentalness_noise.seed, @as(i32, @intFromFloat(wx)), @as(i32, @intFromFloat(wz)));
-                const terrain_height = self.computeHeight(c, e_val, pv, xw, zw, river_mask, region);
-                const terrain_height_i: i32 = @intFromFloat(terrain_height);
-
-                surface_heights[idx] = terrain_height_i;
-                is_underwater_flags[idx] = terrain_height < sea;
-                is_ocean_water_flags[idx] = c < p.ocean_threshold;
-
-                // Simplified biome selection (no blending)
-                const temperature = self.getTemperature(xw, zw);
-                const humidity = self.getHumidity(xw, zw);
-                const climate = biome_mod.computeClimateParams(temperature, humidity, terrain_height_i, c, e_val, p.sea_level, CHUNK_SIZE_Y);
-                const structural = biome_mod.StructuralParams{
-                    .height = terrain_height_i,
-                    .slope = 0, // Skip slope calculation for LOD1
-                    .continentalness = c,
-                    .ridge_mask = 0,
-                };
-                biome_ids[idx] = biome_mod.selectBiomeWithConstraintsAndRiver(climate, structural, river_mask);
-            }
-        }
-
-        // Phase C+D: Generate blocks (skip worm caves, use only noise caves if enabled)
-        local_z = 0;
-        while (local_z < CHUNK_SIZE_Z) : (local_z += 1) {
-            if (stop_flag) |sf| if (sf.*) return;
-            var local_x: u32 = 0;
-            while (local_x < CHUNK_SIZE_X) : (local_x += 1) {
-                const idx = local_x + local_z * CHUNK_SIZE_X;
-                const terrain_height_i = surface_heights[idx];
-                const is_underwater = is_underwater_flags[idx];
-                const is_ocean_water = is_ocean_water_flags[idx];
-                const active_biome: Biome = @enumFromInt(@intFromEnum(biome_ids[idx]));
-                const wx: f32 = @floatFromInt(world_x + @as(i32, @intCast(local_x)));
-                const wz: f32 = @floatFromInt(world_z + @as(i32, @intCast(local_z)));
-
-                chunk.setSurfaceHeight(local_x, local_z, @intCast(terrain_height_i));
-                chunk.biomes[idx] = biome_ids[idx];
-
-                var y: i32 = 0;
-                while (y < CHUNK_SIZE_Y) : (y += 1) {
-                    var block = self.getBlockAt(y, terrain_height_i, active_biome, 4, is_ocean_water, is_underwater, sea);
-
-                    // Apply noise caves only (skip worm caves)
-                    if (options.enable_caves and block != .air and block != .water and block != .bedrock) {
-                        const wy: f32 = @floatFromInt(y);
-                        const cave_region = self.cave_system.getCaveRegionValue(wx, wz);
-                        if (self.cave_system.shouldCarve(wx, wy, wz, terrain_height_i, cave_region)) {
-                            block = if (y < p.sea_level) .water else .air;
-                        }
-                    }
-                    chunk.setBlock(local_x, @intCast(y), local_z, block);
-                }
-            }
-        }
-
-        chunk.generated = true;
-
-        // Skip ores for LOD1
-        if (options.enable_decorations) {
-            self.generateFeatures(chunk);
-        }
-        chunk.dirty = true;
-    }
-
-    /// Generate LOD2 chunk - no caves, no decorations, simplified terrain
-    fn generateLOD2(self: *const TerrainGenerator, chunk: *Chunk, options: GenerationOptions, stop_flag: ?*const bool) void {
-        _ = options;
-        const world_x = chunk.getWorldX();
-        const world_z = chunk.getWorldZ();
-        const p = self.params;
-        const sea: f32 = @floatFromInt(p.sea_level);
-
-        var local_z: u32 = 0;
-        while (local_z < CHUNK_SIZE_Z) : (local_z += 1) {
-            if (stop_flag) |sf| if (sf.*) return;
-            var local_x: u32 = 0;
-            while (local_x < CHUNK_SIZE_X) : (local_x += 1) {
-                const idx = local_x + local_z * CHUNK_SIZE_X;
-                const wx: f32 = @floatFromInt(world_x + @as(i32, @intCast(local_x)));
-                const wz: f32 = @floatFromInt(world_z + @as(i32, @intCast(local_z)));
-
-                // Simplified terrain - skip warping for LOD2
-                const c = self.getContinentalness(wx, wz);
-                const e_val = self.getErosion(wx, wz);
-                const pv = self.getPeaksValleys(wx, wz);
-                const region = region_pkg.getRegion(self.continentalness_noise.seed, @as(i32, @intFromFloat(wx)), @as(i32, @intFromFloat(wz)));
-                const terrain_height = self.computeHeight(c, e_val, pv, wx, wz, 0, region);
-                const terrain_height_i: i32 = @intFromFloat(terrain_height);
-                const is_underwater = terrain_height < sea;
-                const is_ocean_water = c < p.ocean_threshold;
-
-                // Simplified biome (just use climate, no structural)
-                const temperature = self.getTemperature(wx, wz);
-                const humidity = self.getHumidity(wx, wz);
-                const climate = biome_mod.computeClimateParams(temperature, humidity, terrain_height_i, c, e_val, p.sea_level, CHUNK_SIZE_Y);
-                const biome_id = biome_mod.selectBiomeSimple(climate);
-                const active_biome: Biome = @enumFromInt(@intFromEnum(biome_id));
-
-                chunk.setSurfaceHeight(local_x, local_z, @intCast(terrain_height_i));
-                chunk.biomes[idx] = biome_id;
-
-                // Generate blocks without caves
-                var y: i32 = 0;
-                while (y < CHUNK_SIZE_Y) : (y += 1) {
-                    const block = self.getBlockAt(y, terrain_height_i, active_biome, 4, is_ocean_water, is_underwater, sea);
-                    chunk.setBlock(local_x, @intCast(y), local_z, block);
-                }
-            }
-        }
-
-        chunk.generated = true;
-        chunk.dirty = true;
-    }
-
-    /// Generate LOD3 chunk - heightmap only, fastest possible
-    /// Only generates surface data, no full 3D block data needed for distant rendering
-    fn generateLOD3HeightmapOnly(self: *const TerrainGenerator, chunk: *Chunk, stop_flag: ?*const bool) void {
-        const world_x = chunk.getWorldX();
-        const world_z = chunk.getWorldZ();
-        const p = self.params;
-        const sea: f32 = @floatFromInt(p.sea_level);
-
-        var local_z: u32 = 0;
-        while (local_z < CHUNK_SIZE_Z) : (local_z += 1) {
-            if (stop_flag) |sf| if (sf.*) return;
-            var local_x: u32 = 0;
-            while (local_x < CHUNK_SIZE_X) : (local_x += 1) {
-                const idx = local_x + local_z * CHUNK_SIZE_X;
-                const wx: f32 = @floatFromInt(world_x + @as(i32, @intCast(local_x)));
-                const wz: f32 = @floatFromInt(world_z + @as(i32, @intCast(local_z)));
-
-                // Fastest terrain sampling - reduced octaves, no warping
-                const c = self.getContinentalnessLOD(wx, wz);
-                const e_val = self.getErosionLOD(wx, wz);
-                const terrain_height = self.computeHeightLOD(c, e_val, wx, wz, sea);
-                const terrain_height_i: i32 = @intFromFloat(terrain_height);
-                const is_ocean_water = c < p.ocean_threshold;
-
-                // Simple biome from temperature only
-                const temperature = self.getTemperatureLOD(wx, wz);
-                const biome_id = self.getBiomeFromTemperature(temperature, is_ocean_water, terrain_height_i, p.sea_level);
-
-                chunk.setSurfaceHeight(local_x, local_z, @intCast(terrain_height_i));
-                chunk.biomes[idx] = biome_id;
-
-                // Generate only surface blocks + a few layers
-                const surface_block = self.getSurfaceBlock(biome_id, is_ocean_water);
-                const fill_start: i32 = @max(0, terrain_height_i - 3);
-
-                // Bedrock
-                chunk.setBlock(local_x, 0, local_z, .bedrock);
-
-                // Stone fill
-                var y: i32 = 1;
-                while (y < fill_start) : (y += 1) {
-                    chunk.setBlock(local_x, @intCast(y), local_z, .stone);
-                }
-
-                // Dirt/sand fill
-                while (y < terrain_height_i) : (y += 1) {
-                    chunk.setBlock(local_x, @intCast(y), local_z, .dirt);
-                }
-
-                // Surface
-                if (terrain_height_i >= 0 and terrain_height_i < CHUNK_SIZE_Y) {
-                    chunk.setBlock(local_x, @intCast(terrain_height_i), local_z, surface_block);
-                }
-
-                // Water fill for oceans
-                if (is_ocean_water and terrain_height_i < p.sea_level) {
-                    y = terrain_height_i + 1;
-                    while (y <= p.sea_level and y < CHUNK_SIZE_Y) : (y += 1) {
-                        chunk.setBlock(local_x, @intCast(y), local_z, .water);
-                    }
-                }
-            }
-        }
-
-        chunk.generated = true;
-        chunk.dirty = true;
-    }
 
     /// Generate heightmap data only (for LODSimplifiedData)
     /// Uses classification cache when available to ensure LOD matches LOD0.
@@ -1062,7 +822,6 @@ pub const TerrainGenerator = struct {
         const world_x = region_x * @as(i32, @intCast(lod_level.regionSizeBlocks()));
         const world_z = region_z * @as(i32, @intCast(lod_level.regionSizeBlocks()));
         const p = self.params;
-        const sea: f32 = @floatFromInt(p.sea_level);
 
         var gz: u32 = 0;
         while (gz < data.width) : (gz += 1) {
@@ -1099,14 +858,25 @@ pub const TerrainGenerator = struct {
                     data.heightmap[idx] = @intCast(@as(i32, @intFromFloat(terrain_height)));
                 } else {
                     // === Fallback: Compute from scratch using FULL-DETAIL functions ===
-                    // For chunks not yet visited, still use consistent noise functions
+                    // For chunks not yet visited at LOD0, compute using the same
+                    // functions as LOD0 for perfect semantic consistency (Issue #119 Phase 3).
                     const c = self.getContinentalness(wx, wz);
                     const e_val = self.getErosion(wx, wz);
-                    const terrain_height = self.computeHeightLOD(c, e_val, wx, wz, sea);
+                    const pv = self.getPeaksValleys(wx, wz);
+                    const river_mask = self.getRiverMask(wx, wz);
+                    const region_info = region_pkg.getRegion(self.continentalness_noise.seed, wx_i, wz_i);
+                    const warp = self.computeWarp(wx, wz);
+                    const xw = wx + warp.x;
+                    const zw = wz + warp.z;
+                    const coast_jitter = self.coast_jitter_noise.fbm2D(xw, zw, 2, 2.0, 0.5, p.coast_jitter_scale) * 0.03;
+                    const c_jittered = clamp01(c + coast_jitter);
+
+                    // Use full-detail computeHeight for consistency
+                    const terrain_height = self.computeHeight(c_jittered, e_val, pv, xw, zw, river_mask, region_info);
                     const terrain_height_i: i32 = @intFromFloat(terrain_height);
                     const is_ocean_water = c < p.ocean_threshold;
 
-                    // Use full temperature calculation for biome consistency
+                    // Use full-detail biome calculation
                     const temperature = self.getTemperature(wx, wz);
                     const humidity = self.getHumidity(wx, wz);
                     const climate = biome_mod.computeClimateParams(temperature, humidity, terrain_height_i, c, e_val, p.sea_level, CHUNK_SIZE_Y);
@@ -1133,84 +903,6 @@ pub const TerrainGenerator = struct {
             .dirt => .dirt,
             .stone => .stone,
         };
-    }
-
-    // LOD-optimized noise functions
-    // Issue #119: These now call full-detail versions for semantic consistency.
-    // The performance difference is minimal and correctness is more important.
-    fn getContinentalnessLOD(self: *const TerrainGenerator, x: f32, z: f32) f32 {
-        // Use full-detail version for consistent biome/land/water decisions
-        return self.getContinentalness(x, z);
-    }
-
-    fn getErosionLOD(self: *const TerrainGenerator, x: f32, z: f32) f32 {
-        // Use full-detail version for consistent terrain shape
-        return self.getErosion(x, z);
-    }
-
-    fn getTemperatureLOD(self: *const TerrainGenerator, x: f32, z: f32) f32 {
-        // Use full-detail version for consistent biome selection
-        return self.getTemperature(x, z);
-    }
-
-    fn computeHeightLOD(self: *const TerrainGenerator, c: f32, e: f32, x: f32, z: f32, sea: f32) f32 {
-        const p = self.params;
-
-        // Use same base logic as full terrain for consistency
-        // Ocean handling (same as computeHeight)
-        if (c < p.ocean_threshold) {
-            const ocean_depth_factor = c / p.ocean_threshold;
-            const deep_ocean_depth = sea - 55.0;
-            const shallow_ocean_depth = sea - 12.0;
-
-            // Minimal seabed variation for LOD
-            const seabed_detail = self.seabed_noise.fbm2D(x, z, 2, 2.0, 0.5, p.seabed_scale) * p.seabed_amp;
-
-            return std.math.lerp(deep_ocean_depth, shallow_ocean_depth, ocean_depth_factor) + seabed_detail;
-        }
-
-        // For land, use simplified V7-style terrain (same as full but fewer octaves)
-        // V7: Blend terrain_base and terrain_alt using height_select
-        const base_height = self.terrain_base.get2D(x, z);
-        const alt_height = self.terrain_alt.get2D(x, z);
-        const select = self.height_select.get2D(x, z);
-        const persist = self.terrain_persist.get2D(x, z);
-
-        const base_modulated = base_height * persist;
-        const alt_modulated = alt_height * persist;
-
-        const blend = clamp01((select + 8.0) / 16.0);
-        const v7_terrain = std.math.lerp(base_modulated, alt_modulated, blend);
-
-        // Combine with continental base (simplified for LOD)
-        const land_factor = (c - p.ocean_threshold) / (1.0 - p.ocean_threshold);
-        const erosion_factor = 1.0 - e * 0.5;
-        const continental_base = sea + 5 + land_factor * 60 * erosion_factor;
-
-        // Blend V7 terrain with continental base
-        const height = std.math.lerp(continental_base, v7_terrain, 0.7);
-
-        // Add some detail noise for LOD
-        if (c >= p.ocean_threshold) {
-            const detail = self.detail_noise.fbm2D(x, z, 3, 2.0, 0.5, 0.02);
-            return height + detail * 15.0 * (1.0 - e);
-        }
-
-        return height;
-    }
-
-    fn getBiomeFromTemperature(self: *const TerrainGenerator, temperature: f32, is_ocean: bool, height: i32, sea_level: i32) BiomeId {
-        _ = self;
-        if (is_ocean) {
-            if (height < sea_level - 30) return .deep_ocean;
-            return .ocean;
-        }
-
-        if (temperature < 0.2) return .snow_tundra;
-        if (temperature < 0.4) return .taiga;
-        if (temperature < 0.6) return .plains;
-        if (temperature < 0.8) return .forest;
-        return .desert;
     }
 
     fn getSurfaceBlock(self: *const TerrainGenerator, biome_id: BiomeId, is_ocean: bool) BlockType {
