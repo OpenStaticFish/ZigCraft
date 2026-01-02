@@ -171,9 +171,8 @@ pub const LODManager = struct {
             .memory_used_bytes = 0,
         };
 
-        // Initialize worker pool for LOD generation (2 workers for LOD tasks)
-        // LOD3 queue gets priority processing since it's fastest
-        mgr.lod_gen_pool = try WorkerPool.init(allocator, 2, lod3_queue, mgr, processLODGenJob);
+        // Initialize worker pool for LOD generation and meshing (3 workers for LOD tasks)
+        mgr.lod_gen_pool = try WorkerPool.init(allocator, 3, lod3_queue, mgr, processLODJob);
 
         log.log.info("LODManager initialized with radii: LOD0={}, LOD1={}, LOD2={}, LOD3={}", .{
             config.lod0_radius,
@@ -390,23 +389,23 @@ pub const LODManager = struct {
         self.mutex.lockShared();
         defer self.mutex.unlockShared();
 
-        const max_meshes_per_frame = 2; // Reduce from 4 for less main thread work
-        var meshes_built: u32 = 0;
-
         // Check LOD1 regions
         var iter1 = self.lod1_regions.iterator();
         while (iter1.next()) |entry| {
-            if (meshes_built >= max_meshes_per_frame) break;
             const chunk = entry.value_ptr.*;
             if (chunk.state == .generated) {
-                chunk.state = .queued_for_mesh;
-                // Build mesh immediately (on main thread for now)
-                self.buildMeshForChunk(chunk) catch |err| {
-                    log.log.err("Failed to build LOD1 mesh: {}", .{err});
-                    continue;
-                };
-                chunk.state = .mesh_ready;
-                meshes_built += 1;
+                const dx = chunk.region_x * 4 - self.player_cx;
+                const dz = chunk.region_z * 4 - self.player_cz;
+                const dist_sq = dx * dx + dz * dz;
+
+                chunk.state = .meshing;
+                try self.lod3_gen_queue.push(.{
+                    .type = .meshing,
+                    .chunk_x = chunk.region_x,
+                    .chunk_z = chunk.region_z,
+                    .job_token = chunk.job_token,
+                    .dist_sq = (dist_sq & 0x0FFFFFFF) | (@as(i32, @intFromEnum(LODLevel.lod1)) << 28),
+                });
             } else if (chunk.state == .mesh_ready) {
                 chunk.state = .uploading;
                 try self.lod1_upload_queue.push(chunk);
@@ -416,16 +415,20 @@ pub const LODManager = struct {
         // Check LOD2 regions
         var iter2 = self.lod2_regions.iterator();
         while (iter2.next()) |entry| {
-            if (meshes_built >= max_meshes_per_frame) break;
             const chunk = entry.value_ptr.*;
             if (chunk.state == .generated) {
-                chunk.state = .queued_for_mesh;
-                self.buildMeshForChunk(chunk) catch |err| {
-                    log.log.err("Failed to build LOD2 mesh: {}", .{err});
-                    continue;
-                };
-                chunk.state = .mesh_ready;
-                meshes_built += 1;
+                const dx = chunk.region_x * 8 - self.player_cx;
+                const dz = chunk.region_z * 8 - self.player_cz;
+                const dist_sq = dx * dx + dz * dz;
+
+                chunk.state = .meshing;
+                try self.lod3_gen_queue.push(.{
+                    .type = .meshing,
+                    .chunk_x = chunk.region_x,
+                    .chunk_z = chunk.region_z,
+                    .job_token = chunk.job_token,
+                    .dist_sq = (dist_sq & 0x0FFFFFFF) | (@as(i32, @intFromEnum(LODLevel.lod2)) << 28),
+                });
             } else if (chunk.state == .mesh_ready) {
                 chunk.state = .uploading;
                 try self.lod2_upload_queue.push(chunk);
@@ -435,16 +438,20 @@ pub const LODManager = struct {
         // Check LOD3 regions
         var iter3 = self.lod3_regions.iterator();
         while (iter3.next()) |entry| {
-            if (meshes_built >= max_meshes_per_frame) break;
             const chunk = entry.value_ptr.*;
             if (chunk.state == .generated) {
-                chunk.state = .queued_for_mesh;
-                self.buildMeshForChunk(chunk) catch |err| {
-                    log.log.err("Failed to build LOD3 mesh: {}", .{err});
-                    continue;
-                };
-                chunk.state = .mesh_ready;
-                meshes_built += 1;
+                const dx = chunk.region_x * 16 - self.player_cx;
+                const dz = chunk.region_z * 16 - self.player_cz;
+                const dist_sq = dx * dx + dz * dz;
+
+                chunk.state = .meshing;
+                try self.lod3_gen_queue.push(.{
+                    .type = .meshing,
+                    .chunk_x = chunk.region_x,
+                    .chunk_z = chunk.region_z,
+                    .job_token = chunk.job_token,
+                    .dist_sq = (dist_sq & 0x0FFFFFFF) | (@as(i32, @intFromEnum(LODLevel.lod3)) << 28),
+                });
             } else if (chunk.state == .mesh_ready) {
                 chunk.state = .uploading;
                 try self.lod3_upload_queue.push(chunk);
@@ -555,24 +562,28 @@ pub const LODManager = struct {
         self.mutex.unlock();
 
         // Remove outside of iteration
-        for (to_remove.items) |key| {
-            if (storage.get(key)) |chunk| {
-                // Clean up mesh before removing chunk
-                const meshes = switch (lod) {
-                    .lod0 => return,
-                    .lod1 => &self.lod1_meshes,
-                    .lod2 => &self.lod2_meshes,
-                    .lod3 => &self.lod3_meshes,
-                };
-                if (meshes.get(key)) |mesh| {
-                    mesh.deinit(self.rhi);
-                    self.allocator.destroy(mesh);
-                    _ = meshes.remove(key);
-                }
+        if (to_remove.items.len > 0) {
+            // Vulkan: Wait for GPU idle before destroying buffers that might be in flight
+            self.rhi.waitIdle();
+            for (to_remove.items) |key| {
+                if (storage.get(key)) |chunk| {
+                    // Clean up mesh before removing chunk
+                    const meshes = switch (lod) {
+                        .lod0 => return,
+                        .lod1 => &self.lod1_meshes,
+                        .lod2 => &self.lod2_meshes,
+                        .lod3 => &self.lod3_meshes,
+                    };
+                    if (meshes.get(key)) |mesh| {
+                        mesh.deinit(self.rhi);
+                        self.allocator.destroy(mesh);
+                        _ = meshes.remove(key);
+                    }
 
-                chunk.deinit(self.allocator);
-                self.allocator.destroy(chunk);
-                _ = storage.remove(key);
+                    chunk.deinit(self.allocator);
+                    self.allocator.destroy(chunk);
+                    _ = storage.remove(key);
+                }
             }
         }
     }
@@ -807,6 +818,9 @@ pub const LODManager = struct {
 
     /// Get or create mesh for a LOD region
     fn getOrCreateMesh(self: *LODManager, key: LODRegionKey) !*LODMesh {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         const meshes = switch (key.lod) {
             .lod0 => return error.InvalidLODLevel,
             .lod1 => &self.lod1_meshes,
@@ -849,15 +863,12 @@ pub const LODManager = struct {
     }
 };
 
-/// Worker pool callback for LOD generation
-fn processLODGenJob(ctx: *anyopaque, job: Job) void {
+/// Worker pool callback for LOD tasks (generation and meshing)
+fn processLODJob(ctx: *anyopaque, job: Job) void {
     const self: *LODManager = @ptrCast(@alignCast(ctx));
 
-    // Determine which LOD level this job is for based on job type
-    // We store LOD level in dist_sq's high bits (hacky but works)
+    // Determine which LOD level this job is for based on encoded priority
     const lod_level: LODLevel = @enumFromInt(@as(u3, @intCast((job.dist_sq >> 28) & 0x7)));
-    const real_dist_sq = job.dist_sq & 0x0FFFFFFF;
-
     const key = LODRegionKey{
         .rx = job.chunk_x,
         .rz = job.chunk_z,
@@ -868,7 +879,7 @@ fn processLODGenJob(ctx: *anyopaque, job: Job) void {
     const storage = switch (lod_level) {
         .lod0 => {
             self.mutex.unlockShared();
-            return; // LOD0 handled by World
+            return;
         },
         .lod1 => &self.lod1_regions,
         .lod2 => &self.lod2_regions,
@@ -880,7 +891,7 @@ fn processLODGenJob(ctx: *anyopaque, job: Job) void {
         return;
     };
 
-    // Check if job is stale (too far from player)
+    // Stale job check (too far from player)
     const scale: i32 = @intCast(lod_level.chunksPerSide());
     const player_rx = @divFloor(self.player_cx, scale);
     const player_rz = @divFloor(self.player_cz, scale);
@@ -895,29 +906,25 @@ fn processLODGenJob(ctx: *anyopaque, job: Job) void {
     const region_radius = @divFloor(radius, scale) + 2;
 
     if (dx * dx + dz * dz > region_radius * region_radius) {
-        if (chunk.state == .generating) {
+        if (chunk.state == .generating or chunk.state == .meshing) {
             chunk.state = .missing;
         }
         self.mutex.unlockShared();
         return;
     }
 
-    // Pin chunk during generation
+    // Pin chunk during operation
     chunk.pin();
     self.mutex.unlockShared();
     defer chunk.unpin();
 
-    // Skip if wrong state or token mismatch
-    if (chunk.state != .generating or chunk.job_token != job.job_token) {
-        return;
-    }
+    // Skip if token mismatch
+    if (chunk.job_token != job.job_token) return;
 
-    _ = real_dist_sq;
+    switch (job.type) {
+        .generation => {
+            if (chunk.state != .generating) return;
 
-    // Generate LOD data based on level
-    switch (lod_level) {
-        .lod0 => {}, // Handled by World
-        .lod1, .lod2, .lod3 => {
             // Initialize simplified data if needed
             if (chunk.data != .simplified) {
                 var data = LODSimplifiedData.init(self.allocator, lod_level) catch {
@@ -929,10 +936,19 @@ fn processLODGenJob(ctx: *anyopaque, job: Job) void {
                 self.generator.generateHeightmapOnly(&data, chunk.region_x, chunk.region_z, lod_level);
                 chunk.data = .{ .simplified = data };
             }
+            chunk.state = .generated;
+        },
+        .meshing => {
+            if (chunk.state != .meshing) return;
+
+            self.buildMeshForChunk(chunk) catch |err| {
+                log.log.err("Failed to build LOD{} async mesh: {}", .{ @intFromEnum(lod_level), err });
+                chunk.state = .generated; // Retry later
+                return;
+            };
+            chunk.state = .mesh_ready;
         },
     }
-
-    chunk.state = .generated;
 }
 
 // Tests
