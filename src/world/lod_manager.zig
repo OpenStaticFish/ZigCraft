@@ -262,18 +262,16 @@ pub const LODManager = struct {
         if (self.paused) return;
 
         const pc = worldToChunk(@intFromFloat(player_pos.x), @intFromFloat(player_pos.z));
-        const moved = pc.chunk_x != self.player_cx or pc.chunk_z != self.player_cz;
+        _ = pc.chunk_x != self.player_cx or pc.chunk_z != self.player_cz; // Track movement for future use
 
-        if (moved) {
-            self.player_cx = pc.chunk_x;
-            self.player_cz = pc.chunk_z;
+        self.player_cx = pc.chunk_x;
+        self.player_cz = pc.chunk_z;
 
-            // Queue LOD regions that need loading
-            // Priority: LOD3 first (fast, fills horizon), then LOD2, LOD1
-            try self.queueLODRegions(.lod3, player_velocity);
-            try self.queueLODRegions(.lod2, player_velocity);
-            try self.queueLODRegions(.lod1, player_velocity);
-        }
+        // Queue LOD regions that need loading (also queue on first frame)
+        // Priority: LOD3 first (fast, fills horizon), then LOD2, LOD1
+        try self.queueLODRegions(.lod3, player_velocity);
+        try self.queueLODRegions(.lod2, player_velocity);
+        try self.queueLODRegions(.lod1, player_velocity);
 
         // Process state transitions
         try self.processStateTransitions();
@@ -299,6 +297,8 @@ pub const LODManager = struct {
 
         // Skip LOD0 - handled by existing World system
         if (lod == .lod0) return;
+
+        var queued_count: u32 = 0;
 
         const scale: i32 = @intCast(lod.chunksPerSide());
         const region_radius = @divFloor(radius, scale) + 1;
@@ -341,6 +341,7 @@ pub const LODManager = struct {
 
                 // Check if region exists
                 if (storage.get(key) == null) {
+                    queued_count += 1;
                     // Create new LOD chunk
                     const chunk = try self.allocator.create(LODChunk);
                     chunk.* = LODChunk.init(rx, rz, lod);
@@ -658,9 +659,9 @@ pub const LODManager = struct {
         while (iter3.next()) |entry| {
             const key = entry.key_ptr.*;
             const mesh = entry.value_ptr.*;
-            
+
             if (!mesh.ready or mesh.vertex_count == 0) continue;
-            
+
             // Get region for this mesh
             if (self.lod3_regions.get(key)) |chunk| {
                 if (chunk.state != .renderable) continue;
@@ -672,10 +673,7 @@ pub const LODManager = struct {
                 const size_z: f32 = @floatFromInt(bounds.max_z - bounds.min_z);
 
                 // Frustum Culling
-                const aabb = AABB.init(
-                    Vec3.init(region_x - camera_pos.x, -camera_pos.y, region_z - camera_pos.z),
-                    Vec3.init(region_x - camera_pos.x + size_x, -camera_pos.y + 256.0, region_z - camera_pos.z + size_z)
-                );
+                const aabb = AABB.init(Vec3.init(region_x - camera_pos.x, -camera_pos.y, region_z - camera_pos.z), Vec3.init(region_x - camera_pos.x + size_x, -camera_pos.y + 256.0, region_z - camera_pos.z + size_z));
                 if (!frustum.intersectsAABB(aabb)) continue;
 
                 // Masking: skip if within LOD2 radius
@@ -684,14 +682,14 @@ pub const LODManager = struct {
                 const region_cz = @as(f32, @floatFromInt(key.rz)) * scale + scale * 0.5;
                 const dx = region_cx - player_cx;
                 const dz = region_cz - player_cz;
-                const dist_sq = dx*dx + dz*dz;
+                const dist_sq = dx * dx + dz * dz;
                 const lod2_rad = @as(f32, @floatFromInt(self.config.lod2_radius));
                 if (dist_sq <= lod2_rad * lod2_rad) continue;
-                
+
                 const rel_x = region_x - camera_pos.x;
                 const rel_z = region_z - camera_pos.z;
                 const rel_y = -camera_pos.y;
-                
+
                 const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
                 self.rhi.setModelMatrix(model);
                 mesh.draw(self.rhi);
@@ -703,9 +701,9 @@ pub const LODManager = struct {
         while (iter2.next()) |entry| {
             const key = entry.key_ptr.*;
             const mesh = entry.value_ptr.*;
-            
+
             if (!mesh.ready or mesh.vertex_count == 0) continue;
-            
+
             if (self.lod2_regions.get(key)) |chunk| {
                 if (chunk.state != .renderable) continue;
 
@@ -716,10 +714,7 @@ pub const LODManager = struct {
                 const size_z: f32 = @floatFromInt(bounds.max_z - bounds.min_z);
 
                 // Frustum Culling
-                const aabb = AABB.init(
-                    Vec3.init(region_x - camera_pos.x, -camera_pos.y, region_z - camera_pos.z),
-                    Vec3.init(region_x - camera_pos.x + size_x, -camera_pos.y + 256.0, region_z - camera_pos.z + size_z)
-                );
+                const aabb = AABB.init(Vec3.init(region_x - camera_pos.x, -camera_pos.y, region_z - camera_pos.z), Vec3.init(region_x - camera_pos.x + size_x, -camera_pos.y + 256.0, region_z - camera_pos.z + size_z));
                 if (!frustum.intersectsAABB(aabb)) continue;
 
                 // Masking: skip if within LOD1 radius
@@ -728,14 +723,14 @@ pub const LODManager = struct {
                 const region_cz = @as(f32, @floatFromInt(key.rz)) * scale + scale * 0.5;
                 const dx = region_cx - player_cx;
                 const dz = region_cz - player_cz;
-                const dist_sq = dx*dx + dz*dz;
+                const dist_sq = dx * dx + dz * dz;
                 const lod1_rad = @as(f32, @floatFromInt(self.config.lod1_radius));
                 if (dist_sq <= lod1_rad * lod1_rad) continue;
-                
+
                 const rel_x = region_x - camera_pos.x;
                 const rel_z = region_z - camera_pos.z;
                 const rel_y = -camera_pos.y;
-                
+
                 const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
                 self.rhi.setModelMatrix(model);
                 mesh.draw(self.rhi);
@@ -747,9 +742,9 @@ pub const LODManager = struct {
         while (iter1.next()) |entry| {
             const key = entry.key_ptr.*;
             const mesh = entry.value_ptr.*;
-            
+
             if (!mesh.ready or mesh.vertex_count == 0) continue;
-            
+
             if (self.lod1_regions.get(key)) |chunk| {
                 if (chunk.state != .renderable) continue;
 
@@ -760,10 +755,7 @@ pub const LODManager = struct {
                 const size_z: f32 = @floatFromInt(bounds.max_z - bounds.min_z);
 
                 // Frustum Culling
-                const aabb = AABB.init(
-                    Vec3.init(region_x - camera_pos.x, -camera_pos.y, region_z - camera_pos.z),
-                    Vec3.init(region_x - camera_pos.x + size_x, -camera_pos.y + 256.0, region_z - camera_pos.z + size_z)
-                );
+                const aabb = AABB.init(Vec3.init(region_x - camera_pos.x, -camera_pos.y, region_z - camera_pos.z), Vec3.init(region_x - camera_pos.x + size_x, -camera_pos.y + 256.0, region_z - camera_pos.z + size_z));
                 if (!frustum.intersectsAABB(aabb)) continue;
 
                 // Masking: skip if within LOD0 radius
@@ -772,14 +764,14 @@ pub const LODManager = struct {
                 const region_cz = @as(f32, @floatFromInt(key.rz)) * scale + scale * 0.5;
                 const dx = region_cx - player_cx;
                 const dz = region_cz - player_cz;
-                const dist_sq = dx*dx + dz*dz;
+                const dist_sq = dx * dx + dz * dz;
                 const lod0_rad = @as(f32, @floatFromInt(self.config.lod0_radius));
                 if (dist_sq <= lod0_rad * lod0_rad) continue;
-                
+
                 const rel_x = region_x - camera_pos.x;
                 const rel_z = region_z - camera_pos.z;
                 const rel_y = -camera_pos.y;
-                
+
                 const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
                 self.rhi.setModelMatrix(model);
                 mesh.draw(self.rhi);
@@ -815,7 +807,7 @@ pub const LODManager = struct {
         };
 
         const mesh = try self.getOrCreateMesh(key);
-        
+
         switch (chunk.data) {
             .simplified => |*data| {
                 const bounds = chunk.worldBounds();
@@ -834,12 +826,12 @@ pub const LODManager = struct {
 /// Worker pool callback for LOD generation
 fn processLODGenJob(ctx: *anyopaque, job: Job) void {
     const self: *LODManager = @ptrCast(@alignCast(ctx));
-    
+
     // Determine which LOD level this job is for based on job type
     // We store LOD level in dist_sq's high bits (hacky but works)
     const lod_level: LODLevel = @enumFromInt(@as(u3, @intCast((job.dist_sq >> 28) & 0x7)));
     const real_dist_sq = job.dist_sq & 0x0FFFFFFF;
-    
+
     const key = LODRegionKey{
         .rx = job.chunk_x,
         .rz = job.chunk_z,
@@ -895,7 +887,7 @@ fn processLODGenJob(ctx: *anyopaque, job: Job) void {
     }
 
     _ = real_dist_sq;
-    
+
     // Generate LOD data based on level
     switch (lod_level) {
         .lod0 => {}, // Handled by World
@@ -906,7 +898,7 @@ fn processLODGenJob(ctx: *anyopaque, job: Job) void {
                     chunk.state = .missing;
                     return;
                 };
-                
+
                 // Generate heightmap data
                 self.generator.generateHeightmapOnly(&data, chunk.region_x, chunk.region_z, lod_level);
                 chunk.data = .{ .simplified = data };
@@ -920,7 +912,7 @@ fn processLODGenJob(ctx: *anyopaque, job: Job) void {
 // Tests
 test "LODManager initialization" {
     const allocator = std.testing.allocator;
-    
+
     // We can't fully test without RHI, but we can test the config
     const config = LODConfig{
         .lod0_radius = 8,

@@ -222,6 +222,11 @@ pub const Key = enum(u32) {
     left_ctrl = 0x400000E0,
     right_ctrl = 0x400000E4,
 
+    // Function keys
+    f1 = 0x4000003a,
+    f2 = 0x4000003b,
+    f3 = 0x4000003c,
+
     _,
 
     pub fn fromSDL(sdl_key: u32) Key {

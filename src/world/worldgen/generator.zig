@@ -53,25 +53,25 @@ const LODSimplifiedData = lod_chunk.LODSimplifiedData;
 pub const GenerationOptions = struct {
     /// LOD level - higher = more simplified
     lod_level: LODLevel = .lod0,
-    
+
     /// Enable cave generation (worm + noise caves)
     enable_caves: bool = true,
-    
+
     /// Enable worm caves specifically (expensive neighbor checks)
     enable_worm_caves: bool = true,
-    
+
     /// Enable decorations (trees, flowers, grass)
     enable_decorations: bool = true,
-    
+
     /// Enable ore generation
     enable_ores: bool = true,
-    
+
     /// Enable lighting calculation
     enable_lighting: bool = true,
-    
+
     /// Noise octave reduction (0 = full detail, higher = fewer octaves)
     octave_reduction: u8 = 0,
-    
+
     /// Skip biome edge blending
     skip_biome_blending: bool = false,
 
@@ -1056,8 +1056,8 @@ pub const TerrainGenerator = struct {
 
     /// Generate heightmap data only (for LODSimplifiedData)
     pub fn generateHeightmapOnly(self: *const TerrainGenerator, data: *LODSimplifiedData, region_x: i32, region_z: i32, lod_level: LODLevel) void {
-        const scale = lod_level.scale();
-        const block_step = scale; // Sample every N blocks
+        // Cell size now depends on both LOD level and grid size
+        const block_step = LODSimplifiedData.getCellSizeBlocks(lod_level);
         const world_x = region_x * @as(i32, @intCast(lod_level.regionSizeBlocks()));
         const world_z = region_z * @as(i32, @intCast(lod_level.regionSizeBlocks()));
         const p = self.params;
@@ -1109,22 +1109,29 @@ pub const TerrainGenerator = struct {
     }
 
     fn computeHeightLOD(self: *const TerrainGenerator, c: f32, e: f32, x: f32, z: f32, sea: f32) f32 {
-        _ = x;
-        _ = z;
         const p = self.params;
 
-        // Simplified height computation for LOD
+        // Base height from continentalness and erosion
+        var base_height: f32 = undefined;
         if (c < p.ocean_threshold) {
             // Ocean
             const depth_factor = 1.0 - (c / p.ocean_threshold);
-            return sea - 10 - depth_factor * 30;
+            base_height = sea - 10 - depth_factor * 30;
         } else {
             // Land
             const land_factor = (c - p.ocean_threshold) / (1.0 - p.ocean_threshold);
             const erosion_factor = 1.0 - e * 0.5;
-            const base_height = sea + 5 + land_factor * 60 * erosion_factor;
-            return base_height;
+            base_height = sea + 5 + land_factor * 60 * erosion_factor;
         }
+
+        // Add terrain detail noise (simplified - fewer octaves)
+        // This makes LOD terrain match full-detail terrain better
+        if (c >= p.ocean_threshold) {
+            const detail = self.detail_noise.fbm2D(x, z, 2, 2.0, 0.5, 0.02);
+            base_height += detail * 15.0 * (1.0 - e);
+        }
+
+        return base_height;
     }
 
     fn getBiomeFromTemperature(self: *const TerrainGenerator, temperature: f32, is_ocean: bool, height: i32, sea_level: i32) BiomeId {

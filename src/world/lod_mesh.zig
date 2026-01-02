@@ -2,7 +2,7 @@
 //!
 //! LOD meshes are simplified versions of chunk meshes:
 //! - LOD1: 2x2 chunks merged, 2-block resolution
-//! - LOD2: 4x4 chunks merged, 4-block resolution  
+//! - LOD2: 4x4 chunks merged, 4-block resolution
 //! - LOD3: 8x8 chunks merged, 8-block resolution (heightmap only)
 //!
 //! Key simplifications:
@@ -25,7 +25,7 @@ const BufferHandle = rhi_mod.BufferHandle;
 
 /// Size of each LOD mesh grid cell in blocks
 pub fn getCellSize(lod: LODLevel) u32 {
-    return lod.scale();
+    return LODSimplifiedData.getCellSizeBlocks(lod);
 }
 
 /// LOD Mesh for a single LOD region
@@ -65,63 +65,55 @@ pub const LODMesh = struct {
     }
 
     /// Build mesh from simplified LOD data (heightmap-based)
-    pub fn buildFromSimplifiedData(self: *LODMesh, data: *const LODSimplifiedData, world_x: i32, world_z: i32) !void {
+    pub fn buildFromSimplifiedData(self: *LODMesh, data: *const LODSimplifiedData, _: i32, _: i32) !void {
         const cell_size = getCellSize(self.lod_level);
-        
+
         var vertices = std.ArrayListUnmanaged(Vertex){};
         defer vertices.deinit(self.allocator);
 
-        // Generate a quad for each grid cell
+        // Generate a smooth heightmap mesh using per-vertex heights
+        // Each cell is split into 2 triangles with vertices at correct heights
         var gz: u32 = 0;
         while (gz < data.width) : (gz += 1) {
             var gx: u32 = 0;
             while (gx < data.width) : (gx += 1) {
-                const idx = gx + gz * data.width;
-                const height = data.heightmap[idx];
-                const biome = data.biomes[idx];
-                const color = biome_mod.getBiomeColor(biome);
+                // Get heights at all 4 corners of this cell
+                const h00 = data.heightmap[gx + gz * data.width];
+                const h10 = if (gx + 1 < data.width) data.heightmap[(gx + 1) + gz * data.width] else h00;
+                const h01 = if (gz + 1 < data.width) data.heightmap[gx + (gz + 1) * data.width] else h00;
+                const h11 = if (gx + 1 < data.width and gz + 1 < data.width) data.heightmap[(gx + 1) + (gz + 1) * data.width] else h00;
 
-                // Convert packed color to RGB floats
-                const r: f32 = @as(f32, @floatFromInt((color >> 16) & 0xFF)) / 255.0;
-                const g: f32 = @as(f32, @floatFromInt((color >> 8) & 0xFF)) / 255.0;
-                const b: f32 = @as(f32, @floatFromInt(color & 0xFF)) / 255.0;
+                // Get biome colors at all 4 corners
+                const c00 = biome_mod.getBiomeColor(data.biomes[gx + gz * data.width]);
+                const c10 = if (gx + 1 < data.width) biome_mod.getBiomeColor(data.biomes[(gx + 1) + gz * data.width]) else c00;
+                const c01 = if (gz + 1 < data.width) biome_mod.getBiomeColor(data.biomes[gx + (gz + 1) * data.width]) else c00;
+                const c11 = if (gx + 1 < data.width and gz + 1 < data.width) biome_mod.getBiomeColor(data.biomes[(gx + 1) + (gz + 1) * data.width]) else c00;
 
-                // Local position of this cell (relative to chunk origin)
+                // Local positions
                 const wx: f32 = @floatFromInt(gx * cell_size);
                 const wz: f32 = @floatFromInt(gz * cell_size);
-                const wy: f32 = @floatFromInt(height);
                 const size: f32 = @floatFromInt(cell_size);
 
-                // Add top face quad (two triangles)
-                try addTopFaceQuad(self.allocator, &vertices, wx, wy, wz, size, r, g, b);
+                // Create 2 triangles with proper per-vertex heights
+                try addSmoothQuad(self.allocator, &vertices, wx, wz, size, h00, h10, h01, h11, c00, c10, c01, c11);
 
-                // Add skirts (perimeter) to hide gaps
-                const skirt_depth = size * 4.0;
+                // Add skirts at edges
+                const skirt_depth: f32 = size * 4.0;
                 if (gx == 0) {
-                    try addSideFaceQuad(self.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.6, g * 0.6, b * 0.6, .west);
+                    const avg_h: f32 = @floatFromInt(@divTrunc(h00 + h01, 2));
+                    try addSideFaceQuad(self.allocator, &vertices, wx, avg_h, wz, size, avg_h - skirt_depth, unpackR(c00) * 0.6, unpackG(c00) * 0.6, unpackB(c00) * 0.6, .west);
                 }
                 if (gx == data.width - 1) {
-                    try addSideFaceQuad(self.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.6, g * 0.6, b * 0.6, .east);
+                    const avg_h: f32 = @floatFromInt(@divTrunc(h10 + h11, 2));
+                    try addSideFaceQuad(self.allocator, &vertices, wx, avg_h, wz, size, avg_h - skirt_depth, unpackR(c10) * 0.6, unpackG(c10) * 0.6, unpackB(c10) * 0.6, .east);
                 }
                 if (gz == 0) {
-                    try addSideFaceQuad(self.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.7, g * 0.7, b * 0.7, .north);
+                    const avg_h: f32 = @floatFromInt(@divTrunc(h00 + h10, 2));
+                    try addSideFaceQuad(self.allocator, &vertices, wx, avg_h, wz, size, avg_h - skirt_depth, unpackR(c00) * 0.7, unpackG(c00) * 0.7, unpackB(c00) * 0.7, .north);
                 }
                 if (gz == data.width - 1) {
-                    try addSideFaceQuad(self.allocator, &vertices, wx, wy, wz, size, wy - skirt_depth, r * 0.7, g * 0.7, b * 0.7, .south);
-                }
-
-                // Add side faces if needed (for cliffs/height differences)
-                if (gx > 0) {
-                    const neighbor_height = data.heightmap[(gx - 1) + gz * data.width];
-                    if (height > neighbor_height + 2) {
-                        try addSideFaceQuad(self.allocator, &vertices, wx, wy, wz, size, @floatFromInt(neighbor_height), r * 0.7, g * 0.7, b * 0.7, .west);
-                    }
-                }
-                if (gz > 0) {
-                    const neighbor_height = data.heightmap[gx + (gz - 1) * data.width];
-                    if (height > neighbor_height + 2) {
-                        try addSideFaceQuad(self.allocator, &vertices, wx, wy, wz, size, @floatFromInt(neighbor_height), r * 0.8, g * 0.8, b * 0.8, .north);
-                    }
+                    const avg_h: f32 = @floatFromInt(@divTrunc(h01 + h11, 2));
+                    try addSideFaceQuad(self.allocator, &vertices, wx, avg_h, wz, size, avg_h - skirt_depth, unpackR(c01) * 0.7, unpackG(c01) * 0.7, unpackB(c01) * 0.7, .south);
                 }
             }
         }
@@ -133,7 +125,7 @@ pub const LODMesh = struct {
         if (self.pending_vertices) |p| {
             self.allocator.free(p);
         }
-        
+
         if (vertices.items.len > 0) {
             self.pending_vertices = try self.allocator.dupe(Vertex, vertices.items);
         } else {
@@ -147,8 +139,8 @@ pub const LODMesh = struct {
         heightmap: []const i16,
         biomes: []const BiomeId,
         width: u32,
-        world_x: i32,
-        world_z: i32,
+        _: i32,
+        _: i32,
     ) !void {
         const cell_size = getCellSize(self.lod_level);
 
@@ -265,6 +257,102 @@ pub const LODMesh = struct {
 };
 
 const FaceDir = enum { north, south, east, west };
+
+// Helper functions for unpacking colors
+fn unpackR(color: u32) f32 {
+    return @as(f32, @floatFromInt((color >> 16) & 0xFF)) / 255.0;
+}
+
+fn unpackG(color: u32) f32 {
+    return @as(f32, @floatFromInt((color >> 8) & 0xFF)) / 255.0;
+}
+
+fn unpackB(color: u32) f32 {
+    return @as(f32, @floatFromInt(color & 0xFF)) / 255.0;
+}
+
+/// Add a smooth quad with per-vertex heights and colors
+fn addSmoothQuad(
+    allocator: std.mem.Allocator,
+    vertices: *std.ArrayListUnmanaged(Vertex),
+    x: f32,
+    z: f32,
+    size: f32,
+    h00: i16,
+    h10: i16,
+    h01: i16,
+    h11: i16,
+    c00: u32,
+    c10: u32,
+    c01: u32,
+    c11: u32,
+) !void {
+    const y00: f32 = @floatFromInt(h00);
+    const y10: f32 = @floatFromInt(h10);
+    const y01: f32 = @floatFromInt(h01);
+    const y11: f32 = @floatFromInt(h11);
+
+    // Calculate normals from height differences
+    const normal = [3]f32{ 0, 1, 0 };
+
+    // Triangle 1: (0,0), (1,0), (1,1)
+    try vertices.append(allocator, .{
+        .pos = .{ x, y00, z },
+        .color = .{ unpackR(c00), unpackG(c00), unpackB(c00) },
+        .normal = normal,
+        .uv = .{ 0, 0 },
+        .tile_id = 0,
+        .skylight = 15,
+        .blocklight = 0,
+    });
+    try vertices.append(allocator, .{
+        .pos = .{ x + size, y10, z },
+        .color = .{ unpackR(c10), unpackG(c10), unpackB(c10) },
+        .normal = normal,
+        .uv = .{ 1, 0 },
+        .tile_id = 0,
+        .skylight = 15,
+        .blocklight = 0,
+    });
+    try vertices.append(allocator, .{
+        .pos = .{ x + size, y11, z + size },
+        .color = .{ unpackR(c11), unpackG(c11), unpackB(c11) },
+        .normal = normal,
+        .uv = .{ 1, 1 },
+        .tile_id = 0,
+        .skylight = 15,
+        .blocklight = 0,
+    });
+
+    // Triangle 2: (0,0), (1,1), (0,1)
+    try vertices.append(allocator, .{
+        .pos = .{ x, y00, z },
+        .color = .{ unpackR(c00), unpackG(c00), unpackB(c00) },
+        .normal = normal,
+        .uv = .{ 0, 0 },
+        .tile_id = 0,
+        .skylight = 15,
+        .blocklight = 0,
+    });
+    try vertices.append(allocator, .{
+        .pos = .{ x + size, y11, z + size },
+        .color = .{ unpackR(c11), unpackG(c11), unpackB(c11) },
+        .normal = normal,
+        .uv = .{ 1, 1 },
+        .tile_id = 0,
+        .skylight = 15,
+        .blocklight = 0,
+    });
+    try vertices.append(allocator, .{
+        .pos = .{ x, y01, z + size },
+        .color = .{ unpackR(c01), unpackG(c01), unpackB(c01) },
+        .normal = normal,
+        .uv = .{ 0, 1 },
+        .tile_id = 0,
+        .skylight = 15,
+        .blocklight = 0,
+    });
+}
 
 /// Add a top-facing quad (two triangles)
 fn addTopFaceQuad(allocator: std.mem.Allocator, vertices: *std.ArrayListUnmanaged(Vertex), x: f32, y: f32, z: f32, size: f32, r: f32, g: f32, b: f32) !void {
@@ -394,8 +482,8 @@ pub const LODMeshBuilder = struct {
         mesh: *LODMesh,
         heightmaps: [4][]const i16, // NW, NE, SW, SE chunks
         biomes: [4][]const BiomeId,
-        region_world_x: i32,
-        region_world_z: i32,
+        _: i32,
+        _: i32,
     ) !void {
         _ = self;
         const chunk_size: u32 = 16;
@@ -407,7 +495,7 @@ pub const LODMeshBuilder = struct {
 
         // Process each of the 4 chunks
         const chunk_offsets = [4][2]i32{
-            .{ 0, 0 },  // NW
+            .{ 0, 0 }, // NW
             .{ 16, 0 }, // NE
             .{ 0, 16 }, // SW
             .{ 16, 16 }, // SE
@@ -473,8 +561,8 @@ pub const LODMeshBuilder = struct {
         mesh: *LODMesh,
         heightmaps: [16][]const i16,
         biomes_data: [16][]const BiomeId,
-        region_world_x: i32,
-        region_world_z: i32,
+        _: i32,
+        _: i32,
     ) !void {
         _ = self;
         const chunk_size: u32 = 16;
@@ -582,8 +670,8 @@ test "getCellSize" {
 pub const EdgeDir = enum {
     north, // -Z
     south, // +Z
-    east,  // +X
-    west,  // -X
+    east, // +X
+    west, // -X
 };
 
 /// Seam stitching configuration

@@ -74,13 +74,30 @@ pub const LODSimplifiedData = struct {
 
     allocator: std.mem.Allocator,
 
+    /// Get optimal grid size for a given LOD level.
+    /// We want ~2 blocks per cell for smooth terrain:
+    /// - LOD1: region=64 blocks, 32x32 grid = 2 blocks/cell
+    /// - LOD2: region=128 blocks, 64x64 grid = 2 blocks/cell
+    /// - LOD3: region=256 blocks, 128x128 grid = 2 blocks/cell
+    pub fn getGridSize(lod_level: LODLevel) u32 {
+        return switch (lod_level) {
+            .lod0 => 16, // Not used for LOD0
+            .lod1 => 32, // 64 blocks / 32 = 2 blocks per cell
+            .lod2 => 64, // 128 blocks / 64 = 2 blocks per cell
+            .lod3 => 128, // 256 blocks / 128 = 2 blocks per cell
+        };
+    }
+
+    /// Get cell size in blocks for a given LOD level and grid size.
+    pub fn getCellSizeBlocks(lod_level: LODLevel) u32 {
+        const region_size = lod_level.regionSizeBlocks();
+        const grid_size = getGridSize(lod_level);
+        return region_size / grid_size;
+    }
+
     pub fn init(allocator: std.mem.Allocator, lod_level: LODLevel) !LODSimplifiedData {
-        _ = lod_level; // Reserved for future LOD-specific grid sizing
-        // Grid size depends on LOD level
-        // LOD1: 32x32 (2 blocks per cell)
-        // LOD2: 32x32 (4 blocks per cell) 
-        // LOD3: 32x32 (8 blocks per cell)
-        const grid_size: u32 = 32;
+        // Grid size scales with LOD level for consistent 2 blocks per cell
+        const grid_size = getGridSize(lod_level);
         const count = grid_size * grid_size;
 
         return LODSimplifiedData{

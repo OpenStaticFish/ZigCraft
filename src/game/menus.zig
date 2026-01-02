@@ -79,7 +79,7 @@ pub fn drawSettings(ctx: MenuContext, app_state: *AppState, settings: *Settings,
     const toggle_width: f32 = 160.0 * ui_scale;
 
     const pw: f32 = @min(ctx.screen_w * 0.75, 750.0 * ui_scale);
-    const ph: f32 = 600.0 * ui_scale;
+    const ph: f32 = 680.0 * ui_scale;
     const px: f32 = (ctx.screen_w - pw) * 0.5;
     const py: f32 = (ctx.screen_h - ph) * 0.5;
     ctx.ui.drawRect(.{ .x = px, .y = py, .width = pw, .height = ph }, Color.rgba(0.12, 0.14, 0.18, 0.95));
@@ -172,6 +172,14 @@ pub fn drawSettings(ctx: MenuContext, app_state: *AppState, settings: *Settings,
         rhi.setMSAA(settings.msaa_samples);
     }
     Font.drawText(ctx.ui, "(VULKAN)", vx + toggle_width + 10.0, sy, 1.5 * ui_scale, Color.rgba(0.5, 0.5, 0.6, 1.0));
+    sy += row_height;
+
+    // LOD System (experimental)
+    Font.drawText(ctx.ui, "LOD SYSTEM", lx, sy, label_scale, Color.rgba(0.7, 0.7, 0.8, 1.0));
+    if (Widgets.drawButton(ctx.ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, if (settings.lod_enabled) "ENABLED" else "DISABLED", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
+        settings.lod_enabled = !settings.lod_enabled;
+    }
+    Font.drawText(ctx.ui, "(RESTART)", vx + toggle_width + 10.0, sy, 1.5 * ui_scale, Color.rgba(0.5, 0.5, 0.6, 1.0));
 
     // Back button
     if (Widgets.drawButton(ctx.ui, .{ .x = px + (pw - 150.0 * ui_scale) * 0.5, .y = py + ph - 70.0 * ui_scale, .width = 150.0 * ui_scale, .height = 50.0 * ui_scale }, "BACK", btn_scale, mouse_x, mouse_y, mouse_clicked)) {

@@ -1997,7 +1997,10 @@ fn destroyBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle) void {
     ctx.mutex.unlock();
 
     if (entry_opt) |entry| {
-        ctx.buffer_deletion_queue[ctx.current_sync_frame].append(ctx.allocator, .{ .buffer = entry.value.buffer, .memory = entry.value.memory }) catch {
+        // Queue to the OTHER frame slot so it's deleted after waiting on that frame's fence
+        // This ensures at least MAX_FRAMES_IN_FLIGHT frames pass before deletion
+        const delete_frame = (ctx.current_sync_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+        ctx.buffer_deletion_queue[delete_frame].append(ctx.allocator, .{ .buffer = entry.value.buffer, .memory = entry.value.memory }) catch {
             std.log.err("Failed to queue buffer deletion (OOM). Leaking buffer.", .{});
         };
     }
@@ -2204,7 +2207,9 @@ fn ensureFrameReady(ctx: *VulkanContext) void {
     // Reset fence
     _ = c.vkResetFences(ctx.vk_device, 1, &fence);
 
-    // Process deletion queue
+    // Process deletion queue for THIS frame slot (now safe since fence waited)
+    // Buffers were queued here during frame N, now it's frame N+MAX_FRAMES_IN_FLIGHT
+    // so the GPU is guaranteed to be done with them
     for (ctx.buffer_deletion_queue[ctx.current_sync_frame].items) |zombie| {
         c.vkDestroyBuffer(ctx.vk_device, zombie.buffer, null);
         c.vkFreeMemory(ctx.vk_device, zombie.memory, null);
@@ -3383,7 +3388,7 @@ fn drawIndirect(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, command_buffer: r
     if (!ctx.frame_in_progress) return;
     // Simple implementation for single draw or MDI if shader supports it
     // For now, this is a placeholder that assumes the pipeline is bound
-    
+
     ctx.mutex.lock();
     const vbo_opt = ctx.buffers.get(handle);
     const cmd_opt = ctx.buffers.get(command_buffer);

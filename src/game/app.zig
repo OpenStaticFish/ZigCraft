@@ -223,6 +223,7 @@ const CloudState = struct {
 const DebugState = packed struct {
     shadows: bool = false,
     cascade_idx: usize = 0,
+    show_fps: bool = false,
 };
 
 pub const App = struct {
@@ -493,6 +494,9 @@ pub const App = struct {
                 self.settings.vsync = !self.settings.vsync;
                 self.rhi.setVSync(self.settings.vsync);
             }
+            if (self.input.isKeyPressed(.f2)) {
+                self.debug_state.show_fps = !self.debug_state.show_fps;
+            }
             if (debug_build and self.input.isKeyPressed(.u)) self.debug_state.shadows = !self.debug_state.shadows;
 
             self.map_controller.update(&self.input, &self.camera, self.time.delta_time, self.window_manager.window, screen_w, screen_h, if (self.world_map) |m| m.width else 256);
@@ -514,11 +518,18 @@ pub const App = struct {
 
                 if (self.world) |active_world| {
                     if (active_world.render_distance != self.settings.render_distance) {
-                        active_world.render_distance = self.settings.render_distance;
+                        active_world.setRenderDistance(self.settings.render_distance);
                     }
 
                     try active_world.update(self.camera.position, self.time.delta_time);
                 } else self.app_state = .home;
+            } else if (in_pause) {
+                // Still update render distance while paused so settings take effect immediately
+                if (self.world) |active_world| {
+                    if (active_world.render_distance != self.settings.render_distance) {
+                        active_world.setRenderDistance(self.settings.render_distance);
+                    }
+                }
             }
         } else if (self.input.mouse_captured) self.input.setMouseCapture(self.window_manager.window, false);
 
@@ -616,9 +627,16 @@ pub const App = struct {
                     if (self.world_map) |*m| {
                         try self.map_controller.draw(u, screen_w, screen_h, m, &active_world.generator, self.camera.position);
                     }
-                    if (debug_build) {
+                    // FPS counter (F2 toggle, works in release builds)
+                    if (self.debug_state.show_fps) {
                         u.drawRect(.{ .x = 10, .y = 10, .width = 80, .height = 30 }, Color.rgba(0, 0, 0, 0.7));
                         Font.drawNumber(u, @intFromFloat(self.time.fps), 15, 15, Color.white);
+                    }
+                    if (debug_build) {
+                        if (!self.debug_state.show_fps) {
+                            u.drawRect(.{ .x = 10, .y = 10, .width = 80, .height = 30 }, Color.rgba(0, 0, 0, 0.7));
+                            Font.drawNumber(u, @intFromFloat(self.time.fps), 15, 15, Color.white);
+                        }
                         const stats = active_world.getStats();
                         const rs = active_world.getRenderStats();
                         const pc = worldToChunk(@intFromFloat(self.camera.position.x), @intFromFloat(self.camera.position.z));
@@ -806,6 +824,9 @@ pub const App = struct {
                     self.settings.vsync = !self.settings.vsync;
                     self.rhi.setVSync(self.settings.vsync);
                 }
+                if (self.input.isKeyPressed(.f2)) {
+                    self.debug_state.show_fps = !self.debug_state.show_fps;
+                }
                 if (debug_build and self.input.isKeyPressed(.u)) self.debug_state.shadows = !self.debug_state.shadows;
 
                 self.map_controller.update(&self.input, &self.camera, self.time.delta_time, self.window_manager.window, screen_w, screen_h, if (self.world_map) |m| m.width else 256);
@@ -827,11 +848,18 @@ pub const App = struct {
 
                     if (self.world) |active_world| {
                         if (active_world.render_distance != self.settings.render_distance) {
-                            active_world.render_distance = self.settings.render_distance;
+                            active_world.setRenderDistance(self.settings.render_distance);
                         }
 
                         try active_world.update(self.camera.position, self.time.delta_time);
                     } else self.app_state = .home;
+                } else if (in_pause) {
+                    // Still update render distance while paused so settings take effect immediately
+                    if (self.world) |active_world| {
+                        if (active_world.render_distance != self.settings.render_distance) {
+                            active_world.setRenderDistance(self.settings.render_distance);
+                        }
+                    }
                 }
             } else if (self.input.mouse_captured) self.input.setMouseCapture(self.window_manager.window, false);
 
@@ -931,9 +959,16 @@ pub const App = struct {
                         if (self.world_map) |*m| {
                             try self.map_controller.draw(u, screen_w, screen_h, m, &active_world.generator, self.camera.position);
                         }
-                        if (debug_build) {
+                        // FPS counter (F2 toggle, works in release builds)
+                        if (self.debug_state.show_fps) {
                             u.drawRect(.{ .x = 10, .y = 10, .width = 80, .height = 30 }, Color.rgba(0, 0, 0, 0.7));
                             Font.drawNumber(u, @intFromFloat(self.time.fps), 15, 15, Color.white);
+                        }
+                        if (debug_build) {
+                            if (!self.debug_state.show_fps) {
+                                u.drawRect(.{ .x = 10, .y = 10, .width = 80, .height = 30 }, Color.rgba(0, 0, 0, 0.7));
+                                Font.drawNumber(u, @intFromFloat(self.time.fps), 15, 15, Color.white);
+                            }
                             const stats = active_world.getStats();
                             const rs = active_world.getRenderStats();
                             const pc = worldToChunk(@intFromFloat(self.camera.position.x), @intFromFloat(self.camera.position.z));
@@ -1033,7 +1068,11 @@ pub const App = struct {
                     if (self.time.frame_count % 120 == 0) {
                         const s = active_world.getStats();
                         const rs = active_world.getRenderStats();
-                        std.debug.print("FPS: {d:.1} | Chunks: {}/{} (culled: {}) | Vertices: {} | Pos: ({d:.1}, {d:.1}, {d:.1})\n", .{ self.time.fps, rs.chunks_rendered, s.chunks_loaded, rs.chunks_culled, rs.vertices_rendered, self.camera.position.x, self.camera.position.y, self.camera.position.z });
+                        if (active_world.getLODStats()) |lod| {
+                            std.debug.print("FPS: {d:.1} | Chunks: {}/{} | LOD: L1={} L2={} L3={} | Pos: ({d:.1}, {d:.1}, {d:.1})\n", .{ self.time.fps, rs.chunks_rendered, s.chunks_loaded, lod.lod1_loaded, lod.lod2_loaded, lod.lod3_loaded, self.camera.position.x, self.camera.position.y, self.camera.position.z });
+                        } else {
+                            std.debug.print("FPS: {d:.1} | Chunks: {}/{} (culled: {}) | Vertices: {} | Pos: ({d:.1}, {d:.1}, {d:.1})\n", .{ self.time.fps, rs.chunks_rendered, s.chunks_loaded, rs.chunks_culled, rs.vertices_rendered, self.camera.position.x, self.camera.position.y, self.camera.position.z });
+                        }
                     }
                 }
             }

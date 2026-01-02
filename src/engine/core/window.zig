@@ -21,7 +21,7 @@ pub const WindowManager = struct {
             _ = c.SDL_GL_SetAttribute(c.SDL_GL_DEPTH_SIZE, 24);
         }
 
-        var window_flags: u32 = c.SDL_WINDOW_RESIZABLE;
+        var window_flags: u32 = c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_HIGH_PIXEL_DENSITY;
         if (use_vulkan) {
             window_flags |= c.SDL_WINDOW_VULKAN;
         } else {

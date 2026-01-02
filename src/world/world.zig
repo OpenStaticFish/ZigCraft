@@ -151,7 +151,7 @@ pub const World = struct {
     player_movement: PlayerMovement,
     rhi: RHI,
     paused: bool = false,
-    
+
     // LOD System (Issue #114)
     lod_manager: ?*LODManager,
     lod_enabled: bool,
@@ -194,17 +194,17 @@ pub const World = struct {
 
         return world;
     }
-    
+
     /// Initialize with LOD system enabled for extended render distances
     pub fn initWithLOD(allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI, lod_config: LODConfig) !*World {
         const world = try init(allocator, render_distance, seed, rhi);
-        
+
         // Initialize LOD manager with generator reference
         world.lod_manager = try LODManager.init(allocator, lod_config, rhi, &world.generator);
         world.lod_enabled = true;
-        
+
         log.log.info("World initialized with LOD system enabled (LOD3 radius: {} chunks)", .{lod_config.lod3_radius});
-        
+
         return world;
     }
 
@@ -230,12 +230,12 @@ pub const World = struct {
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.chunks.deinit();
-        
+
         // Cleanup LOD manager if enabled
         if (self.lod_manager) |lod_mgr| {
             lod_mgr.deinit();
         }
-        
+
         self.allocator.destroy(self);
     }
 
@@ -243,7 +243,7 @@ pub const World = struct {
         self.paused = true;
         self.gen_queue.setPaused(true);
         self.mesh_queue.setPaused(true);
-        
+
         // Pause LOD manager if enabled
         if (self.lod_manager) |lod_mgr| {
             lod_mgr.pause();
@@ -267,15 +267,30 @@ pub const World = struct {
         self.paused = false;
         self.gen_queue.setPaused(false);
         self.mesh_queue.setPaused(false);
-        
+
         // Resume LOD manager if enabled
         if (self.lod_manager) |lod_mgr| {
             lod_mgr.unpause();
         }
-        
+
         // Chunks will be re-queued in the next update() cycle
         // Force an update of player position to trigger re-scanning
         self.last_pc = .{ .x = 9999, .z = 9999 };
+    }
+
+    /// Set render distance and trigger chunk loading/unloading update
+    pub fn setRenderDistance(self: *World, distance: i32) void {
+        if (self.render_distance != distance) {
+            std.log.info("Render distance changed: {} -> {}", .{ self.render_distance, distance });
+            self.render_distance = distance;
+            // Update LOD config to match render distance
+            if (self.lod_manager) |lod_mgr| {
+                lod_mgr.config.lod0_radius = distance;
+                std.log.info("LOD lod0_radius updated to {}", .{distance});
+            }
+            // Force chunk rescan on next update
+            self.last_pc = .{ .x = 9999, .z = 9999 };
+        }
     }
 
     fn processGenJob(ctx: *anyopaque, job: Job) void {
@@ -487,9 +502,9 @@ pub const World = struct {
 
         self.chunks_mutex.lockShared();
         var mesh_iter = self.chunks.iterator();
-        
+
         const render_dist = if (self.lod_manager) |mgr| @min(self.render_distance, mgr.config.lod0_radius) else self.render_distance;
-        
+
         while (mesh_iter.next()) |entry| {
             const data = entry.value_ptr.*;
             if (data.chunk.state == .generated) {
@@ -560,7 +575,7 @@ pub const World = struct {
             }
         }
         self.chunks_mutex.unlock();
-        
+
         // Update LOD manager if enabled
         if (self.lod_manager) |lod_mgr| {
             const velocity = Vec3.init(
@@ -588,9 +603,9 @@ pub const World = struct {
         const frustum = Frustum.fromViewProj(view_proj);
 
         const pc = worldToChunk(@intFromFloat(camera_pos.x), @intFromFloat(camera_pos.z));
-        
+
         const render_dist = if (self.lod_manager) |mgr| @min(self.render_distance, mgr.config.lod0_radius) else self.render_distance;
-        
+
         var cz = pc.chunk_z - render_dist;
         while (cz <= pc.chunk_z + render_dist) : (cz += 1) {
             var cx = pc.chunk_x - render_dist;
@@ -700,7 +715,7 @@ pub const World = struct {
             .upload_queue = self.upload_queue.count(),
         };
     }
-    
+
     /// Get LOD system statistics (returns null if LOD not enabled)
     pub fn getLODStats(self: *World) ?@import("lod_manager.zig").LODStats {
         if (self.lod_manager) |lod_mgr| {
@@ -708,7 +723,7 @@ pub const World = struct {
         }
         return null;
     }
-    
+
     /// Check if LOD system is enabled
     pub fn isLODEnabled(self: *const World) bool {
         return self.lod_enabled;
