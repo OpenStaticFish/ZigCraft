@@ -165,7 +165,7 @@ const AtmosphereState = struct {
         }
 
         self.fog_color = self.horizon_color;
-        self.fog_density = std.math.lerp(0.002, 0.0012, self.sun_intensity);
+        self.fog_density = std.math.lerp(0.0015, 0.0008, self.sun_intensity);
     }
 
     pub fn setTimeOfDay(self: *AtmosphereState, time: f32) void {
