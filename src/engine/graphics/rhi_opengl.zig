@@ -444,7 +444,7 @@ fn beginMainPass(ctx_ptr: *anyopaque) void {
     // Ensure render state matches what Renderer was doing
     c.glEnable(c.GL_DEPTH_TEST);
     c.glDepthMask(c.GL_TRUE);
-    c.glDepthFunc(c.GL_LESS);
+    c.glDepthFunc(c.GL_LEQUAL);
 
     // Disable culling for now to ensure all voxel faces are visible regardless of winding
     c.glDisable(c.GL_CULL_FACE);
