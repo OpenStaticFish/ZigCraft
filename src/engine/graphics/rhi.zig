@@ -213,9 +213,9 @@ pub const RHI = struct {
         endShadowPass: *const fn (ctx: *anyopaque) void,
 
         // Uniforms
+        setModelMatrix: *const fn (ctx: *anyopaque, model: Mat4, mask_radius: f32) void,
         updateGlobalUniforms: *const fn (ctx: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void,
         updateShadowUniforms: *const fn (ctx: *anyopaque, params: ShadowParams) void,
-        setModelMatrix: *const fn (ctx: *anyopaque, model: Mat4) void,
         setTextureUniforms: *const fn (ctx: *anyopaque, texture_enabled: bool, shadow_map_handles: [3]TextureHandle) void,
 
         // Draw Calls
@@ -363,8 +363,8 @@ pub const RHI = struct {
         self.vtable.updateShadowUniforms(self.ptr, params);
     }
 
-    pub fn setModelMatrix(self: RHI, model: Mat4) void {
-        self.vtable.setModelMatrix(self.ptr, model);
+    pub fn setModelMatrix(self: RHI, model: Mat4, mask_radius: f32) void {
+        self.vtable.setModelMatrix(self.ptr, model, mask_radius);
     }
 
     pub fn setTextureUniforms(self: RHI, texture_enabled: bool, shadow_map_handles: [3]TextureHandle) void {

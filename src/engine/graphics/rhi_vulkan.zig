@@ -63,6 +63,8 @@ const ShadowUniforms = extern struct {
 const ModelUniforms = extern struct {
     view_proj: Mat4,
     model: Mat4,
+    mask_radius: f32,
+    padding: [3]f32,
 };
 
 /// Push constants for procedural sky rendering.
@@ -223,6 +225,7 @@ const VulkanContext = struct {
     memory_type_index: u32, // Host visible coherent
 
     current_model: Mat4,
+    current_mask_radius: f32,
 
     // For swapchain recreation
     window: *c.SDL_Window,
@@ -865,7 +868,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
 
     // 12. Pipeline Layout
     var push_constant_range = std.mem.zeroes(c.VkPushConstantRange);
-    push_constant_range.stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT;
+    push_constant_range.stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT;
     push_constant_range.offset = 0;
     push_constant_range.size = @sizeOf(ModelUniforms);
 
@@ -2585,9 +2588,10 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
     }
 }
 
-fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4) void {
+fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4, mask_radius: f32) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.current_model = model;
+    ctx.current_mask_radius = mask_radius;
 }
 
 fn setTextureUniforms(ctx_ptr: *anyopaque, texture_enabled: bool, shadow_map_handles: [3]rhi.TextureHandle) void {
@@ -3506,8 +3510,10 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
         const uniforms = ModelUniforms{
             .view_proj = if (use_shadow) ctx.shadow_pass_matrix else ctx.current_view_proj,
             .model = ctx.current_model,
+            .mask_radius = ctx.current_mask_radius,
+            .padding = .{ 0, 0, 0 },
         };
-        c.vkCmdPushConstants(command_buffer, ctx.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf(ModelUniforms), &uniforms);
+        c.vkCmdPushConstants(command_buffer, ctx.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(ModelUniforms), &uniforms);
 
         const offset: c.VkDeviceSize = 0;
         c.vkCmdBindVertexBuffers(command_buffer, 0, 1, &vbo.buffer, &offset);
@@ -3857,11 +3863,15 @@ const vtable = rhi.RHI.VTable{
     .endMainPass = endMainPass,
     .endFrame = endFrame,
     .waitIdle = waitIdle,
-    .updateGlobalUniforms = updateGlobalUniforms,
+    .beginShadowPass = beginShadowPass,
+    .endShadowPass = endShadowPass,
     .setModelMatrix = setModelMatrix,
+    .updateGlobalUniforms = updateGlobalUniforms,
+    .updateShadowUniforms = updateShadowUniforms,
     .setTextureUniforms = setTextureUniforms,
     .draw = draw,
     .drawIndirect = drawIndirect,
+    .drawSky = drawSky,
     .createTexture = createTexture,
     .destroyTexture = destroyTexture,
     .bindTexture = bindTexture,
@@ -3877,10 +3887,6 @@ const vtable = rhi.RHI.VTable{
     .drawUITexturedQuad = drawUITexturedQuad,
     .drawClouds = drawClouds,
     .drawDebugShadowMap = drawDebugShadowMap,
-    .beginShadowPass = beginShadowPass,
-    .endShadowPass = endShadowPass,
-    .updateShadowUniforms = updateShadowUniforms,
-    .drawSky = drawSky,
     .setAnisotropicFiltering = setAnisotropicFiltering,
     .setMSAA = setMSAA,
     .getMaxAnisotropy = getMaxAnisotropy,
@@ -3921,6 +3927,7 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_dev
     ctx.shadow_pipeline_bound = false;
     ctx.descriptors_updated = false;
     ctx.bound_texture = 0;
+    ctx.current_mask_radius = 0;
 
     // Rendering options
     ctx.wireframe_enabled = false;

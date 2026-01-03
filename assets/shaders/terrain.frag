@@ -18,6 +18,7 @@ uniform float uAmbient;
 uniform vec3 uFogColor;
 uniform float uFogDensity;
 uniform bool uFogEnabled;
+uniform float uMaskRadius;
 
 // CSM
 uniform sampler2D uShadowMap0;
@@ -169,6 +170,12 @@ void main() {
     lightLevel = max(lightLevel, uAmbient * 0.5);
     lightLevel = clamp(lightLevel, 0.0, 1.0);
     
+    // Circular masking for LODs (Issue #119: Seamless transition)
+    if (vTileID < 0 && uMaskRadius > 0.0) {
+        float horizontalDist = length(vFragPosWorld.xz);
+        if (horizontalDist < uMaskRadius * 16.0) discard;
+    }
+
     vec3 color;
     if (uUseTexture && vTileID >= 0) {
         vec2 atlasSize = vec2(16.0, 16.0);

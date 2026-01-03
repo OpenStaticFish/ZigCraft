@@ -53,6 +53,15 @@ pub const LODStats = struct {
     lod1_generating: u32 = 0,
     lod2_generating: u32 = 0,
     lod3_generating: u32 = 0,
+    // Debug: additional state counts for LOD1/LOD2
+    lod1_meshing: u32 = 0,
+    lod1_mesh_ready: u32 = 0,
+    lod1_uploading: u32 = 0,
+    lod1_generated: u32 = 0,
+    lod2_meshing: u32 = 0,
+    lod2_mesh_ready: u32 = 0,
+    lod2_uploading: u32 = 0,
+    lod2_generated: u32 = 0,
     memory_used_mb: u32 = 0,
     upgrades_pending: u32 = 0,
     downgrades_pending: u32 = 0,
@@ -367,23 +376,34 @@ pub const LODManager = struct {
             while (rx <= player_rx + region_radius) : (rx += 1) {
                 const key = LODRegionKey{ .rx = rx, .rz = rz, .lod = lod };
 
-                // Only queue if region doesn't already exist
-                if (storage.get(key) == null) {
+                // Check if region exists and what state it's in
+                const existing = storage.get(key);
+                const needs_queue = if (existing) |chunk|
+                    // Re-queue if stuck in missing state
+                    chunk.state == .missing
+                else
+                    // Queue if doesn't exist
+                    true;
+
+                if (needs_queue) {
                     queued_count += 1;
-                    // Create new LOD chunk
-                    const chunk = try self.allocator.create(LODChunk);
-                    chunk.* = LODChunk.init(rx, rz, lod);
+
+                    // Reuse existing chunk or create new one
+                    const chunk = if (existing) |c| c else blk: {
+                        const c = try self.allocator.create(LODChunk);
+                        c.* = LODChunk.init(rx, rz, lod);
+                        try storage.put(key, c);
+                        break :blk c;
+                    };
+
                     chunk.job_token = self.next_job_token;
                     self.next_job_token += 1;
-
-                    try storage.put(key, chunk);
 
                     // Calculate velocity-weighted priority
                     const dx = rx - player_rx;
                     const dz = rz - player_rz;
                     const dist_sq = dx * dx + dz * dz;
                     var priority = dist_sq;
-                    queued_count += 1;
                     if (has_velocity) {
                         const fdx: f32 = @floatFromInt(dx);
                         const fdz: f32 = @floatFromInt(dz);
@@ -629,10 +649,15 @@ pub const LODManager = struct {
 
         var iter1 = self.lod1_regions.iterator();
         while (iter1.next()) |entry| {
-            if (entry.value_ptr.*.state == .renderable) {
-                self.stats.lod1_loaded += 1;
-            } else if (entry.value_ptr.*.state == .generating) {
-                self.stats.lod1_generating += 1;
+            const state = entry.value_ptr.*.state;
+            switch (state) {
+                .renderable => self.stats.lod1_loaded += 1,
+                .generating => self.stats.lod1_generating += 1,
+                .generated => self.stats.lod1_generated += 1,
+                .meshing => self.stats.lod1_meshing += 1,
+                .mesh_ready => self.stats.lod1_mesh_ready += 1,
+                .uploading => self.stats.lod1_uploading += 1,
+                else => {},
             }
             // Approx memory: 32x32 grid * (height(2) + biome(2) + block(2) + color(4)) = 10240 bytes
             mem_usage += 10240;
@@ -640,10 +665,15 @@ pub const LODManager = struct {
 
         var iter2 = self.lod2_regions.iterator();
         while (iter2.next()) |entry| {
-            if (entry.value_ptr.*.state == .renderable) {
-                self.stats.lod2_loaded += 1;
-            } else if (entry.value_ptr.*.state == .generating) {
-                self.stats.lod2_generating += 1;
+            const state = entry.value_ptr.*.state;
+            switch (state) {
+                .renderable => self.stats.lod2_loaded += 1,
+                .generating => self.stats.lod2_generating += 1,
+                .generated => self.stats.lod2_generated += 1,
+                .meshing => self.stats.lod2_meshing += 1,
+                .mesh_ready => self.stats.lod2_mesh_ready += 1,
+                .uploading => self.stats.lod2_uploading += 1,
+                else => {},
             }
             mem_usage += 10240;
         }
@@ -719,16 +749,8 @@ pub const LODManager = struct {
         defer self.mutex.unlockShared();
 
         const frustum = Frustum.fromViewProj(view_proj);
-        const player_cx = @as(f32, @floatFromInt(self.player_cx));
-        const player_cz = @as(f32, @floatFromInt(self.player_cz));
-        const world_scale: f32 = @floatFromInt(CHUNK_SIZE_X);
 
-        // Circular radii squared for fast checks
-        const lod0_r2 = @as(f32, @floatFromInt(self.config.lod0_radius * self.config.lod0_radius));
-        const lod1_r2 = @as(f32, @floatFromInt(self.config.lod1_radius * self.config.lod1_radius));
-        const lod2_r2 = @as(f32, @floatFromInt(self.config.lod2_radius * self.config.lod2_radius));
-
-        // Render LOD3
+        // Render LOD3 first (furthest/lowest detail - will be covered by higher detail LODs)
         var iter3 = self.lod3_meshes.iterator();
         while (iter3.next()) |entry| {
             const mesh = entry.value_ptr.*;
@@ -737,24 +759,10 @@ pub const LODManager = struct {
                 if (chunk.state != .renderable) continue;
                 const bounds = chunk.worldBounds();
 
-                // Conservative Masking: only cull if ALL 4 corners are inside the inner detail circle (Issue #119: No gaps)
-                const c1x = @as(f32, @floatFromInt(bounds.min_x)) / world_scale - player_cx;
-                const c1z = @as(f32, @floatFromInt(bounds.min_z)) / world_scale - player_cz;
-                const c2x = @as(f32, @floatFromInt(bounds.max_x)) / world_scale - player_cx;
-                const c2z = @as(f32, @floatFromInt(bounds.max_z)) / world_scale - player_cz;
-
-                const d1 = c1x * c1x + c1z * c1z;
-                const d2 = c2x * c2x + c1z * c1z;
-                const d3 = c1x * c1x + c2z * c2z;
-                const d4 = c2x * c2x + c2z * c2z;
-
-                // Safety buffer: 2 chunks (32 blocks) overlap
-                const inner_r2 = (std.math.sqrt(lod2_r2) - 2.0) * (std.math.sqrt(lod2_r2) - 2.0);
-                if (d1 <= inner_r2 and d2 <= inner_r2 and d3 <= inner_r2 and d4 <= inner_r2) continue;
-
+                // Only frustum cull - no LOD radius culling (let higher LODs render on top)
                 if (!frustum.intersectsAABB(AABB.init(Vec3.init(@floatFromInt(bounds.min_x), -camera_pos.y, @floatFromInt(bounds.min_z)).sub(camera_pos), Vec3.init(@floatFromInt(bounds.max_x), 256.0 - camera_pos.y, @floatFromInt(bounds.max_z)).sub(camera_pos)))) continue;
 
-                self.rhi.setModelMatrix(Mat4.translate(Vec3.init(@as(f32, @floatFromInt(bounds.min_x)) - camera_pos.x, -camera_pos.y, @as(f32, @floatFromInt(bounds.min_z)) - camera_pos.z)));
+                self.rhi.setModelMatrix(Mat4.translate(Vec3.init(@as(f32, @floatFromInt(bounds.min_x)) - camera_pos.x, -camera_pos.y, @as(f32, @floatFromInt(bounds.min_z)) - camera_pos.z)), 160.0);
                 mesh.draw(self.rhi);
             }
         }
@@ -768,27 +776,15 @@ pub const LODManager = struct {
                 if (chunk.state != .renderable) continue;
                 const bounds = chunk.worldBounds();
 
-                const c1x = @as(f32, @floatFromInt(bounds.min_x)) / world_scale - player_cx;
-                const c1z = @as(f32, @floatFromInt(bounds.min_z)) / world_scale - player_cz;
-                const c2x = @as(f32, @floatFromInt(bounds.max_x)) / world_scale - player_cx;
-                const c2z = @as(f32, @floatFromInt(bounds.max_z)) / world_scale - player_cz;
-
-                const d1 = c1x * c1x + c1z * c1z;
-                const d2 = c2x * c2x + c1z * c1z;
-                const d3 = c1x * c1x + c2z * c2z;
-                const d4 = c2x * c2x + c2z * c2z;
-
-                const inner_r2 = (std.math.sqrt(lod1_r2) - 2.0) * (std.math.sqrt(lod1_r2) - 2.0);
-                if (d1 <= inner_r2 and d2 <= inner_r2 and d3 <= inner_r2 and d4 <= inner_r2) continue;
-
+                // Only frustum cull - no LOD radius culling
                 if (!frustum.intersectsAABB(AABB.init(Vec3.init(@floatFromInt(bounds.min_x), -camera_pos.y, @floatFromInt(bounds.min_z)).sub(camera_pos), Vec3.init(@floatFromInt(bounds.max_x), 256.0 - camera_pos.y, @floatFromInt(bounds.max_z)).sub(camera_pos)))) continue;
 
-                self.rhi.setModelMatrix(Mat4.translate(Vec3.init(@as(f32, @floatFromInt(bounds.min_x)) - camera_pos.x, -camera_pos.y, @as(f32, @floatFromInt(bounds.min_z)) - camera_pos.z)));
+                self.rhi.setModelMatrix(Mat4.translate(Vec3.init(@as(f32, @floatFromInt(bounds.min_x)) - camera_pos.x, -camera_pos.y, @as(f32, @floatFromInt(bounds.min_z)) - camera_pos.z)), 80.0);
                 mesh.draw(self.rhi);
             }
         }
 
-        // Render LOD1
+        // Render LOD1 (highest detail LOD - renders on top)
         var iter1 = self.lod1_meshes.iterator();
         while (iter1.next()) |entry| {
             const mesh = entry.value_ptr.*;
@@ -797,22 +793,10 @@ pub const LODManager = struct {
                 if (chunk.state != .renderable) continue;
                 const bounds = chunk.worldBounds();
 
-                const c1x = @as(f32, @floatFromInt(bounds.min_x)) / world_scale - player_cx;
-                const c1z = @as(f32, @floatFromInt(bounds.min_z)) / world_scale - player_cz;
-                const c2x = @as(f32, @floatFromInt(bounds.max_x)) / world_scale - player_cx;
-                const c2z = @as(f32, @floatFromInt(bounds.max_z)) / world_scale - player_cz;
-
-                const d1 = c1x * c1x + c1z * c1z;
-                const d2 = c2x * c2x + c1z * c1z;
-                const d3 = c1x * c1x + c2z * c2z;
-                const d4 = c2x * c2x + c2z * c2z;
-
-                const inner_r2 = (std.math.sqrt(lod0_r2) - 2.0) * (std.math.sqrt(lod0_r2) - 2.0);
-                if (d1 <= inner_r2 and d2 <= inner_r2 and d3 <= inner_r2 and d4 <= inner_r2) continue;
-
+                // Only frustum cull - no LOD radius culling
                 if (!frustum.intersectsAABB(AABB.init(Vec3.init(@floatFromInt(bounds.min_x), -camera_pos.y, @floatFromInt(bounds.min_z)).sub(camera_pos), Vec3.init(@floatFromInt(bounds.max_x), 256.0 - camera_pos.y, @floatFromInt(bounds.max_z)).sub(camera_pos)))) continue;
 
-                self.rhi.setModelMatrix(Mat4.translate(Vec3.init(@as(f32, @floatFromInt(bounds.min_x)) - camera_pos.x, -camera_pos.y, @as(f32, @floatFromInt(bounds.min_z)) - camera_pos.z)));
+                self.rhi.setModelMatrix(Mat4.translate(Vec3.init(@as(f32, @floatFromInt(bounds.min_x)) - camera_pos.x, -camera_pos.y, @as(f32, @floatFromInt(bounds.min_z)) - camera_pos.z)), 40.0);
                 mesh.draw(self.rhi);
             }
         }

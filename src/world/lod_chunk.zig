@@ -272,17 +272,18 @@ pub const LODChunk = struct {
 /// Configuration for LOD system
 pub const LODConfig = struct {
     /// Radius in chunks for each LOD level
-    /// Reduced radii for performance (Issue #119: Performance optimization)
-    lod0_radius: i32 = 10, // 21x21 chunks = 441
-    lod1_radius: i32 = 16,
-    lod2_radius: i32 = 24,
-    lod3_radius: i32 = 32,
+    /// LOD0 = render_distance (user-controlled block chunks)
+    /// LOD1/2/3 = Fixed large values for "infinite" terrain view
+    lod0_radius: i32 = 16, // Default, will be set to render_distance
+    lod1_radius: i32 = 40, // Fixed - not affected by render_distance
+    lod2_radius: i32 = 80, // Fixed - not affected by render_distance
+    lod3_radius: i32 = 160, // Fixed - not affected by render_distance
 
     /// Memory budget in MB
     memory_budget_mb: u32 = 256,
 
     /// Maximum uploads per frame per LOD level
-    max_uploads_per_frame: u32 = 4, // Reduced from 16
+    max_uploads_per_frame: u32 = 8, // Increased from 4 for faster loading
 
     /// Enable fog-masked transitions
     fog_transitions: bool = true,

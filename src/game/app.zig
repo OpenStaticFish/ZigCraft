@@ -420,7 +420,14 @@ pub const App = struct {
         if (self.pending_new_world_seed) |seed| {
             self.pending_new_world_seed = null;
             if (self.settings.lod_enabled) {
-                const lod_config = LODConfig{};
+                // LOD0 = render_distance (user-controlled block chunks)
+                // LOD1/2/3 = Fixed large values for "infinite" terrain view
+                const lod_config = LODConfig{
+                    .lod0_radius = self.settings.render_distance,
+                    .lod1_radius = 40,
+                    .lod2_radius = 80,
+                    .lod3_radius = 160,
+                };
                 self.world = World.initWithLOD(self.allocator, self.settings.render_distance, seed, self.rhi, lod_config) catch |err| {
                     log.log.err("Failed to create world with LOD: {}", .{err});
                     self.app_state = .home;
@@ -750,7 +757,14 @@ pub const App = struct {
             if (self.pending_new_world_seed) |seed| {
                 self.pending_new_world_seed = null;
                 if (self.settings.lod_enabled) {
-                    const lod_config = LODConfig{};
+                    // LOD0 = render_distance (user-controlled block chunks)
+                    // LOD1/2/3 = Fixed large values for "infinite" terrain view
+                    const lod_config = LODConfig{
+                        .lod0_radius = self.settings.render_distance,
+                        .lod1_radius = 40,
+                        .lod2_radius = 80,
+                        .lod3_radius = 160,
+                    };
                     self.world = World.initWithLOD(self.allocator, self.settings.render_distance, seed, self.rhi, lod_config) catch |err| {
                         log.log.err("Failed to create world with LOD: {}", .{err});
                         self.app_state = .home;
@@ -1070,6 +1084,11 @@ pub const App = struct {
                         const rs = active_world.getRenderStats();
                         if (active_world.getLODStats()) |lod| {
                             std.debug.print("FPS: {d:.1} | Chunks: {}/{} | LOD: L1={} L2={} L3={} | Pos: ({d:.1}, {d:.1}, {d:.1})\n", .{ self.time.fps, rs.chunks_rendered, s.chunks_loaded, lod.lod1_loaded, lod.lod2_loaded, lod.lod3_loaded, self.camera.position.x, self.camera.position.y, self.camera.position.z });
+                            // Detailed LOD1/LOD2 state debug
+                            if (lod.lod1_loaded == 0 or lod.lod2_loaded == 0) {
+                                std.debug.print("  LOD1 states: gen={} generated={} meshing={} mesh_ready={} uploading={} renderable={}\n", .{ lod.lod1_generating, lod.lod1_generated, lod.lod1_meshing, lod.lod1_mesh_ready, lod.lod1_uploading, lod.lod1_loaded });
+                                std.debug.print("  LOD2 states: gen={} generated={} meshing={} mesh_ready={} uploading={} renderable={}\n", .{ lod.lod2_generating, lod.lod2_generated, lod.lod2_meshing, lod.lod2_mesh_ready, lod.lod2_uploading, lod.lod2_loaded });
+                            }
                         } else {
                             std.debug.print("FPS: {d:.1} | Chunks: {}/{} (culled: {}) | Vertices: {} | Pos: ({d:.1}, {d:.1}, {d:.1})\n", .{ self.time.fps, rs.chunks_rendered, s.chunks_loaded, rs.chunks_culled, rs.vertices_rendered, self.camera.position.x, self.camera.position.y, self.camera.position.z });
                         }

@@ -87,6 +87,12 @@ layout(set = 0, binding = 3) uniform sampler2D uShadowMap0;
 layout(set = 0, binding = 4) uniform sampler2D uShadowMap1;
 layout(set = 0, binding = 5) uniform sampler2D uShadowMap2;
 
+layout(push_constant) uniform ModelUniforms {
+    mat4 view_proj;
+    mat4 model;
+    float mask_radius;
+} model_data;
+
 float calculateShadow(vec3 fragPosWorld, float nDotL, int layer) {
     vec4 fragPosLightSpace = shadows.light_space_matrices[layer] * vec4(fragPosWorld, 1.0);
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
@@ -175,6 +181,12 @@ void main() {
 
     lightLevel = max(lightLevel, global.ambient * 0.5);
     lightLevel = clamp(lightLevel, 0.0, 1.0);
+
+    // Circular masking for LODs (Issue #119: Seamless transition)
+    if (vTileID < 0 && model_data.mask_radius > 0.0) {
+        float horizontalDist = length(vFragPosWorld.xz);
+        if (horizontalDist < model_data.mask_radius * 16.0) discard;
+    }
 
     vec3 color;
     if (global.use_texture > 0.5 && vTileID >= 0) {

@@ -574,7 +574,7 @@ fn updateShadowUniforms(ctx_ptr: *anyopaque, params: rhi.ShadowParams) void {
     }
 }
 
-fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4) void {
+fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4, mask_radius: f32) void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     const mvp = ctx.current_view_proj.multiply(model);
 
@@ -582,10 +582,12 @@ fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4) void {
         shader.use();
         shader.setMat4Cached("transform", &mvp.data);
         shader.setMat4Cached("uModel", &model.data);
+        shader.setFloatCached("uMaskRadius", mask_radius);
     } else if (ctx.active_program != 0) {
         c.glUseProgram().?(ctx.active_program);
         setUniformMat4Direct(ctx.active_program, "transform", &mvp.data);
         setUniformMat4Direct(ctx.active_program, "uModel", &model.data);
+        setUniformFloatDirect(ctx.active_program, "uMaskRadius", mask_radius);
     }
 }
 
@@ -1138,9 +1140,9 @@ const vtable = rhi.RHI.VTable{
     .waitIdle = waitIdle,
     .beginShadowPass = beginShadowPass,
     .endShadowPass = endShadowPass,
+    .setModelMatrix = setModelMatrix,
     .updateGlobalUniforms = updateGlobalUniforms,
     .updateShadowUniforms = updateShadowUniforms,
-    .setModelMatrix = setModelMatrix,
     .setTextureUniforms = setTextureUniforms,
     .draw = draw,
     .drawIndirect = drawIndirect,

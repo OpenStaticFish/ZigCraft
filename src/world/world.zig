@@ -283,24 +283,10 @@ pub const World = struct {
         if (self.render_distance != distance) {
             std.log.info("Render distance changed: {} -> {}", .{ self.render_distance, distance });
             self.render_distance = distance;
-            // Update LOD config to match render distance
+            // Only update LOD0 radius - LOD1/2/3 are fixed for "infinite" terrain view
             if (self.lod_manager) |lod_mgr| {
-                // Issue #119: Sensible radii scaling for high render distances.
-                // Distance 50 should mean LOD3 is at 50, but LOD0 (blocks) is capped
-                // to maintain playable frame rates (too many draw calls otherwise).
-                lod_mgr.config.lod3_radius = distance;
-                lod_mgr.config.lod2_radius = @max(distance - 12, @divTrunc(distance * 3, 4));
-                lod_mgr.config.lod1_radius = @max(distance - 24, @divTrunc(distance, 2));
-                // Cap LOD0 at 16 chunks (approx 1000 chunks total) for performance.
-                lod_mgr.config.lod0_radius = @min(distance, 16);
-
-                std.log.info("LOD radii dynamically scaled for distance {}: LOD0={}, LOD1={}, LOD2={}, LOD3={}", .{
-                    distance,
-                    lod_mgr.config.lod0_radius,
-                    lod_mgr.config.lod1_radius,
-                    lod_mgr.config.lod2_radius,
-                    lod_mgr.config.lod3_radius,
-                });
+                lod_mgr.config.lod0_radius = distance;
+                std.log.info("LOD0 radius updated to match render distance: {}", .{distance});
             }
             // Force chunk rescan on next update
             self.last_pc = .{ .x = 9999, .z = 9999 };
@@ -479,7 +465,7 @@ pub const World = struct {
             try self.gen_queue.updatePlayerPos(pc.chunk_x, pc.chunk_z);
             try self.mesh_queue.updatePlayerPos(pc.chunk_x, pc.chunk_z);
 
-            const render_dist = if (self.lod_manager) |mgr| @min(self.render_distance, mgr.config.lod0_radius) else self.render_distance;
+            const render_dist = self.render_distance;
 
             var cz = pc.chunk_z - render_dist;
             while (cz <= pc.chunk_z + render_dist) : (cz += 1) {
@@ -559,7 +545,7 @@ pub const World = struct {
             uploads += 1;
         }
 
-        const render_dist_unload = if (self.lod_manager) |mgr| @min(self.render_distance, mgr.config.lod0_radius) else self.render_distance;
+        const render_dist_unload = self.render_distance;
         const unload_dist_sq = (render_dist_unload + CHUNK_UNLOAD_BUFFER) * (render_dist_unload + CHUNK_UNLOAD_BUFFER);
         self.chunks_mutex.lock();
         var to_remove = std.ArrayListUnmanaged(ChunkKey).empty;
@@ -609,6 +595,14 @@ pub const World = struct {
             lod_mgr.render(view_proj, camera_pos);
         }
 
+        // IMPORTANT: Reset mask radius to 0 for LOD0 chunks
+        // This is only needed for backends that share uniforms (OpenGL)
+        // In Vulkan we update it during LODManager.render.
+        if (self.lod_manager) |lod_mgr| {
+            _ = lod_mgr;
+            // self.rhi.setMaskRadius(0); // If I used setMaskRadius
+        }
+
         self.chunks_mutex.lockShared();
         defer self.chunks_mutex.unlockShared();
 
@@ -620,23 +614,18 @@ pub const World = struct {
 
         const render_dist = if (self.lod_manager) |mgr| @min(self.render_distance, mgr.config.lod0_radius) else self.render_distance;
 
-        // Issue #119 Performance fix: Iterate over loaded chunks instead of checking every coordinate in a square.
-        // This avoids thousands of hash map lookups per frame when render distance is high.
-        var iter = self.chunks.iterator();
-        while (iter.next()) |entry| {
-            const data = entry.value_ptr.*;
-            const key = entry.key_ptr.*;
-
-            // Fast distance check
-            const dx = key.x - pc.chunk_x;
-            const dz = key.z - pc.chunk_z;
-            if (@abs(dx) > render_dist or @abs(dz) > render_dist) continue;
-
-            if (data.chunk.state == .renderable) {
-                if (frustum.intersectsChunkRelative(key.x, key.z, camera_pos.x, camera_pos.y, camera_pos.z)) {
-                    self.visible_chunks.append(self.allocator, data) catch {};
-                } else {
-                    self.last_render_stats.chunks_culled += 1;
+        var cz = pc.chunk_z - render_dist;
+        while (cz <= pc.chunk_z + render_dist) : (cz += 1) {
+            var cx = pc.chunk_x - render_dist;
+            while (cx <= pc.chunk_x + render_dist) : (cx += 1) {
+                if (self.chunks.get(.{ .x = cx, .z = cz })) |data| {
+                    if (data.chunk.state == .renderable) {
+                        if (frustum.intersectsChunkRelative(cx, cz, camera_pos.x, camera_pos.y, camera_pos.z)) {
+                            self.visible_chunks.append(self.allocator, data) catch {};
+                        } else {
+                            self.last_render_stats.chunks_culled += 1;
+                        }
+                    }
                 }
             }
         }
@@ -656,7 +645,7 @@ pub const World = struct {
             const rel_y = -camera_pos.y;
 
             const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
-            self.rhi.setModelMatrix(model);
+            self.rhi.setModelMatrix(model, 0);
             data.mesh.draw(self.rhi, .solid);
         }
 
@@ -672,7 +661,7 @@ pub const World = struct {
             const rel_y = -camera_pos.y;
 
             const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
-            self.rhi.setModelMatrix(model);
+            self.rhi.setModelMatrix(model, 0);
             data.mesh.draw(self.rhi, .fluid);
         }
     }
@@ -697,7 +686,7 @@ pub const World = struct {
             const rel_y = -camera_pos.y;
 
             const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
-            self.rhi.setModelMatrix(model);
+            self.rhi.setModelMatrix(model, 0);
 
             data.mesh.draw(self.rhi, .solid);
         }
