@@ -723,43 +723,27 @@ pub const LODManager = struct {
         const player_cz = @as(f32, @floatFromInt(self.player_cz));
         const world_scale: f32 = @floatFromInt(CHUNK_SIZE_X);
 
-        // Render LOD3 first (furthest, most distant)
+        const lod0_r2 = @as(f32, @floatFromInt(self.config.lod0_radius * self.config.lod0_radius));
+        const lod1_r2 = @as(f32, @floatFromInt(self.config.lod1_radius * self.config.lod1_radius));
+        const lod2_r2 = @as(f32, @floatFromInt(self.config.lod2_radius * self.config.lod2_radius));
+
+        // Render LOD3
         var iter3 = self.lod3_meshes.iterator();
         while (iter3.next()) |entry| {
-            const key = entry.key_ptr.*;
             const mesh = entry.value_ptr.*;
-
             if (!mesh.ready or mesh.vertex_count == 0) continue;
-
-            // Get region for this mesh
-            if (self.lod3_regions.get(key)) |chunk| {
+            if (self.lod3_regions.get(entry.key_ptr.*)) |chunk| {
                 if (chunk.state != .renderable) continue;
+                const bounds = chunk.worldBounds();
 
-                const region_bounds = chunk.worldBounds();
-                const region_x: f32 = @floatFromInt(region_bounds.min_x);
-                const region_z: f32 = @floatFromInt(region_bounds.min_z);
-                const size_x: f32 = @floatFromInt(region_bounds.max_x - region_bounds.min_x);
-                const size_z: f32 = @floatFromInt(region_bounds.max_z - region_bounds.min_z);
+                // Annular masking: Cull if entirely within LOD2 radius
+                const dx = (@as(f32, @floatFromInt(bounds.min_x + bounds.max_x)) * 0.5) / world_scale - player_cx;
+                const dz = (@as(f32, @floatFromInt(bounds.min_z + bounds.max_z)) * 0.5) / world_scale - player_cz;
+                if (dx * dx + dz * dz < lod2_r2 - 64.0) continue;
 
-                // Frustum Culling
-                const aabb = AABB.init(Vec3.init(region_x - camera_pos.x, -camera_pos.y, region_z - camera_pos.z), Vec3.init(region_x - camera_pos.x + size_x, -camera_pos.y + 256.0, region_z - camera_pos.z + size_z));
-                if (!frustum.intersectsAABB(aabb)) continue;
+                if (!frustum.intersectsAABB(AABB.init(Vec3.init(@floatFromInt(bounds.min_x), -camera_pos.y, @floatFromInt(bounds.min_z)).sub(camera_pos), Vec3.init(@floatFromInt(bounds.max_x), 256.0 - camera_pos.y, @floatFromInt(bounds.max_z)).sub(camera_pos)))) continue;
 
-                // Masking: skip ONLY if the ENTIRE region is within the inner detail circle (Issue #119)
-                const c1x = @as(f32, @floatFromInt(region_bounds.min_x)) / world_scale - player_cx;
-                const c1z = @as(f32, @floatFromInt(region_bounds.min_z)) / world_scale - player_cz;
-                const c2x = @as(f32, @floatFromInt(region_bounds.max_x)) / world_scale - player_cx;
-                const c2z = @as(f32, @floatFromInt(region_bounds.max_z)) / world_scale - player_cz;
-
-                const r2 = @as(f32, @floatFromInt(self.config.lod2_radius * self.config.lod2_radius));
-                if (c1x * c1x + c1z * c1z <= r2 and c2x * c2x + c1z * c1z <= r2 and c1x * c1x + c2z * c2z <= r2 and c2x * c2x + c2z * c2z <= r2) continue;
-
-                const rel_x = region_x - camera_pos.x;
-                const rel_z = region_z - camera_pos.z;
-                const rel_y = -camera_pos.y;
-
-                const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
-                self.rhi.setModelMatrix(model);
+                self.rhi.setModelMatrix(Mat4.translate(Vec3.init(@as(f32, @floatFromInt(bounds.min_x)) - camera_pos.x, -camera_pos.y, @as(f32, @floatFromInt(bounds.min_z)) - camera_pos.z)));
                 mesh.draw(self.rhi);
             }
         }
@@ -767,79 +751,41 @@ pub const LODManager = struct {
         // Render LOD2
         var iter2 = self.lod2_meshes.iterator();
         while (iter2.next()) |entry| {
-            const key = entry.key_ptr.*;
             const mesh = entry.value_ptr.*;
-
             if (!mesh.ready or mesh.vertex_count == 0) continue;
-
-            if (self.lod2_regions.get(key)) |chunk| {
+            if (self.lod2_regions.get(entry.key_ptr.*)) |chunk| {
                 if (chunk.state != .renderable) continue;
+                const bounds = chunk.worldBounds();
 
-                const region_bounds = chunk.worldBounds();
-                const region_x: f32 = @floatFromInt(region_bounds.min_x);
-                const region_z: f32 = @floatFromInt(region_bounds.min_z);
-                const size_x: f32 = @floatFromInt(region_bounds.max_x - region_bounds.min_x);
-                const size_z: f32 = @floatFromInt(region_bounds.max_z - region_bounds.min_z);
+                // Annular masking: Cull if entirely within LOD1 radius
+                const dx = (@as(f32, @floatFromInt(bounds.min_x + bounds.max_x)) * 0.5) / world_scale - player_cx;
+                const dz = (@as(f32, @floatFromInt(bounds.min_z + bounds.max_z)) * 0.5) / world_scale - player_cz;
+                if (dx * dx + dz * dz < lod1_r2 - 16.0) continue;
 
-                // Frustum Culling
-                const aabb = AABB.init(Vec3.init(region_x - camera_pos.x, -camera_pos.y, region_z - camera_pos.z), Vec3.init(region_x - camera_pos.x + size_x, -camera_pos.y + 256.0, region_z - camera_pos.z + size_z));
-                if (!frustum.intersectsAABB(aabb)) continue;
+                if (!frustum.intersectsAABB(AABB.init(Vec3.init(@floatFromInt(bounds.min_x), -camera_pos.y, @floatFromInt(bounds.min_z)).sub(camera_pos), Vec3.init(@floatFromInt(bounds.max_x), 256.0 - camera_pos.y, @floatFromInt(bounds.max_z)).sub(camera_pos)))) continue;
 
-                // Masking: skip if the ENTIRE region is within the inner detail circle
-                const c1x = @as(f32, @floatFromInt(region_bounds.min_x)) / world_scale - player_cx;
-                const c1z = @as(f32, @floatFromInt(region_bounds.min_z)) / world_scale - player_cz;
-                const c2x = @as(f32, @floatFromInt(region_bounds.max_x)) / world_scale - player_cx;
-                const c2z = @as(f32, @floatFromInt(region_bounds.max_z)) / world_scale - player_cz;
-
-                const r2 = @as(f32, @floatFromInt(self.config.lod1_radius * self.config.lod1_radius));
-                if (c1x * c1x + c1z * c1z <= r2 and c2x * c2x + c1z * c1z <= r2 and c1x * c1x + c2z * c2z <= r2 and c2x * c2x + c2z * c2z <= r2) continue;
-
-                const rel_x = region_x - camera_pos.x;
-                const rel_z = region_z - camera_pos.z;
-                const rel_y = -camera_pos.y;
-
-                const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
-                self.rhi.setModelMatrix(model);
+                self.rhi.setModelMatrix(Mat4.translate(Vec3.init(@as(f32, @floatFromInt(bounds.min_x)) - camera_pos.x, -camera_pos.y, @as(f32, @floatFromInt(bounds.min_z)) - camera_pos.z)));
                 mesh.draw(self.rhi);
             }
         }
 
-        // Render LOD1 (closest to player, most detail among LOD levels)
+        // Render LOD1
         var iter1 = self.lod1_meshes.iterator();
         while (iter1.next()) |entry| {
-            const key = entry.key_ptr.*;
             const mesh = entry.value_ptr.*;
-
             if (!mesh.ready or mesh.vertex_count == 0) continue;
-
-            if (self.lod1_regions.get(key)) |chunk| {
+            if (self.lod1_regions.get(entry.key_ptr.*)) |chunk| {
                 if (chunk.state != .renderable) continue;
+                const bounds = chunk.worldBounds();
 
-                const region_bounds = chunk.worldBounds();
-                const region_x: f32 = @floatFromInt(region_bounds.min_x);
-                const region_z: f32 = @floatFromInt(region_bounds.min_z);
-                const size_x: f32 = @floatFromInt(region_bounds.max_x - region_bounds.min_x);
-                const size_z: f32 = @floatFromInt(region_bounds.max_z - region_bounds.min_z);
+                // Annular masking: Cull if entirely within LOD0 radius
+                const dx = (@as(f32, @floatFromInt(bounds.min_x + bounds.max_x)) * 0.5) / world_scale - player_cx;
+                const dz = (@as(f32, @floatFromInt(bounds.min_z + bounds.max_z)) * 0.5) / world_scale - player_cz;
+                if (dx * dx + dz * dz < lod0_r2 - 4.0) continue;
 
-                // Frustum Culling
-                const aabb = AABB.init(Vec3.init(region_x - camera_pos.x, -camera_pos.y, region_z - camera_pos.z), Vec3.init(region_x - camera_pos.x + size_x, -camera_pos.y + 256.0, region_z - camera_pos.z + size_z));
-                if (!frustum.intersectsAABB(aabb)) continue;
+                if (!frustum.intersectsAABB(AABB.init(Vec3.init(@floatFromInt(bounds.min_x), -camera_pos.y, @floatFromInt(bounds.min_z)).sub(camera_pos), Vec3.init(@floatFromInt(bounds.max_x), 256.0 - camera_pos.y, @floatFromInt(bounds.max_z)).sub(camera_pos)))) continue;
 
-                // Masking: skip if the ENTIRE region is within the inner detail circle (LOD0)
-                const c1x = @as(f32, @floatFromInt(region_bounds.min_x)) / world_scale - player_cx;
-                const c1z = @as(f32, @floatFromInt(region_bounds.min_z)) / world_scale - player_cz;
-                const c2x = @as(f32, @floatFromInt(region_bounds.max_x)) / world_scale - player_cx;
-                const c2z = @as(f32, @floatFromInt(region_bounds.max_z)) / world_scale - player_cz;
-
-                const r2 = @as(f32, @floatFromInt(self.config.lod0_radius * self.config.lod0_radius));
-                if (c1x * c1x + c1z * c1z <= r2 and c2x * c2x + c1z * c1z <= r2 and c1x * c1x + c2z * c2z <= r2 and c2x * c2x + c2z * c2z <= r2) continue;
-
-                const rel_x = region_x - camera_pos.x;
-                const rel_z = region_z - camera_pos.z;
-                const rel_y = -camera_pos.y;
-
-                const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
-                self.rhi.setModelMatrix(model);
+                self.rhi.setModelMatrix(Mat4.translate(Vec3.init(@as(f32, @floatFromInt(bounds.min_x)) - camera_pos.x, -camera_pos.y, @as(f32, @floatFromInt(bounds.min_z)) - camera_pos.z)));
                 mesh.draw(self.rhi);
             }
         }
