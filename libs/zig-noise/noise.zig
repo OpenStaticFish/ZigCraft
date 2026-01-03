@@ -1,5 +1,183 @@
 const std = @import("std");
 
+// ============================================================================
+// Luanti-style NoiseParams System (Issue #104)
+// ============================================================================
+
+/// 3D vector for anisotropic spread values
+pub const Vec3f = struct {
+    x: f32,
+    y: f32,
+    z: f32,
+
+    pub fn init(x: f32, y: f32, z: f32) Vec3f {
+        return .{ .x = x, .y = y, .z = z };
+    }
+
+    /// Create uniform spread (same value for all axes)
+    pub fn uniform(v: f32) Vec3f {
+        return .{ .x = v, .y = v, .z = v };
+    }
+};
+
+/// Noise generation flags (matches Luanti's NoiseFlags)
+pub const NoiseFlags = packed struct {
+    /// Use quintic (5th degree) interpolation for smoother results
+    /// When false, uses linear interpolation (faster but more artifacts)
+    eased: bool = true,
+    /// Take absolute value of noise - creates ridged/billowy terrain
+    /// Useful for mountain ridges, river channels
+    absvalue: bool = false,
+    _padding: u6 = 0,
+};
+
+/// Noise parameters following Luanti conventions
+/// Key difference from raw frequency: uses 'spread' (feature size in blocks)
+/// instead of frequency. spread=600 means features repeat every ~600 blocks.
+pub const NoiseParams = struct {
+    /// Value added to final noise output
+    offset: f32 = 0,
+    /// Amplitude multiplier for noise output
+    scale: f32 = 1,
+    /// Feature size in blocks for X, Y, Z axes
+    /// Larger values = larger features, smaller frequency
+    spread: Vec3f = Vec3f.uniform(600),
+    /// Random seed for this noise layer
+    seed: u64,
+    /// Number of octaves for fractal noise (1-16 typical)
+    octaves: u16 = 4,
+    /// Persistence: amplitude multiplier per octave (0.5 typical)
+    /// Lower = smoother, higher = more detail
+    persist: f32 = 0.5,
+    /// Lacunarity: frequency multiplier per octave (2.0 typical)
+    lacunarity: f32 = 2.0,
+    /// Noise generation flags
+    flags: NoiseFlags = .{},
+
+    /// Convert spread to 2D frequency (uses X component)
+    pub fn getFrequency2D(self: NoiseParams) f32 {
+        return 1.0 / self.spread.x;
+    }
+
+    /// Convert spread to 3D frequency vector (anisotropic)
+    pub fn getFrequency3D(self: NoiseParams) Vec3f {
+        return .{
+            .x = 1.0 / self.spread.x,
+            .y = 1.0 / self.spread.y,
+            .z = 1.0 / self.spread.z,
+        };
+    }
+};
+
+/// Configured noise source that combines Noise + NoiseParams
+/// Provides convenient get2D/get3D methods with all parameters baked in
+pub const ConfiguredNoise = struct {
+    noise: Noise,
+    params: NoiseParams,
+
+    pub fn init(params: NoiseParams) ConfiguredNoise {
+        return .{
+            .noise = Noise.init(params.seed),
+            .params = params,
+        };
+    }
+
+    /// Sample 2D noise at world coordinates
+    /// Returns: offset + scale * fbm(x, z)
+    pub fn get2D(self: *const ConfiguredNoise, x: f32, z: f32) f32 {
+        const freq = self.params.getFrequency2D();
+        var val = self.noise.fbm2D(
+            x,
+            z,
+            self.params.octaves,
+            self.params.lacunarity,
+            self.params.persist,
+            freq,
+        );
+
+        if (self.params.flags.absvalue) {
+            val = @abs(val);
+        }
+
+        return val * self.params.scale + self.params.offset;
+    }
+
+    /// Sample 3D noise at world coordinates with anisotropic spread
+    /// Returns: offset + scale * fbm3D(x, y, z)
+    pub fn get3D(self: *const ConfiguredNoise, x: f32, y: f32, z: f32) f32 {
+        const freq = self.params.getFrequency3D();
+
+        // Manual FBM with anisotropic frequency
+        var total: f32 = 0;
+        var amplitude: f32 = 1;
+        var max_val: f32 = 0;
+        var curr_freq = freq;
+
+        for (0..self.params.octaves) |_| {
+            total += self.noise.perlin3D(
+                x * curr_freq.x,
+                y * curr_freq.y,
+                z * curr_freq.z,
+            ) * amplitude;
+            max_val += amplitude;
+            amplitude *= self.params.persist;
+            curr_freq.x *= self.params.lacunarity;
+            curr_freq.y *= self.params.lacunarity;
+            curr_freq.z *= self.params.lacunarity;
+        }
+
+        var val = total / max_val;
+
+        if (self.params.flags.absvalue) {
+            val = @abs(val);
+        }
+
+        return val * self.params.scale + self.params.offset;
+    }
+
+    /// Sample 2D noise normalized to 0-1 range
+    pub fn get2DNormalized(self: *const ConfiguredNoise, x: f32, z: f32) f32 {
+        const freq = self.params.getFrequency2D();
+        var val = self.noise.fbm2D(
+            x,
+            z,
+            self.params.octaves,
+            self.params.lacunarity,
+            self.params.persist,
+            freq,
+        );
+
+        if (self.params.flags.absvalue) {
+            val = @abs(val);
+            // absvalue range is 0 to ~1
+            return clamp01(val * self.params.scale + self.params.offset);
+        }
+
+        // Normal range is -1 to 1, normalize to 0-1
+        val = (val + 1.0) * 0.5;
+        return clamp01(val * self.params.scale + self.params.offset);
+    }
+
+    /// Sample 2D ridged noise (built-in absvalue behavior)
+    /// Useful for mountain ridges regardless of flags setting
+    pub fn get2DRidged(self: *const ConfiguredNoise, x: f32, z: f32) f32 {
+        const freq = self.params.getFrequency2D();
+        const val = self.noise.ridged2D(
+            x,
+            z,
+            self.params.octaves,
+            self.params.lacunarity,
+            self.params.persist,
+            freq,
+        );
+        return val * self.params.scale + self.params.offset;
+    }
+};
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
 pub fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
     const t = std.math.clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);

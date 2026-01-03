@@ -18,6 +18,7 @@ uniform float uAmbient;
 uniform vec3 uFogColor;
 uniform float uFogDensity;
 uniform bool uFogEnabled;
+uniform float uMaskRadius;
 
 // CSM
 uniform sampler2D uShadowMap0;
@@ -127,7 +128,13 @@ void main() {
     if (depth < uCascadeSplits[0]) layer = 0;
     else if (depth < uCascadeSplits[1]) layer = 1;
     
-    float shadow = calculateShadow(vFragPosWorld, nDotL, layer);
+    // Fade out shadows at high altitude to avoid CSM artifacts
+    // When vViewDepth is very large (camera high up looking down), shadows become unreliable
+    float shadowFadeStart = 400.0;
+    float shadowFadeEnd = 600.0;
+    float shadowFade = 1.0 - clamp((depth - shadowFadeStart) / (shadowFadeEnd - shadowFadeStart), 0.0, 1.0);
+    
+    float shadow = calculateShadow(vFragPosWorld, nDotL, layer) * shadowFade;
 
     // Cascade Blending
     float blendThreshold = 0.9; // Start blending at 90% of cascade range
@@ -163,8 +170,14 @@ void main() {
     lightLevel = max(lightLevel, uAmbient * 0.5);
     lightLevel = clamp(lightLevel, 0.0, 1.0);
     
+    // Circular masking for LODs (Issue #119: Seamless transition)
+    if (vTileID < 0 && uMaskRadius > 0.0) {
+        float horizontalDist = length(vFragPosWorld.xz);
+        if (horizontalDist < uMaskRadius * 16.0) discard;
+    }
+
     vec3 color;
-    if (uUseTexture) {
+    if (uUseTexture && vTileID >= 0) {
         vec2 atlasSize = vec2(16.0, 16.0);
         vec2 tileSize = 1.0 / atlasSize;
         vec2 tilePos = vec2(mod(float(vTileID), atlasSize.x), floor(float(vTileID) / atlasSize.x));

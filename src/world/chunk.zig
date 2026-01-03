@@ -77,6 +77,11 @@ pub const Chunk = struct {
     /// Biome data for each column (X, Z)
     biomes: [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId,
 
+    /// Surface heightmap (Y coordinate of highest solid block)
+    /// Used for generation phases and gameplay logic (rain, spawns)
+    /// Values < 0 mean no surface found (e.g. empty column)
+    heightmap: [CHUNK_SIZE_X * CHUNK_SIZE_Z]i16,
+
     /// Current state in the streaming pipeline
     state: State = .missing,
 
@@ -99,8 +104,8 @@ pub const Chunk = struct {
             .blocks = [_]BlockType{.air} ** CHUNK_VOLUME,
             .light = [_]PackedLight{PackedLight.init(0, 0)} ** CHUNK_VOLUME,
             .biomes = [_]BiomeId{.plains} ** (CHUNK_SIZE_X * CHUNK_SIZE_Z),
+            .heightmap = [_]i16{0} ** (CHUNK_SIZE_X * CHUNK_SIZE_Z),
             .state = .missing,
-            .job_token = 0,
             .pin_count = std.atomic.Value(u32).init(0),
         };
     }
@@ -168,7 +173,18 @@ pub const Chunk = struct {
 
     /// Get blocklight at local coordinates
     pub fn getBlockLight(self: *const Chunk, x: u32, y: u32, z: u32) u4 {
-        return self.light[getIndex(x, y, z)].getBlockLight();
+        const idx = x + z * CHUNK_SIZE_X + y * CHUNK_SIZE_X * CHUNK_SIZE_Z;
+        return self.light[idx].getBlockLight();
+    }
+
+    /// Get surface height at local coordinates
+    pub fn getSurfaceHeight(self: *const Chunk, x: u32, z: u32) i16 {
+        return self.heightmap[x + z * CHUNK_SIZE_X];
+    }
+
+    /// Set surface height at local coordinates
+    pub fn setSurfaceHeight(self: *Chunk, x: u32, z: u32, height: i16) void {
+        self.heightmap[x + z * CHUNK_SIZE_X] = height;
     }
 
     /// Set blocklight at local coordinates

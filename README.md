@@ -30,6 +30,7 @@
 - **Biomes & Climate**: Multi-noise system based on temperature and humidity (11+ biomes).
 - **Infinite Terrain**: Seed-based, deterministic generation with domain warping and 3D caves.
 - **Volumetric Clouds**: Procedural, shadowed cloud layers that integrate with the atmosphere.
+- **Level of Detail (LOD)**: Hierarchical LOD system enabling 100+ chunk render distances using simplified terrain meshes and specialized rendering.
 - **Greedy Meshing**: Optimized vertex data generation for maximum throughput.
 
 ### 🛠️ Engine Core
@@ -60,6 +61,7 @@ This project uses **Nix** for a reproducible development environment.
 ### 🎮 Running the Game
 - **OpenGL (Default)**: `nix develop --command zig build run`
 - **Vulkan Backend**: `nix develop --command zig build run -- --backend vulkan`
+- **High Performance (LOD)**: `nix develop --command zig build run -Doptimize=ReleaseFast -- --backend vulkan`
 
 ### 🧪 Running Tests
 - **All Tests**: `nix develop --command zig build test`

@@ -36,6 +36,10 @@ pub const JobQueue = struct {
     // Current player chunk for dynamic re-prioritization
     player_cx: i32 = 0,
     player_cz: i32 = 0,
+    // Lazy re-prioritization: mark dirty instead of immediate rebuild
+    needs_reprioritize: bool = false,
+    // Threshold: only reprioritize if queue has this many items
+    reprioritize_threshold: usize = 16,
 
     fn compareJobs(context: void, a: Job, b: Job) std.math.Order {
         _ = context;
@@ -51,6 +55,8 @@ pub const JobQueue = struct {
             .paused = false,
             .abort_worker = false,
             .allocator = allocator,
+            .needs_reprioritize = false,
+            .reprioritize_threshold = 16,
         };
     }
 
@@ -75,22 +81,18 @@ pub const JobQueue = struct {
         }
 
         if (self.stopped and self.jobs.count() == 0) return null;
+
+        // Lazy reprioritization: only rebuild if marked dirty and queue is large
+        if (self.needs_reprioritize and self.jobs.count() >= self.reprioritize_threshold) {
+            self.doReprioritize();
+            self.needs_reprioritize = false;
+        }
+
         return self.jobs.removeOrNull();
     }
 
-    /// Update player position and rebuild priority queue with new distances
-    pub fn updatePlayerPos(self: *JobQueue, cx: i32, cz: i32) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.paused) return;
-
-        // Only rebuild if player moved
-        if (cx == self.player_cx and cz == self.player_cz) return;
-        self.player_cx = cx;
-        self.player_cz = cz;
-
-        // Rebuild queue with updated priorities
+    /// Internal: rebuild queue with updated distances (called under lock)
+    fn doReprioritize(self: *JobQueue) void {
         const count = self.jobs.count();
         if (count == 0) return;
 
@@ -99,14 +101,12 @@ pub const JobQueue = struct {
 
         // Extract all jobs
         while (self.jobs.removeOrNull()) |job| {
-            // Recalculate distance
-            const dx = job.chunk_x - cx;
-            const dz = job.chunk_z - cz;
+            // Recalculate distance from current player position
+            const dx = job.chunk_x - self.player_cx;
+            const dz = job.chunk_z - self.player_cz;
             var updated_job = job;
             updated_job.dist_sq = dx * dx + dz * dz;
             temp.append(self.allocator, updated_job) catch {
-                // On allocation failure, job is dropped. This is acceptable as the chunk
-                // will be re-queued on next update cycle when player position changes.
                 log.log.warn("Job queue: dropped job during priority update (allocation failed)", .{});
                 continue;
             };
@@ -115,10 +115,32 @@ pub const JobQueue = struct {
         // Re-add with updated priorities
         for (temp.items) |job| {
             self.jobs.add(job) catch {
-                // Priority queue full or allocation failed - job dropped, will be re-queued
                 log.log.warn("Job queue: failed to re-add job after priority update", .{});
                 continue;
             };
+        }
+    }
+
+    /// Update player position and mark queue for lazy re-prioritization.
+    /// The actual rebuild happens on next pop() if the queue is large enough.
+    pub fn updatePlayerPos(self: *JobQueue, cx: i32, cz: i32) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.paused) return;
+
+        // Only mark for reprioritization if player moved
+        if (cx == self.player_cx and cz == self.player_cz) return;
+        self.player_cx = cx;
+        self.player_cz = cz;
+
+        // Mark for lazy reprioritization instead of immediate rebuild
+        // For small queues, the overhead of tracking dirty state isn't worth it
+        if (self.jobs.count() >= self.reprioritize_threshold) {
+            self.needs_reprioritize = true;
+        } else if (self.jobs.count() > 0) {
+            // For small queues, just do it immediately
+            self.doReprioritize();
         }
     }
 

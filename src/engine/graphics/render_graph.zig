@@ -109,29 +109,24 @@ pub const RenderGraph = struct {
                 true,
             );
             light_space_matrix = cascades.light_space_matrices[cascade_idx];
-            
+
             // Update shadow uniforms UBO (binding 2)
             rhi.updateShadowUniforms(.{
                 .light_space_matrices = cascades.light_space_matrices,
                 .cascade_splits = cascades.cascade_splits,
                 .shadow_texel_sizes = cascades.texel_sizes,
             });
-            
+
             // Start the shadow pass BEFORE updating global uniforms for the shadow pass matrix.
             // This ensures updateGlobalUniforms detects shadow_pass_active=true and sets the matrix
             // without overwriting the global UBO (which holds the main camera view_proj).
             rhi.beginShadowPass(@intCast(cascade_idx));
-            
-            rhi.updateGlobalUniforms(
-                light_space_matrix, 
-                camera.position, 
-                Vec3.zero, 0, Vec3.zero, 0, false, 0, 0, false, 
-                .{}
-            );
+
+            rhi.updateGlobalUniforms(light_space_matrix, camera.position, Vec3.zero, 0, Vec3.zero, 0, false, 0, 0, false, .{});
         } else if (shadow_map) |sm| {
             light_space_matrix = sm.light_space_matrices[cascade_idx];
-            // OpenGL shadow pass is handled in app.zig or via ShadowMap struct, 
-            // but if we are here, we might want to do something? 
+            // OpenGL shadow pass is handled in app.zig or via ShadowMap struct,
+            // but if we are here, we might want to do something?
             // Currently beginShadowPass is a no-op for OpenGL RHI.
             rhi.beginShadowPass(@intCast(cascade_idx));
         } else {
@@ -152,7 +147,7 @@ pub const RenderGraph = struct {
             // Re-bind atlas for OpenGL to ensure it's on unit 0
             if (atlas_handle != 0) rhi.bindTexture(atlas_handle, 0);
         }
-        
+
         const view_proj = if (is_vulkan)
             Mat4.perspectiveReverseZ(camera.fov, aspect, camera.near, camera.far).multiply(camera.getViewMatrixOriginCentered())
         else
@@ -173,11 +168,11 @@ pub const RenderGraph = struct {
             Mat4.perspectiveReverseZ(camera.fov, aspect, camera.near, camera.far).multiply(camera.getViewMatrixOriginCentered())
         else
             camera.getViewProjectionMatrixOriginCentered(aspect);
-        
+
         var final_params = params;
         final_params.view_proj = view_proj;
         final_params.cam_pos = camera.position;
-        
+
         rhi.drawClouds(final_params);
     }
 };

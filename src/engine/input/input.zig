@@ -120,9 +120,18 @@ pub const Input = struct {
                 self.scroll_x = event.wheel.x;
                 self.scroll_y = event.wheel.y;
             },
-            c.SDL_EVENT_WINDOW_RESIZED => {
-                self.window_width = @intCast(event.window.data1);
-                self.window_height = @intCast(event.window.data2);
+            c.SDL_EVENT_WINDOW_RESIZED, c.SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED => {
+                // Use pixel size, not logical size, for proper HiDPI/Wayland support
+                // The event data contains logical size; we need to query actual pixels
+                if (c.SDL_GetWindowFromEvent(&event)) |win| {
+                    var w: c_int = 0;
+                    var h: c_int = 0;
+                    _ = c.SDL_GetWindowSizeInPixels(win, &w, &h);
+                    if (w > 0 and h > 0) {
+                        self.window_width = @intCast(w);
+                        self.window_height = @intCast(h);
+                    }
+                }
             },
             else => {},
         }
@@ -166,5 +175,16 @@ pub const Input = struct {
     pub fn setMouseCapture(self: *Input, window: anytype, captured: bool) void {
         self.mouse_captured = captured;
         _ = c.SDL_SetWindowRelativeMouseMode(window, captured);
+    }
+
+    /// Initialize window dimensions from an SDL window (in pixels, not logical size)
+    pub fn initWindowSize(self: *Input, window: anytype) void {
+        var w: c_int = 0;
+        var h: c_int = 0;
+        _ = c.SDL_GetWindowSizeInPixels(window, &w, &h);
+        if (w > 0 and h > 0) {
+            self.window_width = @intCast(w);
+            self.window_height = @intCast(h);
+        }
     }
 };

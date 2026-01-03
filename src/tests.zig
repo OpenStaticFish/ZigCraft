@@ -705,6 +705,193 @@ test "Noise getHeight returns normalized value" {
 }
 
 // ============================================================================
+// NoiseParams Tests (Issue #104)
+// ============================================================================
+
+const noise_mod = @import("world/worldgen/noise.zig");
+
+test "Vec3f init and uniform" {
+    const v1 = noise_mod.Vec3f.init(1.0, 2.0, 3.0);
+    try testing.expectEqual(@as(f32, 1.0), v1.x);
+    try testing.expectEqual(@as(f32, 2.0), v1.y);
+    try testing.expectEqual(@as(f32, 3.0), v1.z);
+
+    const v2 = noise_mod.Vec3f.uniform(500.0);
+    try testing.expectEqual(@as(f32, 500.0), v2.x);
+    try testing.expectEqual(@as(f32, 500.0), v2.y);
+    try testing.expectEqual(@as(f32, 500.0), v2.z);
+}
+
+test "NoiseParams default values" {
+    const params = noise_mod.NoiseParams{ .seed = 12345 };
+    try testing.expectEqual(@as(f32, 0), params.offset);
+    try testing.expectEqual(@as(f32, 1), params.scale);
+    try testing.expectEqual(@as(f32, 600), params.spread.x);
+    try testing.expectEqual(@as(f32, 600), params.spread.y);
+    try testing.expectEqual(@as(f32, 600), params.spread.z);
+    try testing.expectEqual(@as(u16, 4), params.octaves);
+    try testing.expectEqual(@as(f32, 0.5), params.persist);
+    try testing.expectEqual(@as(f32, 2.0), params.lacunarity);
+    try testing.expect(params.flags.eased);
+    try testing.expect(!params.flags.absvalue);
+}
+
+test "NoiseParams frequency from spread" {
+    const params = noise_mod.NoiseParams{
+        .seed = 12345,
+        .spread = noise_mod.Vec3f.uniform(500),
+    };
+    try testing.expectApproxEqAbs(@as(f32, 0.002), params.getFrequency2D(), 0.0001);
+
+    // Anisotropic spread
+    const params2 = noise_mod.NoiseParams{
+        .seed = 12345,
+        .spread = noise_mod.Vec3f.init(250, 350, 250),
+    };
+    const freq3d = params2.getFrequency3D();
+    try testing.expectApproxEqAbs(@as(f32, 1.0 / 250.0), freq3d.x, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 1.0 / 350.0), freq3d.y, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 1.0 / 250.0), freq3d.z, 0.0001);
+}
+
+test "NoiseFlags packed struct size" {
+    // NoiseFlags should be 1 byte
+    try testing.expectEqual(@as(usize, 1), @sizeOf(noise_mod.NoiseFlags));
+}
+
+test "ConfiguredNoise init" {
+    const params = noise_mod.NoiseParams{
+        .seed = 42,
+        .scale = 70.0,
+        .offset = 4.0,
+        .spread = noise_mod.Vec3f.uniform(600),
+        .octaves = 5,
+        .persist = 0.6,
+    };
+    const cn = noise_mod.ConfiguredNoise.init(params);
+
+    try testing.expectEqual(@as(u64, 42), cn.params.seed);
+    try testing.expectEqual(@as(f32, 70.0), cn.params.scale);
+    try testing.expectEqual(@as(f32, 4.0), cn.params.offset);
+}
+
+test "ConfiguredNoise get2D returns value with offset and scale" {
+    const params = noise_mod.NoiseParams{
+        .seed = 42,
+        .scale = 10.0,
+        .offset = 5.0,
+        .spread = noise_mod.Vec3f.uniform(100),
+        .octaves = 3,
+    };
+    const cn = noise_mod.ConfiguredNoise.init(params);
+
+    const val = cn.get2D(100, 100);
+    // FBM output is roughly -1 to 1
+    // After scale and offset: offset + scale * fbm = 5 + 10 * [-1,1] = [-5, 15]
+    try testing.expect(val >= -10 and val <= 20);
+}
+
+test "ConfiguredNoise absvalue flag produces non-negative" {
+    const params = noise_mod.NoiseParams{
+        .seed = 42,
+        .scale = 1.0,
+        .offset = 0,
+        .spread = noise_mod.Vec3f.uniform(50),
+        .flags = .{ .absvalue = true },
+    };
+    const cn = noise_mod.ConfiguredNoise.init(params);
+
+    // Sample multiple points - all should be >= 0
+    var all_non_negative = true;
+    var x: f32 = 0;
+    while (x < 100) : (x += 10) {
+        var z: f32 = 0;
+        while (z < 100) : (z += 10) {
+            const val = cn.get2D(x, z);
+            if (val < 0) all_non_negative = false;
+        }
+    }
+    try testing.expect(all_non_negative);
+}
+
+test "ConfiguredNoise get3D anisotropic spread" {
+    const params = noise_mod.NoiseParams{
+        .seed = 42,
+        .scale = 1.0,
+        .offset = 0,
+        .spread = noise_mod.Vec3f.init(250, 350, 250),
+        .octaves = 3,
+    };
+    const cn = noise_mod.ConfiguredNoise.init(params);
+
+    const val = cn.get3D(100, 50, 100);
+    // Should be in valid range
+    try testing.expect(val >= -2 and val <= 2);
+}
+
+test "ConfiguredNoise get2DNormalized returns 0-1 range" {
+    const params = noise_mod.NoiseParams{
+        .seed = 42,
+        .scale = 1.0,
+        .offset = 0,
+        .spread = noise_mod.Vec3f.uniform(100),
+        .octaves = 4,
+    };
+    const cn = noise_mod.ConfiguredNoise.init(params);
+
+    var x: f32 = 0;
+    while (x < 50) : (x += 5) {
+        var z: f32 = 0;
+        while (z < 50) : (z += 5) {
+            const val = cn.get2DNormalized(x, z);
+            try testing.expect(val >= 0.0);
+            try testing.expect(val <= 1.0);
+        }
+    }
+}
+
+test "ConfiguredNoise get2DRidged produces ridged output" {
+    const params = noise_mod.NoiseParams{
+        .seed = 42,
+        .scale = 1.0,
+        .offset = 0,
+        .spread = noise_mod.Vec3f.uniform(100),
+        .octaves = 4,
+    };
+    const cn = noise_mod.ConfiguredNoise.init(params);
+
+    // Ridged noise should be in [0, 1] range regardless of flags
+    var x: f32 = 0;
+    while (x < 50) : (x += 5) {
+        var z: f32 = 0;
+        while (z < 50) : (z += 5) {
+            const val = cn.get2DRidged(x, z);
+            try testing.expect(val >= 0.0);
+            try testing.expect(val <= 1.0);
+        }
+    }
+}
+
+test "ConfiguredNoise determinism with same params" {
+    const params = noise_mod.NoiseParams{
+        .seed = 12345,
+        .scale = 50.0,
+        .offset = 10.0,
+        .spread = noise_mod.Vec3f.uniform(300),
+        .octaves = 5,
+        .persist = 0.6,
+    };
+
+    const cn1 = noise_mod.ConfiguredNoise.init(params);
+    const cn2 = noise_mod.ConfiguredNoise.init(params);
+
+    const val1 = cn1.get2D(123.456, 789.012);
+    const val2 = cn2.get2D(123.456, 789.012);
+
+    try testing.expectEqual(val1, val2);
+}
+
+// ============================================================================
 // WorldGen Determinism Tests
 // ============================================================================
 
@@ -713,8 +900,8 @@ const TerrainGenerator = @import("world/worldgen/generator.zig").TerrainGenerato
 test "WorldGen same seed produces identical blocks at origin" {
     const allocator = testing.allocator;
 
-    const gen1 = TerrainGenerator.init(12345, allocator);
-    const gen2 = TerrainGenerator.init(12345, allocator);
+    var gen1 = TerrainGenerator.init(12345, allocator);
+    var gen2 = TerrainGenerator.init(12345, allocator);
 
     var chunk1 = Chunk.init(0, 0);
     var chunk2 = Chunk.init(0, 0);
@@ -728,8 +915,8 @@ test "WorldGen same seed produces identical blocks at origin" {
 test "WorldGen same seed produces identical biomes at origin" {
     const allocator = testing.allocator;
 
-    const gen1 = TerrainGenerator.init(12345, allocator);
-    const gen2 = TerrainGenerator.init(12345, allocator);
+    var gen1 = TerrainGenerator.init(12345, allocator);
+    var gen2 = TerrainGenerator.init(12345, allocator);
 
     var chunk1 = Chunk.init(0, 0);
     var chunk2 = Chunk.init(0, 0);
@@ -774,8 +961,8 @@ test "WorldGen same seed produces identical blocks at different positions" {
 test "WorldGen different seeds produce different blocks" {
     const allocator = testing.allocator;
 
-    const gen1 = TerrainGenerator.init(11111, allocator);
-    const gen2 = TerrainGenerator.init(99999, allocator);
+    var gen1 = TerrainGenerator.init(11111, allocator);
+    var gen2 = TerrainGenerator.init(99999, allocator);
 
     var chunk1 = Chunk.init(0, 0);
     var chunk2 = Chunk.init(0, 0);
@@ -790,24 +977,46 @@ test "WorldGen different seeds produce different blocks" {
 test "WorldGen different seeds produce different biomes" {
     const allocator = testing.allocator;
 
-    const gen1 = TerrainGenerator.init(11111, allocator);
-    const gen2 = TerrainGenerator.init(99999, allocator);
+    var gen1 = TerrainGenerator.init(11111, allocator);
+    var gen2 = TerrainGenerator.init(99999, allocator);
 
-    var chunk1 = Chunk.init(0, 0);
-    var chunk2 = Chunk.init(0, 0);
+    // With structure-first generation (Issue #92), noise scales are much larger
+    // (continental scale = 1/3500). To see biome differences, we need to test
+    // at multiple distant locations spanning different continental zones.
+    // Use chunk coordinates (world = chunk * 16) that sample different noise phases.
+    // Test locations ~10000+ blocks apart in world space.
+    const test_locations = [_][2]i32{
+        .{ -300, 200 }, // ~5000 blocks from origin
+        .{ 500, -400 }, // Different direction
+        .{ 700, 300 }, // ~11000 blocks from origin
+        .{ -600, -500 }, // Negative quadrant
+        .{ 1000, 1000 }, // ~22000 blocks from origin
+    };
 
-    gen1.generate(&chunk1, null);
-    gen2.generate(&chunk2, null);
+    var differences_found: u32 = 0;
 
-    const all_same = std.mem.eql(BiomeId, &chunk1.biomes, &chunk2.biomes);
-    try testing.expect(!all_same);
+    for (test_locations) |loc| {
+        var chunk1 = Chunk.init(loc[0], loc[1]);
+        var chunk2 = Chunk.init(loc[0], loc[1]);
+
+        gen1.generate(&chunk1, null);
+        gen2.generate(&chunk2, null);
+
+        if (!std.mem.eql(BiomeId, &chunk1.biomes, &chunk2.biomes)) {
+            differences_found += 1;
+        }
+    }
+
+    // With large-scale noise, we expect at least SOME locations to differ
+    // Even if individual chunks look similar, across 5 samples there should be variance
+    try testing.expect(differences_found >= 1);
 }
 
 test "WorldGen determinism across multiple chunks with same seed" {
     const allocator = testing.allocator;
     const seed: u64 = 987654321;
 
-    const gens = [_]TerrainGenerator{
+    var gens = [_]TerrainGenerator{
         TerrainGenerator.init(seed, allocator),
         TerrainGenerator.init(seed, allocator),
         TerrainGenerator.init(seed, allocator),
@@ -825,11 +1034,11 @@ test "WorldGen determinism across multiple chunks with same seed" {
         Chunk.init(-7, 12),
     };
 
-    for (gens, 0..) |gen, i| {
+    for (&gens, 0..) |*gen, i| {
         gen.generate(&chunks1[i], null);
     }
 
-    for (gens, 0..) |gen, i| {
+    for (&gens, 0..) |*gen, i| {
         gen.generate(&chunks2[i], null);
     }
 
@@ -842,7 +1051,7 @@ test "WorldGen determinism across multiple chunks with same seed" {
 test "WorldGen golden output for known seed at origin" {
     const allocator = testing.allocator;
 
-    const gen = TerrainGenerator.init(42, allocator);
+    var gen = TerrainGenerator.init(42, allocator);
     var chunk = Chunk.init(0, 0);
 
     gen.generate(&chunk, null);
@@ -850,15 +1059,83 @@ test "WorldGen golden output for known seed at origin" {
     try testing.expect(chunk.generated);
     try testing.expect(chunk.dirty);
 
-    const top_block = chunk.getBlock(8, 64, 8);
-    try testing.expect(top_block.isSolid());
-
+    // With the coastal terrain fixes (Issue #92), the terrain shape has changed.
+    // Instead of checking a fixed Y coordinate, verify terrain generation is valid:
+    // 1. Bedrock must be present at y=0
     const bedrock_present = chunk.getBlock(0, 0, 0) == .bedrock;
     try testing.expect(bedrock_present);
 
+    // 2. There must be a valid surface somewhere in the chunk
     const surface_height = chunk.getHighestSolidY(8, 8);
     try testing.expect(surface_height > 0);
     try testing.expect(surface_height < CHUNK_SIZE_Y);
+
+    // 3. The surface block should be solid (not air/water)
+    const surface_block = chunk.getBlock(8, surface_height, 8);
+    try testing.expect(surface_block.isSolid());
+}
+
+test "WorldGen populates heightmap and biomes" {
+    const allocator = testing.allocator;
+    var gen = TerrainGenerator.init(42, allocator);
+    var chunk = Chunk.init(0, 0);
+
+    gen.generate(&chunk, null);
+
+    // Check heightmap
+    const h = chunk.getSurfaceHeight(8, 8);
+    try testing.expect(h > 0);
+    try testing.expect(h < CHUNK_SIZE_Y);
+
+    // Check that stored height corresponds to a solid or water block (terrain surface)
+    // Note: getBlock takes u32 y, h is i16
+    const block_at_surface = chunk.getBlock(8, @intCast(h), 8);
+    // It should be solid or water (if ocean)
+    // Actually, surface_height is the height of the terrain surface.
+    // If underwater, it's the sea floor?
+    // generator.zig: `surface_heights[idx] = terrain_height_i;`
+    // computeHeight returns the height of the solid terrain (seabed if ocean).
+    // So block at h should be solid (sand/gravel/dirt/stone).
+    // Block at h+1 might be water or air.
+    try testing.expect(block_at_surface != BlockType.air);
+    try testing.expect(block_at_surface != BlockType.water); // Should be seabed if underwater
+
+    // Check biomes
+    const b = chunk.biomes[8 + 8 * 16];
+    // Just ensure valid enum
+    try testing.expect(@intFromEnum(b) <= 20); // 20 is max ID currently
+}
+
+test "Decoration placement" {
+    const allocator = testing.allocator;
+    const gen = TerrainGenerator.init(42, allocator);
+    var chunk = Chunk.init(0, 0);
+
+    // Setup chunk for decorations
+    for (0..CHUNK_SIZE_Z) |z| {
+        for (0..CHUNK_SIZE_X) |x| {
+            chunk.setSurfaceHeight(@intCast(x), @intCast(z), 64);
+            chunk.biomes[x + z * CHUNK_SIZE_X] = .plains;
+            chunk.setBlock(@intCast(x), 64, @intCast(z), .grass);
+        }
+    }
+
+    gen.generateFeatures(&chunk);
+
+    // Verify some decorations placed
+    var deco_count: u32 = 0;
+    for (0..CHUNK_SIZE_Z) |z| {
+        for (0..CHUNK_SIZE_X) |x| {
+            const block = chunk.getBlock(@intCast(x), 65, @intCast(z));
+            if (block == .tall_grass or block == .flower_red) {
+                deco_count += 1;
+            }
+        }
+    }
+
+    // Plains has 0.5 prob for grass, 0.05 for flowers.
+    // 256 blocks * 0.55 ~= 140 decorations.
+    try testing.expect(deco_count > 50);
 }
 
 // ============================================================================
@@ -996,36 +1273,41 @@ test "Biome structural constraints - height filter" {
     const getBiomeDefinition = biome_mod.getBiomeDefinition;
     const selectBiomeWithConstraints = biome_mod.selectBiomeWithConstraints;
 
+    // Updated for structure-first thresholds (Issue #92):
+    // - snowy_mountains requires min_height = 110 (updated from 100)
+    // - Mountains require continentalness >= 0.75 (inland high or core)
     const snowy_mountains = getBiomeDefinition(.snowy_mountains);
-    try testing.expect(snowy_mountains.min_height == 100);
+    try testing.expect(snowy_mountains.min_height == 110);
 
+    // Low elevation test - should NOT get snowy_mountains
     const climate_low = ClimateParams{
         .temperature = 0.3,
         .humidity = 0.5,
         .elevation = 0.5,
-        .continentalness = 0.7,
+        .continentalness = 0.85, // Continental core (>0.75)
         .ruggedness = 0.8,
     };
     const structural_low = StructuralParams{
-        .height = 50,
+        .height = 50, // Below min_height = 110
         .slope = 5,
-        .continentalness = 0.7,
+        .continentalness = 0.85,
         .ridge_mask = 0.3,
     };
     const biome_at_low_elev = selectBiomeWithConstraints(climate_low, structural_low);
     try testing.expect(biome_at_low_elev != .snowy_mountains);
 
+    // High elevation test - should get snowy_mountains
     const climate_high = ClimateParams{
-        .temperature = 0.3,
+        .temperature = 0.1, // Cold (Heat=10) to match snowy_mountains
         .humidity = 0.5,
         .elevation = 0.8,
-        .continentalness = 0.7,
+        .continentalness = 0.85, // Continental core (>0.75)
         .ruggedness = 0.8,
     };
     const structural_high = StructuralParams{
-        .height = 120,
+        .height = 120, // Above min_height = 110
         .slope = 5,
-        .continentalness = 0.7,
+        .continentalness = 0.85, // Must be >= 0.75 for mountains
         .ridge_mask = 0.3,
     };
     const biome_at_high_elev = selectBiomeWithConstraints(climate_high, structural_high);
@@ -1102,4 +1384,298 @@ test "Biome structural constraints - desert elevation limit" {
     };
     const biome_high = selectBiomeWithConstraints(climate, structural_high);
     try testing.expect(biome_high != .desert);
+}
+
+// ============================================================================
+// Biome Edge Detection Tests (Issue #102)
+// ============================================================================
+
+test "needsTransition returns true for desert-forest pair" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+
+    // Desert <-> Forest should need a transition
+    try testing.expect(biome_mod.needsTransition(.desert, .forest) == true);
+    try testing.expect(biome_mod.needsTransition(.forest, .desert) == true);
+
+    // Desert <-> Plains should need a transition
+    try testing.expect(biome_mod.needsTransition(.desert, .plains) == true);
+
+    // Snow tundra <-> Plains should need a transition
+    try testing.expect(biome_mod.needsTransition(.snow_tundra, .plains) == true);
+    try testing.expect(biome_mod.needsTransition(.snow_tundra, .forest) == true);
+
+    // Mountains <-> Plains should need a transition
+    try testing.expect(biome_mod.needsTransition(.mountains, .plains) == true);
+}
+
+test "needsTransition returns false for compatible biomes" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+
+    // Plains <-> Forest are compatible, no transition needed
+    try testing.expect(biome_mod.needsTransition(.plains, .forest) == false);
+
+    // Ocean <-> Beach are compatible
+    try testing.expect(biome_mod.needsTransition(.ocean, .beach) == false);
+
+    // Same biome never needs transition
+    try testing.expect(biome_mod.needsTransition(.desert, .desert) == false);
+    try testing.expect(biome_mod.needsTransition(.forest, .forest) == false);
+}
+
+test "getTransitionBiome returns correct biome for pairs" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+
+    // Desert <-> Forest should get dry_plains
+    try testing.expectEqual(biome_mod.getTransitionBiome(.desert, .forest), .dry_plains);
+    try testing.expectEqual(biome_mod.getTransitionBiome(.forest, .desert), .dry_plains);
+
+    // Desert <-> Plains should get dry_plains
+    try testing.expectEqual(biome_mod.getTransitionBiome(.desert, .plains), .dry_plains);
+
+    // Snow tundra <-> Plains should get taiga
+    try testing.expectEqual(biome_mod.getTransitionBiome(.snow_tundra, .plains), .taiga);
+    try testing.expectEqual(biome_mod.getTransitionBiome(.snow_tundra, .forest), .taiga);
+
+    // Mountains <-> Plains should get foothills
+    try testing.expectEqual(biome_mod.getTransitionBiome(.mountains, .plains), .foothills);
+
+    // Swamp <-> Forest should get marsh
+    try testing.expectEqual(biome_mod.getTransitionBiome(.swamp, .forest), .marsh);
+}
+
+test "getTransitionBiome returns null for compatible pairs" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+
+    // Plains <-> Forest has no transition defined
+    try testing.expectEqual(biome_mod.getTransitionBiome(.plains, .forest), null);
+
+    // Ocean <-> Beach has no transition defined
+    try testing.expectEqual(biome_mod.getTransitionBiome(.ocean, .beach), null);
+
+    // Same biome returns null
+    try testing.expectEqual(biome_mod.getTransitionBiome(.desert, .desert), null);
+}
+
+test "EdgeBand enum values are correct" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+
+    try testing.expectEqual(@intFromEnum(biome_mod.EdgeBand.none), 0);
+    try testing.expectEqual(@intFromEnum(biome_mod.EdgeBand.outer), 1);
+    try testing.expectEqual(@intFromEnum(biome_mod.EdgeBand.middle), 2);
+    try testing.expectEqual(@intFromEnum(biome_mod.EdgeBand.inner), 3);
+}
+
+test "Edge detection constants are properly defined" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+
+    // EDGE_STEP should be 4 for coarse grid sampling
+    try testing.expectEqual(biome_mod.EDGE_STEP, 4);
+
+    // EDGE_WIDTH should be 8 for transition band width
+    try testing.expectEqual(biome_mod.EDGE_WIDTH, 8);
+
+    // EDGE_CHECK_RADII should have 3 values: 4, 8, 12
+    try testing.expectEqual(biome_mod.EDGE_CHECK_RADII.len, 3);
+    try testing.expectEqual(biome_mod.EDGE_CHECK_RADII[0], 4);
+    try testing.expectEqual(biome_mod.EDGE_CHECK_RADII[1], 8);
+    try testing.expectEqual(biome_mod.EDGE_CHECK_RADII[2], 12);
+}
+
+test "BiomeEdgeInfo struct fields" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+
+    const edge_info = biome_mod.BiomeEdgeInfo{
+        .base_biome = .desert,
+        .neighbor_biome = .forest,
+        .edge_band = .middle,
+    };
+
+    try testing.expectEqual(edge_info.base_biome, .desert);
+    try testing.expectEqual(edge_info.neighbor_biome.?, .forest);
+    try testing.expectEqual(edge_info.edge_band, .middle);
+
+    // Test with no neighbor
+    const no_edge = biome_mod.BiomeEdgeInfo{
+        .base_biome = .plains,
+        .neighbor_biome = null,
+        .edge_band = .none,
+    };
+
+    try testing.expectEqual(no_edge.neighbor_biome, null);
+    try testing.expectEqual(no_edge.edge_band, .none);
+}
+
+test "Transition rules table has expected entries" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+
+    // Should have at least 10 transition rules
+    try testing.expect(biome_mod.TRANSITION_RULES.len >= 10);
+
+    // Verify a few specific rules exist
+    var found_desert_forest = false;
+    var found_snow_plains = false;
+    var found_mountain_plains = false;
+
+    for (biome_mod.TRANSITION_RULES) |rule| {
+        if ((rule.biome_a == .desert and rule.biome_b == .forest) or
+            (rule.biome_a == .forest and rule.biome_b == .desert))
+        {
+            found_desert_forest = true;
+            try testing.expectEqual(rule.transition, .dry_plains);
+        }
+        if ((rule.biome_a == .snow_tundra and rule.biome_b == .plains) or
+            (rule.biome_a == .plains and rule.biome_b == .snow_tundra))
+        {
+            found_snow_plains = true;
+            try testing.expectEqual(rule.transition, .taiga);
+        }
+        if ((rule.biome_a == .mountains and rule.biome_b == .plains) or
+            (rule.biome_a == .plains and rule.biome_b == .mountains))
+        {
+            found_mountain_plains = true;
+            try testing.expectEqual(rule.transition, .foothills);
+        }
+    }
+
+    try testing.expect(found_desert_forest);
+    try testing.expect(found_snow_plains);
+    try testing.expect(found_mountain_plains);
+}
+
+// ============================================================================
+// Voronoi Biome Selection Tests (Issue #106)
+// ============================================================================
+
+test "BiomePoint struct fields" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+
+    const point = biome_mod.BiomePoint{
+        .id = .desert,
+        .heat = 90,
+        .humidity = 10,
+        .weight = 1.2,
+        .min_continental = 0.42,
+    };
+
+    try testing.expectEqual(point.id, .desert);
+    try testing.expectEqual(@as(f32, 90), point.heat);
+    try testing.expectEqual(@as(f32, 10), point.humidity);
+    try testing.expectEqual(@as(f32, 1.2), point.weight);
+    try testing.expectEqual(@as(f32, 0.42), point.min_continental);
+}
+
+test "BIOME_POINTS table has expected biomes" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+
+    // Should have multiple biome points
+    try testing.expect(biome_mod.BIOME_POINTS.len >= 15);
+
+    // Find specific biomes
+    var found_desert = false;
+    var found_plains = false;
+    var found_forest = false;
+    var found_snow = false;
+
+    for (biome_mod.BIOME_POINTS) |point| {
+        if (point.id == .desert) found_desert = true;
+        if (point.id == .plains) found_plains = true;
+        if (point.id == .forest) found_forest = true;
+        if (point.id == .snow_tundra) found_snow = true;
+    }
+
+    try testing.expect(found_desert);
+    try testing.expect(found_plains);
+    try testing.expect(found_forest);
+    try testing.expect(found_snow);
+}
+
+test "selectBiomeVoronoi returns desert for hot/dry" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+
+    // Hot (90) and dry (10) should select desert
+    // Height 70 (within desert y_max=90), continental 0.5 (inland), slope 0
+    const result = biome_mod.selectBiomeVoronoi(90, 10, 70, 0.5, 0);
+    try testing.expectEqual(result, .desert);
+}
+
+test "selectBiomeVoronoi returns snow_tundra for cold/dry" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+
+    // Cold (5) and dry (30) should select snow_tundra
+    // Height 70, continental 0.5 (inland), slope 0
+    const result = biome_mod.selectBiomeVoronoi(5, 30, 70, 0.5, 0);
+    try testing.expectEqual(result, .snow_tundra);
+}
+
+test "selectBiomeVoronoi returns ocean for low continentalness" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+
+    // Any heat/humidity, but low continentalness = ocean
+    const result = biome_mod.selectBiomeVoronoi(50, 50, 50, 0.25, 0);
+    try testing.expectEqual(result, .ocean);
+}
+
+test "selectBiomeVoronoi returns deep_ocean for very low continentalness" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+
+    // Very low continentalness = deep ocean
+    const result = biome_mod.selectBiomeVoronoi(50, 50, 30, 0.10, 0);
+    try testing.expectEqual(result, .deep_ocean);
+}
+
+test "selectBiomeVoronoi respects height constraints" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+
+    // High elevation with cold temp should get mountains, not plains
+    // snowy_mountains requires y_min=100, so at height 110 with cold temp...
+    const high_result = biome_mod.selectBiomeVoronoi(10, 40, 110, 0.65, 0);
+    try testing.expectEqual(high_result, .snowy_mountains);
+
+    // At low height with same temp, should NOT get snowy_mountains
+    const low_result = biome_mod.selectBiomeVoronoi(10, 40, 70, 0.65, 0);
+    try testing.expect(low_result != .snowy_mountains);
+}
+
+test "selectBiomeVoronoi weight affects selection" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+
+    // Plains has high weight (1.5), so it should win in temperate areas
+    // even if slightly closer to another biome's center
+    const result = biome_mod.selectBiomeVoronoi(50, 45, 70, 0.5, 0);
+    try testing.expectEqual(result, .plains);
+}
+
+test "selectBiomeVoronoiWithRiver returns river when mask active" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+
+    // High river mask should override to river biome
+    const result = biome_mod.selectBiomeVoronoiWithRiver(50, 50, 65, 0.5, 0, 0.8);
+    try testing.expectEqual(result, .river);
+
+    // Low river mask should return normal biome
+    const no_river = biome_mod.selectBiomeVoronoiWithRiver(50, 50, 65, 0.5, 0, 0.2);
+    try testing.expect(no_river != .river);
+}
+
+test "selectBiomeWithConstraints uses Voronoi selection" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+
+    // Create climate params for hot/dry area
+    const climate = biome_mod.ClimateParams{
+        .temperature = 0.9, // Hot -> 90 in Voronoi scale
+        .humidity = 0.1, // Dry -> 10 in Voronoi scale
+        .elevation = 0.4,
+        .continentalness = 0.5,
+        .ruggedness = 0.2,
+    };
+
+    const structural = biome_mod.StructuralParams{
+        .height = 70,
+        .slope = 2,
+        .continentalness = 0.5,
+        .ridge_mask = 0.1,
+    };
+
+    const result = biome_mod.selectBiomeWithConstraints(climate, structural);
+    try testing.expectEqual(result, .desert);
 }

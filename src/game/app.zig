@@ -18,6 +18,8 @@ const ShadowMap = @import("../engine/graphics/shadows.zig").ShadowMap;
 const World = @import("../world/world.zig").World;
 const worldToChunk = @import("../world/chunk.zig").worldToChunk;
 const WorldMap = @import("../world/worldgen/world_map.zig").WorldMap;
+const region_pkg = @import("../world/worldgen/region.zig");
+const LODConfig = @import("../world/lod_chunk.zig").LODConfig;
 
 const rhi_pkg = @import("../engine/graphics/rhi.zig");
 const RHI = rhi_pkg.RHI;
@@ -163,7 +165,7 @@ const AtmosphereState = struct {
         }
 
         self.fog_color = self.horizon_color;
-        self.fog_density = std.math.lerp(0.002, 0.0012, self.sun_intensity);
+        self.fog_density = std.math.lerp(0.0015, 0.0008, self.sun_intensity);
     }
 
     pub fn setTimeOfDay(self: *AtmosphereState, time: f32) void {
@@ -221,6 +223,7 @@ const CloudState = struct {
 const DebugState = packed struct {
     shadows: bool = false,
     cascade_idx: usize = 0,
+    show_fps: bool = false,
 };
 
 pub const App = struct {
@@ -270,13 +273,14 @@ pub const App = struct {
             }
         }
 
-        const wm = try WindowManager.init(allocator, use_vulkan);
-
+        // Load settings first to get window resolution
         log.log.info("Initializing engine systems...", .{});
-        const settings = Settings{};
+        const settings = Settings.load(allocator);
+
+        const wm = try WindowManager.init(allocator, use_vulkan, settings.window_width, settings.window_height);
+
         var input = Input.init(allocator);
-        input.window_width = 1280;
-        input.window_height = 720;
+        input.initWindowSize(wm.window);
         const time = Time.init();
 
         const RhiResult = struct {
@@ -349,7 +353,7 @@ pub const App = struct {
             .move_speed = 50.0,
         });
 
-        const ui = try UISystem.init(rhi, 1280, 720);
+        const ui = try UISystem.init(rhi, input.window_width, input.window_height);
 
         const app = try allocator.create(App);
         app.* = .{
@@ -402,7 +406,7 @@ pub const App = struct {
     }
 
     pub fn runSingleFrame(self: *App) !void {
-        self.rhi.setViewport(1280, 720);
+        self.rhi.setViewport(self.input.window_width, self.input.window_height);
 
         if (self.pending_world_cleanup or self.pending_new_world_seed != null) {
             self.rhi.waitIdle();
@@ -415,11 +419,27 @@ pub const App = struct {
 
         if (self.pending_new_world_seed) |seed| {
             self.pending_new_world_seed = null;
-            self.world = World.init(self.allocator, self.settings.render_distance, seed, self.rhi) catch |err| {
-                log.log.err("Failed to create world: {}", .{err});
-                self.app_state = .home;
-                return;
-            };
+            if (self.settings.lod_enabled) {
+                // LOD0 = render_distance (user-controlled block chunks)
+                // LOD1/2/3 = Fixed large values for "infinite" terrain view
+                const lod_config = LODConfig{
+                    .lod0_radius = self.settings.render_distance,
+                    .lod1_radius = 40,
+                    .lod2_radius = 80,
+                    .lod3_radius = 160,
+                };
+                self.world = World.initWithLOD(self.allocator, self.settings.render_distance, seed, self.rhi, lod_config) catch |err| {
+                    log.log.err("Failed to create world with LOD: {}", .{err});
+                    self.app_state = .home;
+                    return;
+                };
+            } else {
+                self.world = World.init(self.allocator, self.settings.render_distance, seed, self.rhi) catch |err| {
+                    log.log.err("Failed to create world: {}", .{err});
+                    self.app_state = .home;
+                    return;
+                };
+            }
             if (self.world_map == null) self.world_map = WorldMap.init(self.rhi, 256, 256);
             self.map_controller.show_map = false;
             self.map_controller.map_needs_update = true;
@@ -481,6 +501,9 @@ pub const App = struct {
                 self.settings.vsync = !self.settings.vsync;
                 self.rhi.setVSync(self.settings.vsync);
             }
+            if (self.input.isKeyPressed(.f2)) {
+                self.debug_state.show_fps = !self.debug_state.show_fps;
+            }
             if (debug_build and self.input.isKeyPressed(.u)) self.debug_state.shadows = !self.debug_state.shadows;
 
             self.map_controller.update(&self.input, &self.camera, self.time.delta_time, self.window_manager.window, screen_w, screen_h, if (self.world_map) |m| m.width else 256);
@@ -502,11 +525,18 @@ pub const App = struct {
 
                 if (self.world) |active_world| {
                     if (active_world.render_distance != self.settings.render_distance) {
-                        active_world.render_distance = self.settings.render_distance;
+                        active_world.setRenderDistance(self.settings.render_distance);
                     }
 
-                    try active_world.update(self.camera.position);
+                    try active_world.update(self.camera.position, self.time.delta_time);
                 } else self.app_state = .home;
+            } else if (in_pause) {
+                // Still update render distance while paused so settings take effect immediately
+                if (self.world) |active_world| {
+                    if (active_world.render_distance != self.settings.render_distance) {
+                        active_world.setRenderDistance(self.settings.render_distance);
+                    }
+                }
             }
         } else if (self.input.mouse_captured) self.input.setMouseCapture(self.window_manager.window, false);
 
@@ -604,9 +634,16 @@ pub const App = struct {
                     if (self.world_map) |*m| {
                         try self.map_controller.draw(u, screen_w, screen_h, m, &active_world.generator, self.camera.position);
                     }
-                    if (debug_build) {
+                    // FPS counter (F2 toggle, works in release builds)
+                    if (self.debug_state.show_fps) {
                         u.drawRect(.{ .x = 10, .y = 10, .width = 80, .height = 30 }, Color.rgba(0, 0, 0, 0.7));
                         Font.drawNumber(u, @intFromFloat(self.time.fps), 15, 15, Color.white);
+                    }
+                    if (debug_build) {
+                        if (!self.debug_state.show_fps) {
+                            u.drawRect(.{ .x = 10, .y = 10, .width = 80, .height = 30 }, Color.rgba(0, 0, 0, 0.7));
+                            Font.drawNumber(u, @intFromFloat(self.time.fps), 15, 15, Color.white);
+                        }
                         const stats = active_world.getStats();
                         const rs = active_world.getRenderStats();
                         const pc = worldToChunk(@intFromFloat(self.camera.position.x), @intFromFloat(self.camera.position.z));
@@ -638,6 +675,18 @@ pub const App = struct {
                         Font.drawNumber(u, mn, 140, hy + 125, Color.white);
                         Font.drawText(u, "SUN:", 15, hy + 145, 1.5, Color.white);
                         Font.drawNumber(u, @intFromFloat(si * 100.0), 100, hy + 145, Color.white);
+
+                        // Region Role Debug (Issue #110)
+                        if (self.world) |world| {
+                            const px: i32 = @intFromFloat(self.camera.position.x);
+                            const pz: i32 = @intFromFloat(self.camera.position.z);
+                            const region = world.generator.getRegionInfo(px, pz);
+                            const c3 = region_pkg.getRoleColor(region.role);
+                            Font.drawText(u, "ROLE:", 15, hy + 165, 1.5, Color.rgba(c3[0], c3[1], c3[2], 1.0));
+                            var buf: [32]u8 = undefined;
+                            const label = std.fmt.bufPrint(&buf, "{s}", .{@tagName(region.role)}) catch "???";
+                            Font.drawText(u, label, 100, hy + 165, 1.5, Color.white);
+                        }
                     }
                     if (in_pause) {
                         u.drawRect(.{ .x = 0, .y = 0, .width = screen_w, .height = screen_h }, Color.rgba(0, 0, 0, 0.5));
@@ -673,6 +722,7 @@ pub const App = struct {
                 .screen_h = screen_h,
                 .time = &self.time,
                 .allocator = self.allocator,
+                .window_manager = &self.window_manager,
             };
             switch (self.app_state) {
                 .home => {
@@ -691,7 +741,7 @@ pub const App = struct {
     }
 
     pub fn run(self: *App) !void {
-        self.rhi.setViewport(1280, 720);
+        self.rhi.setViewport(self.input.window_width, self.input.window_height);
         log.log.info("=== ZigCraft ===", .{});
 
         while (!self.input.should_quit) {
@@ -706,11 +756,27 @@ pub const App = struct {
 
             if (self.pending_new_world_seed) |seed| {
                 self.pending_new_world_seed = null;
-                self.world = World.init(self.allocator, self.settings.render_distance, seed, self.rhi) catch |err| {
-                    log.log.err("Failed to create world: {}", .{err});
-                    self.app_state = .home;
-                    continue;
-                };
+                if (self.settings.lod_enabled) {
+                    // LOD0 = render_distance (user-controlled block chunks)
+                    // LOD1/2/3 = Fixed large values for "infinite" terrain view
+                    const lod_config = LODConfig{
+                        .lod0_radius = self.settings.render_distance,
+                        .lod1_radius = 40,
+                        .lod2_radius = 80,
+                        .lod3_radius = 160,
+                    };
+                    self.world = World.initWithLOD(self.allocator, self.settings.render_distance, seed, self.rhi, lod_config) catch |err| {
+                        log.log.err("Failed to create world with LOD: {}", .{err});
+                        self.app_state = .home;
+                        continue;
+                    };
+                } else {
+                    self.world = World.init(self.allocator, self.settings.render_distance, seed, self.rhi) catch |err| {
+                        log.log.err("Failed to create world: {}", .{err});
+                        self.app_state = .home;
+                        continue;
+                    };
+                }
                 if (self.world_map == null) self.world_map = WorldMap.init(self.rhi, 256, 256);
                 self.map_controller.show_map = false;
                 self.map_controller.map_needs_update = true;
@@ -772,6 +838,9 @@ pub const App = struct {
                     self.settings.vsync = !self.settings.vsync;
                     self.rhi.setVSync(self.settings.vsync);
                 }
+                if (self.input.isKeyPressed(.f2)) {
+                    self.debug_state.show_fps = !self.debug_state.show_fps;
+                }
                 if (debug_build and self.input.isKeyPressed(.u)) self.debug_state.shadows = !self.debug_state.shadows;
 
                 self.map_controller.update(&self.input, &self.camera, self.time.delta_time, self.window_manager.window, screen_w, screen_h, if (self.world_map) |m| m.width else 256);
@@ -793,11 +862,18 @@ pub const App = struct {
 
                     if (self.world) |active_world| {
                         if (active_world.render_distance != self.settings.render_distance) {
-                            active_world.render_distance = self.settings.render_distance;
+                            active_world.setRenderDistance(self.settings.render_distance);
                         }
 
-                        try active_world.update(self.camera.position);
+                        try active_world.update(self.camera.position, self.time.delta_time);
                     } else self.app_state = .home;
+                } else if (in_pause) {
+                    // Still update render distance while paused so settings take effect immediately
+                    if (self.world) |active_world| {
+                        if (active_world.render_distance != self.settings.render_distance) {
+                            active_world.setRenderDistance(self.settings.render_distance);
+                        }
+                    }
                 }
             } else if (self.input.mouse_captured) self.input.setMouseCapture(self.window_manager.window, false);
 
@@ -897,9 +973,16 @@ pub const App = struct {
                         if (self.world_map) |*m| {
                             try self.map_controller.draw(u, screen_w, screen_h, m, &active_world.generator, self.camera.position);
                         }
-                        if (debug_build) {
+                        // FPS counter (F2 toggle, works in release builds)
+                        if (self.debug_state.show_fps) {
                             u.drawRect(.{ .x = 10, .y = 10, .width = 80, .height = 30 }, Color.rgba(0, 0, 0, 0.7));
                             Font.drawNumber(u, @intFromFloat(self.time.fps), 15, 15, Color.white);
+                        }
+                        if (debug_build) {
+                            if (!self.debug_state.show_fps) {
+                                u.drawRect(.{ .x = 10, .y = 10, .width = 80, .height = 30 }, Color.rgba(0, 0, 0, 0.7));
+                                Font.drawNumber(u, @intFromFloat(self.time.fps), 15, 15, Color.white);
+                            }
                             const stats = active_world.getStats();
                             const rs = active_world.getRenderStats();
                             const pc = worldToChunk(@intFromFloat(self.camera.position.x), @intFromFloat(self.camera.position.z));
@@ -931,6 +1014,18 @@ pub const App = struct {
                             Font.drawNumber(u, mn, 140, hy + 125, Color.white);
                             Font.drawText(u, "SUN:", 15, hy + 145, 1.5, Color.white);
                             Font.drawNumber(u, @intFromFloat(si * 100.0), 100, hy + 145, Color.white);
+
+                            // Region Role Debug (Issue #110)
+                            if (self.world) |world| {
+                                const px: i32 = @intFromFloat(self.camera.position.x);
+                                const pz: i32 = @intFromFloat(self.camera.position.z);
+                                const region = world.generator.getRegionInfo(px, pz);
+                                const c3 = region_pkg.getRoleColor(region.role);
+                                Font.drawText(u, "ROLE:", 15, hy + 165, 1.5, Color.rgba(c3[0], c3[1], c3[2], 1.0));
+                                var buf: [32]u8 = undefined;
+                                const label = std.fmt.bufPrint(&buf, "{s}", .{@tagName(region.role)}) catch "???";
+                                Font.drawText(u, label, 100, hy + 165, 1.5, Color.white);
+                            }
                         }
                         if (in_pause) {
                             u.drawRect(.{ .x = 0, .y = 0, .width = screen_w, .height = screen_h }, Color.rgba(0, 0, 0, 0.5));
@@ -966,6 +1061,7 @@ pub const App = struct {
                     .screen_h = screen_h,
                     .time = &self.time,
                     .allocator = self.allocator,
+                    .window_manager = &self.window_manager,
                 };
                 switch (self.app_state) {
                     .home => {
@@ -986,7 +1082,16 @@ pub const App = struct {
                     if (self.time.frame_count % 120 == 0) {
                         const s = active_world.getStats();
                         const rs = active_world.getRenderStats();
-                        std.debug.print("FPS: {d:.1} | Chunks: {}/{} (culled: {}) | Vertices: {} | Pos: ({d:.1}, {d:.1}, {d:.1})\n", .{ self.time.fps, rs.chunks_rendered, s.chunks_loaded, rs.chunks_culled, rs.vertices_rendered, self.camera.position.x, self.camera.position.y, self.camera.position.z });
+                        if (active_world.getLODStats()) |lod| {
+                            std.debug.print("FPS: {d:.1} | Chunks: {}/{} | LOD: L1={} L2={} L3={} | Pos: ({d:.1}, {d:.1}, {d:.1})\n", .{ self.time.fps, rs.chunks_rendered, s.chunks_loaded, lod.lod1_loaded, lod.lod2_loaded, lod.lod3_loaded, self.camera.position.x, self.camera.position.y, self.camera.position.z });
+                            // Detailed LOD1/LOD2 state debug
+                            if (lod.lod1_loaded == 0 or lod.lod2_loaded == 0) {
+                                std.debug.print("  LOD1 states: gen={} generated={} meshing={} mesh_ready={} uploading={} renderable={}\n", .{ lod.lod1_generating, lod.lod1_generated, lod.lod1_meshing, lod.lod1_mesh_ready, lod.lod1_uploading, lod.lod1_loaded });
+                                std.debug.print("  LOD2 states: gen={} generated={} meshing={} mesh_ready={} uploading={} renderable={}\n", .{ lod.lod2_generating, lod.lod2_generated, lod.lod2_meshing, lod.lod2_mesh_ready, lod.lod2_uploading, lod.lod2_loaded });
+                            }
+                        } else {
+                            std.debug.print("FPS: {d:.1} | Chunks: {}/{} (culled: {}) | Vertices: {} | Pos: ({d:.1}, {d:.1}, {d:.1})\n", .{ self.time.fps, rs.chunks_rendered, s.chunks_loaded, rs.chunks_culled, rs.vertices_rendered, self.camera.position.x, self.camera.position.y, self.camera.position.z });
+                        }
                     }
                 }
             }

@@ -444,7 +444,7 @@ fn beginMainPass(ctx_ptr: *anyopaque) void {
     // Ensure render state matches what Renderer was doing
     c.glEnable(c.GL_DEPTH_TEST);
     c.glDepthMask(c.GL_TRUE);
-    c.glDepthFunc(c.GL_LESS);
+    c.glDepthFunc(c.GL_LEQUAL);
 
     // Disable culling for now to ensure all voxel faces are visible regardless of winding
     c.glDisable(c.GL_CULL_FACE);
@@ -574,7 +574,7 @@ fn updateShadowUniforms(ctx_ptr: *anyopaque, params: rhi.ShadowParams) void {
     }
 }
 
-fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4) void {
+fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4, mask_radius: f32) void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
     const mvp = ctx.current_view_proj.multiply(model);
 
@@ -582,10 +582,12 @@ fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4) void {
         shader.use();
         shader.setMat4Cached("transform", &mvp.data);
         shader.setMat4Cached("uModel", &model.data);
+        shader.setFloatCached("uMaskRadius", mask_radius);
     } else if (ctx.active_program != 0) {
         c.glUseProgram().?(ctx.active_program);
         setUniformMat4Direct(ctx.active_program, "transform", &mvp.data);
         setUniformMat4Direct(ctx.active_program, "uModel", &model.data);
+        setUniformFloatDirect(ctx.active_program, "uMaskRadius", mask_radius);
     }
 }
 
@@ -704,6 +706,16 @@ fn shaderSetInt(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle, name: [*c]const u
     const program = @as(c.GLuint, @intCast(handle));
     const loc = c.glGetUniformLocation().?(program, name);
     if (loc != -1) c.glUniform1i().?(loc, value);
+}
+
+fn drawIndirect(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, command_buffer: rhi.BufferHandle, offset: usize, draw_count: u32, stride: u32) void {
+    _ = ctx_ptr;
+    _ = handle;
+    _ = command_buffer;
+    _ = offset;
+    _ = draw_count;
+    _ = stride;
+    // Not implemented for OpenGL backend yet
 }
 
 fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.DrawMode) void {
@@ -1076,6 +1088,36 @@ fn drawDebugShadowMap(ctx_ptr: *anyopaque, cascade_index: usize, depth_map_handl
     c.glBindVertexArray().?(0);
 }
 
+fn setAnisotropicFiltering(ctx_ptr: *anyopaque, level: u8) void {
+    _ = ctx_ptr;
+    // OpenGL anisotropic filtering is set per-texture at creation time
+    // This would require recreating textures, so we log a warning
+    if (level > 1) {
+        std.log.info("OpenGL: Anisotropic filtering level {} requested (applied on texture creation)", .{level});
+    }
+}
+
+fn setMSAA(ctx_ptr: *anyopaque, samples: u8) void {
+    _ = ctx_ptr;
+    // OpenGL MSAA requires window recreation which is not supported at runtime
+    std.log.warn("OpenGL: MSAA change not supported at runtime (requires window recreation)", .{});
+    _ = samples;
+}
+
+fn getMaxAnisotropy(ctx_ptr: *anyopaque) u8 {
+    _ = ctx_ptr;
+    var max_aniso: c.GLfloat = 1.0;
+    c.glGetFloatv(c.GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &max_aniso);
+    return @intFromFloat(@min(max_aniso, 16.0));
+}
+
+fn getMaxMSAASamples(ctx_ptr: *anyopaque) u8 {
+    _ = ctx_ptr;
+    var max_samples: c.GLint = 1;
+    c.glGetIntegerv(c.GL_MAX_SAMPLES, &max_samples);
+    return @intCast(@min(max_samples, 16));
+}
+
 const vtable = rhi.RHI.VTable{
     .init = init,
     .deinit = deinit,
@@ -1098,11 +1140,12 @@ const vtable = rhi.RHI.VTable{
     .waitIdle = waitIdle,
     .beginShadowPass = beginShadowPass,
     .endShadowPass = endShadowPass,
+    .setModelMatrix = setModelMatrix,
     .updateGlobalUniforms = updateGlobalUniforms,
     .updateShadowUniforms = updateShadowUniforms,
-    .setModelMatrix = setModelMatrix,
     .setTextureUniforms = setTextureUniforms,
     .draw = draw,
+    .drawIndirect = drawIndirect,
     .drawSky = drawSky,
     .createTexture = createTexture,
     .destroyTexture = destroyTexture,
@@ -1119,6 +1162,10 @@ const vtable = rhi.RHI.VTable{
     .drawUITexturedQuad = drawUITexturedQuad,
     .drawClouds = drawClouds,
     .drawDebugShadowMap = drawDebugShadowMap,
+    .setAnisotropicFiltering = setAnisotropicFiltering,
+    .setMSAA = setMSAA,
+    .getMaxAnisotropy = getMaxAnisotropy,
+    .getMaxMSAASamples = getMaxMSAASamples,
 };
 
 pub fn createRHI(allocator: std.mem.Allocator, device: ?*RenderDevice) !rhi.RHI {

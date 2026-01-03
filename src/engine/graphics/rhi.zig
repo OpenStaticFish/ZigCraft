@@ -85,6 +85,13 @@ pub const DrawMode = enum {
     points,
 };
 
+pub const DrawIndirectCommand = extern struct {
+    vertexCount: u32,
+    instanceCount: u32,
+    firstVertex: u32,
+    firstInstance: u32,
+};
+
 /// Sky rendering parameters
 pub const SkyParams = struct {
     cam_pos: Vec3,
@@ -206,13 +213,14 @@ pub const RHI = struct {
         endShadowPass: *const fn (ctx: *anyopaque) void,
 
         // Uniforms
+        setModelMatrix: *const fn (ctx: *anyopaque, model: Mat4, mask_radius: f32) void,
         updateGlobalUniforms: *const fn (ctx: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void,
         updateShadowUniforms: *const fn (ctx: *anyopaque, params: ShadowParams) void,
-        setModelMatrix: *const fn (ctx: *anyopaque, model: Mat4) void,
         setTextureUniforms: *const fn (ctx: *anyopaque, texture_enabled: bool, shadow_map_handles: [3]TextureHandle) void,
 
         // Draw Calls
         draw: *const fn (ctx: *anyopaque, handle: BufferHandle, count: u32, mode: DrawMode) void,
+        drawIndirect: *const fn (ctx: *anyopaque, handle: BufferHandle, command_buffer: BufferHandle, offset: usize, draw_count: u32, stride: u32) void,
         drawSky: *const fn (ctx: *anyopaque, params: SkyParams) void,
 
         // Textures
@@ -240,6 +248,12 @@ pub const RHI = struct {
 
         // Debug rendering
         drawDebugShadowMap: *const fn (ctx: *anyopaque, cascade_index: usize, depth_map_handle: TextureHandle) void,
+
+        // Quality settings
+        setAnisotropicFiltering: *const fn (ctx: *anyopaque, level: u8) void,
+        setMSAA: *const fn (ctx: *anyopaque, samples: u8) void,
+        getMaxAnisotropy: *const fn (ctx: *anyopaque) u8,
+        getMaxMSAASamples: *const fn (ctx: *anyopaque) u8,
     };
 
     pub fn init(self: RHI, allocator: Allocator, device: ?*RenderDevice) !void {
@@ -349,8 +363,8 @@ pub const RHI = struct {
         self.vtable.updateShadowUniforms(self.ptr, params);
     }
 
-    pub fn setModelMatrix(self: RHI, model: Mat4) void {
-        self.vtable.setModelMatrix(self.ptr, model);
+    pub fn setModelMatrix(self: RHI, model: Mat4, mask_radius: f32) void {
+        self.vtable.setModelMatrix(self.ptr, model, mask_radius);
     }
 
     pub fn setTextureUniforms(self: RHI, texture_enabled: bool, shadow_map_handles: [3]TextureHandle) void {
@@ -359,6 +373,10 @@ pub const RHI = struct {
 
     pub fn draw(self: RHI, handle: BufferHandle, count: u32, mode: DrawMode) void {
         self.vtable.draw(self.ptr, handle, count, mode);
+    }
+
+    pub fn drawIndirect(self: RHI, handle: BufferHandle, command_buffer: BufferHandle, offset: usize, draw_count: u32, stride: u32) void {
+        self.vtable.drawIndirect(self.ptr, handle, command_buffer, offset, draw_count, stride);
     }
 
     pub fn drawSky(self: RHI, params: SkyParams) void {
@@ -426,5 +444,21 @@ pub const RHI = struct {
 
     pub fn drawDebugShadowMap(self: RHI, cascade_index: usize, depth_map_handle: TextureHandle) void {
         self.vtable.drawDebugShadowMap(self.ptr, cascade_index, depth_map_handle);
+    }
+
+    pub fn setAnisotropicFiltering(self: RHI, level: u8) void {
+        self.vtable.setAnisotropicFiltering(self.ptr, level);
+    }
+
+    pub fn setMSAA(self: RHI, samples: u8) void {
+        self.vtable.setMSAA(self.ptr, samples);
+    }
+
+    pub fn getMaxAnisotropy(self: RHI) u8 {
+        return self.vtable.getMaxAnisotropy(self.ptr);
+    }
+
+    pub fn getMaxMSAASamples(self: RHI) u8 {
+        return self.vtable.getMaxMSAASamples(self.ptr);
     }
 };

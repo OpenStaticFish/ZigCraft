@@ -4,6 +4,9 @@
 const std = @import("std");
 const noise_mod = @import("noise.zig");
 const Noise = noise_mod.Noise;
+const ConfiguredNoise = noise_mod.ConfiguredNoise;
+const NoiseParams = noise_mod.NoiseParams;
+const Vec3f = noise_mod.Vec3f;
 const smoothstep = noise_mod.smoothstep;
 
 const Chunk = @import("../chunk.zig").Chunk;
@@ -40,12 +43,20 @@ pub const CaveParams = struct {
     worm_turn_strength: f32 = 0.12,
     worm_branch_chance: f32 = 0.03,
 
-    // Section 6: Noise Cavities
+    // Section 6: Noise Cavities (Legacy)
     cavity_scale: f32 = 1.0 / 50.0,
     cavity_y_scale: f32 = 1.0 / 40.0, // Slightly stretched vertically
     cavity_threshold: f32 = 0.62, // Lower = more cavities
     cavity_y_min: i32 = 15,
     cavity_y_max: i32 = 140,
+
+    // Section 7: Noise Intersection Caves (Issue #108)
+    // Caves where cave1 > threshold AND cave2 > threshold
+    intersection_threshold: f32 = 0.5,
+
+    // Section 8: Large Caverns (Issue #108)
+    cavern_threshold: f32 = 0.6,
+    cavern_y_max: i32 = 32, // Deep underground only
 
     // Sea level for underwater cave handling
     sea_level: i32 = 64,
@@ -102,6 +113,11 @@ pub const CaveSystem = struct {
     worm_noise: Noise, // For worm direction perturbation
     cavity_noise: Noise, // 3D noise cavities
 
+    // New V7-style noises (Issue #108)
+    cave1_noise: ConfiguredNoise,
+    cave2_noise: ConfiguredNoise,
+    cavern_noise: ConfiguredNoise,
+
     params: CaveParams,
     seed: u64,
 
@@ -113,6 +129,29 @@ pub const CaveSystem = struct {
             .region_noise = Noise.init(random.int(u64)),
             .worm_noise = Noise.init(random.int(u64)),
             .cavity_noise = Noise.init(random.int(u64)),
+
+            // Intersection caves (spread ~60 blocks)
+            .cave1_noise = ConfiguredNoise.init(.{
+                .seed = seed +% 1005,
+                .spread = Vec3f.uniform(61),
+                .octaves = 3,
+                .persist = 0.5,
+            }),
+            .cave2_noise = ConfiguredNoise.init(.{
+                .seed = seed +% 1006,
+                .spread = Vec3f.uniform(67),
+                .octaves = 3,
+                .persist = 0.5,
+            }),
+
+            // Large caverns (massive spread)
+            .cavern_noise = ConfiguredNoise.init(.{
+                .seed = seed +% 1007,
+                .spread = Vec3f.init(384, 128, 384),
+                .octaves = 2,
+                .persist = 0.5,
+            }),
+
             .params = .{},
             .seed = seed,
         };
@@ -360,8 +399,8 @@ pub const CaveSystem = struct {
         }
     }
 
-    /// Check if a block should be carved by noise cavities
-    pub fn shouldCarveNoiseCavity(
+    /// Check if a block should be carved (combines all noise-based cave types)
+    pub fn shouldCarve(
         self: *const CaveSystem,
         world_x: f32,
         world_y: f32,
@@ -375,9 +414,26 @@ pub const CaveSystem = struct {
         // Region must allow caves
         if (cave_region_value < p.region_threshold) return false;
 
-        // Surface protection
+        // Surface protection (shared for all noise caves)
         if (yi > surface_height - p.min_surface_depth) return false;
 
+        // 1. Large Caverns (Deep underground)
+        if (yi < p.cavern_y_max) {
+            const cavern = self.cavern_noise.get3D(world_x, world_y, world_z);
+            // Threshold increases with height (smaller caves higher up)
+            const y_frac = world_y / @as(f32, @floatFromInt(p.cavern_y_max));
+            const threshold = p.cavern_threshold + y_frac * 0.2;
+            if (cavern > threshold) return true;
+        }
+
+        // 2. Intersection Caves (Connected tunnels)
+        // Two 3D noises must BOTH be above threshold
+        const n1 = self.cave1_noise.get3D(world_x, world_y, world_z);
+        const n2 = self.cave2_noise.get3D(world_x, world_y, world_z);
+        if (n1 > p.intersection_threshold and n2 > p.intersection_threshold) return true;
+
+        // 3. Legacy/Detail Cavities (Optional - keep for variety or remove?)
+        // Keeping as fallback for now but reducing probability
         // Depth band (caves prefer mid-depths)
         const band = smoothstep(
             @floatFromInt(p.cavity_y_min),
@@ -390,7 +446,6 @@ pub const CaveSystem = struct {
         ));
         if (band < 0.1) return false;
 
-        // 3D cavity noise
         const n = self.cavity_noise.fbm3D(
             world_x * p.cavity_scale,
             world_y * p.cavity_y_scale,
