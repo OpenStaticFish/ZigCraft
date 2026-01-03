@@ -1151,12 +1151,8 @@ test "single block generates 6 faces" {
     try mesh.buildWithNeighbors(&chunk, .empty);
 
     var total_verts: u32 = 0;
-    for (mesh.pending_solid) |p| {
-        if (p) |v| total_verts += @intCast(v.len);
-    }
-    for (mesh.pending_fluid) |p| {
-        if (p) |v| total_verts += @intCast(v.len);
-    }
+    if (mesh.pending_solid) |v| total_verts += @intCast(v.len);
+    if (mesh.pending_fluid) |v| total_verts += @intCast(v.len);
     try testing.expectEqual(@as(u32, 36), total_verts);
 }
 
@@ -1170,12 +1166,8 @@ test "adjacent blocks share face (no internal faces)" {
     try mesh.buildWithNeighbors(&chunk, .empty);
 
     var total_verts: u32 = 0;
-    for (mesh.pending_solid) |p| {
-        if (p) |v| total_verts += @intCast(v.len);
-    }
-    for (mesh.pending_fluid) |p| {
-        if (p) |v| total_verts += @intCast(v.len);
-    }
+    if (mesh.pending_solid) |v| total_verts += @intCast(v.len);
+    if (mesh.pending_fluid) |v| total_verts += @intCast(v.len);
     try testing.expect(total_verts < 72);
 }
 
@@ -1189,12 +1181,8 @@ test "adjacent transparent blocks share face" {
     try mesh.buildWithNeighbors(&chunk, .empty);
 
     var total_verts: u32 = 0;
-    for (mesh.pending_solid) |p| {
-        if (p) |v| total_verts += @intCast(v.len);
-    }
-    for (mesh.pending_fluid) |p| {
-        if (p) |v| total_verts += @intCast(v.len);
-    }
+    if (mesh.pending_solid) |v| total_verts += @intCast(v.len);
+    if (mesh.pending_fluid) |v| total_verts += @intCast(v.len);
     try testing.expect(total_verts < 72);
 }
 

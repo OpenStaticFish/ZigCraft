@@ -1,4 +1,7 @@
 //! Chunk mesh generation with Greedy Meshing and Subchunks.
+//!
+//! Vertices are built per-subchunk for greedy meshing efficiency,
+//! then merged into single solid/fluid buffers for minimal draw calls.
 
 const std = @import("std");
 
@@ -39,77 +42,76 @@ pub const NeighborChunks = struct {
     };
 };
 
-pub const SubChunkMesh = struct {
+/// Merged chunk mesh with single solid/fluid buffers for minimal draw calls.
+/// Subchunk data is only used during mesh building, then merged.
+pub const ChunkMesh = struct {
+    // Merged GPU buffers - one draw call each
     solid_handle: BufferHandle = 0,
-    count_solid: u32 = 0,
-    capacity_solid: u32 = 0,
+    solid_count: u32 = 0,
+    solid_capacity: u32 = 0,
 
     fluid_handle: BufferHandle = 0,
-    count_fluid: u32 = 0,
-    capacity_fluid: u32 = 0,
+    fluid_count: u32 = 0,
+    fluid_capacity: u32 = 0,
 
     ready: bool = false,
 
-    pub fn deinit(self: *SubChunkMesh, rhi: RHI) void {
-        if (self.solid_handle != 0) rhi.destroyBuffer(self.solid_handle);
-        if (self.fluid_handle != 0) rhi.destroyBuffer(self.fluid_handle);
-    }
-};
-
-pub const ChunkMesh = struct {
-    subchunks: [NUM_SUBCHUNKS]SubChunkMesh,
     allocator: std.mem.Allocator,
     mutex: std.Thread.Mutex,
 
-    pending_solid: [NUM_SUBCHUNKS]?[]Vertex,
-    pending_fluid: [NUM_SUBCHUNKS]?[]Vertex,
+    // Pending merged vertex data (built on worker thread, uploaded on main thread)
+    pending_solid: ?[]Vertex = null,
+    pending_fluid: ?[]Vertex = null,
+
+    // Temporary per-subchunk data during building (not stored after merge)
+    subchunk_solid: [NUM_SUBCHUNKS]?[]Vertex = [_]?[]Vertex{null} ** NUM_SUBCHUNKS,
+    subchunk_fluid: [NUM_SUBCHUNKS]?[]Vertex = [_]?[]Vertex{null} ** NUM_SUBCHUNKS,
 
     pub fn init(allocator: std.mem.Allocator) ChunkMesh {
-        var self: ChunkMesh = .{
-            .subchunks = undefined,
+        return .{
             .allocator = allocator,
             .mutex = .{},
-            .pending_solid = [_]?[]Vertex{null} ** NUM_SUBCHUNKS,
-            .pending_fluid = [_]?[]Vertex{null} ** NUM_SUBCHUNKS,
         };
-        for (0..NUM_SUBCHUNKS) |i| {
-            self.subchunks[i] = .{
-                .solid_handle = 0,
-                .count_solid = 0,
-                .capacity_solid = 0,
-                .fluid_handle = 0,
-                .count_fluid = 0,
-                .capacity_fluid = 0,
-                .ready = false,
-            };
-        }
-        return self;
     }
 
     // Must be called on main thread or wherever RHI context is valid
     pub fn deinit(self: *ChunkMesh, rhi: RHI) void {
         self.mutex.lock();
         defer self.mutex.unlock();
+
+        if (self.solid_handle != 0) rhi.destroyBuffer(self.solid_handle);
+        if (self.fluid_handle != 0) rhi.destroyBuffer(self.fluid_handle);
+
+        if (self.pending_solid) |p| self.allocator.free(p);
+        if (self.pending_fluid) |p| self.allocator.free(p);
+
         for (0..NUM_SUBCHUNKS) |i| {
-            self.subchunks[i].deinit(rhi);
-            if (self.pending_solid[i]) |p| self.allocator.free(p);
-            if (self.pending_fluid[i]) |p| self.allocator.free(p);
+            if (self.subchunk_solid[i]) |p| self.allocator.free(p);
+            if (self.subchunk_fluid[i]) |p| self.allocator.free(p);
         }
     }
 
     pub fn deinitWithoutRHI(self: *ChunkMesh) void {
         self.mutex.lock();
         defer self.mutex.unlock();
+
+        if (self.pending_solid) |p| self.allocator.free(p);
+        if (self.pending_fluid) |p| self.allocator.free(p);
+
         for (0..NUM_SUBCHUNKS) |i| {
-            if (self.pending_solid[i]) |p| self.allocator.free(p);
-            if (self.pending_fluid[i]) |p| self.allocator.free(p);
+            if (self.subchunk_solid[i]) |p| self.allocator.free(p);
+            if (self.subchunk_fluid[i]) |p| self.allocator.free(p);
         }
     }
 
     pub fn buildWithNeighbors(self: *ChunkMesh, chunk: *const Chunk, neighbors: NeighborChunks) !void {
+        // Build each subchunk separately (greedy meshing works per Y slice)
         for (0..NUM_SUBCHUNKS) |i| {
             try self.buildSubchunk(chunk, neighbors, @intCast(i));
         }
+
+        // Merge all subchunk vertices into single buffers
+        try self.mergeSubchunks();
     }
 
     fn buildSubchunk(self: *ChunkMesh, chunk: *const Chunk, neighbors: NeighborChunks, si: u32) !void {
@@ -134,12 +136,74 @@ pub const ChunkMesh = struct {
             try self.meshSlice(chunk, neighbors, .south, sz, si, &solid_verts, &fluid_verts);
         }
 
+        // Store subchunk data temporarily (will be merged later)
         self.mutex.lock();
         defer self.mutex.unlock();
-        if (self.pending_solid[si]) |p| self.allocator.free(p);
-        if (self.pending_fluid[si]) |p| self.allocator.free(p);
-        self.pending_solid[si] = if (solid_verts.items.len > 0) try self.allocator.dupe(Vertex, solid_verts.items) else null;
-        self.pending_fluid[si] = if (fluid_verts.items.len > 0) try self.allocator.dupe(Vertex, fluid_verts.items) else null;
+
+        if (self.subchunk_solid[si]) |p| self.allocator.free(p);
+        if (self.subchunk_fluid[si]) |p| self.allocator.free(p);
+
+        self.subchunk_solid[si] = if (solid_verts.items.len > 0)
+            try self.allocator.dupe(Vertex, solid_verts.items)
+        else
+            null;
+        self.subchunk_fluid[si] = if (fluid_verts.items.len > 0)
+            try self.allocator.dupe(Vertex, fluid_verts.items)
+        else
+            null;
+    }
+
+    /// Merge all subchunk vertices into single solid/fluid arrays.
+    /// Called after all subchunks are built.
+    fn mergeSubchunks(self: *ChunkMesh) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Count total vertices
+        var total_solid: usize = 0;
+        var total_fluid: usize = 0;
+        for (0..NUM_SUBCHUNKS) |i| {
+            if (self.subchunk_solid[i]) |v| total_solid += v.len;
+            if (self.subchunk_fluid[i]) |v| total_fluid += v.len;
+        }
+
+        // Free old pending data
+        if (self.pending_solid) |p| self.allocator.free(p);
+        if (self.pending_fluid) |p| self.allocator.free(p);
+
+        // Merge solid vertices
+        if (total_solid > 0) {
+            var merged = try self.allocator.alloc(Vertex, total_solid);
+            var offset: usize = 0;
+            for (0..NUM_SUBCHUNKS) |i| {
+                if (self.subchunk_solid[i]) |v| {
+                    @memcpy(merged[offset..][0..v.len], v);
+                    offset += v.len;
+                    self.allocator.free(v);
+                    self.subchunk_solid[i] = null;
+                }
+            }
+            self.pending_solid = merged;
+        } else {
+            self.pending_solid = null;
+        }
+
+        // Merge fluid vertices
+        if (total_fluid > 0) {
+            var merged = try self.allocator.alloc(Vertex, total_fluid);
+            var offset: usize = 0;
+            for (0..NUM_SUBCHUNKS) |i| {
+                if (self.subchunk_fluid[i]) |v| {
+                    @memcpy(merged[offset..][0..v.len], v);
+                    offset += v.len;
+                    self.allocator.free(v);
+                    self.subchunk_fluid[i] = null;
+                }
+            }
+            self.pending_fluid = merged;
+        } else {
+            self.pending_fluid = null;
+        }
     }
 
     const FaceKey = struct {
@@ -242,68 +306,59 @@ pub const ChunkMesh = struct {
     }
 
     /// Upload pending mesh data to the GPU.
-    ///
-    /// ## Buffer Reuse Strategy
-    /// Buffers are reused when possible to avoid GPU sync points:
-    /// - If new data fits in existing buffer capacity, only the data is updated
-    /// - If capacity is exceeded, buffer is reallocated to next power-of-2 size
-    /// - Minimum allocation is 1KB to reduce small reallocations
-    ///
-    /// This approach balances memory usage with reallocation frequency.
-    /// A full ring buffer would be more efficient for frequently-changing meshes,
-    /// but chunk meshes change infrequently after initial generation.
+    /// Now uploads single merged buffers instead of 16 separate ones.
     pub fn upload(self: *ChunkMesh, rhi: RHI) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        for (0..NUM_SUBCHUNKS) |si| {
-            if (self.pending_solid[si]) |v| {
-                const bytes = std.mem.sliceAsBytes(v);
-                // Reuse buffer if capacity is sufficient; otherwise reallocate
-                if (bytes.len > self.subchunks[si].capacity_solid) {
-                    if (self.subchunks[si].solid_handle != 0) {
-                        rhi.destroyBuffer(self.subchunks[si].solid_handle);
-                    }
-                    var new_cap = std.math.ceilPowerOfTwo(usize, bytes.len) catch bytes.len;
-                    if (new_cap < 1024) new_cap = 1024;
-                    self.subchunks[si].solid_handle = rhi.createBuffer(new_cap, .vertex);
-                    self.subchunks[si].capacity_solid = @intCast(new_cap);
-                }
-                rhi.uploadBuffer(self.subchunks[si].solid_handle, bytes);
 
-                self.subchunks[si].count_solid = @intCast(v.len);
-                self.allocator.free(v);
-                self.pending_solid[si] = null;
-                self.subchunks[si].ready = true;
-            }
-            if (self.pending_fluid[si]) |v| {
-                const bytes = std.mem.sliceAsBytes(v);
-                if (bytes.len > self.subchunks[si].capacity_fluid) {
-                    if (self.subchunks[si].fluid_handle != 0) {
-                        rhi.destroyBuffer(self.subchunks[si].fluid_handle);
-                    }
-                    var new_cap = std.math.ceilPowerOfTwo(usize, bytes.len) catch bytes.len;
-                    if (new_cap < 1024) new_cap = 1024;
-                    self.subchunks[si].fluid_handle = rhi.createBuffer(new_cap, .vertex);
-                    self.subchunks[si].capacity_fluid = @intCast(new_cap);
+        // Upload merged solid buffer
+        if (self.pending_solid) |v| {
+            const bytes = std.mem.sliceAsBytes(v);
+            if (bytes.len > self.solid_capacity) {
+                if (self.solid_handle != 0) {
+                    rhi.destroyBuffer(self.solid_handle);
                 }
-                rhi.uploadBuffer(self.subchunks[si].fluid_handle, bytes);
-
-                self.subchunks[si].count_fluid = @intCast(v.len);
-                self.allocator.free(v);
-                self.pending_fluid[si] = null;
-                self.subchunks[si].ready = true;
+                var new_cap = std.math.ceilPowerOfTwo(usize, bytes.len) catch bytes.len;
+                if (new_cap < 1024) new_cap = 1024;
+                self.solid_handle = rhi.createBuffer(new_cap, .vertex);
+                self.solid_capacity = @intCast(new_cap);
             }
+            rhi.uploadBuffer(self.solid_handle, bytes);
+            self.solid_count = @intCast(v.len);
+            self.allocator.free(v);
+            self.pending_solid = null;
+            self.ready = true;
+        }
+
+        // Upload merged fluid buffer
+        if (self.pending_fluid) |v| {
+            const bytes = std.mem.sliceAsBytes(v);
+            if (bytes.len > self.fluid_capacity) {
+                if (self.fluid_handle != 0) {
+                    rhi.destroyBuffer(self.fluid_handle);
+                }
+                var new_cap = std.math.ceilPowerOfTwo(usize, bytes.len) catch bytes.len;
+                if (new_cap < 1024) new_cap = 1024;
+                self.fluid_handle = rhi.createBuffer(new_cap, .vertex);
+                self.fluid_capacity = @intCast(new_cap);
+            }
+            rhi.uploadBuffer(self.fluid_handle, bytes);
+            self.fluid_count = @intCast(v.len);
+            self.allocator.free(v);
+            self.pending_fluid = null;
+            self.ready = true;
         }
     }
 
+    /// Draw the chunk mesh with a single draw call per pass.
+    /// Reduced from 16 draw calls to 1 per pass.
     pub fn draw(self: *const ChunkMesh, rhi: RHI, pass: Pass) void {
-        for (self.subchunks) |s| {
-            if (!s.ready) continue;
-            if (pass == .solid and s.count_solid > 0) {
-                rhi.draw(s.solid_handle, s.count_solid, .triangles);
-            } else if (pass == .fluid and s.count_fluid > 0) {
-                rhi.draw(s.fluid_handle, s.count_fluid, .triangles);
-            }
+        if (!self.ready) return;
+
+        if (pass == .solid and self.solid_count > 0) {
+            rhi.draw(self.solid_handle, self.solid_count, .triangles);
+        } else if (pass == .fluid and self.fluid_count > 0) {
+            rhi.draw(self.fluid_handle, self.fluid_count, .triangles);
         }
     }
 };

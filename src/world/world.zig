@@ -636,9 +636,7 @@ pub const World = struct {
 
         for (self.visible_chunks.items) |data| {
             self.last_render_stats.chunks_rendered += 1;
-            for (data.mesh.subchunks) |s| {
-                self.last_render_stats.vertices_rendered += s.count_solid;
-            }
+            self.last_render_stats.vertices_rendered += data.mesh.solid_count;
 
             const chunk_world_x: f32 = @floatFromInt(data.chunk.chunk_x * CHUNK_SIZE_X);
             const chunk_world_z: f32 = @floatFromInt(data.chunk.chunk_z * CHUNK_SIZE_Z);
@@ -652,9 +650,7 @@ pub const World = struct {
         }
 
         for (self.visible_chunks.items) |data| {
-            for (data.mesh.subchunks) |s| {
-                self.last_render_stats.vertices_rendered += s.count_fluid;
-            }
+            self.last_render_stats.vertices_rendered += data.mesh.fluid_count;
 
             const chunk_world_x: f32 = @floatFromInt(data.chunk.chunk_x * CHUNK_SIZE_X);
             const chunk_world_z: f32 = @floatFromInt(data.chunk.chunk_z * CHUNK_SIZE_Z);
@@ -713,9 +709,7 @@ pub const World = struct {
         var total_verts: u64 = 0;
         var iter = self.chunks.iterator();
         while (iter.next()) |entry| {
-            for (entry.value_ptr.*.mesh.subchunks) |s| {
-                total_verts += s.count_solid + s.count_fluid;
-            }
+            total_verts += entry.value_ptr.*.mesh.solid_count + entry.value_ptr.*.mesh.fluid_count;
         }
 
         self.gen_queue.mutex.lock();
