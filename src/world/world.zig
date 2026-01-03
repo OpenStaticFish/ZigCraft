@@ -285,11 +285,17 @@ pub const World = struct {
             self.render_distance = distance;
             // Update LOD config to match render distance
             if (self.lod_manager) |lod_mgr| {
-                lod_mgr.config.lod0_radius = distance;
-                lod_mgr.config.lod1_radius = distance + 6;
-                lod_mgr.config.lod2_radius = distance + 14;
-                lod_mgr.config.lod3_radius = distance + 22;
-                std.log.info("LOD radii updated: LOD0={}, LOD1={}, LOD2={}, LOD3={}", .{
+                // Issue #119: Sensible radii scaling for high render distances.
+                // Distance 50 should mean LOD3 is at 50, but LOD0 (blocks) is capped
+                // to maintain playable frame rates (too many draw calls otherwise).
+                lod_mgr.config.lod3_radius = distance;
+                lod_mgr.config.lod2_radius = @max(distance - 12, @divTrunc(distance * 3, 4));
+                lod_mgr.config.lod1_radius = @max(distance - 24, @divTrunc(distance, 2));
+                // Cap LOD0 at 16 chunks (approx 1000 chunks total) for performance.
+                lod_mgr.config.lod0_radius = @min(distance, 16);
+
+                std.log.info("LOD radii dynamically scaled for distance {}: LOD0={}, LOD1={}, LOD2={}, LOD3={}", .{
+                    distance,
                     lod_mgr.config.lod0_radius,
                     lod_mgr.config.lod1_radius,
                     lod_mgr.config.lod2_radius,
