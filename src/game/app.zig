@@ -607,8 +607,8 @@ pub const App = struct {
                 if (self.shader != 0) {
                     self.atlas.bind(0);
                     if (self.shadow_map) |*sm| {
-                        var shadow_map_handles: [3]rhi_pkg.TextureHandle = undefined;
-                        for (0..3) |i| {
+                        var shadow_map_handles: [rhi_pkg.SHADOW_CASCADE_COUNT]rhi_pkg.TextureHandle = undefined;
+                        for (0..rhi_pkg.SHADOW_CASCADE_COUNT) |i| {
                             shadow_map_handles[i] = sm.depth_maps[i].handle;
                         }
                         self.rhi.setTextureUniforms(self.settings.textures_enabled, shadow_map_handles);
@@ -618,7 +618,7 @@ pub const App = struct {
                             .shadow_texel_sizes = sm.texel_sizes,
                         });
                     } else {
-                        self.rhi.setTextureUniforms(self.settings.textures_enabled, [_]rhi_pkg.TextureHandle{ 0, 0, 0 });
+                        self.rhi.setTextureUniforms(self.settings.textures_enabled, [_]rhi_pkg.TextureHandle{0} ** rhi_pkg.SHADOW_CASCADE_COUNT);
                     }
                 }
 
@@ -946,8 +946,8 @@ pub const App = struct {
                     if (self.shader != 0) {
                         self.atlas.bind(0);
                         if (self.shadow_map) |*sm| {
-                            var shadow_map_handles: [3]rhi_pkg.TextureHandle = undefined;
-                            for (0..3) |i| {
+                            var shadow_map_handles: [rhi_pkg.SHADOW_CASCADE_COUNT]rhi_pkg.TextureHandle = undefined;
+                            for (0..rhi_pkg.SHADOW_CASCADE_COUNT) |i| {
                                 shadow_map_handles[i] = sm.depth_maps[i].handle;
                             }
                             self.rhi.setTextureUniforms(self.settings.textures_enabled, shadow_map_handles);
@@ -957,7 +957,7 @@ pub const App = struct {
                                 .shadow_texel_sizes = sm.texel_sizes,
                             });
                         } else {
-                            self.rhi.setTextureUniforms(self.settings.textures_enabled, [_]rhi_pkg.TextureHandle{ 0, 0, 0 });
+                            self.rhi.setTextureUniforms(self.settings.textures_enabled, [_]rhi_pkg.TextureHandle{0} ** rhi_pkg.SHADOW_CASCADE_COUNT);
                         }
                     }
 

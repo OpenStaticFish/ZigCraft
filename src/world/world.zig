@@ -668,10 +668,13 @@ pub const World = struct {
         }
     }
 
-    pub fn renderShadowPass(self: *World, view_proj: Mat4, camera_pos: Vec3) void {
-        _ = view_proj;
-        self.chunks_mutex.lock();
-        defer self.chunks_mutex.unlock();
+    pub fn renderShadowPass(self: *World, light_space_matrix: Mat4, camera_pos: Vec3) void {
+        // Build frustum from the light's orthographic projection matrix
+        // This culls chunks that are outside the shadow cascade's view
+        const shadow_frustum = Frustum.fromViewProj(light_space_matrix);
+
+        self.chunks_mutex.lockShared();
+        defer self.chunks_mutex.unlockShared();
 
         var iter = self.chunks.iterator();
         while (iter.next()) |entry| {
@@ -682,6 +685,12 @@ pub const World = struct {
 
             const chunk_world_x: f32 = @floatFromInt(key.x * CHUNK_SIZE_X);
             const chunk_world_z: f32 = @floatFromInt(key.z * CHUNK_SIZE_Z);
+
+            // Frustum culling against the shadow cascade's orthographic projection
+            // Use intersectsChunkRelative with camera_pos for consistent coordinate system
+            if (!shadow_frustum.intersectsChunkRelative(key.x, key.z, camera_pos.x, camera_pos.y, camera_pos.z)) {
+                continue;
+            }
 
             const rel_x = chunk_world_x - camera_pos.x;
             const rel_z = chunk_world_z - camera_pos.z;

@@ -367,7 +367,7 @@ pub const RHI = struct {
         self.vtable.setModelMatrix(self.ptr, model, mask_radius);
     }
 
-    pub fn setTextureUniforms(self: RHI, texture_enabled: bool, shadow_map_handles: [3]TextureHandle) void {
+    pub fn setTextureUniforms(self: RHI, texture_enabled: bool, shadow_map_handles: [SHADOW_CASCADE_COUNT]TextureHandle) void {
         self.vtable.setTextureUniforms(self.ptr, texture_enabled, shadow_map_handles);
     }
 

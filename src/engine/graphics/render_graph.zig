@@ -140,7 +140,7 @@ pub const RenderGraph = struct {
         if (!is_vulkan and shader != 0) {
             rhi.bindShader(shader);
             // Force update texture uniforms for OpenGL to ensure uUseTexture is set on the active shader
-            rhi.setTextureUniforms(true, .{ 0, 0, 0 });
+            rhi.setTextureUniforms(true, [_]rhi_pkg.TextureHandle{0} ** rhi_pkg.SHADOW_CASCADE_COUNT);
             // Re-bind atlas for OpenGL to ensure it's on unit 0
             if (atlas_handle != 0) rhi.bindTexture(atlas_handle, 0);
         }
