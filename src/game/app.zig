@@ -557,7 +557,7 @@ pub const App = struct {
                     if (self.atmosphere.sun_intensity < 0.05 and self.atmosphere.moon_intensity > 0.05) light_dir = self.atmosphere.moon_dir;
                     if (!self.is_vulkan and (self.atmosphere.sun_intensity > 0.05 or self.atmosphere.moon_intensity > 0.05)) {
                         sm.update(self.camera.fov, aspect, 0.1, self.settings.shadow_distance, light_dir, self.camera.position, self.camera.getViewMatrixOriginCentered());
-                        for (0..3) |i| {
+                        for (0..rhi_pkg.SHADOW_CASCADE_COUNT) |i| {
                             sm.begin(i);
                             self.rhi.updateGlobalUniforms(sm.light_space_matrices[i], self.camera.position, self.atmosphere.sun_dir, self.atmosphere.time_of_day, self.atmosphere.fog_color, self.atmosphere.fog_density, self.atmosphere.fog_enabled, self.atmosphere.sun_intensity, self.atmosphere.ambient_intensity, self.settings.textures_enabled, .{});
                             active_world.renderShadowPass(sm.light_space_matrices[i], self.camera.position);
@@ -895,7 +895,7 @@ pub const App = struct {
                         if (self.atmosphere.sun_intensity < 0.05 and self.atmosphere.moon_intensity > 0.05) light_dir = self.atmosphere.moon_dir;
                         if (!self.is_vulkan and (self.atmosphere.sun_intensity > 0.05 or self.atmosphere.moon_intensity > 0.05)) {
                             sm.update(self.camera.fov, aspect, 0.1, self.settings.shadow_distance, light_dir, self.camera.position, self.camera.getViewMatrixOriginCentered());
-                            for (0..3) |i| {
+                            for (0..rhi_pkg.SHADOW_CASCADE_COUNT) |i| {
                                 sm.begin(i);
                                 self.rhi.updateGlobalUniforms(sm.light_space_matrices[i], self.camera.position, self.atmosphere.sun_dir, self.atmosphere.time_of_day, self.atmosphere.fog_color, self.atmosphere.fog_density, self.atmosphere.fog_enabled, self.atmosphere.sun_intensity, self.atmosphere.ambient_intensity, self.settings.textures_enabled, .{});
                                 active_world.renderShadowPass(sm.light_space_matrices[i], self.camera.position);

@@ -54,9 +54,10 @@ const GlobalUniforms = extern struct {
 
 /// Shadow cascade uniforms for CSM. Bound to descriptor set 0, binding 2.
 const ShadowUniforms = extern struct {
-    light_space_matrices: [shadows.ShadowMap.CASCADE_COUNT]Mat4,
-    cascade_splits: [4]f32, // View-space depth splits
-    shadow_texel_sizes: [4]f32,
+    light_space_matrices: [rhi.SHADOW_CASCADE_COUNT]Mat4,
+    cascade_splits: [rhi.SHADOW_CASCADE_COUNT]f32,
+    shadow_texel_sizes: [rhi.SHADOW_CASCADE_COUNT]f32,
+    padding: f32 = 0.0,
 };
 
 /// Per-draw model matrix, passed via push constants for efficiency.
@@ -3757,8 +3758,9 @@ fn updateShadowUniforms(ctx_ptr: *anyopaque, params: rhi.ShadowParams) void {
 
     const shadow_uniforms = ShadowUniforms{
         .light_space_matrices = params.light_space_matrices,
-        .cascade_splits = .{ params.cascade_splits[0], params.cascade_splits[1], params.cascade_splits[2], 0.0 },
-        .shadow_texel_sizes = .{ params.shadow_texel_sizes[0], params.shadow_texel_sizes[1], params.shadow_texel_sizes[2], 0.0 },
+        .cascade_splits = .{ params.cascade_splits[0], params.cascade_splits[1] },
+        .shadow_texel_sizes = .{ params.shadow_texel_sizes[0], params.shadow_texel_sizes[1] },
+        .padding = 0.0,
     };
 
     var map_ptr: ?*anyopaque = null;

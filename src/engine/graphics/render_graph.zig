@@ -10,7 +10,6 @@ const ShadowMap = @import("shadows.zig").ShadowMap;
 pub const RenderPass = enum {
     shadow_cascade_0,
     shadow_cascade_1,
-    shadow_cascade_2,
     main_opaque,
     main_transparent,
     sky,
@@ -27,7 +26,6 @@ pub const RenderGraph = struct {
         const default_passes = &[_]RenderPass{
             .shadow_cascade_0,
             .shadow_cascade_1,
-            .shadow_cascade_2,
             .sky,
             .main_opaque,
             .clouds,
@@ -54,7 +52,7 @@ pub const RenderGraph = struct {
         for (self.passes) |pass| {
             // Start main render pass (clears buffer) only once before the first non-shadow pass
             switch (pass) {
-                .shadow_cascade_0, .shadow_cascade_1, .shadow_cascade_2 => {},
+                .shadow_cascade_0, .shadow_cascade_1 => {},
                 else => {
                     if (!main_pass_started) {
                         rhi.beginMainPass();
@@ -84,7 +82,6 @@ pub const RenderGraph = struct {
         switch (pass) {
             .shadow_cascade_0 => if (is_vulkan) RenderGraph.executeShadowPass(0, rhi, world, camera, shadow_map, is_vulkan, aspect, sky_params.sun_dir),
             .shadow_cascade_1 => if (is_vulkan) RenderGraph.executeShadowPass(1, rhi, world, camera, shadow_map, is_vulkan, aspect, sky_params.sun_dir),
-            .shadow_cascade_2 => if (is_vulkan) RenderGraph.executeShadowPass(2, rhi, world, camera, shadow_map, is_vulkan, aspect, sky_params.sun_dir),
             .main_opaque => RenderGraph.executeMainPass(rhi, world, camera, is_vulkan, aspect, main_shader, atlas_handle),
             .main_transparent => {},
             .sky => RenderGraph.executeSkyPass(rhi, camera, is_vulkan, aspect, sky_params),
