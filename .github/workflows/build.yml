@@ -32,27 +32,16 @@ jobs:
     - name: Build
       run: nix build -L
 
-    - name: Validate OpenGL shaders
-      run: |
-        nix develop --command sh -c '
-          echo "Validating OpenGL shaders..."
-          for shader in assets/shaders/*.vert assets/shaders/*.frag; do
-            echo "  Checking $shader"
-            glslangValidator "$shader"
-          done
-          echo "All OpenGL shaders valid!"
-        '
-      
     - name: Prepare Artifact
       run: |
         mkdir -p dist
         # Copy binary (resolving symlink from nix build)
-        cp -L result/bin/zig-triangle dist/zig-voxel-engine-linux
+        cp -L result/bin/zigcraft dist/zigcraft-linux
         
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: zig-voxel-engine-${{ matrix.os }}
+        name: zigcraft-${{ matrix.os }}
         path: dist/
 
   integration-test:

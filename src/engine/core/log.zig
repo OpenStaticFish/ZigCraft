@@ -60,33 +60,3 @@ pub const Logger = struct {
 
 /// Global logger instance
 pub var log = Logger.init(.debug);
-
-/// OpenGL error checking
-pub fn checkGLError(location: []const u8) bool {
-    const c = @import("../../c.zig").c;
-
-    var had_error = false;
-    while (true) {
-        const err = c.glGetError();
-        if (err == c.GL_NO_ERROR) break;
-
-        const err_str = switch (err) {
-            c.GL_INVALID_ENUM => "GL_INVALID_ENUM",
-            c.GL_INVALID_VALUE => "GL_INVALID_VALUE",
-            c.GL_INVALID_OPERATION => "GL_INVALID_OPERATION",
-            c.GL_OUT_OF_MEMORY => "GL_OUT_OF_MEMORY",
-            c.GL_INVALID_FRAMEBUFFER_OPERATION => "GL_INVALID_FRAMEBUFFER_OPERATION",
-            else => "UNKNOWN",
-        };
-
-        log.err("OpenGL error at {s}: {s} (0x{x})", .{ location, err_str, err });
-        had_error = true;
-    }
-    return had_error;
-}
-
-/// Clear any pending GL errors
-pub fn clearGLErrors() void {
-    const c = @import("../../c.zig").c;
-    while (c.glGetError() != c.GL_NO_ERROR) {}
-}

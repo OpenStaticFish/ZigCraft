@@ -488,5 +488,5 @@ const ShaderCache = struct {
 
 const RhiError = error{
     OutOfMemory,
-    OpenGLError,
+    VulkanError,
 };

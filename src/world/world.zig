@@ -602,11 +602,8 @@ pub const World = struct {
         }
 
         // IMPORTANT: Reset mask radius to 0 for LOD0 chunks
-        // This is only needed for backends that share uniforms (OpenGL)
-        // In Vulkan we update it during LODManager.render.
         if (self.lod_manager) |lod_mgr| {
             _ = lod_mgr;
-            // self.rhi.setMaskRadius(0); // If I used setMaskRadius
         }
 
         self.visible_chunks.clearRetainingCapacity();

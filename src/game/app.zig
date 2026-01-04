@@ -14,18 +14,16 @@ const Widgets = @import("../engine/ui/widgets.zig");
 const MapController = @import("map_controller.zig").MapController;
 const Vec3 = @import("../engine/math/vec3.zig").Vec3;
 const Mat4 = @import("../engine/math/mat4.zig").Mat4;
-const ShadowMap = @import("../engine/graphics/shadows.zig").ShadowMap;
-const World = @import("../world/world.zig").World;
 const worldToChunk = @import("../world/chunk.zig").worldToChunk;
 const WorldMap = @import("../world/worldgen/world_map.zig").WorldMap;
 const region_pkg = @import("../world/worldgen/region.zig");
 const LODConfig = @import("../world/lod_chunk.zig").LODConfig;
+const CSM = @import("../engine/graphics/csm.zig");
 
+const World = @import("../world/world.zig").World;
 const rhi_pkg = @import("../engine/graphics/rhi.zig");
 const RHI = rhi_pkg.RHI;
-const rhi_opengl = @import("../engine/graphics/rhi_opengl.zig");
 const rhi_vulkan = @import("../engine/graphics/rhi_vulkan.zig");
-const Shader = @import("../engine/graphics/shader.zig").Shader;
 const TextureAtlas = @import("../engine/graphics/texture_atlas.zig").TextureAtlas;
 const RenderGraph = @import("../engine/graphics/render_graph.zig").RenderGraph;
 
@@ -231,13 +229,11 @@ pub const App = struct {
     window_manager: WindowManager,
 
     rhi: RHI,
-    is_vulkan: bool,
-    shader: rhi_pkg.ShaderHandle,
+    shader: rhi_pkg.ShaderHandle = rhi_pkg.InvalidShaderHandle,
     atlas: TextureAtlas,
     render_graph: RenderGraph,
     atmosphere: AtmosphereState,
     clouds: CloudState,
-    shadow_map: ?ShadowMap,
 
     settings: Settings,
     input: Input,
@@ -260,92 +256,26 @@ pub const App = struct {
     debug_state: DebugState,
 
     pub fn init(allocator: std.mem.Allocator) !*App {
-        var use_vulkan = false;
-        {
-            var args_iter = try std.process.argsWithAllocator(allocator);
-            defer args_iter.deinit();
-            _ = args_iter.skip();
-            while (args_iter.next()) |arg| {
-                if (std.mem.eql(u8, arg, "--backend") and std.mem.eql(u8, args_iter.next() orelse "", "vulkan")) {
-                    use_vulkan = true;
-                    break;
-                }
-            }
-        }
-
         // Load settings first to get window resolution
         log.log.info("Initializing engine systems...", .{});
         const settings = Settings.load(allocator);
 
-        const wm = try WindowManager.init(allocator, use_vulkan, settings.window_width, settings.window_height);
+        const wm = try WindowManager.init(allocator, true, settings.window_width, settings.window_height);
 
         var input = Input.init(allocator);
         input.initWindowSize(wm.window);
         const time = Time.init();
 
-        const RhiResult = struct {
-            rhi: RHI,
-            is_vulkan: bool,
-        };
-
-        const rhi_and_type = if (use_vulkan) blk: {
-            log.log.info("Attempting to initialize Vulkan backend...", .{});
-            const res = rhi_vulkan.createRHI(allocator, wm.window, null);
-            if (res) |v| {
-                break :blk RhiResult{ .rhi = v, .is_vulkan = true };
-            } else |err| {
-                log.log.err("Failed to initialize Vulkan: {}. Falling back to OpenGL.", .{err});
-                break :blk RhiResult{ .rhi = try rhi_opengl.createRHI(allocator, null), .is_vulkan = false };
-            }
-        } else blk: {
-            log.log.info("Initializing OpenGL backend...", .{});
-            break :blk RhiResult{ .rhi = try rhi_opengl.createRHI(allocator, null), .is_vulkan = false };
-        };
-
-        const rhi = rhi_and_type.rhi;
-        const actual_is_vulkan = rhi_and_type.is_vulkan;
+        log.log.info("Initializing Vulkan backend...", .{});
+        const rhi = try rhi_vulkan.createRHI(allocator, wm.window, null);
 
         try rhi.init(allocator, null);
-
-        const terrain_vert = "assets/shaders/terrain.vert";
-        const terrain_frag = "assets/shaders/terrain.frag";
-        const shader = if (!actual_is_vulkan) blk: {
-            const vert_src = std.fs.cwd().readFileAlloc(terrain_vert, allocator, @enumFromInt(1024 * 1024)) catch {
-                break :blk rhi_pkg.InvalidShaderHandle;
-            };
-            defer allocator.free(vert_src);
-            const frag_src = std.fs.cwd().readFileAlloc(terrain_frag, allocator, @enumFromInt(1024 * 1024)) catch {
-                break :blk rhi_pkg.InvalidShaderHandle;
-            };
-            defer allocator.free(frag_src);
-            const vert_c = allocator.dupeZ(u8, vert_src) catch {
-                break :blk rhi_pkg.InvalidShaderHandle;
-            };
-            defer allocator.free(vert_c);
-            const frag_c = allocator.dupeZ(u8, frag_src) catch {
-                break :blk rhi_pkg.InvalidShaderHandle;
-            };
-            defer allocator.free(frag_c);
-            const handle = rhi.createShader(vert_c, frag_c) catch {
-                break :blk rhi_pkg.InvalidShaderHandle;
-            };
-            break :blk handle;
-        } else rhi_pkg.InvalidShaderHandle;
 
         const atlas = try TextureAtlas.init(allocator, rhi);
         var atmosphere = AtmosphereState{};
         atmosphere.setTimeOfDay(0.25);
         const clouds = CloudState{};
         const render_graph = RenderGraph.init(allocator);
-        const shadow_map = if (!actual_is_vulkan) blk: {
-            const sm = ShadowMap.init(rhi, settings.shadow_resolution) catch |err| {
-                log.log.warn("ShadowMap initialization failed: {}. Shadows disabled.", .{err});
-                break :blk null;
-            };
-            break :blk sm;
-        } else null;
-
-        if (!actual_is_vulkan) rhi.setVSync(settings.vsync);
 
         const camera = Camera.init(.{
             .position = Vec3.init(8, 100, 8),
@@ -360,13 +290,11 @@ pub const App = struct {
             .allocator = allocator,
             .window_manager = wm,
             .rhi = rhi,
-            .is_vulkan = actual_is_vulkan,
-            .shader = shader,
+            .shader = rhi_pkg.InvalidShaderHandle,
             .atlas = atlas,
             .render_graph = render_graph,
             .atmosphere = atmosphere,
             .clouds = clouds,
-            .shadow_map = shadow_map,
             .settings = settings,
             .input = input,
             .time = time,
@@ -394,9 +322,8 @@ pub const App = struct {
 
         if (self.ui) |*u| u.deinit();
 
-        if (self.shadow_map) |*sm| sm.deinit();
         self.atlas.deinit();
-        if (self.shader != 0) self.rhi.destroyShader(self.shader);
+        if (self.shader != rhi_pkg.InvalidShaderHandle) self.rhi.destroyShader(self.shader);
         self.rhi.deinit();
 
         self.input.deinit();
@@ -547,26 +474,8 @@ pub const App = struct {
         if (in_world or in_pause) {
             if (self.world) |active_world| {
                 const aspect = screen_w / screen_h;
-                const view_proj_cull = self.camera.getViewProjectionMatrixOriginCentered(aspect);
-                const view_proj_render = if (self.is_vulkan)
-                    Mat4.perspectiveReverseZ(self.camera.fov, aspect, self.camera.near, self.camera.far).multiply(self.camera.getViewMatrixOriginCentered())
-                else
-                    view_proj_cull;
-                if (self.shadow_map) |*sm| {
-                    var light_dir = self.atmosphere.sun_dir;
-                    if (self.atmosphere.sun_intensity < 0.05 and self.atmosphere.moon_intensity > 0.05) light_dir = self.atmosphere.moon_dir;
-                    if (!self.is_vulkan and (self.atmosphere.sun_intensity > 0.05 or self.atmosphere.moon_intensity > 0.05)) {
-                        // Dynamic shadow distance: cap at half render distance to avoid wasted shadow rendering
-                        const dynamic_shadow_dist = @min(self.settings.shadow_distance, @as(f32, @floatFromInt(self.settings.render_distance)) * 8.0);
-                        sm.update(self.camera.fov, aspect, 0.1, dynamic_shadow_dist, light_dir, self.camera.position, self.camera.getViewMatrixOriginCentered());
-                        for (0..rhi_pkg.SHADOW_CASCADE_COUNT) |i| {
-                            sm.begin(i);
-                            self.rhi.updateGlobalUniforms(sm.light_space_matrices[i], self.camera.position, self.atmosphere.sun_dir, self.atmosphere.time_of_day, self.atmosphere.fog_color, self.atmosphere.fog_density, self.atmosphere.fog_enabled, self.atmosphere.sun_intensity, self.atmosphere.ambient_intensity, self.settings.textures_enabled, .{});
-                            active_world.renderShadowPass(sm.light_space_matrices[i], self.camera.position);
-                        }
-                        sm.end(self.input.window_width, self.input.window_height);
-                    }
-                }
+                const view_proj_render = Mat4.perspectiveReverseZ(self.camera.fov, aspect, self.camera.near, self.camera.far).multiply(self.camera.getViewMatrixOriginCentered());
+
                 const sky_params = rhi_pkg.SkyParams{
                     .cam_pos = self.camera.position,
                     .cam_forward = self.camera.forward,
@@ -599,37 +508,9 @@ pub const App = struct {
                     };
                 };
 
-                // For OpenGL, bind the shader before setting uniforms so they are applied
-                if (self.shader != 0 and !self.is_vulkan) {
-                    self.rhi.bindShader(self.shader);
-                }
-
                 self.rhi.updateGlobalUniforms(view_proj_render, self.camera.position, self.atmosphere.sun_dir, self.atmosphere.time_of_day, self.atmosphere.fog_color, self.atmosphere.fog_density, self.atmosphere.fog_enabled, self.atmosphere.sun_intensity, self.atmosphere.ambient_intensity, self.settings.textures_enabled, cloud_params);
 
-                if (self.shader != 0) {
-                    self.atlas.bind(0);
-                    if (self.shadow_map) |*sm| {
-                        var shadow_map_handles: [rhi_pkg.SHADOW_CASCADE_COUNT]rhi_pkg.TextureHandle = undefined;
-                        for (0..rhi_pkg.SHADOW_CASCADE_COUNT) |i| {
-                            shadow_map_handles[i] = sm.depth_maps[i].handle;
-                        }
-                        self.rhi.setTextureUniforms(self.settings.textures_enabled, shadow_map_handles);
-                        self.rhi.updateShadowUniforms(.{
-                            .light_space_matrices = sm.light_space_matrices,
-                            .cascade_splits = sm.cascade_splits,
-                            .shadow_texel_sizes = sm.texel_sizes,
-                        });
-                    } else {
-                        self.rhi.setTextureUniforms(self.settings.textures_enabled, [_]rhi_pkg.TextureHandle{0} ** rhi_pkg.SHADOW_CASCADE_COUNT);
-                    }
-                }
-
-                self.render_graph.execute(self.rhi, active_world, &self.camera, self.shadow_map, self.is_vulkan, aspect, sky_params, cloud_params, self.shader, self.atlas.texture.handle);
-
-                if (debug_build and self.debug_state.shadows and self.shadow_map != null) {
-                    const cascade_idx = self.debug_state.cascade_idx;
-                    self.rhi.drawDebugShadowMap(cascade_idx, self.shadow_map.?.depth_maps[cascade_idx].handle);
-                }
+                self.render_graph.execute(self.rhi, active_world, &self.camera, aspect, sky_params, cloud_params, self.shader, self.atlas.texture.handle);
 
                 if (self.ui) |*u| {
                     u.begin();
@@ -739,7 +620,6 @@ pub const App = struct {
         }
 
         self.rhi.endFrame();
-        if (!self.is_vulkan) _ = c.SDL_GL_SwapWindow(self.window_manager.window);
     }
 
     pub fn run(self: *App) !void {
@@ -886,25 +766,7 @@ pub const App = struct {
             if (in_world or in_pause) {
                 if (self.world) |active_world| {
                     const aspect = screen_w / screen_h;
-                    const view_proj_cull = self.camera.getViewProjectionMatrixOriginCentered(aspect);
-                    const view_proj_render = if (self.is_vulkan)
-                        Mat4.perspectiveReverseZ(self.camera.fov, aspect, self.camera.near, self.camera.far).multiply(self.camera.getViewMatrixOriginCentered())
-                    else
-                        view_proj_cull;
-
-                    if (self.shadow_map) |*sm| {
-                        var light_dir = self.atmosphere.sun_dir;
-                        if (self.atmosphere.sun_intensity < 0.05 and self.atmosphere.moon_intensity > 0.05) light_dir = self.atmosphere.moon_dir;
-                        if (!self.is_vulkan and (self.atmosphere.sun_intensity > 0.05 or self.atmosphere.moon_intensity > 0.05)) {
-                            sm.update(self.camera.fov, aspect, 0.1, self.settings.shadow_distance, light_dir, self.camera.position, self.camera.getViewMatrixOriginCentered());
-                            for (0..rhi_pkg.SHADOW_CASCADE_COUNT) |i| {
-                                sm.begin(i);
-                                self.rhi.updateGlobalUniforms(sm.light_space_matrices[i], self.camera.position, self.atmosphere.sun_dir, self.atmosphere.time_of_day, self.atmosphere.fog_color, self.atmosphere.fog_density, self.atmosphere.fog_enabled, self.atmosphere.sun_intensity, self.atmosphere.ambient_intensity, self.settings.textures_enabled, .{});
-                                active_world.renderShadowPass(sm.light_space_matrices[i], self.camera.position);
-                            }
-                            sm.end(self.input.window_width, self.input.window_height);
-                        }
-                    }
+                    const view_proj_render = Mat4.perspectiveReverseZ(self.camera.fov, aspect, self.camera.near, self.camera.far).multiply(self.camera.getViewMatrixOriginCentered());
 
                     const sky_params = rhi_pkg.SkyParams{
                         .cam_pos = self.camera.position,
@@ -938,37 +800,9 @@ pub const App = struct {
                         };
                     };
 
-                    // For OpenGL, bind the shader before setting uniforms so they are applied
-                    if (self.shader != 0 and !self.is_vulkan) {
-                        self.rhi.bindShader(self.shader);
-                    }
-
                     self.rhi.updateGlobalUniforms(view_proj_render, self.camera.position, self.atmosphere.sun_dir, self.atmosphere.time_of_day, self.atmosphere.fog_color, self.atmosphere.fog_density, self.atmosphere.fog_enabled, self.atmosphere.sun_intensity, self.atmosphere.ambient_intensity, self.settings.textures_enabled, cloud_params);
 
-                    if (self.shader != 0) {
-                        self.atlas.bind(0);
-                        if (self.shadow_map) |*sm| {
-                            var shadow_map_handles: [rhi_pkg.SHADOW_CASCADE_COUNT]rhi_pkg.TextureHandle = undefined;
-                            for (0..rhi_pkg.SHADOW_CASCADE_COUNT) |i| {
-                                shadow_map_handles[i] = sm.depth_maps[i].handle;
-                            }
-                            self.rhi.setTextureUniforms(self.settings.textures_enabled, shadow_map_handles);
-                            self.rhi.updateShadowUniforms(.{
-                                .light_space_matrices = sm.light_space_matrices,
-                                .cascade_splits = sm.cascade_splits,
-                                .shadow_texel_sizes = sm.texel_sizes,
-                            });
-                        } else {
-                            self.rhi.setTextureUniforms(self.settings.textures_enabled, [_]rhi_pkg.TextureHandle{0} ** rhi_pkg.SHADOW_CASCADE_COUNT);
-                        }
-                    }
-
-                    self.render_graph.execute(self.rhi, active_world, &self.camera, self.shadow_map, self.is_vulkan, aspect, sky_params, cloud_params, self.shader, self.atlas.texture.handle);
-
-                    if (debug_build and self.debug_state.shadows and self.shadow_map != null) {
-                        const cascade_idx = self.debug_state.cascade_idx;
-                        self.rhi.drawDebugShadowMap(cascade_idx, self.shadow_map.?.depth_maps[cascade_idx].handle);
-                    }
+                    self.render_graph.execute(self.rhi, active_world, &self.camera, aspect, sky_params, cloud_params, self.shader, self.atlas.texture.handle);
 
                     if (self.ui) |*u| {
                         u.begin();
@@ -1078,7 +912,6 @@ pub const App = struct {
             }
 
             self.rhi.endFrame();
-            if (!self.is_vulkan) _ = c.SDL_GL_SwapWindow(self.window_manager.window);
             if (debug_build and in_world) {
                 if (self.world) |active_world| {
                     if (self.time.frame_count % 120 == 0) {

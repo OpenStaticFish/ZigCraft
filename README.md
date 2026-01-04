@@ -8,7 +8,7 @@
   [![Build Status](https://github.com/MichaelFisher1997/ZigCraft/actions/workflows/build.yml/badge.svg)](https://github.com/MichaelFisher1997/ZigCraft/actions)
   [![Tests](https://img.shields.io/badge/Tests-58%20Passed-success.svg)](src/tests.zig)
 
-  A high-performance Minecraft-style voxel engine built with **Zig**, **SDL3**, and a modular **Render Hardware Interface (RHI)** supporting **OpenGL 3.3+** and **Vulkan**.
+  A high-performance Minecraft-style voxel engine built with **Zig**, **SDL3**, and a modern **Vulkan** graphics pipeline.
 </div>
 
 ---
@@ -20,7 +20,7 @@
 ## ✨ Key Features
 
 ### 🎨 Rendering Architecture
-- **Multi-Backend RHI**: Clean abstraction layer between game logic and graphics APIs.
+- **Vulkan RHI**: Modern, explicit graphics API for high performance and low CPU overhead.
 - **Cascaded Shadow Maps (CSM)**: 3 cascades for high-fidelity shadows across long distances.
 - **Atmospheric Scattering**: Physically-based day/night cycle with dynamic fog and sky rendering.
 - **Floating Origin & Reverse-Z**: Industry-standard techniques to eliminate precision jitter and Z-fighting at scale.
@@ -59,9 +59,8 @@
 This project uses **Nix** for a reproducible development environment.
 
 ### 🎮 Running the Game
-- **OpenGL (Default)**: `nix develop --command zig build run`
-- **Vulkan Backend**: `nix develop --command zig build run -- --backend vulkan`
-- **High Performance (LOD)**: `nix develop --command zig build run -Doptimize=ReleaseFast -- --backend vulkan`
+- **Run**: `nix develop --command zig build run`
+- **Release build**: `nix develop --command zig build run -Doptimize=ReleaseFast`
 
 ### 🧪 Running Tests
 - **All Tests**: `nix develop --command zig build test`
