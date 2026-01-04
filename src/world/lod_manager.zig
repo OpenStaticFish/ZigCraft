@@ -272,6 +272,17 @@ pub const LODManager = struct {
         self.lod3_regions.deinit();
 
         self.transition_queue.deinit(self.allocator);
+
+        // Process any pending deletions
+        if (self.deletion_queue.items.len > 0) {
+            self.rhi.waitIdle();
+            for (self.deletion_queue.items) |mesh| {
+                mesh.deinit(self.rhi);
+                self.allocator.destroy(mesh);
+            }
+        }
+        self.deletion_queue.deinit(self.allocator);
+
         self.allocator.destroy(self);
     }
 
@@ -854,6 +865,9 @@ pub const LODManager = struct {
             var iter = meshes.iterator();
             while (iter.next()) |entry| {
                 if (storage.get(entry.key_ptr.*)) |chunk| {
+                    // Don't unload if being processed (pinned) or not ready
+                    if (chunk.isPinned() or chunk.state == .generating or chunk.state == .meshing or chunk.state == .uploading) continue;
+
                     const bounds = chunk.worldBounds();
                     if (self.areAllChunksLoaded(bounds, checker, ctx)) {
                         to_remove.append(self.allocator, entry.key_ptr.*) catch {};
