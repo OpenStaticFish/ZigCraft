@@ -182,7 +182,6 @@ pub fn drawSettings(ctx: MenuContext, app_state: *AppState, settings: *Settings,
         settings.msaa_samples = cycleMSAA(settings.msaa_samples);
         rhi.setMSAA(settings.msaa_samples);
     }
-    Font.drawText(ctx.ui, "(RESTART)", vx + toggle_width + 10.0, sy, 1.5 * ui_scale, Color.rgba(0.5, 0.5, 0.6, 1.0));
     sy += row_height;
 
     // UI Scale
@@ -198,7 +197,6 @@ pub fn drawSettings(ctx: MenuContext, app_state: *AppState, settings: *Settings,
     if (Widgets.drawButton(ctx.ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, if (settings.lod_enabled) "ENABLED" else "DISABLED", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
         settings.lod_enabled = !settings.lod_enabled;
     }
-    Font.drawText(ctx.ui, "(RESTART)", vx + toggle_width + 10.0, sy, 1.5 * ui_scale, Color.rgba(0.5, 0.5, 0.6, 1.0));
     sy += row_height;
 
     // Textures
