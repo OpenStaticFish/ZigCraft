@@ -30,7 +30,7 @@ pub const InvalidShaderHandle: ShaderHandle = 0;
 pub const TextureHandle = u32;
 pub const InvalidTextureHandle: TextureHandle = 0;
 
-pub const SHADOW_CASCADE_COUNT = 2;
+pub const SHADOW_CASCADE_COUNT = 3;
 
 pub const BufferUsage = enum {
     vertex,
