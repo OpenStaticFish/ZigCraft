@@ -15,13 +15,32 @@ pub const Settings = struct {
     fov: f32 = 45.0,
     textures_enabled: bool = true,
     wireframe_enabled: bool = false,
-    shadow_resolution: u32 = 2048,
+    shadow_quality: u32 = 2, // 0=Low, 1=Medium, 2=High, 3=Ultra
     shadow_distance: f32 = 250.0,
     anisotropic_filtering: u8 = 16,
     msaa_samples: u8 = 4,
     window_width: u32 = 1920,
     window_height: u32 = 1080,
     lod_enabled: bool = false, // Disabled by default due to performance issues
+
+    pub const ShadowQuality = struct {
+        resolution: u32,
+        label: []const u8,
+    };
+
+    pub const SHADOW_QUALITIES = [_]ShadowQuality{
+        .{ .resolution = 1024, .label = "LOW" },
+        .{ .resolution = 2048, .label = "MEDIUM" },
+        .{ .resolution = 4096, .label = "HIGH" },
+        .{ .resolution = 8192, .label = "ULTRA" },
+    };
+
+    pub fn getShadowResolution(self: *const Settings) u32 {
+        if (self.shadow_quality < SHADOW_QUALITIES.len) {
+            return SHADOW_QUALITIES[self.shadow_quality].resolution;
+        }
+        return SHADOW_QUALITIES[2].resolution; // Default to High
+    }
 
     // Common resolution presets
     pub const Resolution = struct {

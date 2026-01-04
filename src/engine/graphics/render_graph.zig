@@ -10,6 +10,7 @@ const CSM = @import("csm.zig");
 pub const RenderPass = enum {
     shadow_cascade_0,
     shadow_cascade_1,
+    shadow_cascade_2,
     main_opaque,
     main_transparent,
     sky,
@@ -26,6 +27,7 @@ pub const RenderGraph = struct {
         const default_passes = &[_]RenderPass{
             .shadow_cascade_0,
             .shadow_cascade_1,
+            .shadow_cascade_2,
             .sky,
             .main_opaque,
             .clouds,
@@ -45,12 +47,14 @@ pub const RenderGraph = struct {
         cloud_params: rhi_pkg.CloudParams,
         main_shader: rhi_pkg.ShaderHandle,
         atlas_handle: rhi_pkg.TextureHandle,
+        shadow_distance: f32,
+        shadow_resolution: u32,
     ) void {
         var main_pass_started = false;
         for (self.passes) |pass| {
             // Start main render pass (clears buffer) only once before the first non-shadow pass
             switch (pass) {
-                .shadow_cascade_0, .shadow_cascade_1 => {},
+                .shadow_cascade_0, .shadow_cascade_1, .shadow_cascade_2 => {},
                 else => {
                     if (!main_pass_started) {
                         rhi.beginMainPass();
@@ -58,7 +62,7 @@ pub const RenderGraph = struct {
                     }
                 },
             }
-            self.executePass(pass, rhi, world, camera, aspect, sky_params, cloud_params, main_shader, atlas_handle);
+            self.executePass(pass, rhi, world, camera, aspect, sky_params, cloud_params, main_shader, atlas_handle, shadow_distance, shadow_resolution);
         }
     }
 
@@ -73,11 +77,14 @@ pub const RenderGraph = struct {
         cloud_params: rhi_pkg.CloudParams,
         main_shader: rhi_pkg.ShaderHandle,
         atlas_handle: rhi_pkg.TextureHandle,
+        shadow_distance: f32,
+        shadow_resolution: u32,
     ) void {
         _ = self;
         switch (pass) {
-            .shadow_cascade_0 => RenderGraph.executeShadowPass(0, rhi, world, camera, aspect, sky_params.sun_dir),
-            .shadow_cascade_1 => RenderGraph.executeShadowPass(1, rhi, world, camera, aspect, sky_params.sun_dir),
+            .shadow_cascade_0 => RenderGraph.executeShadowPass(0, rhi, world, camera, aspect, sky_params.sun_dir, shadow_distance, shadow_resolution),
+            .shadow_cascade_1 => RenderGraph.executeShadowPass(1, rhi, world, camera, aspect, sky_params.sun_dir, shadow_distance, shadow_resolution),
+            .shadow_cascade_2 => RenderGraph.executeShadowPass(2, rhi, world, camera, aspect, sky_params.sun_dir, shadow_distance, shadow_resolution),
             .main_opaque => RenderGraph.executeMainPass(rhi, world, camera, aspect, main_shader, atlas_handle),
             .main_transparent => {},
             .sky => RenderGraph.executeSkyPass(rhi, camera, aspect, sky_params),
@@ -87,15 +94,15 @@ pub const RenderGraph = struct {
         }
     }
 
-    fn executeShadowPass(cascade_idx: usize, rhi: RHI, world: *World, camera: *Camera, aspect: f32, light_dir: Vec3) void {
+    fn executeShadowPass(cascade_idx: usize, rhi: RHI, world: *World, camera: *Camera, aspect: f32, light_dir: Vec3, shadow_distance: f32, shadow_resolution: u32) void {
         var light_space_matrix = Mat4.identity;
 
         const cascades = CSM.computeCascades(
-            2048,
+            shadow_resolution,
             camera.fov,
             aspect,
             0.1,
-            200.0,
+            shadow_distance,
             light_dir,
             camera.getViewMatrixOriginCentered(),
             true,
