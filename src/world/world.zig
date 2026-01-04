@@ -164,7 +164,7 @@ pub const World = struct {
 
         const generator = TerrainGenerator.init(seed, allocator);
 
-        const vertex_allocator = try GlobalVertexAllocator.init(allocator, rhi, 4096); // 4096MB megabuffer
+        const vertex_allocator = try GlobalVertexAllocator.init(allocator, rhi, 1024); // 1024MB megabuffer
 
         world.* = .{
             .chunks = std.HashMap(ChunkKey, *ChunkData, ChunkKeyContext, 80).init(allocator),
