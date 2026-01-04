@@ -97,16 +97,19 @@ pub const GlobalVertexAllocator = struct {
             return allocation;
         }
 
-        // Calculate actual largest block for better debugging
+        // Calculate actual largest block and total free for better debugging
         var largest_block: usize = 0;
+        var total_free: usize = 0;
         for (self.free_blocks.items) |block| {
             if (block.size > largest_block) largest_block = block.size;
+            total_free += block.size;
         }
 
-        std.log.err("GlobalVertexAllocator OOM: needed {} ({} vertices), capacity {}GB, free blocks: {}. Largest block: {} ({} KB)", .{
+        std.log.err("GlobalVertexAllocator OOM: needed {} ({} vertices), capacity {}GB, total free: {}MB, free blocks: {}. Largest block: {} ({} KB)", .{
             size_needed,
             vertices.len,
             self.capacity / (1024 * 1024 * 1024),
+            total_free / (1024 * 1024),
             self.free_blocks.items.len,
             largest_block,
             largest_block / 1024,
@@ -120,6 +123,14 @@ pub const GlobalVertexAllocator = struct {
 
         self.mutex.lock();
         defer self.mutex.unlock();
+
+        // Safety check: ensure we're not double-freeing or freeing an overlapping region
+        for (self.free_blocks.items) |block| {
+            if (allocation.offset < block.offset + block.size and allocation.offset + size > block.offset) {
+                std.log.err("Double-free or overlapping free detected in GlobalVertexAllocator! offset={}, size={}", .{ allocation.offset, size });
+                return;
+            }
+        }
 
         // Add new free block and maintain sorted order by offset
         const new_block = FreeBlock{
