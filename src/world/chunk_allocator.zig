@@ -105,13 +105,12 @@ pub const GlobalVertexAllocator = struct {
             total_free += block.size;
         }
 
-        std.log.err("GlobalVertexAllocator OOM: needed {} ({} vertices), capacity {}GB, total free: {}MB, free blocks: {}. Largest block: {} ({} KB)", .{
+        std.log.err("GlobalVertexAllocator OOM: needed {} ({} vertices), capacity {}GB, total free: {} KB, free blocks: {}. Largest block: {} KB", .{
             size_needed,
             vertices.len,
             self.capacity / (1024 * 1024 * 1024),
-            total_free / (1024 * 1024),
+            total_free / 1024,
             self.free_blocks.items.len,
-            largest_block,
             largest_block / 1024,
         });
         return error.OutOfMemory;
