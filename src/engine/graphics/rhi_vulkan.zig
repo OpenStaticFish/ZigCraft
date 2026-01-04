@@ -25,7 +25,6 @@
 const std = @import("std");
 const c = @import("../../c.zig").c;
 const rhi = @import("rhi.zig");
-const shadows = @import("shadows.zig");
 const RenderDevice = @import("render_device.zig").RenderDevice;
 const Mat4 = @import("../math/mat4.zig").Mat4;
 const Vec3 = @import("../math/vec3.zig").Vec3;
@@ -265,11 +264,11 @@ const VulkanContext = struct {
     max_msaa_samples: u8,
 
     // Shadow resources
-    shadow_images: [shadows.ShadowMap.CASCADE_COUNT]c.VkImage,
-    shadow_image_memory: [shadows.ShadowMap.CASCADE_COUNT]c.VkDeviceMemory,
-    shadow_image_views: [shadows.ShadowMap.CASCADE_COUNT]c.VkImageView,
-    shadow_framebuffers: [shadows.ShadowMap.CASCADE_COUNT]c.VkFramebuffer,
-    shadow_image_layouts: [shadows.ShadowMap.CASCADE_COUNT]c.VkImageLayout,
+    shadow_images: [rhi.SHADOW_CASCADE_COUNT]c.VkImage,
+    shadow_image_memory: [rhi.SHADOW_CASCADE_COUNT]c.VkDeviceMemory,
+    shadow_image_views: [rhi.SHADOW_CASCADE_COUNT]c.VkImageView,
+    shadow_framebuffers: [rhi.SHADOW_CASCADE_COUNT]c.VkFramebuffer,
+    shadow_image_layouts: [rhi.SHADOW_CASCADE_COUNT]c.VkImageLayout,
     shadow_sampler: c.VkSampler,
     shadow_extent: c.VkExtent2D,
 
@@ -1155,7 +1154,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
 
     try checkVk(c.vkCreateRenderPass(ctx.vk_device, &shadow_render_pass_info, null, &ctx.shadow_render_pass));
 
-    for (0..shadows.ShadowMap.CASCADE_COUNT) |si| {
+    for (0..rhi.SHADOW_CASCADE_COUNT) |si| {
         var shadow_image_info = std.mem.zeroes(c.VkImageCreateInfo);
         shadow_image_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         shadow_image_info.imageType = c.VK_IMAGE_TYPE_2D;
@@ -1227,8 +1226,8 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
 
         try checkVk(c.vkBeginCommandBuffer(cmd, &begin_info));
 
-        var barriers: [shadows.ShadowMap.CASCADE_COUNT]c.VkImageMemoryBarrier = undefined;
-        for (0..shadows.ShadowMap.CASCADE_COUNT) |bi| {
+        var barriers: [rhi.SHADOW_CASCADE_COUNT]c.VkImageMemoryBarrier = undefined;
+        for (0..rhi.SHADOW_CASCADE_COUNT) |bi| {
             barriers[bi] = std.mem.zeroes(c.VkImageMemoryBarrier);
             barriers[bi].sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
             barriers[bi].oldLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1245,7 +1244,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
             barriers[bi].dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
         }
 
-        c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, shadows.ShadowMap.CASCADE_COUNT, &barriers);
+        c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, rhi.SHADOW_CASCADE_COUNT, &barriers);
 
         try checkVk(c.vkEndCommandBuffer(cmd));
 
@@ -1260,7 +1259,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
         c.vkFreeCommandBuffers(ctx.vk_device, ctx.command_pool, 1, &cmd);
 
         // Mark all cascade layouts as SHADER_READ_ONLY_OPTIMAL
-        for (0..shadows.ShadowMap.CASCADE_COUNT) |li| {
+        for (0..rhi.SHADOW_CASCADE_COUNT) |li| {
             ctx.shadow_image_layouts[li] = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         }
     }
@@ -1921,7 +1920,7 @@ fn deinit(ctx_ptr: *anyopaque) void {
         // Clean up shadow pipeline
         if (ctx.shadow_pipeline != null) c.vkDestroyPipeline(ctx.vk_device, ctx.shadow_pipeline, null);
 
-        for (0..shadows.ShadowMap.CASCADE_COUNT) |i| {
+        for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
             if (ctx.shadow_framebuffers[i] != null) c.vkDestroyFramebuffer(ctx.vk_device, ctx.shadow_framebuffers[i], null);
             if (ctx.shadow_image_views[i] != null) c.vkDestroyImageView(ctx.vk_device, ctx.shadow_image_views[i], null);
             if (ctx.shadow_images[i] != null) c.vkDestroyImage(ctx.vk_device, ctx.shadow_images[i], null);
@@ -2546,7 +2545,7 @@ fn setClearColor(ctx_ptr: *anyopaque, color: Vec3) void {
 }
 
 fn transitionShadowImage(ctx: *VulkanContext, cascade_index: u32, new_layout: c.VkImageLayout) void {
-    if (cascade_index >= shadows.ShadowMap.CASCADE_COUNT) return;
+    if (cascade_index >= rhi.SHADOW_CASCADE_COUNT) return;
     if (ctx.shadow_images[cascade_index] == null) return;
 
     const old_layout = ctx.shadow_image_layouts[cascade_index];
@@ -3791,7 +3790,7 @@ fn drawUITexturedQuad(ctx_ptr: *anyopaque, texture: rhi.TextureHandle, rect: rhi
 fn beginShadowPass(ctx_ptr: *anyopaque, cascade_index: u32) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
-    if (cascade_index >= shadows.ShadowMap.CASCADE_COUNT) return;
+    if (cascade_index >= rhi.SHADOW_CASCADE_COUNT) return;
 
     if (ctx.main_pass_active) {
         endMainPass(ctx_ptr);
@@ -4078,7 +4077,7 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_dev
     ctx.cloud_ebo = .{ .buffer = null, .memory = null, .size = 0, .is_host_visible = false };
     ctx.cloud_mesh_size = 10000.0;
     ctx.shadow_sampler = null;
-    for (0..shadows.ShadowMap.CASCADE_COUNT) |i| {
+    for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
         ctx.shadow_images[i] = null;
         ctx.shadow_image_views[i] = null;
         ctx.shadow_framebuffers[i] = null;

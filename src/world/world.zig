@@ -27,7 +27,7 @@ const LODConfig = @import("lod_chunk.zig").LODConfig;
 
 /// Buffer distance beyond render_distance for chunk unloading.
 /// Prevents thrashing when player moves near chunk boundaries.
-const CHUNK_UNLOAD_BUFFER: i32 = 2;
+const CHUNK_UNLOAD_BUFFER: i32 = 1;
 
 pub const ChunkKey = struct {
     x: i32,
@@ -164,7 +164,7 @@ pub const World = struct {
 
         const generator = TerrainGenerator.init(seed, allocator);
 
-        const vertex_allocator = try GlobalVertexAllocator.init(allocator, rhi, 1024); // 1024MB megabuffer
+        const vertex_allocator = try GlobalVertexAllocator.init(allocator, rhi, 4096); // 4096MB megabuffer
 
         world.* = .{
             .chunks = std.HashMap(ChunkKey, *ChunkData, ChunkKeyContext, 80).init(allocator),
@@ -602,11 +602,8 @@ pub const World = struct {
         }
 
         // IMPORTANT: Reset mask radius to 0 for LOD0 chunks
-        // This is only needed for backends that share uniforms (OpenGL)
-        // In Vulkan we update it during LODManager.render.
         if (self.lod_manager) |lod_mgr| {
             _ = lod_mgr;
-            // self.rhi.setMaskRadius(0); // If I used setMaskRadius
         }
 
         self.visible_chunks.clearRetainingCapacity();

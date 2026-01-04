@@ -119,7 +119,7 @@ pub const Camera = struct {
 
     /// Get projection matrix
     pub fn getProjectionMatrix(self: *const Camera, aspect_ratio: f32) Mat4 {
-        // Standard perspective for compatibility (matches GL_LESS depth test)
+        // Standard perspective for compatibility
         return Mat4.perspective(self.fov, aspect_ratio, self.near, self.far);
     }
 

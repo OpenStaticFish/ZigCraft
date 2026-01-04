@@ -94,8 +94,7 @@ pub fn computeCascades(resolution: u32, camera_fov: f32, aspect: f32, near: f32,
             light_ortho.data[2][2] = A;
             light_ortho.data[3][2] = B;
         } else {
-            // Standard OpenGL: map closer to -1, further to 1
-            // maxZ is closer (less negative), minZ is further (more negative)
+            // Standard perspective: map closer to -1, further to 1
             const A = -2.0 / (maxZ - minZ);
             const B = (maxZ + minZ) / (maxZ - minZ);
             light_ortho.data[2][2] = A;

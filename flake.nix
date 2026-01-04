@@ -1,5 +1,5 @@
 {
-  description = "Zig 0.14 SDL3 OpenGL Triangle";
+  description = "Zig 0.14 SDL3 Vulkan Voxel Engine";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -23,7 +23,7 @@
     in
     {
       packages.${system}.default = pkgs.stdenv.mkDerivation {
-        pname = "zig-triangle";
+        pname = "zigcraft";
         version = "0.1.0";
         src = ./.;
 
@@ -36,8 +36,6 @@
 
         buildInputs = [
           pkgs.sdl3
-          pkgs.glew
-          pkgs.libGL
           pkgs.vulkan-loader
           pkgs.vulkan-headers
           pkgs.vulkan-validation-layers
@@ -55,8 +53,8 @@
         '';
 
         postFixup = ''
-          patchelf --add-rpath ${pkgs.lib.makeLibraryPath [ pkgs.glew pkgs.libGL pkgs.sdl3 pkgs.vulkan-loader pkgs.stdenv.cc.cc.lib ]} $out/bin/zig-triangle
-          wrapProgram $out/bin/zig-triangle \
+          patchelf --add-rpath ${pkgs.lib.makeLibraryPath [ pkgs.sdl3 pkgs.vulkan-loader pkgs.stdenv.cc.cc.lib ]} $out/bin/zigcraft
+          wrapProgram $out/bin/zigcraft \
             --prefix LD_LIBRARY_PATH : ${pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.vulkan-loader ]}
         '';
       };
@@ -71,8 +69,6 @@
 
         buildInputs = [
           pkgs.sdl3
-          pkgs.glew    # For GL extension loading
-          pkgs.libGL   # Base OpenGL driver support
           pkgs.vulkan-loader
           pkgs.vulkan-headers
           pkgs.vulkan-validation-layers

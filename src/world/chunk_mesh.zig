@@ -313,7 +313,10 @@ pub const ChunkMesh = struct {
 
         // Upload merged solid buffer
         if (self.pending_solid) |v| {
-            if (self.solid_allocation) |alloc| allocator.free(alloc);
+            if (self.solid_allocation) |alloc| {
+                allocator.free(alloc);
+                self.solid_allocation = null;
+            }
             self.solid_allocation = allocator.allocate(v) catch |err| {
                 std.log.err("Failed to allocate chunk mesh vertices (will retry): {}", .{err});
                 return;
@@ -325,7 +328,10 @@ pub const ChunkMesh = struct {
 
         // Upload merged fluid buffer
         if (self.pending_fluid) |v| {
-            if (self.fluid_allocation) |alloc| allocator.free(alloc);
+            if (self.fluid_allocation) |alloc| {
+                allocator.free(alloc);
+                self.fluid_allocation = null;
+            }
             self.fluid_allocation = allocator.allocate(v) catch |err| {
                 std.log.err("Failed to allocate chunk fluid vertices (will retry): {}", .{err});
                 return;

@@ -4,18 +4,15 @@ This document provides essential instructions for agentic coding agents operatin
 
 ## Development Environment & Commands
 
-The project uses Nix for dependency management. **All build and test commands MUST be wrapped in `nix develop --command`** to ensure dependencies (SDL3, OpenGL, Vulkan, glslang) are available.
+The project uses Nix for dependency management. **All build and test commands MUST be wrapped in `nix develop --command`** to ensure dependencies (SDL3, Vulkan, glslang) are available.
 
 ### Build & Run
 ```bash
 # Build
 nix develop --command zig build
 
-# Run (Default/OpenGL)
+# Run
 nix develop --command zig build run
-
-# Run (Vulkan backend)
-nix develop --command zig build run -- --backend vulkan
 
 # Release build
 nix develop --command zig build -Doptimize=ReleaseFast
@@ -127,8 +124,8 @@ const log = @import("../engine/core/log.zig");
 
 ### Render Hardware Interface (RHI)
 - All rendering uses the `RHI` interface in `src/engine/graphics/rhi.zig`
-- **Both backends must be updated**: `rhi_opengl.zig` and `rhi_vulkan.zig`
-- Extend functionality by updating `RHI.VTable` and both backend implementations
+- Vulkan is the primary and only supported backend implementation in `rhi_vulkan.zig`
+- Extend functionality by updating `RHI.VTable` and the backend implementation
 
 ### Job System & Concurrency
 - Use `JobSystem` for heavy tasks (world gen, meshing, lighting)
@@ -164,7 +161,6 @@ const log = @import("../engine/core/log.zig");
 ## Agent Best Practices
 
 ### Verification Checklist
-- [ ] Test with both `--backend opengl` (default) and `--backend vulkan`
 - [ ] Run `zig build test` to verify unit tests and shader validation
 - [ ] Check `zig build -Doptimize=ReleaseFast` for performance-critical changes
 - [ ] Run `zig fmt src/` before committing

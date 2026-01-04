@@ -8,8 +8,6 @@ const RenderDevice = @import("render_device.zig").RenderDevice;
 pub const RhiError = error{
     /// Vulkan API call failed
     VulkanError,
-    /// OpenGL error occurred
-    OpenGLError,
     /// Out of memory
     OutOfMemory,
     /// Resource not found

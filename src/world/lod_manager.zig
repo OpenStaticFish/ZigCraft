@@ -142,7 +142,7 @@ pub const LODManager = struct {
     // Performance tracking for throttling
     update_tick: u32 = 0,
 
-    // Deferred mesh deletion queue (Vulkan/GL optimization)
+    // Deferred mesh deletion queue (Vulkan optimization)
     deletion_queue: std.ArrayListUnmanaged(*LODMesh),
     deletion_timer: f32 = 0,
 
