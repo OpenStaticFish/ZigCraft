@@ -267,7 +267,7 @@ pub const App = struct {
         const time = Time.init();
 
         log.log.info("Initializing Vulkan backend...", .{});
-        const rhi = try rhi_vulkan.createRHI(allocator, wm.window, null, settings.getShadowResolution());
+        const rhi = try rhi_vulkan.createRHI(allocator, wm.window, null, settings.getShadowResolution(), settings.msaa_samples);
 
         try rhi.init(allocator, null);
 

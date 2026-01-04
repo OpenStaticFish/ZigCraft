@@ -262,6 +262,12 @@ const VulkanContext = struct {
     max_anisotropy: f32,
     msaa_samples: u8,
     max_msaa_samples: u8,
+
+    // MSAA resources (only allocated when msaa_samples > 1)
+    msaa_color_image: c.VkImage,
+    msaa_color_memory: c.VkDeviceMemory,
+    msaa_color_view: c.VkImageView,
+
     shadow_resolution: u32,
 
     // Shadow resources
@@ -338,6 +344,16 @@ fn findMemoryType(physical_device: c.VkPhysicalDevice, type_filter: u32, propert
     return 0;
 }
 
+/// Converts MSAA sample count (1, 2, 4, 8) to Vulkan sample count flag.
+fn getMSAASampleCountFlag(samples: u8) c.VkSampleCountFlagBits {
+    return switch (samples) {
+        2 => c.VK_SAMPLE_COUNT_2_BIT,
+        4 => c.VK_SAMPLE_COUNT_4_BIT,
+        8 => c.VK_SAMPLE_COUNT_8_BIT,
+        else => c.VK_SAMPLE_COUNT_1_BIT,
+    };
+}
+
 /// Creates a buffer with specified usage and memory properties.
 fn createVulkanBuffer(ctx: *VulkanContext, size: usize, usage: c.VkBufferUsageFlags, properties: c.VkMemoryPropertyFlags) VulkanBuffer {
     var buffer_info = std.mem.zeroes(c.VkBufferCreateInfo);
@@ -368,6 +384,106 @@ fn createVulkanBuffer(ctx: *VulkanContext, size: usize, usage: c.VkBufferUsageFl
 
     const is_host_visible = (properties & c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
     return .{ .buffer = buffer, .memory = memory, .size = mem_reqs.size, .is_host_visible = is_host_visible };
+}
+
+/// Creates MSAA color image resources when msaa_samples > 1.
+/// Call after swapchain creation since we need extent and format.
+fn createMSAAResources(ctx: *VulkanContext) void {
+    // Only create MSAA resources if multisampling is enabled
+    if (ctx.msaa_samples <= 1) {
+        ctx.msaa_color_image = null;
+        ctx.msaa_color_memory = null;
+        ctx.msaa_color_view = null;
+        return;
+    }
+
+    const sample_count = getMSAASampleCountFlag(ctx.msaa_samples);
+
+    // Create MSAA color image
+    var image_info = std.mem.zeroes(c.VkImageCreateInfo);
+    image_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = c.VK_IMAGE_TYPE_2D;
+    image_info.extent.width = ctx.swapchain_extent.width;
+    image_info.extent.height = ctx.swapchain_extent.height;
+    image_info.extent.depth = 1;
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.format = ctx.swapchain_format;
+    image_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
+    image_info.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+    // TRANSIENT_ATTACHMENT for lazily-allocated memory (GPU optimization)
+    image_info.usage = c.VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    image_info.samples = sample_count;
+    image_info.sharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
+
+    if (c.vkCreateImage(ctx.vk_device, &image_info, null, &ctx.msaa_color_image) != c.VK_SUCCESS) {
+        std.log.err("Failed to create MSAA color image", .{});
+        ctx.msaa_color_image = null;
+        return;
+    }
+
+    // Allocate memory
+    var mem_reqs: c.VkMemoryRequirements = undefined;
+    c.vkGetImageMemoryRequirements(ctx.vk_device, ctx.msaa_color_image, &mem_reqs);
+
+    var alloc_info = std.mem.zeroes(c.VkMemoryAllocateInfo);
+    alloc_info.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    alloc_info.allocationSize = mem_reqs.size;
+    // Try LAZILY_ALLOCATED first for transient attachments, fall back to DEVICE_LOCAL
+    const lazy_mem_type = findMemoryType(ctx.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT | c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (lazy_mem_type != 0) {
+        alloc_info.memoryTypeIndex = lazy_mem_type;
+    } else {
+        alloc_info.memoryTypeIndex = findMemoryType(ctx.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    }
+
+    if (c.vkAllocateMemory(ctx.vk_device, &alloc_info, null, &ctx.msaa_color_memory) != c.VK_SUCCESS) {
+        std.log.err("Failed to allocate MSAA color memory", .{});
+        c.vkDestroyImage(ctx.vk_device, ctx.msaa_color_image, null);
+        ctx.msaa_color_image = null;
+        return;
+    }
+
+    _ = c.vkBindImageMemory(ctx.vk_device, ctx.msaa_color_image, ctx.msaa_color_memory, 0);
+
+    // Create image view
+    var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
+    view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = ctx.msaa_color_image;
+    view_info.viewType = c.VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = ctx.swapchain_format;
+    view_info.subresourceRange.aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT;
+    view_info.subresourceRange.baseMipLevel = 0;
+    view_info.subresourceRange.levelCount = 1;
+    view_info.subresourceRange.baseArrayLayer = 0;
+    view_info.subresourceRange.layerCount = 1;
+
+    if (c.vkCreateImageView(ctx.vk_device, &view_info, null, &ctx.msaa_color_view) != c.VK_SUCCESS) {
+        std.log.err("Failed to create MSAA color image view", .{});
+        c.vkFreeMemory(ctx.vk_device, ctx.msaa_color_memory, null);
+        c.vkDestroyImage(ctx.vk_device, ctx.msaa_color_image, null);
+        ctx.msaa_color_image = null;
+        ctx.msaa_color_memory = null;
+        return;
+    }
+
+    std.log.info("Created MSAA {}x color image ({}x{})", .{ ctx.msaa_samples, ctx.swapchain_extent.width, ctx.swapchain_extent.height });
+}
+
+/// Destroys MSAA resources if they exist.
+fn destroyMSAAResources(ctx: *VulkanContext) void {
+    if (ctx.msaa_color_view != null) {
+        c.vkDestroyImageView(ctx.vk_device, ctx.msaa_color_view, null);
+        ctx.msaa_color_view = null;
+    }
+    if (ctx.msaa_color_image != null) {
+        c.vkDestroyImage(ctx.vk_device, ctx.msaa_color_image, null);
+        ctx.msaa_color_image = null;
+    }
+    if (ctx.msaa_color_memory != null) {
+        c.vkFreeMemory(ctx.vk_device, ctx.msaa_color_memory, null);
+        ctx.msaa_color_memory = null;
+    }
 }
 
 fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*RenderDevice) anyerror!void {
@@ -464,9 +580,10 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
     } else {
         ctx.max_msaa_samples = 1;
     }
-    ctx.msaa_samples = 1; // Start with no MSAA, can be enabled via settings
+    // Clamp requested MSAA to max supported (msaa_samples was set from settings in createRHI)
+    ctx.msaa_samples = @min(ctx.msaa_samples, ctx.max_msaa_samples);
 
-    std.log.info("Vulkan device: max anisotropy={d:.1}, max MSAA={}x", .{ ctx.max_anisotropy, ctx.max_msaa_samples });
+    std.log.info("Vulkan device: max anisotropy={d:.1}, max MSAA={}x, using MSAA={}x", .{ ctx.max_anisotropy, ctx.max_msaa_samples, ctx.msaa_samples });
 
     var device_features = std.mem.zeroes(c.VkPhysicalDeviceFeatures);
     if (supported_features.fillModeNonSolid == c.VK_TRUE) {
@@ -603,7 +720,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
     depth_image_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
     depth_image_info.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
     depth_image_info.usage = c.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    depth_image_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
+    depth_image_info.samples = getMSAASampleCountFlag(ctx.msaa_samples);
     depth_image_info.sharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
 
     try checkVk(c.vkCreateImage(ctx.vk_device, &depth_image_info, null, &ctx.depth_image));
@@ -632,76 +749,164 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
 
     try checkVk(c.vkCreateImageView(ctx.vk_device, &depth_view_info, null, &ctx.depth_image_view));
 
+    // 5c. Create MSAA resources if multisampling is enabled
+    createMSAAResources(ctx);
+
     // 6. Create Render Pass
+    const sample_count = getMSAASampleCountFlag(ctx.msaa_samples);
+    const use_msaa = ctx.msaa_samples > 1;
 
-    var color_attachment = std.mem.zeroes(c.VkAttachmentDescription);
-    color_attachment.format = ctx.swapchain_format;
-    color_attachment.samples = c.VK_SAMPLE_COUNT_1_BIT;
-    color_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR;
-    color_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_STORE;
-    color_attachment.stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    color_attachment.stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    color_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
-    color_attachment.finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    if (use_msaa) {
+        // MSAA render pass: 3 attachments (MSAA color, MSAA depth, resolve)
+        var msaa_color_attachment = std.mem.zeroes(c.VkAttachmentDescription);
+        msaa_color_attachment.format = ctx.swapchain_format;
+        msaa_color_attachment.samples = sample_count;
+        msaa_color_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR;
+        msaa_color_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE; // MSAA image not needed after resolve
+        msaa_color_attachment.stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        msaa_color_attachment.stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        msaa_color_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+        msaa_color_attachment.finalLayout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-    var depth_attachment = std.mem.zeroes(c.VkAttachmentDescription);
-    depth_attachment.format = depth_format;
-    depth_attachment.samples = c.VK_SAMPLE_COUNT_1_BIT;
-    depth_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depth_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_STORE;
-    depth_attachment.stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    depth_attachment.stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depth_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
-    depth_attachment.finalLayout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        var depth_attachment = std.mem.zeroes(c.VkAttachmentDescription);
+        depth_attachment.format = depth_format;
+        depth_attachment.samples = sample_count;
+        depth_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depth_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE; // Depth not needed after rendering
+        depth_attachment.stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        depth_attachment.stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depth_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+        depth_attachment.finalLayout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-    var color_attachment_ref = std.mem.zeroes(c.VkAttachmentReference);
-    color_attachment_ref.attachment = 0;
-    color_attachment_ref.layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        var resolve_attachment = std.mem.zeroes(c.VkAttachmentDescription);
+        resolve_attachment.format = ctx.swapchain_format;
+        resolve_attachment.samples = c.VK_SAMPLE_COUNT_1_BIT; // Resolve target is single-sampled
+        resolve_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE; // Will be overwritten by resolve
+        resolve_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_STORE;
+        resolve_attachment.stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        resolve_attachment.stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        resolve_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+        resolve_attachment.finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
-    var depth_attachment_ref = std.mem.zeroes(c.VkAttachmentReference);
-    depth_attachment_ref.attachment = 1;
-    depth_attachment_ref.layout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        var color_attachment_ref = std.mem.zeroes(c.VkAttachmentReference);
+        color_attachment_ref.attachment = 0; // MSAA color
+        color_attachment_ref.layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-    var subpass = std.mem.zeroes(c.VkSubpassDescription);
-    subpass.pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &color_attachment_ref;
-    subpass.pDepthStencilAttachment = &depth_attachment_ref;
+        var depth_attachment_ref = std.mem.zeroes(c.VkAttachmentReference);
+        depth_attachment_ref.attachment = 1; // MSAA depth
+        depth_attachment_ref.layout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
-    var dependency = std.mem.zeroes(c.VkSubpassDependency);
-    dependency.srcSubpass = c.VK_SUBPASS_EXTERNAL;
-    dependency.dstSubpass = 0;
-    dependency.srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dependency.srcAccessMask = 0;
-    dependency.dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dependency.dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        var resolve_attachment_ref = std.mem.zeroes(c.VkAttachmentReference);
+        resolve_attachment_ref.attachment = 2; // Resolve target (swapchain)
+        resolve_attachment_ref.layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-    var attachment_descs = [_]c.VkAttachmentDescription{ color_attachment, depth_attachment };
-    var render_pass_info = std.mem.zeroes(c.VkRenderPassCreateInfo);
-    render_pass_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    render_pass_info.attachmentCount = 2;
-    render_pass_info.pAttachments = &attachment_descs[0];
-    render_pass_info.subpassCount = 1;
-    render_pass_info.pSubpasses = &subpass;
-    render_pass_info.dependencyCount = 1;
-    render_pass_info.pDependencies = &dependency;
+        var subpass = std.mem.zeroes(c.VkSubpassDescription);
+        subpass.pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &color_attachment_ref;
+        subpass.pDepthStencilAttachment = &depth_attachment_ref;
+        subpass.pResolveAttachments = &resolve_attachment_ref; // Automatic MSAA resolve
 
-    try checkVk(c.vkCreateRenderPass(ctx.vk_device, &render_pass_info, null, &ctx.render_pass));
+        var dependency = std.mem.zeroes(c.VkSubpassDependency);
+        dependency.srcSubpass = c.VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        dependency.srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.srcAccessMask = 0;
+        dependency.dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+        var attachment_descs = [_]c.VkAttachmentDescription{ msaa_color_attachment, depth_attachment, resolve_attachment };
+        var render_pass_info = std.mem.zeroes(c.VkRenderPassCreateInfo);
+        render_pass_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        render_pass_info.attachmentCount = 3;
+        render_pass_info.pAttachments = &attachment_descs[0];
+        render_pass_info.subpassCount = 1;
+        render_pass_info.pSubpasses = &subpass;
+        render_pass_info.dependencyCount = 1;
+        render_pass_info.pDependencies = &dependency;
+
+        try checkVk(c.vkCreateRenderPass(ctx.vk_device, &render_pass_info, null, &ctx.render_pass));
+        std.log.info("Created MSAA {}x render pass", .{ctx.msaa_samples});
+    } else {
+        // Non-MSAA render pass: 2 attachments (color, depth)
+        var color_attachment = std.mem.zeroes(c.VkAttachmentDescription);
+        color_attachment.format = ctx.swapchain_format;
+        color_attachment.samples = c.VK_SAMPLE_COUNT_1_BIT;
+        color_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR;
+        color_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_STORE;
+        color_attachment.stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        color_attachment.stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        color_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+        color_attachment.finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+        var depth_attachment = std.mem.zeroes(c.VkAttachmentDescription);
+        depth_attachment.format = depth_format;
+        depth_attachment.samples = c.VK_SAMPLE_COUNT_1_BIT;
+        depth_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depth_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_STORE;
+        depth_attachment.stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        depth_attachment.stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depth_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+        depth_attachment.finalLayout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        var color_attachment_ref = std.mem.zeroes(c.VkAttachmentReference);
+        color_attachment_ref.attachment = 0;
+        color_attachment_ref.layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        var depth_attachment_ref = std.mem.zeroes(c.VkAttachmentReference);
+        depth_attachment_ref.attachment = 1;
+        depth_attachment_ref.layout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        var subpass = std.mem.zeroes(c.VkSubpassDescription);
+        subpass.pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &color_attachment_ref;
+        subpass.pDepthStencilAttachment = &depth_attachment_ref;
+
+        var dependency = std.mem.zeroes(c.VkSubpassDependency);
+        dependency.srcSubpass = c.VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        dependency.srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.srcAccessMask = 0;
+        dependency.dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+        var attachment_descs = [_]c.VkAttachmentDescription{ color_attachment, depth_attachment };
+        var render_pass_info = std.mem.zeroes(c.VkRenderPassCreateInfo);
+        render_pass_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        render_pass_info.attachmentCount = 2;
+        render_pass_info.pAttachments = &attachment_descs[0];
+        render_pass_info.subpassCount = 1;
+        render_pass_info.pSubpasses = &subpass;
+        render_pass_info.dependencyCount = 1;
+        render_pass_info.pDependencies = &dependency;
+
+        try checkVk(c.vkCreateRenderPass(ctx.vk_device, &render_pass_info, null, &ctx.render_pass));
+    }
 
     // 7. Create Framebuffers
     for (ctx.swapchain_image_views.items) |iv| {
-        const fb_attachments = [_]c.VkImageView{ iv, ctx.depth_image_view };
+        var fb: c.VkFramebuffer = null;
         var framebuffer_info = std.mem.zeroes(c.VkFramebufferCreateInfo);
         framebuffer_info.sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         framebuffer_info.renderPass = ctx.render_pass;
-        framebuffer_info.attachmentCount = 2;
-        framebuffer_info.pAttachments = &fb_attachments[0];
         framebuffer_info.width = ctx.swapchain_extent.width;
         framebuffer_info.height = ctx.swapchain_extent.height;
         framebuffer_info.layers = 1;
 
-        var fb: c.VkFramebuffer = null;
-        try checkVk(c.vkCreateFramebuffer(ctx.vk_device, &framebuffer_info, null, &fb));
+        if (use_msaa and ctx.msaa_color_view != null) {
+            // MSAA framebuffer: [msaa_color, depth, swapchain_resolve]
+            const fb_attachments = [_]c.VkImageView{ ctx.msaa_color_view.?, ctx.depth_image_view, iv };
+            framebuffer_info.attachmentCount = 3;
+            framebuffer_info.pAttachments = &fb_attachments[0];
+            try checkVk(c.vkCreateFramebuffer(ctx.vk_device, &framebuffer_info, null, &fb));
+        } else {
+            // Non-MSAA framebuffer: [swapchain_color, depth]
+            const fb_attachments = [_]c.VkImageView{ iv, ctx.depth_image_view };
+            framebuffer_info.attachmentCount = 2;
+            framebuffer_info.pAttachments = &fb_attachments[0];
+            try checkVk(c.vkCreateFramebuffer(ctx.vk_device, &framebuffer_info, null, &fb));
+        }
         try ctx.swapchain_framebuffers.append(ctx.allocator, fb);
     }
 
@@ -1062,7 +1267,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
 
     var multisampling = std.mem.zeroes(c.VkPipelineMultisampleStateCreateInfo);
     multisampling.sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisampling.rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT;
+    multisampling.rasterizationSamples = getMSAASampleCountFlag(ctx.msaa_samples);
 
     var color_blend_attachment = std.mem.zeroes(c.VkPipelineColorBlendAttachmentState);
     color_blend_attachment.colorWriteMask = c.VK_COLOR_COMPONENT_R_BIT | c.VK_COLOR_COMPONENT_G_BIT | c.VK_COLOR_COMPONENT_B_BIT | c.VK_COLOR_COMPONENT_A_BIT;
@@ -1946,6 +2151,9 @@ fn deinit(ctx_ptr: *anyopaque) void {
         if (ctx.depth_image_memory != null) c.vkFreeMemory(ctx.vk_device, ctx.depth_image_memory, null);
         if (ctx.depth_image != null) c.vkDestroyImage(ctx.vk_device, ctx.depth_image, null);
 
+        // Clean up MSAA resources
+        destroyMSAAResources(ctx);
+
         if (ctx.swapchain != null) c.vkDestroySwapchainKHR(ctx.vk_device, ctx.swapchain, null);
         if (ctx.render_pass != null) c.vkDestroyRenderPass(ctx.vk_device, ctx.render_pass, null);
 
@@ -2131,6 +2339,9 @@ fn cleanupSwapchain(ctx: *VulkanContext) void {
         ctx.depth_image = null;
     }
 
+    // Cleanup MSAA resources
+    destroyMSAAResources(ctx);
+
     if (ctx.swapchain != null) {
         c.vkDestroySwapchainKHR(ctx.vk_device, ctx.swapchain, null);
         ctx.swapchain = null;
@@ -2251,7 +2462,7 @@ fn recreateSwapchain(ctx: *VulkanContext) void {
     depth_image_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
     depth_image_info.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
     depth_image_info.usage = c.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    depth_image_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
+    depth_image_info.samples = getMSAASampleCountFlag(ctx.msaa_samples);
     depth_image_info.sharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
 
     _ = c.vkCreateImage(ctx.vk_device, &depth_image_info, null, &ctx.depth_image);
@@ -2280,20 +2491,33 @@ fn recreateSwapchain(ctx: *VulkanContext) void {
 
     _ = c.vkCreateImageView(ctx.vk_device, &depth_view_info, null, &ctx.depth_image_view);
 
+    // Recreate MSAA resources
+    createMSAAResources(ctx);
+
     // Recreate framebuffers
+    const use_msaa = ctx.msaa_samples > 1 and ctx.msaa_color_view != null;
     for (ctx.swapchain_image_views.items) |iv| {
-        const fb_attachments = [_]c.VkImageView{ iv, ctx.depth_image_view };
+        var fb: c.VkFramebuffer = null;
         var framebuffer_info = std.mem.zeroes(c.VkFramebufferCreateInfo);
         framebuffer_info.sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         framebuffer_info.renderPass = ctx.render_pass;
-        framebuffer_info.attachmentCount = 2;
-        framebuffer_info.pAttachments = &fb_attachments[0];
         framebuffer_info.width = ctx.swapchain_extent.width;
         framebuffer_info.height = ctx.swapchain_extent.height;
         framebuffer_info.layers = 1;
 
-        var fb: c.VkFramebuffer = null;
-        _ = c.vkCreateFramebuffer(ctx.vk_device, &framebuffer_info, null, &fb);
+        if (use_msaa) {
+            // MSAA framebuffer: [msaa_color, depth, swapchain_resolve]
+            const fb_attachments = [_]c.VkImageView{ ctx.msaa_color_view.?, ctx.depth_image_view, iv };
+            framebuffer_info.attachmentCount = 3;
+            framebuffer_info.pAttachments = &fb_attachments[0];
+            _ = c.vkCreateFramebuffer(ctx.vk_device, &framebuffer_info, null, &fb);
+        } else {
+            // Non-MSAA framebuffer: [swapchain_color, depth]
+            const fb_attachments = [_]c.VkImageView{ iv, ctx.depth_image_view };
+            framebuffer_info.attachmentCount = 2;
+            framebuffer_info.pAttachments = &fb_attachments[0];
+            _ = c.vkCreateFramebuffer(ctx.vk_device, &framebuffer_info, null, &fb);
+        }
         ctx.swapchain_framebuffers.append(ctx.allocator, fb) catch {};
     }
 
@@ -3469,13 +3693,11 @@ fn setMSAA(ctx_ptr: *anyopaque, samples: u8) void {
     const clamped = @min(samples, ctx.max_msaa_samples);
     if (ctx.msaa_samples == clamped) return;
 
+    // Store the new setting - it will be applied on next app restart.
+    // Full runtime MSAA switching requires recreating render pass and all pipelines,
+    // which is a significant operation that most games defer to startup.
     ctx.msaa_samples = clamped;
-    std.log.info("Vulkan MSAA set to {}x (max: {}x)", .{ clamped, ctx.max_msaa_samples });
-    // Note: Full MSAA implementation requires:
-    // 1. Recreating render pass with MSAA attachments
-    // 2. Creating MSAA color/depth images
-    // 3. Recreating all pipelines with new sample count
-    // This is a placeholder that logs the setting; full implementation is a larger refactor.
+    std.log.info("Vulkan MSAA set to {}x (max: {}x) - requires restart to take effect", .{ clamped, ctx.max_msaa_samples });
 }
 
 fn getMaxAnisotropy(ctx_ptr: *anyopaque) u8 {
@@ -4002,7 +4224,7 @@ const vtable = rhi.RHI.VTable{
     .getMaxMSAASamples = getMaxMSAASamples,
 };
 
-pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_device: ?*RenderDevice, shadow_resolution: u32) !rhi.RHI {
+pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_device: ?*RenderDevice, shadow_resolution: u32, msaa_samples: u8) !rhi.RHI {
     const ctx = try allocator.create(VulkanContext);
     // Initialize all fields to safe defaults
     ctx.allocator = allocator;
@@ -4064,6 +4286,9 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_dev
     ctx.depth_image = null;
     ctx.depth_image_view = null;
     ctx.depth_image_memory = null;
+    ctx.msaa_color_image = null;
+    ctx.msaa_color_view = null;
+    ctx.msaa_color_memory = null;
     ctx.pipeline = null;
     ctx.pipeline_layout = null;
     ctx.wireframe_pipeline = null;
@@ -4090,7 +4315,7 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_dev
     ctx.memory_type_index = 0;
     ctx.anisotropic_filtering = 1;
     ctx.max_anisotropy = 1.0;
-    ctx.msaa_samples = 1;
+    ctx.msaa_samples = msaa_samples; // Will be clamped to max_msaa_samples during init
     ctx.max_msaa_samples = 1;
     ctx.shadow_sampler = null;
     ctx.shadow_extent = .{ .width = 0, .height = 0 };
