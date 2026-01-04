@@ -19,6 +19,9 @@ const rhi_mod = @import("../engine/graphics/rhi.zig");
 const RHI = rhi_mod.RHI;
 const Vertex = rhi_mod.Vertex;
 const BufferHandle = rhi_mod.BufferHandle;
+const chunk_alloc_mod = @import("chunk_allocator.zig");
+const GlobalVertexAllocator = chunk_alloc_mod.GlobalVertexAllocator;
+const VertexAllocation = chunk_alloc_mod.VertexAllocation;
 
 pub const SUBCHUNK_SIZE = 16;
 pub const NUM_SUBCHUNKS = 16;
@@ -45,14 +48,9 @@ pub const NeighborChunks = struct {
 /// Merged chunk mesh with single solid/fluid buffers for minimal draw calls.
 /// Subchunk data is only used during mesh building, then merged.
 pub const ChunkMesh = struct {
-    // Merged GPU buffers - one draw call each
-    solid_handle: BufferHandle = 0,
-    solid_count: u32 = 0,
-    solid_capacity: u32 = 0,
-
-    fluid_handle: BufferHandle = 0,
-    fluid_count: u32 = 0,
-    fluid_capacity: u32 = 0,
+    // Merged GPU allocations from GlobalVertexAllocator
+    solid_allocation: ?VertexAllocation = null,
+    fluid_allocation: ?VertexAllocation = null,
 
     ready: bool = false,
 
@@ -74,13 +72,15 @@ pub const ChunkMesh = struct {
         };
     }
 
-    // Must be called on main thread or wherever RHI context is valid
-    pub fn deinit(self: *ChunkMesh, rhi: RHI) void {
+    // Must be called on main thread
+    pub fn deinit(self: *ChunkMesh, allocator: *GlobalVertexAllocator) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (self.solid_handle != 0) rhi.destroyBuffer(self.solid_handle);
-        if (self.fluid_handle != 0) rhi.destroyBuffer(self.fluid_handle);
+        if (self.solid_allocation) |alloc| allocator.free(alloc);
+        if (self.fluid_allocation) |alloc| allocator.free(alloc);
+        self.solid_allocation = null;
+        self.fluid_allocation = null;
 
         if (self.pending_solid) |p| self.allocator.free(p);
         if (self.pending_fluid) |p| self.allocator.free(p);
@@ -305,26 +305,19 @@ pub const ChunkMesh = struct {
         }
     }
 
-    /// Upload pending mesh data to the GPU.
-    /// Now uploads single merged buffers instead of 16 separate ones.
-    pub fn upload(self: *ChunkMesh, rhi: RHI) void {
+    /// Upload pending mesh data to the GPU using GlobalVertexAllocator.
+    /// Upload pending mesh data to the GPU using GlobalVertexAllocator.
+    pub fn upload(self: *ChunkMesh, allocator: *GlobalVertexAllocator) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
         // Upload merged solid buffer
         if (self.pending_solid) |v| {
-            const bytes = std.mem.sliceAsBytes(v);
-            if (bytes.len > self.solid_capacity) {
-                if (self.solid_handle != 0) {
-                    rhi.destroyBuffer(self.solid_handle);
-                }
-                var new_cap = std.math.ceilPowerOfTwo(usize, bytes.len) catch bytes.len;
-                if (new_cap < 1024) new_cap = 1024;
-                self.solid_handle = rhi.createBuffer(new_cap, .vertex);
-                self.solid_capacity = @intCast(new_cap);
-            }
-            rhi.uploadBuffer(self.solid_handle, bytes);
-            self.solid_count = @intCast(v.len);
+            if (self.solid_allocation) |alloc| allocator.free(alloc);
+            self.solid_allocation = allocator.allocate(v) catch |err| {
+                std.log.err("Failed to allocate chunk mesh vertices (will retry): {}", .{err});
+                return;
+            };
             self.allocator.free(v);
             self.pending_solid = null;
             self.ready = true;
@@ -332,18 +325,11 @@ pub const ChunkMesh = struct {
 
         // Upload merged fluid buffer
         if (self.pending_fluid) |v| {
-            const bytes = std.mem.sliceAsBytes(v);
-            if (bytes.len > self.fluid_capacity) {
-                if (self.fluid_handle != 0) {
-                    rhi.destroyBuffer(self.fluid_handle);
-                }
-                var new_cap = std.math.ceilPowerOfTwo(usize, bytes.len) catch bytes.len;
-                if (new_cap < 1024) new_cap = 1024;
-                self.fluid_handle = rhi.createBuffer(new_cap, .vertex);
-                self.fluid_capacity = @intCast(new_cap);
-            }
-            rhi.uploadBuffer(self.fluid_handle, bytes);
-            self.fluid_count = @intCast(v.len);
+            if (self.fluid_allocation) |alloc| allocator.free(alloc);
+            self.fluid_allocation = allocator.allocate(v) catch |err| {
+                std.log.err("Failed to allocate chunk fluid vertices (will retry): {}", .{err});
+                return;
+            };
             self.allocator.free(v);
             self.pending_fluid = null;
             self.ready = true;
@@ -351,14 +337,20 @@ pub const ChunkMesh = struct {
     }
 
     /// Draw the chunk mesh with a single draw call per pass.
-    /// Reduced from 16 draw calls to 1 per pass.
     pub fn draw(self: *const ChunkMesh, rhi: RHI, pass: Pass) void {
         if (!self.ready) return;
 
-        if (pass == .solid and self.solid_count > 0) {
-            rhi.draw(self.solid_handle, self.solid_count, .triangles);
-        } else if (pass == .fluid and self.fluid_count > 0) {
-            rhi.draw(self.fluid_handle, self.fluid_count, .triangles);
+        switch (pass) {
+            .solid => {
+                if (self.solid_allocation) |alloc| {
+                    rhi.drawOffset(alloc.handle, alloc.count, .triangles, alloc.offset);
+                }
+            },
+            .fluid => {
+                if (self.fluid_allocation) |alloc| {
+                    rhi.drawOffset(alloc.handle, alloc.count, .triangles, alloc.offset);
+                }
+            },
         }
     }
 };

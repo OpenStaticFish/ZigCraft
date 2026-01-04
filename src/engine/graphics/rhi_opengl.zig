@@ -392,15 +392,22 @@ fn uploadBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, data: []const u8)
     const idx = handle - 1;
     if (idx < ctx.buffers.items.len) {
         const buf = ctx.buffers.items[idx];
-        if (buf.vbo != 0) {
-            c.glBindBuffer().?(c.GL_ARRAY_BUFFER, buf.vbo);
-            // Replace entire buffer content
-            // NOTE: In a real queue we would use glMapBufferRange or just glBufferSubData
-            // For now, since we allocate with size in createBuffer, we use glBufferSubData.
-            c.glBufferSubData().?(c.GL_ARRAY_BUFFER, 0, @intCast(data.len), data.ptr);
-            c.glBindBuffer().?(c.GL_ARRAY_BUFFER, 0);
-            checkError("uploadBuffer");
-        }
+        c.glBindBuffer().?(c.GL_ARRAY_BUFFER, buf.vbo);
+        c.glBufferData().?(c.GL_ARRAY_BUFFER, @intCast(data.len), data.ptr, c.GL_STATIC_DRAW);
+    }
+}
+
+fn updateBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, offset: usize, data: []const u8) void {
+    const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
+
+    if (handle == 0) return;
+    const idx = handle - 1;
+    if (idx < ctx.buffers.items.len) {
+        const buf = ctx.buffers.items[idx];
+        c.glBindBuffer().?(c.GL_ARRAY_BUFFER, buf.vbo);
+        c.glBufferSubData().?(c.GL_ARRAY_BUFFER, @intCast(offset), @intCast(data.len), data.ptr);
     }
 }
 
@@ -522,7 +529,7 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
 fn setTextureUniforms(ctx_ptr: *anyopaque, texture_enabled: bool, shadow_map_handles: [rhi.SHADOW_CASCADE_COUNT]rhi.TextureHandle) void {
     const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
 
-    const shadow_map_names = [_][:0]const u8{ "uShadowMap0", "uShadowMap1" };
+    const shadow_map_names = [_][:0]const u8{ "uShadowMap0", "uShadowMap1", "uShadowMap2" };
 
     if (ctx.active_shader) |shader| {
         shader.use();
@@ -719,26 +726,26 @@ fn drawIndirect(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, command_buffer: r
 }
 
 fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.DrawMode) void {
-    const ctx: *OpenGLContext = @ptrCast(@alignCast(ctx_ptr));
-    ctx.mutex.lock();
-    defer ctx.mutex.unlock();
+    _ = ctx_ptr;
+    const gl_mode: c.GLenum = switch (mode) {
+        .triangles => c.GL_TRIANGLES,
+        .lines => c.GL_LINES,
+        .points => c.GL_POINTS,
+    };
+    c.glBindBuffer().?(c.GL_ARRAY_BUFFER, @intCast(handle));
+    c.glDrawArrays(gl_mode, 0, @intCast(count));
+}
 
-    if (handle == 0) return;
-    const idx = handle - 1;
-    if (idx < ctx.buffers.items.len) {
-        const buf = ctx.buffers.items[idx];
-        if (buf.vao != 0) {
-            c.glBindVertexArray().?(buf.vao);
-            const gl_mode: c.GLenum = switch (mode) {
-                .triangles => c.GL_TRIANGLES,
-                .lines => c.GL_LINES,
-                .points => c.GL_POINTS,
-            };
-            c.glDrawArrays(gl_mode, 0, @intCast(count));
-            c.glBindVertexArray().?(0);
-            checkError("draw");
-        }
-    }
+fn drawOffset(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.DrawMode, offset: usize) void {
+    _ = ctx_ptr;
+    const gl_mode: c.GLenum = switch (mode) {
+        .triangles => c.GL_TRIANGLES,
+        .lines => c.GL_LINES,
+        .points => c.GL_POINTS,
+    };
+    c.glBindBuffer().?(c.GL_ARRAY_BUFFER, @intCast(handle));
+    const first: i32 = @intCast(offset / @sizeOf(rhi.Vertex));
+    c.glDrawArrays(gl_mode, first, @intCast(count));
 }
 
 fn drawSky(ctx_ptr: *anyopaque, params: rhi.SkyParams) void {
@@ -1123,6 +1130,7 @@ const vtable = rhi.RHI.VTable{
     .deinit = deinit,
     .createBuffer = createBuffer,
     .uploadBuffer = uploadBuffer,
+    .updateBuffer = updateBuffer,
     .destroyBuffer = destroyBuffer,
     .createShader = createShader,
     .destroyShader = destroyShader,
@@ -1145,6 +1153,7 @@ const vtable = rhi.RHI.VTable{
     .updateShadowUniforms = updateShadowUniforms,
     .setTextureUniforms = setTextureUniforms,
     .draw = draw,
+    .drawOffset = drawOffset,
     .drawIndirect = drawIndirect,
     .drawSky = drawSky,
     .createTexture = createTexture,

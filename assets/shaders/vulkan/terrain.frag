@@ -91,6 +91,7 @@ layout(push_constant) uniform ModelUniforms {
     mat4 view_proj;
     mat4 model;
     float mask_radius;
+    vec3 padding;
 } model_data;
 
 float calculateShadow(vec3 fragPosWorld, float nDotL, int layer) {

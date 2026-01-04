@@ -29,12 +29,19 @@ layout(set = 0, binding = 0) uniform GlobalUniforms {
     float sun_intensity;
     float ambient;
     float use_texture;
+    vec2 cloud_wind_offset;
+    float cloud_scale;
+    float cloud_coverage;
+    float cloud_shadow_strength;
+    float cloud_height;
     float padding[2];
 } global;
 
 layout(push_constant) uniform ModelUniforms {
     mat4 view_proj;
     mat4 model;
+    float mask_radius;
+    vec3 padding;
 } pc;
 
 void main() {

@@ -30,7 +30,7 @@ pub const InvalidShaderHandle: ShaderHandle = 0;
 pub const TextureHandle = u32;
 pub const InvalidTextureHandle: TextureHandle = 0;
 
-pub const SHADOW_CASCADE_COUNT = 2;
+pub const SHADOW_CASCADE_COUNT = 3;
 
 pub const BufferUsage = enum {
     vertex,
@@ -188,6 +188,7 @@ pub const RHI = struct {
         // Resource Management (delegated to RenderDevice)
         createBuffer: *const fn (ctx: *anyopaque, size: usize, usage: BufferUsage) BufferHandle,
         uploadBuffer: *const fn (ctx: *anyopaque, handle: BufferHandle, data: []const u8) void,
+        updateBuffer: *const fn (ctx: *anyopaque, handle: BufferHandle, offset: usize, data: []const u8) void,
         destroyBuffer: *const fn (ctx: *anyopaque, handle: BufferHandle) void,
 
         // Shader Management (delegated to RenderDevice)
@@ -220,6 +221,7 @@ pub const RHI = struct {
 
         // Draw Calls
         draw: *const fn (ctx: *anyopaque, handle: BufferHandle, count: u32, mode: DrawMode) void,
+        drawOffset: *const fn (ctx: *anyopaque, handle: BufferHandle, count: u32, mode: DrawMode, offset: usize) void,
         drawIndirect: *const fn (ctx: *anyopaque, handle: BufferHandle, command_buffer: BufferHandle, offset: usize, draw_count: u32, stride: u32) void,
         drawSky: *const fn (ctx: *anyopaque, params: SkyParams) void,
 
@@ -284,6 +286,10 @@ pub const RHI = struct {
 
     pub fn uploadBuffer(self: RHI, handle: BufferHandle, data: []const u8) void {
         self.vtable.uploadBuffer(self.ptr, handle, data);
+    }
+
+    pub fn updateBuffer(self: RHI, handle: BufferHandle, offset: usize, data: []const u8) void {
+        self.vtable.updateBuffer(self.ptr, handle, offset, data);
     }
 
     pub fn destroyBuffer(self: RHI, handle: BufferHandle) void {
@@ -373,6 +379,10 @@ pub const RHI = struct {
 
     pub fn draw(self: RHI, handle: BufferHandle, count: u32, mode: DrawMode) void {
         self.vtable.draw(self.ptr, handle, count, mode);
+    }
+
+    pub fn drawOffset(self: RHI, handle: BufferHandle, count: u32, mode: DrawMode, offset: usize) void {
+        self.vtable.drawOffset(self.ptr, handle, count, mode, offset);
     }
 
     pub fn drawIndirect(self: RHI, handle: BufferHandle, command_buffer: BufferHandle, offset: usize, draw_count: u32, stride: u32) void {

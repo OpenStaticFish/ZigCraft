@@ -55,9 +55,8 @@ const GlobalUniforms = extern struct {
 /// Shadow cascade uniforms for CSM. Bound to descriptor set 0, binding 2.
 const ShadowUniforms = extern struct {
     light_space_matrices: [rhi.SHADOW_CASCADE_COUNT]Mat4,
-    cascade_splits: [rhi.SHADOW_CASCADE_COUNT]f32,
-    shadow_texel_sizes: [rhi.SHADOW_CASCADE_COUNT]f32,
-    padding: f32 = 0.0,
+    cascade_splits: [4]f32, // vec4 in shader
+    shadow_texel_sizes: [4]f32, // vec4 in shader
 };
 
 /// Per-draw model matrix, passed via push constants for efficiency.
@@ -193,6 +192,11 @@ const VulkanContext = struct {
     depth_image: c.VkImage,
     depth_image_memory: c.VkDeviceMemory,
     depth_image_view: c.VkImageView,
+
+    // Dummy shadow texture for fallback
+    dummy_shadow_image: c.VkImage,
+    dummy_shadow_memory: c.VkDeviceMemory,
+    dummy_shadow_view: c.VkImageView,
 
     // Uniforms
     global_ubos: [MAX_FRAMES_IN_FLIGHT]VulkanBuffer,
@@ -629,6 +633,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
     try checkVk(c.vkCreateImageView(ctx.vk_device, &depth_view_info, null, &ctx.depth_image_view));
 
     // 6. Create Render Pass
+
     var color_attachment = std.mem.zeroes(c.VkAttachmentDescription);
     color_attachment.format = ctx.swapchain_format;
     color_attachment.samples = c.VK_SAMPLE_COUNT_1_BIT;
@@ -729,11 +734,100 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
     try checkVk(c.vkAllocateCommandBuffers(ctx.vk_device, &tcb_alloc_info, &ctx.transfer_command_buffers[0]));
 
     // Initialize staging buffers (8MB per frame)
-    const STAGING_SIZE = 8 * 1024 * 1024;
+    const STAGING_SIZE = 64 * 1024 * 1024;
     for (0..MAX_FRAMES_IN_FLIGHT) |frame_i| {
         ctx.staging_buffers[frame_i] = try StagingBuffer.init(ctx, STAGING_SIZE);
     }
     ctx.transfer_ready = false;
+
+    // 5c. Create Dummy Shadow Map (1x1 Depth)
+    var dummy_image_info = std.mem.zeroes(c.VkImageCreateInfo);
+    dummy_image_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    dummy_image_info.imageType = c.VK_IMAGE_TYPE_2D;
+    dummy_image_info.extent.width = 1;
+    dummy_image_info.extent.height = 1;
+    dummy_image_info.extent.depth = 1;
+    dummy_image_info.mipLevels = 1;
+    dummy_image_info.arrayLayers = 1;
+    dummy_image_info.format = c.VK_FORMAT_D32_SFLOAT;
+    dummy_image_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
+    dummy_image_info.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+    dummy_image_info.usage = c.VK_IMAGE_USAGE_SAMPLED_BIT | c.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    dummy_image_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
+    dummy_image_info.sharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
+
+    try checkVk(c.vkCreateImage(ctx.vk_device, &dummy_image_info, null, &ctx.dummy_shadow_image));
+
+    var dummy_mem_reqs: c.VkMemoryRequirements = undefined;
+    c.vkGetImageMemoryRequirements(ctx.vk_device, ctx.dummy_shadow_image, &dummy_mem_reqs);
+
+    var dummy_alloc_info = std.mem.zeroes(c.VkMemoryAllocateInfo);
+    dummy_alloc_info.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    dummy_alloc_info.allocationSize = dummy_mem_reqs.size;
+    dummy_alloc_info.memoryTypeIndex = findMemoryType(ctx.physical_device, dummy_mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+    try checkVk(c.vkAllocateMemory(ctx.vk_device, &dummy_alloc_info, null, &ctx.dummy_shadow_memory));
+    try checkVk(c.vkBindImageMemory(ctx.vk_device, ctx.dummy_shadow_image, ctx.dummy_shadow_memory, 0));
+
+    var dummy_view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
+    dummy_view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    dummy_view_info.image = ctx.dummy_shadow_image;
+    dummy_view_info.viewType = c.VK_IMAGE_VIEW_TYPE_2D;
+    dummy_view_info.format = c.VK_FORMAT_D32_SFLOAT;
+    dummy_view_info.subresourceRange.aspectMask = c.VK_IMAGE_ASPECT_DEPTH_BIT;
+    dummy_view_info.subresourceRange.baseMipLevel = 0;
+    dummy_view_info.subresourceRange.levelCount = 1;
+    dummy_view_info.subresourceRange.baseArrayLayer = 0;
+    dummy_view_info.subresourceRange.layerCount = 1;
+
+    try checkVk(c.vkCreateImageView(ctx.vk_device, &dummy_view_info, null, &ctx.dummy_shadow_view));
+
+    // Transition dummy image to SHADER_READ_ONLY_OPTIMAL immediately
+    {
+        var alloc_info_cmd = std.mem.zeroes(c.VkCommandBufferAllocateInfo);
+        alloc_info_cmd.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        alloc_info_cmd.level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        alloc_info_cmd.commandPool = ctx.command_pool;
+        alloc_info_cmd.commandBufferCount = 1;
+
+        var cmd: c.VkCommandBuffer = null;
+        try checkVk(c.vkAllocateCommandBuffers(ctx.vk_device, &alloc_info_cmd, &cmd));
+
+        var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
+        begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin_info.flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+        try checkVk(c.vkBeginCommandBuffer(cmd, &begin_info));
+
+        var barrier = std.mem.zeroes(c.VkImageMemoryBarrier);
+        barrier.sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = ctx.dummy_shadow_image;
+        barrier.subresourceRange.aspectMask = c.VK_IMAGE_ASPECT_DEPTH_BIT;
+        barrier.subresourceRange.baseMipLevel = 0;
+        barrier.subresourceRange.levelCount = 1;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = 1;
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+
+        c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
+
+        try checkVk(c.vkEndCommandBuffer(cmd));
+
+        var submit_info = std.mem.zeroes(c.VkSubmitInfo);
+        submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit_info.commandBufferCount = 1;
+        submit_info.pCommandBuffers = &cmd;
+
+        try checkVk(c.vkQueueSubmit(ctx.queue, 1, &submit_info, null));
+        try checkVk(c.vkQueueWaitIdle(ctx.queue));
+
+        c.vkFreeCommandBuffers(ctx.vk_device, ctx.command_pool, 1, &cmd);
+    }
 
     // 9. Sync Objects
     var semaphore_info = std.mem.zeroes(c.VkSemaphoreCreateInfo);
@@ -1113,6 +1207,62 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
         shadow_fb_info.layers = 1;
 
         try checkVk(c.vkCreateFramebuffer(ctx.vk_device, &shadow_fb_info, null, &ctx.shadow_framebuffers[si]));
+    }
+
+    // Transition all shadow cascade images to SHADER_READ_ONLY_OPTIMAL immediately
+    // so they are valid for sampling even before the first shadow pass runs
+    {
+        var alloc_info_cmd = std.mem.zeroes(c.VkCommandBufferAllocateInfo);
+        alloc_info_cmd.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        alloc_info_cmd.level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        alloc_info_cmd.commandPool = ctx.command_pool;
+        alloc_info_cmd.commandBufferCount = 1;
+
+        var cmd: c.VkCommandBuffer = null;
+        try checkVk(c.vkAllocateCommandBuffers(ctx.vk_device, &alloc_info_cmd, &cmd));
+
+        var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
+        begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin_info.flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+        try checkVk(c.vkBeginCommandBuffer(cmd, &begin_info));
+
+        var barriers: [shadows.ShadowMap.CASCADE_COUNT]c.VkImageMemoryBarrier = undefined;
+        for (0..shadows.ShadowMap.CASCADE_COUNT) |bi| {
+            barriers[bi] = std.mem.zeroes(c.VkImageMemoryBarrier);
+            barriers[bi].sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barriers[bi].oldLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+            barriers[bi].newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barriers[bi].srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+            barriers[bi].dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+            barriers[bi].image = ctx.shadow_images[bi];
+            barriers[bi].subresourceRange.aspectMask = c.VK_IMAGE_ASPECT_DEPTH_BIT;
+            barriers[bi].subresourceRange.baseMipLevel = 0;
+            barriers[bi].subresourceRange.levelCount = 1;
+            barriers[bi].subresourceRange.baseArrayLayer = 0;
+            barriers[bi].subresourceRange.layerCount = 1;
+            barriers[bi].srcAccessMask = 0;
+            barriers[bi].dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+        }
+
+        c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, shadows.ShadowMap.CASCADE_COUNT, &barriers);
+
+        try checkVk(c.vkEndCommandBuffer(cmd));
+
+        var submit_info = std.mem.zeroes(c.VkSubmitInfo);
+        submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit_info.commandBufferCount = 1;
+        submit_info.pCommandBuffers = &cmd;
+
+        try checkVk(c.vkQueueSubmit(ctx.queue, 1, &submit_info, null));
+        try checkVk(c.vkQueueWaitIdle(ctx.queue));
+
+        c.vkFreeCommandBuffers(ctx.vk_device, ctx.command_pool, 1, &cmd);
+
+        // Mark all cascade layouts as SHADER_READ_ONLY_OPTIMAL
+        for (0..shadows.ShadowMap.CASCADE_COUNT) |li| {
+            ctx.shadow_image_layouts[li] = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
     }
 
     const shadow_vert_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/shadow.vert.spv", ctx.allocator, @enumFromInt(1024 * 1024));
@@ -1724,10 +1874,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
     shadow_sampler_info.borderColor = c.VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
     try checkVk(c.vkCreateSampler(ctx.vk_device, &shadow_sampler_info, null, &ctx.shadow_sampler));
 
-    // Initialize shadow layouts to undefined
-    for (0..shadows.ShadowMap.CASCADE_COUNT) |si| {
-        ctx.shadow_image_layouts[si] = c.VK_IMAGE_LAYOUT_UNDEFINED;
-    }
+    // Shadow layouts were already transitioned to SHADER_READ_ONLY_OPTIMAL during shadow cascade creation
 
     for (0..MAX_FRAMES_IN_FLIGHT) |frame_i| {
         ctx.buffer_deletion_queue[frame_i] = .empty;
@@ -1828,6 +1975,10 @@ fn deinit(ctx_ptr: *anyopaque) void {
         if (ctx.descriptor_pool != null) c.vkDestroyDescriptorPool(ctx.vk_device, ctx.descriptor_pool, null);
         if (ctx.descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(ctx.vk_device, ctx.descriptor_set_layout, null);
 
+        if (ctx.dummy_shadow_view != null) c.vkDestroyImageView(ctx.vk_device, ctx.dummy_shadow_view, null);
+        if (ctx.dummy_shadow_image != null) c.vkDestroyImage(ctx.vk_device, ctx.dummy_shadow_image, null);
+        if (ctx.dummy_shadow_memory != null) c.vkFreeMemory(ctx.vk_device, ctx.dummy_shadow_memory, null);
+
         var buf_iter = ctx.buffers.iterator();
         while (buf_iter.next()) |entry| {
             c.vkDestroyBuffer(ctx.vk_device, entry.value_ptr.buffer, null);
@@ -1887,10 +2038,13 @@ fn createBuffer(ctx_ptr: *anyopaque, size: usize, usage: rhi.BufferUsage) rhi.Bu
 }
 
 fn uploadBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, data: []const u8) void {
+    updateBuffer(ctx_ptr, handle, 0, data);
+}
+
+fn updateBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, dst_offset: usize, data: []const u8) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (data.len == 0 or handle == 0) return;
 
-    // Ensure we have a command buffer ready for transfers
     ensureFrameReady(ctx);
 
     ctx.mutex.lock();
@@ -1898,10 +2052,9 @@ fn uploadBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, data: []const u8)
     ctx.mutex.unlock();
 
     if (buf_opt) |buf| {
-        // Try mapping directly first (for HOST_VISIBLE buffers like UBOs)
         if (buf.is_host_visible) {
             var map_ptr: ?*anyopaque = null;
-            const result = c.vkMapMemory(ctx.vk_device, buf.memory, 0, @intCast(data.len), 0, &map_ptr);
+            const result = c.vkMapMemory(ctx.vk_device, buf.memory, @intCast(dst_offset), @intCast(data.len), 0, &map_ptr);
             if (result == c.VK_SUCCESS) {
                 @memcpy(@as([*]u8, @ptrCast(map_ptr))[0..data.len], data);
                 c.vkUnmapMemory(ctx.vk_device, buf.memory);
@@ -1909,23 +2062,20 @@ fn uploadBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, data: []const u8)
             }
         }
 
-        // Try async upload via staging ring
         const staging = &ctx.staging_buffers[ctx.current_sync_frame];
-        if (staging.allocate(data.len)) |offset| {
-            // Copy to staging memory
-            const dest = @as([*]u8, @ptrCast(staging.mapped_ptr.?)) + offset;
+        if (staging.allocate(data.len)) |src_offset| {
+            const dest = @as([*]u8, @ptrCast(staging.mapped_ptr.?)) + src_offset;
+
             @memcpy(dest[0..data.len], data);
 
-            // Record copy command
             const transfer_cb = ctx.transfer_command_buffers[ctx.current_sync_frame];
 
             var copy_region = std.mem.zeroes(c.VkBufferCopy);
-            copy_region.srcOffset = offset;
-            copy_region.dstOffset = 0;
+            copy_region.srcOffset = src_offset;
+            copy_region.dstOffset = @intCast(dst_offset);
             copy_region.size = @intCast(data.len);
             c.vkCmdCopyBuffer(transfer_cb, staging.buffer, buf.buffer, 1, &copy_region);
 
-            // Add barrier to ensure copy finishes before vertex/index input
             var barrier = std.mem.zeroes(c.VkBufferMemoryBarrier);
             barrier.sType = c.VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
             barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1933,64 +2083,13 @@ fn uploadBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, data: []const u8)
             barrier.srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
             barrier.dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
             barrier.buffer = buf.buffer;
-            barrier.offset = 0;
+            barrier.offset = @intCast(dst_offset);
             barrier.size = @intCast(data.len);
 
             c.vkCmdPipelineBarrier(transfer_cb, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_VERTEX_INPUT_BIT, 0, 0, null, 1, &barrier, 0, null);
-            return;
+        } else {
+            std.log.err("Staging buffer full! Skipping upload of {} bytes", .{data.len});
         }
-
-        // Fallback to synchronous upload if staging buffer is full
-        // std.log.warn("Staging buffer full, falling back to synchronous upload", .{});
-        const staging_temp = createVulkanBuffer(ctx, data.len, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        defer {
-            if (staging_temp.buffer != null) c.vkDestroyBuffer(ctx.vk_device, staging_temp.buffer, null);
-            if (staging_temp.memory != null) c.vkFreeMemory(ctx.vk_device, staging_temp.memory, null);
-        }
-
-        if (staging_temp.buffer == null) return;
-
-        // Copy to staging
-        var map_ptr: ?*anyopaque = null;
-        if (c.vkMapMemory(ctx.vk_device, staging_temp.memory, 0, @intCast(data.len), 0, &map_ptr) == c.VK_SUCCESS) {
-            @memcpy(@as([*]u8, @ptrCast(map_ptr))[0..data.len], data);
-            c.vkUnmapMemory(ctx.vk_device, staging_temp.memory);
-        }
-
-        // Use the old single-use transfer buffer if we are here (WaitIdle!)
-        // Note: we can't use the per-frame transfer CB here because we are going to wait immediately.
-        // We'll allocate a temporary command buffer.
-
-        var alloc_info = std.mem.zeroes(c.VkCommandBufferAllocateInfo);
-        alloc_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        alloc_info.level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        alloc_info.commandPool = ctx.transfer_command_pool; // Reuse pool
-        alloc_info.commandBufferCount = 1;
-
-        var temp_cb: c.VkCommandBuffer = null;
-        _ = c.vkAllocateCommandBuffers(ctx.vk_device, &alloc_info, &temp_cb);
-
-        var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
-        begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        begin_info.flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-        _ = c.vkBeginCommandBuffer(temp_cb, &begin_info);
-
-        var copy_region = std.mem.zeroes(c.VkBufferCopy);
-        copy_region.size = @intCast(data.len);
-        c.vkCmdCopyBuffer(temp_cb, staging_temp.buffer, buf.buffer, 1, &copy_region);
-
-        _ = c.vkEndCommandBuffer(temp_cb);
-
-        var submit_info = std.mem.zeroes(c.VkSubmitInfo);
-        submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        submit_info.commandBufferCount = 1;
-        submit_info.pCommandBuffers = &temp_cb;
-
-        _ = c.vkQueueSubmit(ctx.queue, 1, &submit_info, null);
-        _ = c.vkQueueWaitIdle(ctx.queue);
-
-        c.vkFreeCommandBuffers(ctx.vk_device, ctx.transfer_command_pool, 1, &temp_cb);
     }
 }
 
@@ -2240,7 +2339,7 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
 
     ensureFrameReady(ctx);
 
-    ctx.frame_in_progress = false;
+    ctx.frame_in_progress = true;
     ctx.draw_call_count = 0;
     ctx.main_pass_active = false;
     ctx.shadow_pass_active = false;
@@ -3411,6 +3510,10 @@ fn drawIndirect(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, command_buffer: r
 }
 
 fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.DrawMode) void {
+    drawOffset(ctx_ptr, handle, count, mode, 0);
+}
+
+fn drawOffset(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.DrawMode, offset: usize) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
     if (!ctx.main_pass_active and !ctx.shadow_pass_active) beginMainPass(ctx_ptr);
@@ -3428,7 +3531,7 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
 
         const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
 
-        // Bind pipeline only if not already bound (major optimization)
+        // Bind pipeline only if not already bound
         if (use_shadow) {
             if (!ctx.shadow_pipeline_bound) {
                 if (ctx.shadow_pipeline == null) return;
@@ -3438,7 +3541,6 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
             }
         } else {
             if (!ctx.terrain_pipeline_bound) {
-                // Select solid or wireframe pipeline
                 const selected_pipeline = if (ctx.wireframe_enabled and ctx.wireframe_pipeline != null)
                     ctx.wireframe_pipeline
                 else
@@ -3446,13 +3548,11 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
                 if (selected_pipeline == null) return;
                 c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, selected_pipeline);
 
-                // Update descriptors if they haven't been updated this frame, or if the texture changed
                 if (!ctx.descriptors_updated or ctx.current_texture != ctx.bound_texture) {
                     ctx.mutex.lock();
                     const tex_opt = ctx.textures.get(ctx.current_texture);
                     ctx.mutex.unlock();
 
-                    // Update texture descriptor
                     if (tex_opt) |tex| {
                         var image_info = c.VkDescriptorImageInfo{
                             .sampler = tex.sampler,
@@ -3471,15 +3571,16 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
                         c.vkUpdateDescriptorSets(ctx.vk_device, 1, &write, 0, null);
                     }
 
-                    // Update shadow map descriptors (bindings 3, 4, 5) if this is the first update of the frame
                     if (!ctx.descriptors_updated) {
                         for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
-                            const view = if (ctx.shadow_image_views[i] != null) ctx.shadow_image_views[i] else blk: {
+                            var view = ctx.shadow_image_views[i];
+                            if (view == null) {
                                 ctx.mutex.lock();
                                 const t = ctx.textures.get(ctx.current_texture);
                                 ctx.mutex.unlock();
-                                break :blk if (t) |tex| tex.view else null;
-                            };
+                                if (t) |tex| view = tex.view;
+                            }
+                            if (view == null) view = ctx.dummy_shadow_view;
                             if (view == null) continue;
 
                             var image_info = c.VkDescriptorImageInfo{
@@ -3507,7 +3608,6 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
             }
         }
 
-        // Push constants are cheap, always update per-draw
         const uniforms = ModelUniforms{
             .view_proj = if (use_shadow) ctx.shadow_pass_matrix else ctx.current_view_proj,
             .model = ctx.current_model,
@@ -3516,8 +3616,8 @@ fn draw(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: rhi.Dra
         };
         c.vkCmdPushConstants(command_buffer, ctx.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(ModelUniforms), &uniforms);
 
-        const offset: c.VkDeviceSize = 0;
-        c.vkCmdBindVertexBuffers(command_buffer, 0, 1, &vbo.buffer, &offset);
+        const offset_vbo: c.VkDeviceSize = @intCast(offset);
+        c.vkCmdBindVertexBuffers(command_buffer, 0, 1, &vbo.buffer, &offset_vbo);
         c.vkCmdDraw(command_buffer, count, 1, 0, 0);
     }
 }
@@ -3756,11 +3856,15 @@ fn endShadowPass(ctx_ptr: *anyopaque) void {
 fn updateShadowUniforms(ctx_ptr: *anyopaque, params: rhi.ShadowParams) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
 
+    var splits = [_]f32{ 0, 0, 0, 0 };
+    var sizes = [_]f32{ 0, 0, 0, 0 };
+    @memcpy(splits[0..rhi.SHADOW_CASCADE_COUNT], &params.cascade_splits);
+    @memcpy(sizes[0..rhi.SHADOW_CASCADE_COUNT], &params.shadow_texel_sizes);
+
     const shadow_uniforms = ShadowUniforms{
         .light_space_matrices = params.light_space_matrices,
-        .cascade_splits = .{ params.cascade_splits[0], params.cascade_splits[1] },
-        .shadow_texel_sizes = .{ params.shadow_texel_sizes[0], params.shadow_texel_sizes[1] },
-        .padding = 0.0,
+        .cascade_splits = splits,
+        .shadow_texel_sizes = sizes,
     };
 
     var map_ptr: ?*anyopaque = null;
@@ -3850,6 +3954,7 @@ const vtable = rhi.RHI.VTable{
     .deinit = deinit,
     .createBuffer = createBuffer,
     .uploadBuffer = uploadBuffer,
+    .updateBuffer = updateBuffer,
     .destroyBuffer = destroyBuffer,
     .createShader = createShader,
     .destroyShader = destroyShader,
@@ -3872,6 +3977,7 @@ const vtable = rhi.RHI.VTable{
     .updateShadowUniforms = updateShadowUniforms,
     .setTextureUniforms = setTextureUniforms,
     .draw = draw,
+    .drawOffset = drawOffset,
     .drawIndirect = drawIndirect,
     .drawSky = drawSky,
     .createTexture = createTexture,

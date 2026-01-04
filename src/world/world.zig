@@ -10,23 +10,19 @@ const worldToLocal = @import("chunk.zig").worldToLocal;
 const CHUNK_SIZE_X = @import("chunk.zig").CHUNK_SIZE_X;
 const CHUNK_SIZE_Z = @import("chunk.zig").CHUNK_SIZE_Z;
 const TerrainGenerator = @import("worldgen/generator.zig").TerrainGenerator;
-const RHI = @import("../engine/graphics/rhi.zig").RHI;
-
-const Mat4 = @import("../engine/math/mat4.zig").Mat4;
+const GlobalVertexAllocator = @import("chunk_allocator.zig").GlobalVertexAllocator;
+const LODManager = @import("lod_manager.zig").LODManager;
 const Vec3 = @import("../engine/math/vec3.zig").Vec3;
+const Mat4 = @import("../engine/math/mat4.zig").Mat4;
 const Frustum = @import("../engine/math/frustum.zig").Frustum;
-const Shader = @import("../engine/graphics/shader.zig").Shader;
+const rhi_mod = @import("../engine/graphics/rhi.zig");
+const RHI = rhi_mod.RHI;
+const JobQueue = @import("../engine/core/job_system.zig").JobQueue;
+const WorkerPool = @import("../engine/core/job_system.zig").WorkerPool;
+const Job = @import("../engine/core/job_system.zig").Job;
+const RingBuffer = @import("../engine/core/ring_buffer.zig").RingBuffer;
 const log = @import("../engine/core/log.zig");
 
-const JobSystem = @import("../engine/core/job_system.zig");
-const JobQueue = JobSystem.JobQueue;
-const WorkerPool = JobSystem.WorkerPool;
-const Job = JobSystem.Job;
-const JobType = JobSystem.JobType;
-const RingBuffer = @import("../engine/core/ring_buffer.zig").RingBuffer;
-
-// LOD System imports
-const LODManager = @import("lod_manager.zig").LODManager;
 const LODConfig = @import("lod_chunk.zig").LODConfig;
 
 /// Buffer distance beyond render_distance for chunk unloading.
@@ -155,6 +151,7 @@ pub const World = struct {
     // LOD System (Issue #114)
     lod_manager: ?*LODManager,
     lod_enabled: bool,
+    vertex_allocator: GlobalVertexAllocator,
 
     pub fn init(allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI) !*World {
         const world = try allocator.create(World);
@@ -166,6 +163,8 @@ pub const World = struct {
         mesh_queue.* = JobQueue.init(allocator);
 
         const generator = TerrainGenerator.init(seed, allocator);
+
+        const vertex_allocator = try GlobalVertexAllocator.init(allocator, rhi, 1024); // 1024MB megabuffer
 
         world.* = .{
             .chunks = std.HashMap(ChunkKey, *ChunkData, ChunkKeyContext, 80).init(allocator),
@@ -187,6 +186,7 @@ pub const World = struct {
             .paused = false,
             .lod_manager = null,
             .lod_enabled = false,
+            .vertex_allocator = vertex_allocator,
         };
 
         world.gen_pool = try WorkerPool.init(allocator, 4, gen_queue, world, processGenJob);
@@ -226,7 +226,7 @@ pub const World = struct {
 
         var iter = self.chunks.iterator();
         while (iter.next()) |entry| {
-            entry.value_ptr.*.mesh.deinit(self.rhi);
+            entry.value_ptr.*.mesh.deinit(&self.vertex_allocator);
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.chunks.deinit();
@@ -236,6 +236,7 @@ pub const World = struct {
             lod_mgr.deinit();
         }
 
+        self.vertex_allocator.deinit();
         self.allocator.destroy(self);
     }
 
@@ -538,7 +539,7 @@ pub const World = struct {
         var uploads: usize = 0;
         while (!self.upload_queue.isEmpty() and uploads < max_uploads) {
             const data = self.upload_queue.pop() orelse break;
-            data.mesh.upload(self.rhi);
+            data.mesh.upload(&self.vertex_allocator);
             if (data.chunk.state == .uploading) {
                 data.chunk.state = .renderable;
             }
@@ -569,7 +570,7 @@ pub const World = struct {
 
         for (to_remove.items) |key| {
             if (self.chunks.get(key)) |data| {
-                data.mesh.deinit(self.rhi);
+                data.mesh.deinit(&self.vertex_allocator);
                 self.allocator.destroy(data);
                 _ = self.chunks.remove(key);
             }
@@ -636,7 +637,8 @@ pub const World = struct {
 
         for (self.visible_chunks.items) |data| {
             self.last_render_stats.chunks_rendered += 1;
-            self.last_render_stats.vertices_rendered += data.mesh.solid_count;
+            if (data.mesh.solid_allocation) |alloc| self.last_render_stats.vertices_rendered += alloc.count;
+            if (data.mesh.fluid_allocation) |alloc| self.last_render_stats.vertices_rendered += alloc.count;
 
             const chunk_world_x: f32 = @floatFromInt(data.chunk.chunk_x * CHUNK_SIZE_X);
             const chunk_world_z: f32 = @floatFromInt(data.chunk.chunk_z * CHUNK_SIZE_Z);
@@ -650,8 +652,6 @@ pub const World = struct {
         }
 
         for (self.visible_chunks.items) |data| {
-            self.last_render_stats.vertices_rendered += data.mesh.fluid_count;
-
             const chunk_world_x: f32 = @floatFromInt(data.chunk.chunk_x * CHUNK_SIZE_X);
             const chunk_world_z: f32 = @floatFromInt(data.chunk.chunk_z * CHUNK_SIZE_Z);
             const rel_x = chunk_world_x - camera_pos.x;
@@ -709,7 +709,8 @@ pub const World = struct {
         var total_verts: u64 = 0;
         var iter = self.chunks.iterator();
         while (iter.next()) |entry| {
-            total_verts += entry.value_ptr.*.mesh.solid_count + entry.value_ptr.*.mesh.fluid_count;
+            if (entry.value_ptr.*.mesh.solid_allocation) |alloc| total_verts += alloc.count;
+            if (entry.value_ptr.*.mesh.fluid_allocation) |alloc| total_verts += alloc.count;
         }
 
         self.gen_queue.mutex.lock();

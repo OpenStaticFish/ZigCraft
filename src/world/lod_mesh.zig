@@ -55,13 +55,18 @@ pub const LODMesh = struct {
     }
 
     pub fn deinit(self: *LODMesh, rhi: RHI) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         if (self.buffer_handle != 0) {
             rhi.destroyBuffer(self.buffer_handle);
+            self.buffer_handle = 0;
         }
         if (self.pending_vertices) |p| {
             self.allocator.free(p);
+            self.pending_vertices = null;
         }
-        self.* = undefined;
+        self.ready = false;
     }
 
     /// Build mesh from simplified LOD data (heightmap-based)

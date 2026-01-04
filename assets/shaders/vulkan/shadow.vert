@@ -5,6 +5,8 @@ layout(location = 0) in vec3 aPos;
 layout(push_constant) uniform ModelUniforms {
     mat4 view_proj;
     mat4 model;
+    float mask_radius;
+    vec3 padding;
 } pc;
 
 void main() {
