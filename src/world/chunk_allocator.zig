@@ -63,28 +63,38 @@ pub const GlobalVertexAllocator = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        // Use First-Fit strategy
+        // Use Best-Fit strategy to minimize fragmentation
+        var best_fit_idx: ?usize = null;
+        var best_fit_size: usize = std.math.maxInt(usize);
+
         for (self.free_blocks.items, 0..) |block, i| {
-            if (block.size >= size_needed) {
-                const allocation = VertexAllocation{
-                    .offset = block.offset,
-                    .count = @intCast(vertices.len),
-                    .handle = self.buffer,
-                };
-
-                // Upload at the correct offset within the megabuffer
-                self.rhi.updateBuffer(self.buffer, block.offset, std.mem.sliceAsBytes(vertices));
-
-                // Update free block
-                if (block.size > size_needed) {
-                    self.free_blocks.items[i].offset += size_needed;
-                    self.free_blocks.items[i].size -= size_needed;
-                } else {
-                    _ = self.free_blocks.swapRemove(i);
-                }
-
-                return allocation;
+            if (block.size >= size_needed and block.size < best_fit_size) {
+                best_fit_idx = i;
+                best_fit_size = block.size;
+                if (block.size == size_needed) break; // Perfect fit
             }
+        }
+
+        if (best_fit_idx) |i| {
+            const block = self.free_blocks.items[i];
+            const allocation = VertexAllocation{
+                .offset = block.offset,
+                .count = @intCast(vertices.len),
+                .handle = self.buffer,
+            };
+
+            // Upload at the correct offset within the megabuffer
+            self.rhi.updateBuffer(self.buffer, block.offset, std.mem.sliceAsBytes(vertices));
+
+            // Update free block
+            if (block.size > size_needed) {
+                self.free_blocks.items[i].offset += size_needed;
+                self.free_blocks.items[i].size -= size_needed;
+            } else {
+                _ = self.free_blocks.orderedRemove(i);
+            }
+
+            return allocation;
         }
 
         // Calculate actual largest block for better debugging
@@ -131,6 +141,7 @@ pub const GlobalVertexAllocator = struct {
         };
 
         // Coalesce blocks - check both directions iteratively
+        var coalesce_count: usize = 0;
         while (true) {
             var coalesced: bool = false;
 
@@ -141,6 +152,7 @@ pub const GlobalVertexAllocator = struct {
                     self.free_blocks.items[insert_idx].size += next.size;
                     _ = self.free_blocks.orderedRemove(insert_idx + 1);
                     coalesced = true;
+                    coalesce_count += 1;
                 } else {
                     break;
                 }
@@ -154,6 +166,7 @@ pub const GlobalVertexAllocator = struct {
                     _ = self.free_blocks.orderedRemove(insert_idx);
                     insert_idx -= 1;
                     coalesced = true;
+                    coalesce_count += 1;
                 }
             }
 
