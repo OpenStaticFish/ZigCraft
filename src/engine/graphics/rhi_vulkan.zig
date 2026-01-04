@@ -262,6 +262,7 @@ const VulkanContext = struct {
     max_anisotropy: f32,
     msaa_samples: u8,
     max_msaa_samples: u8,
+    shadow_resolution: u32,
 
     // Shadow resources
     shadow_images: [rhi.SHADOW_CASCADE_COUNT]c.VkImage,
@@ -1114,7 +1115,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
 
     // 13b. Shadow resources
     const shadow_format = c.VK_FORMAT_D32_SFLOAT;
-    ctx.shadow_extent = .{ .width = 2048, .height = 2048 };
+    ctx.shadow_extent = .{ .width = ctx.shadow_resolution, .height = ctx.shadow_resolution };
 
     var shadow_depth_attachment = std.mem.zeroes(c.VkAttachmentDescription);
     shadow_depth_attachment.format = shadow_format;
@@ -1869,8 +1870,9 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
     shadow_sampler_info.addressModeU = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
     shadow_sampler_info.addressModeV = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
     shadow_sampler_info.addressModeW = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-    // Reverse-Z: border = 0.0 means "no occluder" (far plane), so out-of-bounds = no shadow
     shadow_sampler_info.borderColor = c.VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+    shadow_sampler_info.compareEnable = c.VK_TRUE;
+    shadow_sampler_info.compareOp = c.VK_COMPARE_OP_GREATER_OR_EQUAL; // Reverse-Z: closer is larger
     try checkVk(c.vkCreateSampler(ctx.vk_device, &shadow_sampler_info, null, &ctx.shadow_sampler));
 
     // Shadow layouts were already transitioned to SHADER_READ_ONLY_OPTIMAL during shadow cascade creation
@@ -4000,12 +4002,19 @@ const vtable = rhi.RHI.VTable{
     .getMaxMSAASamples = getMaxMSAASamples,
 };
 
-pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_device: ?*RenderDevice) !rhi.RHI {
+pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_device: ?*RenderDevice, shadow_resolution: u32) !rhi.RHI {
     const ctx = try allocator.create(VulkanContext);
     // Initialize all fields to safe defaults
     ctx.allocator = allocator;
     ctx.render_device = render_device;
+    ctx.shadow_resolution = shadow_resolution;
     ctx.window = window;
+    ctx.instance = null;
+    ctx.surface = null;
+    ctx.physical_device = null;
+    ctx.vk_device = null;
+    ctx.queue = null;
+    ctx.graphics_family = 0;
     ctx.framebuffer_resized = false;
     ctx.draw_call_count = 0;
     ctx.buffers = std.AutoHashMap(rhi.BufferHandle, VulkanBuffer).init(allocator);
@@ -4076,9 +4085,18 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_dev
     ctx.cloud_vbo = .{ .buffer = null, .memory = null, .size = 0, .is_host_visible = false };
     ctx.cloud_ebo = .{ .buffer = null, .memory = null, .size = 0, .is_host_visible = false };
     ctx.cloud_mesh_size = 10000.0;
+    ctx.descriptor_pool = null;
+    ctx.descriptor_set_layout = null;
+    ctx.memory_type_index = 0;
+    ctx.anisotropic_filtering = 1;
+    ctx.max_anisotropy = 1.0;
+    ctx.msaa_samples = 1;
+    ctx.max_msaa_samples = 1;
     ctx.shadow_sampler = null;
+    ctx.shadow_extent = .{ .width = 0, .height = 0 };
     for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
         ctx.shadow_images[i] = null;
+        ctx.shadow_image_memory[i] = null;
         ctx.shadow_image_views[i] = null;
         ctx.shadow_framebuffers[i] = null;
         ctx.shadow_image_layouts[i] = c.VK_IMAGE_LAYOUT_UNDEFINED;
@@ -4091,9 +4109,19 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_dev
         ctx.shadow_ubos[i] = .{ .buffer = null, .memory = null, .size = 0, .is_host_visible = false };
         ctx.ui_vbos[i] = .{ .buffer = null, .memory = null, .size = 0, .is_host_visible = false };
         ctx.descriptor_sets[i] = null;
+        ctx.ui_tex_descriptor_sets[i] = null;
+        ctx.debug_shadow_descriptor_sets[i] = null;
         ctx.buffer_deletion_queue[i] = .empty;
     }
     ctx.model_ubo = .{ .buffer = null, .memory = null, .size = 0, .is_host_visible = false };
+    ctx.ui_screen_width = 0;
+    ctx.ui_screen_height = 0;
+    ctx.ui_flushed_vertex_count = 0;
+    ctx.cloud_vao = null;
+    ctx.debug_shadow_vao = null;
+    ctx.dummy_shadow_image = null;
+    ctx.dummy_shadow_memory = null;
+    ctx.dummy_shadow_view = null;
 
     return rhi.RHI{
         .ptr = ctx,

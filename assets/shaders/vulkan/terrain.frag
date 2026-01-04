@@ -83,9 +83,9 @@ layout(set = 0, binding = 2) uniform ShadowUniforms {
     vec4 shadow_texel_sizes;
 } shadows;
 
-layout(set = 0, binding = 3) uniform sampler2D uShadowMap0;
-layout(set = 0, binding = 4) uniform sampler2D uShadowMap1;
-layout(set = 0, binding = 5) uniform sampler2D uShadowMap2;
+layout(set = 0, binding = 3) uniform sampler2DShadow uShadowMap0;
+layout(set = 0, binding = 4) uniform sampler2DShadow uShadowMap1;
+layout(set = 0, binding = 5) uniform sampler2DShadow uShadowMap2;
 
 layout(push_constant) uniform ModelUniforms {
     mat4 view_proj;
@@ -94,49 +94,65 @@ layout(push_constant) uniform ModelUniforms {
     vec3 padding;
 } model_data;
 
+float shadowHash(vec3 p) {
+    p = fract(p * 0.1031);
+    p += dot(p, p.yzx + 33.33);
+    return fract((p.x + p.y) * p.z);
+}
+
 float calculateShadow(vec3 fragPosWorld, float nDotL, int layer) {
     vec4 fragPosLightSpace = shadows.light_space_matrices[layer] * vec4(fragPosWorld, 1.0);
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
 
-    // XY [-1,1] -> [0,1]
     projCoords.xy = projCoords.xy * 0.5 + 0.5;
     
-    // No Y-flip needed - shadow vertex shader also doesn't flip Y,
-    // so the coordinate spaces match and texel snapping works correctly.
-
-    // Check bounds - areas outside the shadow frustum should not be shadowed
     if (projCoords.x < 0.0 || projCoords.x > 1.0 ||
         projCoords.y < 0.0 || projCoords.y > 1.0 ||
         projCoords.z > 1.0 || projCoords.z < 0.0) return 0.0;
 
     float currentDepth = projCoords.z;
 
-    // Reverse-Z: closer objects have LARGER Z.
-    // Fragment is in shadow if it's further than the depth stored in the shadow map.
-    // Further means SMALLER Z.
-    float bias = max(0.0005 * (1.0 - nDotL), 0.0001);
+    // Adjusted bias for hardware PCF + Poisson
+    float bias = max(0.0002 * (1.0 - nDotL), 0.00005);
     if (layer == 1) bias *= 2.0;
-    if (layer == 2) bias *= 4.0;
+    if (layer == 2) bias *= 5.0;
 
     float shadow = 0.0;
     vec2 texelSize = 1.0 / vec2(textureSize(uShadowMap0, 0));
 
-    for (int x = -1; x <= 1; ++x) {
-        for (int y = -1; y <= 1; ++y) {
-            float pcfDepth;
-            if (layer == 0) {
-                pcfDepth = texture(uShadowMap0, projCoords.xy + vec2(x, y) * texelSize).r;
-            } else if (layer == 1) {
-                pcfDepth = texture(uShadowMap1, projCoords.xy + vec2(x, y) * texelSize).r;
-            } else {
-                pcfDepth = texture(uShadowMap2, projCoords.xy + vec2(x, y) * texelSize).r;
-            }
+    // Better Poisson Disk for jittered PCF
+    float angle = shadowHash(fragPosWorld) * 6.283185;
+    float s = sin(angle);
+    float c = cos(angle);
+    mat2 rot = mat2(c, s, -s, c);
 
-            shadow += currentDepth < pcfDepth - bias ? 1.0 : 0.0;
+    const int SAMPLES = 16;
+    vec2 poissonDisk[16] = vec2[](
+        vec2(-0.94201624, -0.39906216), vec2(0.94558609, -0.76890725),
+        vec2(-0.094184101, -0.92938870), vec2(0.34495938, 0.29387760),
+        vec2(-0.91588581, 0.45771432), vec2(-0.81544232, -0.87912464),
+        vec2(-0.38277543, 0.27676845), vec2(0.97484398, 0.75648379),
+        vec2(0.44323325, -0.97511554), vec2(0.53742981, -0.47373420),
+        vec2(-0.51339162, 0.84062361), vec2(0.18737649, -0.15983421),
+        vec2(-0.41011392, -0.54401124), vec2(0.67105663, 0.92716503),
+        vec2(-0.64335855, -0.28876165), vec2(0.40141695, 0.81434191)
+    );
+
+    // Hardware PCF + Poisson hybrid
+    for (int i = 0; i < SAMPLES; i++) {
+        vec2 offset = (rot * poissonDisk[i]) * texelSize * 2.2;
+        vec3 shadowCoord = vec3(projCoords.xy + offset, currentDepth + bias);
+        
+        if (layer == 0) {
+            shadow += texture(uShadowMap0, shadowCoord);
+        } else if (layer == 1) {
+            shadow += texture(uShadowMap1, shadowCoord);
+        } else {
+            shadow += texture(uShadowMap2, shadowCoord);
         }
     }
-    shadow /= 9.0;
-    return shadow;
+
+    return 1.0 - (shadow / float(SAMPLES));
 }
 
 void main() {

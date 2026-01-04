@@ -12,7 +12,7 @@ pub const ShadowCascades = struct {
 };
 
 pub fn computeCascades(resolution: u32, camera_fov: f32, aspect: f32, near: f32, far: f32, sun_dir: Vec3, cam_view: Mat4, z_range_01: bool) ShadowCascades {
-    const lambda = 0.8;
+    const lambda = 0.92;
     const shadow_dist = far;
 
     var cascades: ShadowCascades = .{

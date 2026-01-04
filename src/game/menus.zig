@@ -79,7 +79,7 @@ pub fn drawSettings(ctx: MenuContext, app_state: *AppState, settings: *Settings,
     const toggle_width: f32 = 160.0 * ui_scale;
 
     const pw: f32 = @min(ctx.screen_w * 0.75, 750.0 * ui_scale);
-    const ph: f32 = 680.0 * ui_scale;
+    const ph: f32 = 790.0 * ui_scale;
     const px: f32 = (ctx.screen_w - pw) * 0.5;
     const py: f32 = (ctx.screen_h - ph) * 0.5;
     ctx.ui.drawRect(.{ .x = px, .y = py, .width = pw, .height = ph }, Color.rgba(0.12, 0.14, 0.18, 0.95));
@@ -144,14 +144,23 @@ pub fn drawSettings(ctx: MenuContext, app_state: *AppState, settings: *Settings,
     }
     sy += row_height;
 
+    // Shadow Quality
+    Font.drawText(ctx.ui, "SHADOW QUALITY", lx, sy, label_scale, Color.white);
+    const sq_label = getShadowQualityLabel(settings.shadow_quality);
+    if (Widgets.drawButton(ctx.ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, sq_label, btn_scale, mouse_x, mouse_y, mouse_clicked)) {
+        const num_qualities: u32 = @intCast(Settings.SHADOW_QUALITIES.len);
+        settings.shadow_quality = @mod(settings.shadow_quality + 1, num_qualities);
+    }
+    sy += row_height;
+
     // Shadow Distance
     Font.drawText(ctx.ui, "SHADOW DISTANCE", lx, sy, label_scale, Color.white);
     Font.drawNumber(ctx.ui, @intFromFloat(settings.shadow_distance), vx + 70.0 * ui_scale, sy, Color.white);
     if (Widgets.drawButton(ctx.ui, .{ .x = vx, .y = sy - 5.0, .width = btn_width, .height = btn_height }, "-", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
-        if (settings.shadow_distance > 50.0) settings.shadow_distance -= 50.0;
+        if (settings.shadow_distance > 100.0) settings.shadow_distance -= 100.0;
     }
     if (Widgets.drawButton(ctx.ui, .{ .x = vx + 120.0 * ui_scale, .y = sy - 5.0, .width = btn_width, .height = btn_height }, "+", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
-        if (settings.shadow_distance < 1000.0) settings.shadow_distance += 50.0;
+        if (settings.shadow_distance < 2500.0) settings.shadow_distance += 100.0;
     }
     sy += row_height;
 
@@ -180,6 +189,23 @@ pub fn drawSettings(ctx: MenuContext, app_state: *AppState, settings: *Settings,
         settings.lod_enabled = !settings.lod_enabled;
     }
     Font.drawText(ctx.ui, "(RESTART)", vx + toggle_width + 10.0, sy, 1.5 * ui_scale, Color.rgba(0.5, 0.5, 0.6, 1.0));
+    sy += row_height;
+
+    // Textures
+    Font.drawText(ctx.ui, "TEXTURES", lx, sy, label_scale, Color.white);
+    if (Widgets.drawButton(ctx.ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, if (settings.textures_enabled) "ENABLED" else "DISABLED", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
+        settings.textures_enabled = !settings.textures_enabled;
+        rhi.setTexturesEnabled(settings.textures_enabled);
+    }
+    sy += row_height;
+
+    // Wireframe (debug)
+    Font.drawText(ctx.ui, "WIREFRAME", lx, sy, label_scale, Color.rgba(0.7, 0.7, 0.8, 1.0));
+    if (Widgets.drawButton(ctx.ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, if (settings.wireframe_enabled) "ENABLED" else "DISABLED", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
+        settings.wireframe_enabled = !settings.wireframe_enabled;
+        rhi.setWireframe(settings.wireframe_enabled);
+    }
+    Font.drawText(ctx.ui, "(DEBUG)", vx + toggle_width + 10.0, sy, 1.5 * ui_scale, Color.rgba(0.5, 0.5, 0.6, 1.0));
 
     // Back button
     if (Widgets.drawButton(ctx.ui, .{ .x = px + (pw - 150.0 * ui_scale) * 0.5, .y = py + ph - 70.0 * ui_scale, .width = 150.0 * ui_scale, .height = 50.0 * ui_scale }, "BACK", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
@@ -226,6 +252,13 @@ fn cycleMSAA(current: u8) u8 {
         4 => 8,
         else => 1,
     };
+}
+
+fn getShadowQualityLabel(quality_idx: u32) []const u8 {
+    if (quality_idx < Settings.SHADOW_QUALITIES.len) {
+        return Settings.SHADOW_QUALITIES[quality_idx].label;
+    }
+    return Settings.SHADOW_QUALITIES[2].label;
 }
 
 pub fn drawSingleplayer(ctx: MenuContext, app_state: *AppState, seed_input: *std.ArrayListUnmanaged(u8), seed_focused: *bool, pending_new_world_seed: *?u64) !void {
