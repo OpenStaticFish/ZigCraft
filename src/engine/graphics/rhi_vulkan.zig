@@ -2386,6 +2386,7 @@ fn drawClouds(ctx_ptr: *anyopaque, params: rhi.CloudParams) void {
 
     // Bind cloud pipeline
     c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.cloud_pipeline);
+    ctx.terrain_pipeline_bound = false;
 
     // CloudPushConstants: mat4 view_proj + 4 vec4s = 128 bytes
     const CloudPushConstants = extern struct {
@@ -2425,6 +2426,7 @@ fn drawDebugShadowMap(ctx_ptr: *anyopaque, cascade_index: usize, depth_map_handl
 
     // Bind debug shadow pipeline
     c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.debug_shadow_pipeline);
+    ctx.terrain_pipeline_bound = false;
 
     // Set up orthographic projection for UI-sized quad
     const debug_size: f32 = 200.0;
@@ -3279,6 +3281,7 @@ fn beginUI(ctx_ptr: *anyopaque, screen_width: f32, screen_height: f32) void {
     // Bind UI pipeline and VBO
     const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
     c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.ui_pipeline);
+    ctx.terrain_pipeline_bound = false;
 
     const offset: c.VkDeviceSize = 0;
     c.vkCmdBindVertexBuffers(command_buffer, 0, 1, &ui_vbo.buffer, &offset);
@@ -3353,6 +3356,7 @@ fn drawUITexturedQuad(ctx_ptr: *anyopaque, texture: rhi.TextureHandle, rect: rhi
 
     // 2. Bind Textured UI Pipeline
     c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.ui_tex_pipeline);
+    ctx.terrain_pipeline_bound = false;
 
     // 3. Update & Bind Descriptor Set
     var image_info = std.mem.zeroes(c.VkDescriptorImageInfo);
@@ -3522,6 +3526,7 @@ fn drawSky(ctx_ptr: *anyopaque, params: rhi.SkyParams) void {
 
     const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
     c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.sky_pipeline);
+    ctx.terrain_pipeline_bound = false;
     c.vkCmdPushConstants(command_buffer, ctx.sky_pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(SkyPushConstants), &pc);
     c.vkCmdDraw(command_buffer, 3, 1, 0, 0);
 }
