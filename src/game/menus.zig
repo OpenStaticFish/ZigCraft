@@ -69,7 +69,9 @@ pub fn drawSettings(ctx: MenuContext, app_state: *AppState, settings: *Settings,
     const mouse_clicked = ctx.input.isMouseButtonPressed(.left);
 
     // Scale UI based on screen height for better readability at high resolutions
-    const ui_scale: f32 = @max(1.0, ctx.screen_h / 720.0);
+    // Apply manual ui_scale multiplier from settings
+    const auto_scale: f32 = @max(1.0, ctx.screen_h / 720.0);
+    const ui_scale: f32 = auto_scale * settings.ui_scale;
     const label_scale: f32 = 2.5 * ui_scale;
     const btn_scale: f32 = 2.0 * ui_scale;
     const title_scale: f32 = 3.5 * ui_scale;
@@ -79,7 +81,7 @@ pub fn drawSettings(ctx: MenuContext, app_state: *AppState, settings: *Settings,
     const toggle_width: f32 = 160.0 * ui_scale;
 
     const pw: f32 = @min(ctx.screen_w * 0.75, 750.0 * ui_scale);
-    const ph: f32 = 790.0 * ui_scale;
+    const ph: f32 = 845.0 * ui_scale;
     const px: f32 = (ctx.screen_w - pw) * 0.5;
     const py: f32 = (ctx.screen_h - ph) * 0.5;
     ctx.ui.drawRect(.{ .x = px, .y = py, .width = pw, .height = ph }, Color.rgba(0.12, 0.14, 0.18, 0.95));
@@ -180,7 +182,14 @@ pub fn drawSettings(ctx: MenuContext, app_state: *AppState, settings: *Settings,
         settings.msaa_samples = cycleMSAA(settings.msaa_samples);
         rhi.setMSAA(settings.msaa_samples);
     }
-    Font.drawText(ctx.ui, "(VULKAN)", vx + toggle_width + 10.0, sy, 1.5 * ui_scale, Color.rgba(0.5, 0.5, 0.6, 1.0));
+    sy += row_height;
+
+    // UI Scale
+    Font.drawText(ctx.ui, "UI SCALE", lx, sy, label_scale, Color.white);
+    const ui_scale_label = getUIScaleLabel(settings.ui_scale);
+    if (Widgets.drawButton(ctx.ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, ui_scale_label, btn_scale, mouse_x, mouse_y, mouse_clicked)) {
+        settings.ui_scale = cycleUIScale(settings.ui_scale);
+    }
     sy += row_height;
 
     // LOD System (experimental)
@@ -188,7 +197,6 @@ pub fn drawSettings(ctx: MenuContext, app_state: *AppState, settings: *Settings,
     if (Widgets.drawButton(ctx.ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, if (settings.lod_enabled) "ENABLED" else "DISABLED", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
         settings.lod_enabled = !settings.lod_enabled;
     }
-    Font.drawText(ctx.ui, "(RESTART)", vx + toggle_width + 10.0, sy, 1.5 * ui_scale, Color.rgba(0.5, 0.5, 0.6, 1.0));
     sy += row_height;
 
     // Textures
@@ -252,6 +260,24 @@ fn cycleMSAA(current: u8) u8 {
         4 => 8,
         else => 1,
     };
+}
+
+fn getUIScaleLabel(scale: f32) []const u8 {
+    if (scale <= 0.55) return "0.5X";
+    if (scale <= 0.8) return "0.75X";
+    if (scale <= 1.1) return "1.0X";
+    if (scale <= 1.3) return "1.25X";
+    if (scale <= 1.6) return "1.5X";
+    return "2.0X";
+}
+
+fn cycleUIScale(current: f32) f32 {
+    if (current <= 0.55) return 0.75;
+    if (current <= 0.8) return 1.0;
+    if (current <= 1.1) return 1.25;
+    if (current <= 1.3) return 1.5;
+    if (current <= 1.6) return 2.0;
+    return 0.5;
 }
 
 fn getShadowQualityLabel(quality_idx: u32) []const u8 {

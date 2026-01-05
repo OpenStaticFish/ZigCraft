@@ -19,6 +19,7 @@ pub const Settings = struct {
     shadow_distance: f32 = 250.0,
     anisotropic_filtering: u8 = 16,
     msaa_samples: u8 = 4,
+    ui_scale: f32 = 1.0, // Manual UI scale multiplier (0.5 to 2.0)
     window_width: u32 = 1920,
     window_height: u32 = 1080,
     lod_enabled: bool = false, // Disabled by default due to performance issues

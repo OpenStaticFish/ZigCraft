@@ -16,6 +16,9 @@ pub const WindowManager = struct {
 
         const window_flags: u32 = c.SDL_WINDOW_RESIZABLE | c.SDL_WINDOW_HIGH_PIXEL_DENSITY | c.SDL_WINDOW_VULKAN;
 
+        // If requested resolution is very high (e.g. 2560+), it might be intended as physical pixels.
+        // On HiDPI screens, requesting 2560 logical units will result in a window larger than the screen.
+        // We'll create it resizable and let the compositor/OS handle the initial logical size.
         const window = c.SDL_CreateWindow(
             "ZigCraft",
             @intCast(width),
