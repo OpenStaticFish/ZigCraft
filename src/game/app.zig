@@ -31,6 +31,14 @@ const AppState = @import("state.zig").AppState;
 const Settings = @import("state.zig").Settings;
 const Menus = @import("menus.zig");
 
+// Player physics and interaction
+const Player = @import("player.zig").Player;
+const Inventory = @import("inventory.zig").Inventory;
+const hotbar = @import("ui/hotbar.zig");
+const inventory_ui = @import("ui/inventory_ui.zig");
+const BlockOutline = @import("block_outline.zig").BlockOutline;
+const HandRenderer = @import("hand_renderer.zig").HandRenderer;
+
 const debug_build = builtin.mode == .Debug;
 
 const AtmosphereState = struct {
@@ -253,6 +261,14 @@ pub const App = struct {
     world_map: ?WorldMap,
     map_controller: MapController,
 
+    // Player and inventory system
+    player: ?Player,
+    inventory: Inventory,
+    inventory_ui_state: inventory_ui.InventoryUI,
+    creative_mode: bool,
+    block_outline: BlockOutline,
+    hand_renderer: HandRenderer,
+
     debug_state: DebugState,
 
     pub fn init(allocator: std.mem.Allocator) !*App {
@@ -309,6 +325,12 @@ pub const App = struct {
             .world = null,
             .world_map = null,
             .map_controller = .{},
+            .player = null,
+            .inventory = Inventory.init(),
+            .inventory_ui_state = .{},
+            .creative_mode = true, // Default to creative mode
+            .block_outline = BlockOutline.init(rhi),
+            .hand_renderer = HandRenderer.init(rhi),
             .debug_state = .{},
         };
 
@@ -322,6 +344,8 @@ pub const App = struct {
 
         if (self.ui) |*u| u.deinit();
 
+        self.block_outline.deinit();
+        self.hand_renderer.deinit();
         self.atlas.deinit();
         if (self.shader != rhi_pkg.InvalidShaderHandle) self.rhi.destroyShader(self.shader);
         self.rhi.deinit();
@@ -370,7 +394,10 @@ pub const App = struct {
             if (self.world_map == null) self.world_map = WorldMap.init(self.rhi, 256, 256);
             self.map_controller.show_map = false;
             self.map_controller.map_needs_update = true;
-            self.camera = Camera.init(.{ .position = Vec3.init(8, 100, 8), .pitch = -0.3, .move_speed = 50.0 });
+            // Initialize player at spawn position
+            const spawn_pos = Vec3.init(8, 100, 8);
+            self.player = Player.init(spawn_pos, self.creative_mode);
+            self.camera = self.player.?.camera;
         }
 
         self.time.update();
@@ -437,17 +464,65 @@ pub const App = struct {
 
             if (debug_build and self.debug_state.shadows and self.input.isKeyPressed(.k)) self.debug_state.cascade_idx = (self.debug_state.cascade_idx + 1) % 3;
 
-            if (self.input.isKeyPressed(.@"1")) self.atmosphere.setTimeOfDay(0.0);
-            if (self.input.isKeyPressed(.@"2")) self.atmosphere.setTimeOfDay(0.25);
-            if (self.input.isKeyPressed(.@"3")) self.atmosphere.setTimeOfDay(0.5);
-            if (self.input.isKeyPressed(.@"4")) self.atmosphere.setTimeOfDay(0.75);
+            // Time controls only available via inventory UI now (moved from 1-4 keys)
             if (self.input.isKeyPressed(.n)) {
                 self.atmosphere.time_scale = if (self.atmosphere.time_scale > 0) @as(f32, 0.0) else @as(f32, 1.0);
             }
 
+            // Inventory toggle (I key)
+            if (self.input.isKeyPressed(.i)) {
+                self.inventory_ui_state.toggle();
+                self.input.setMouseCapture(self.window_manager.window, !self.inventory_ui_state.visible);
+            }
+
+            // Creative mode toggle (F3 key)
+            if (self.input.isKeyPressed(.f3)) {
+                self.creative_mode = !self.creative_mode;
+                if (self.player) |*p| {
+                    p.setCreativeMode(self.creative_mode);
+                }
+            }
+
+            // Hotbar selection (1-9 keys) - only when inventory UI is closed
+            if (!self.inventory_ui_state.visible) {
+                if (self.input.isKeyPressed(.@"1")) self.inventory.selectSlot(0);
+                if (self.input.isKeyPressed(.@"2")) self.inventory.selectSlot(1);
+                if (self.input.isKeyPressed(.@"3")) self.inventory.selectSlot(2);
+                if (self.input.isKeyPressed(.@"4")) self.inventory.selectSlot(3);
+                if (self.input.isKeyPressed(.@"5")) self.inventory.selectSlot(4);
+                if (self.input.isKeyPressed(.@"6")) self.inventory.selectSlot(5);
+                if (self.input.isKeyPressed(.@"7")) self.inventory.selectSlot(6);
+                if (self.input.isKeyPressed(.@"8")) self.inventory.selectSlot(7);
+                if (self.input.isKeyPressed(.@"9")) self.inventory.selectSlot(8);
+
+                // Scroll wheel for hotbar
+                if (self.input.scroll_y != 0) {
+                    self.inventory.scrollSelection(@intFromFloat(self.input.scroll_y));
+                }
+            }
+
             if (in_world) {
-                if (!self.map_controller.show_map and !in_pause) {
-                    self.camera.update(&self.input, self.time.delta_time);
+                if (!self.map_controller.show_map and !in_pause and !self.inventory_ui_state.visible) {
+                    // Update player instead of camera directly
+                    if (self.player) |*p| {
+                        if (self.world) |active_world| {
+                            p.update(&self.input, active_world, self.time.delta_time, self.time.elapsed);
+                            self.camera = p.camera;
+
+                            // Block interaction (only when not in inventory)
+                            if (self.input.isMouseButtonPressed(.left)) {
+                                p.breakTargetBlock(active_world);
+                            }
+                            if (self.input.isMouseButtonPressed(.right)) {
+                                if (self.inventory.getSelectedBlock()) |block_type| {
+                                    p.placeBlock(active_world, block_type);
+                                }
+                            }
+                        }
+                    } else {
+                        // Fallback to camera update if no player
+                        self.camera.update(&self.input, self.time.delta_time);
+                    }
                 }
 
                 if (self.world) |active_world| {
@@ -511,6 +586,13 @@ pub const App = struct {
                 self.rhi.updateGlobalUniforms(view_proj_render, self.camera.position, self.atmosphere.sun_dir, self.atmosphere.time_of_day, self.atmosphere.fog_color, self.atmosphere.fog_density, self.atmosphere.fog_enabled, self.atmosphere.sun_intensity, self.atmosphere.ambient_intensity, self.settings.textures_enabled, cloud_params);
 
                 self.render_graph.execute(self.rhi, active_world, &self.camera, aspect, sky_params, cloud_params, self.shader, self.atlas.texture.handle, self.settings.shadow_distance, self.settings.getShadowResolution());
+
+                // Draw block outline if player has a target
+                if (self.player) |p| {
+                    if (p.target_block) |target| {
+                        self.block_outline.draw(target.x, target.y, target.z, self.camera.position);
+                    }
+                }
 
                 if (self.ui) |*u| {
                     u.begin();
@@ -591,8 +673,69 @@ pub const App = struct {
                         if (Widgets.drawButton(u, .{ .x = px, .y = py, .width = pw, .height = ph }, "QUIT TO TITLE", 2.0, mouse_x, mouse_y, mouse_clicked)) {
                             self.app_state = .home;
                             self.pending_world_cleanup = true;
+                            self.player = null;
                         }
                     }
+
+                    // === HUD Elements (crosshair, hotbar, inventory) ===
+
+                    // Draw crosshair (only when not in inventory/pause)
+                    if (!in_pause and !self.inventory_ui_state.visible) {
+                        const cx = screen_w / 2.0;
+                        const cy = screen_h / 2.0;
+                        const crosshair_size: f32 = 10;
+                        const crosshair_thickness: f32 = 2;
+                        // Horizontal line
+                        u.drawRect(.{
+                            .x = cx - crosshair_size,
+                            .y = cy - crosshair_thickness / 2,
+                            .width = crosshair_size * 2,
+                            .height = crosshair_thickness,
+                        }, Color.white);
+                        // Vertical line
+                        u.drawRect(.{
+                            .x = cx - crosshair_thickness / 2,
+                            .y = cy - crosshair_size,
+                            .width = crosshair_thickness,
+                            .height = crosshair_size * 2,
+                        }, Color.white);
+                    }
+
+                    // Draw hotbar (always visible except during full inventory)
+                    if (!self.inventory_ui_state.visible) {
+                        hotbar.drawDefault(u, &self.inventory, screen_w, screen_h);
+                    }
+
+                    // Draw inventory UI with time controls
+                    if (self.inventory_ui_state.visible) {
+                        const time_action = self.inventory_ui_state.draw(
+                            u,
+                            &self.inventory,
+                            mouse_x,
+                            mouse_y,
+                            mouse_clicked,
+                            screen_w,
+                            screen_h,
+                        );
+                        // Handle time control buttons from inventory
+                        if (time_action) |time_idx| {
+                            const times = [_]f32{ 0.0, 0.25, 0.5, 0.75 };
+                            if (time_idx < 4) {
+                                self.atmosphere.setTimeOfDay(times[time_idx]);
+                            }
+                        }
+                    }
+
+                    // Show mode indicator
+                    if (self.creative_mode) {
+                        Font.drawText(u, "CREATIVE", screen_w - 100, 10, 1.5, Color.rgba(100, 200, 255, 200));
+                        if (self.player) |p| {
+                            if (p.fly_mode) {
+                                Font.drawText(u, "FLYING", screen_w - 80, 25, 1.5, Color.rgba(150, 255, 150, 200));
+                            }
+                        }
+                    }
+
                     u.end();
                 }
             }
@@ -662,7 +805,10 @@ pub const App = struct {
                 if (self.world_map == null) self.world_map = WorldMap.init(self.rhi, 256, 256);
                 self.map_controller.show_map = false;
                 self.map_controller.map_needs_update = true;
-                self.camera = Camera.init(.{ .position = Vec3.init(8, 100, 8), .pitch = -0.3, .move_speed = 50.0 });
+                // Initialize player at spawn position
+                const spawn_pos = Vec3.init(8, 100, 8);
+                self.player = Player.init(spawn_pos, self.creative_mode);
+                self.camera = self.player.?.camera;
             }
 
             self.time.update();
@@ -729,17 +875,71 @@ pub const App = struct {
 
                 if (debug_build and self.debug_state.shadows and self.input.isKeyPressed(.k)) self.debug_state.cascade_idx = (self.debug_state.cascade_idx + 1) % 3;
 
-                if (self.input.isKeyPressed(.@"1")) self.atmosphere.setTimeOfDay(0.0);
-                if (self.input.isKeyPressed(.@"2")) self.atmosphere.setTimeOfDay(0.25);
-                if (self.input.isKeyPressed(.@"3")) self.atmosphere.setTimeOfDay(0.5);
-                if (self.input.isKeyPressed(.@"4")) self.atmosphere.setTimeOfDay(0.75);
+                // Time controls only available via inventory UI now (moved from 1-4 keys)
                 if (self.input.isKeyPressed(.n)) {
                     self.atmosphere.time_scale = if (self.atmosphere.time_scale > 0) @as(f32, 0.0) else @as(f32, 1.0);
                 }
 
+                // Inventory toggle (I key)
+                if (self.input.isKeyPressed(.i)) {
+                    self.inventory_ui_state.toggle();
+                    self.input.setMouseCapture(self.window_manager.window, !self.inventory_ui_state.visible);
+                }
+
+                // Creative mode toggle (F3 key)
+                if (self.input.isKeyPressed(.f3)) {
+                    self.creative_mode = !self.creative_mode;
+                    if (self.player) |*p| {
+                        p.setCreativeMode(self.creative_mode);
+                    }
+                }
+
+                // Hotbar selection (1-9 keys) - only when inventory UI is closed
+                if (!self.inventory_ui_state.visible) {
+                    if (self.input.isKeyPressed(.@"1")) self.inventory.selectSlot(0);
+                    if (self.input.isKeyPressed(.@"2")) self.inventory.selectSlot(1);
+                    if (self.input.isKeyPressed(.@"3")) self.inventory.selectSlot(2);
+                    if (self.input.isKeyPressed(.@"4")) self.inventory.selectSlot(3);
+                    if (self.input.isKeyPressed(.@"5")) self.inventory.selectSlot(4);
+                    if (self.input.isKeyPressed(.@"6")) self.inventory.selectSlot(5);
+                    if (self.input.isKeyPressed(.@"7")) self.inventory.selectSlot(6);
+                    if (self.input.isKeyPressed(.@"8")) self.inventory.selectSlot(7);
+                    if (self.input.isKeyPressed(.@"9")) self.inventory.selectSlot(8);
+
+                    // Scroll wheel for hotbar
+                    if (self.input.scroll_y != 0) {
+                        self.inventory.scrollSelection(@intFromFloat(self.input.scroll_y));
+                    }
+                }
+
                 if (in_world) {
-                    if (!self.map_controller.show_map and !in_pause) {
-                        self.camera.update(&self.input, self.time.delta_time);
+                    if (!self.map_controller.show_map and !in_pause and !self.inventory_ui_state.visible) {
+                        // Update player instead of camera directly
+                        if (self.player) |*p| {
+                            if (self.world) |active_world| {
+                                p.update(&self.input, active_world, self.time.delta_time, self.time.elapsed);
+                                self.camera = p.camera;
+
+                                // Block interaction (only when not in inventory)
+                                if (self.input.isMouseButtonPressed(.left)) {
+                                    p.breakTargetBlock(active_world);
+                                    self.hand_renderer.swing();
+                                }
+                                if (self.input.isMouseButtonPressed(.right)) {
+                                    if (self.inventory.getSelectedBlock()) |block_type| {
+                                        p.placeBlock(active_world, block_type);
+                                        self.hand_renderer.swing();
+                                    }
+                                }
+                            }
+                        } else {
+                            // Fallback to camera update if no player
+                            self.camera.update(&self.input, self.time.delta_time);
+                        }
+
+                        // Update hand renderer
+                        self.hand_renderer.update(self.time.delta_time);
+                        self.hand_renderer.updateMesh(self.inventory, &self.atlas);
                     }
 
                     if (self.world) |active_world| {
@@ -803,6 +1003,16 @@ pub const App = struct {
                     self.rhi.updateGlobalUniforms(view_proj_render, self.camera.position, self.atmosphere.sun_dir, self.atmosphere.time_of_day, self.atmosphere.fog_color, self.atmosphere.fog_density, self.atmosphere.fog_enabled, self.atmosphere.sun_intensity, self.atmosphere.ambient_intensity, self.settings.textures_enabled, cloud_params);
 
                     self.render_graph.execute(self.rhi, active_world, &self.camera, aspect, sky_params, cloud_params, self.shader, self.atlas.texture.handle, self.settings.shadow_distance, self.settings.getShadowResolution());
+
+                    // Draw block outline if player has a target
+                    if (self.player) |p| {
+                        if (p.target_block) |target| {
+                            self.block_outline.draw(target.x, target.y, target.z, self.camera.position);
+                        }
+                    }
+
+                    // Draw held block
+                    self.hand_renderer.draw(self.camera.position, self.camera.yaw, self.camera.pitch);
 
                     if (self.ui) |*u| {
                         u.begin();
@@ -883,8 +1093,69 @@ pub const App = struct {
                             if (Widgets.drawButton(u, .{ .x = px, .y = py, .width = pw, .height = ph }, "QUIT TO TITLE", 2.0, mouse_x, mouse_y, mouse_clicked)) {
                                 self.app_state = .home;
                                 self.pending_world_cleanup = true;
+                                self.player = null;
                             }
                         }
+
+                        // === HUD Elements (crosshair, hotbar, inventory) ===
+
+                        // Draw crosshair (only when not in inventory/pause)
+                        if (!in_pause and !self.inventory_ui_state.visible) {
+                            const cx = screen_w / 2.0;
+                            const cy = screen_h / 2.0;
+                            const crosshair_size: f32 = 10;
+                            const crosshair_thickness: f32 = 2;
+                            // Horizontal line
+                            u.drawRect(.{
+                                .x = cx - crosshair_size,
+                                .y = cy - crosshair_thickness / 2,
+                                .width = crosshair_size * 2,
+                                .height = crosshair_thickness,
+                            }, Color.white);
+                            // Vertical line
+                            u.drawRect(.{
+                                .x = cx - crosshair_thickness / 2,
+                                .y = cy - crosshair_size,
+                                .width = crosshair_thickness,
+                                .height = crosshair_size * 2,
+                            }, Color.white);
+                        }
+
+                        // Draw hotbar (always visible except during full inventory)
+                        if (!self.inventory_ui_state.visible) {
+                            hotbar.drawDefault(u, &self.inventory, screen_w, screen_h);
+                        }
+
+                        // Draw inventory UI with time controls
+                        if (self.inventory_ui_state.visible) {
+                            const time_action = self.inventory_ui_state.draw(
+                                u,
+                                &self.inventory,
+                                mouse_x,
+                                mouse_y,
+                                mouse_clicked,
+                                screen_w,
+                                screen_h,
+                            );
+                            // Handle time control buttons from inventory
+                            if (time_action) |time_idx| {
+                                const times = [_]f32{ 0.0, 0.25, 0.5, 0.75 };
+                                if (time_idx < 4) {
+                                    self.atmosphere.setTimeOfDay(times[time_idx]);
+                                }
+                            }
+                        }
+
+                        // Show mode indicator
+                        if (self.creative_mode) {
+                            Font.drawText(u, "CREATIVE", screen_w - 100, 10, 1.5, Color.rgba(100, 200, 255, 200));
+                            if (self.player) |p| {
+                                if (p.fly_mode) {
+                                    Font.drawText(u, "FLYING", screen_w - 80, 25, 1.5, Color.rgba(150, 255, 150, 200));
+                                }
+                            }
+                        }
+
                         u.end();
                     }
                 }

@@ -278,6 +278,22 @@ pub const Chunk = struct {
         self.generated = true;
         self.dirty = true;
     }
+
+    /// Update skylight for a specific column (x, z)
+    pub fn updateSkylightColumn(self: *Chunk, x: u32, z: u32) void {
+        var sky_light: u4 = MAX_LIGHT;
+        var y: i32 = CHUNK_SIZE_Y - 1;
+        while (y >= 0) : (y -= 1) {
+            const uy: u32 = @intCast(y);
+            const block = self.getBlock(x, uy, z);
+            self.setSkyLight(x, uy, z, sky_light);
+            if (block.isOpaque()) {
+                sky_light = 0;
+            } else if (block == .water and sky_light > 0) {
+                sky_light -= 1;
+            }
+        }
+    }
 };
 
 /// Convert world coordinates to chunk coordinates
