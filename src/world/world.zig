@@ -443,6 +443,32 @@ pub const World = struct {
         const data = try self.getOrCreateChunk(cp.chunk_x, cp.chunk_z);
         const local = worldToLocal(world_x, world_z);
         data.chunk.setBlock(local.x, @intCast(world_y), local.z, block);
+
+        // Update skylight for this column
+        data.chunk.updateSkylightColumn(local.x, local.z);
+
+        // Mark neighbor chunks dirty if block is on chunk boundary
+        // This ensures their meshes update to show/hide faces correctly
+        if (local.x == 0) {
+            if (self.getChunk(cp.chunk_x - 1, cp.chunk_z)) |neighbor| {
+                neighbor.chunk.dirty = true;
+            }
+        }
+        if (local.x == CHUNK_SIZE_X - 1) {
+            if (self.getChunk(cp.chunk_x + 1, cp.chunk_z)) |neighbor| {
+                neighbor.chunk.dirty = true;
+            }
+        }
+        if (local.z == 0) {
+            if (self.getChunk(cp.chunk_x, cp.chunk_z - 1)) |neighbor| {
+                neighbor.chunk.dirty = true;
+            }
+        }
+        if (local.z == CHUNK_SIZE_Z - 1) {
+            if (self.getChunk(cp.chunk_x, cp.chunk_z + 1)) |neighbor| {
+                neighbor.chunk.dirty = true;
+            }
+        }
     }
 
     pub fn getChunk(self: *World, cx: i32, cz: i32) ?*ChunkData {
@@ -619,7 +645,7 @@ pub const World = struct {
             var cx = pc.chunk_x - render_dist;
             while (cx <= pc.chunk_x + render_dist) : (cx += 1) {
                 if (self.chunks.get(.{ .x = cx, .z = cz })) |data| {
-                    if (data.chunk.state == .renderable) {
+                    if (data.chunk.state == .renderable or data.mesh.solid_allocation != null or data.mesh.fluid_allocation != null) {
                         if (frustum.intersectsChunkRelative(cx, cz, camera_pos.x, camera_pos.y, camera_pos.z)) {
                             self.visible_chunks.append(self.allocator, data) catch {};
                         } else {
