@@ -449,14 +449,13 @@ fn addGreedyFace(allocator: std.mem.Allocator, verts: *std.ArrayListUnmanaged(Ve
             p[1] = .{ uf + wf, y, vf + hf };
             p[2] = .{ uf + wf, y, vf };
             p[3] = .{ uf, y, vf };
-            uv = [4][2]f32{ .{ 0, hf }, .{ wf, hf }, .{ wf, 0 }, .{ 0, 0 } };
         } else {
             p[0] = .{ uf, y, vf };
             p[1] = .{ uf + wf, y, vf };
             p[2] = .{ uf + wf, y, vf + hf };
             p[3] = .{ uf, y, vf + hf };
-            uv = [4][2]f32{ .{ 0, 0 }, .{ wf, 0 }, .{ wf, hf }, .{ 0, hf } };
         }
+        uv = [4][2]f32{ .{ 0, 0 }, .{ wf, 0 }, .{ wf, hf }, .{ 0, hf } };
     } else if (axis == .east) {
         const x = sf;
         const y0: f32 = @floatFromInt(si * SUBCHUNK_SIZE);
@@ -465,14 +464,13 @@ fn addGreedyFace(allocator: std.mem.Allocator, verts: *std.ArrayListUnmanaged(Ve
             p[1] = .{ x, y0 + uf, vf };
             p[2] = .{ x, y0 + uf + wf, vf };
             p[3] = .{ x, y0 + uf + wf, vf + hf };
-            uv = [4][2]f32{ .{ hf, 0 }, .{ 0, 0 }, .{ 0, wf }, .{ hf, wf } };
         } else {
             p[0] = .{ x, y0 + uf, vf };
             p[1] = .{ x, y0 + uf, vf + hf };
             p[2] = .{ x, y0 + uf + wf, vf + hf };
             p[3] = .{ x, y0 + uf + wf, vf };
-            uv = [4][2]f32{ .{ 0, 0 }, .{ hf, 0 }, .{ hf, wf }, .{ 0, wf } };
         }
+        uv = [4][2]f32{ .{ 0, 0 }, .{ hf, 0 }, .{ hf, wf }, .{ 0, wf } };
     } else {
         const z = sf;
         const y0: f32 = @floatFromInt(si * SUBCHUNK_SIZE);
@@ -481,14 +479,13 @@ fn addGreedyFace(allocator: std.mem.Allocator, verts: *std.ArrayListUnmanaged(Ve
             p[1] = .{ uf + wf, y0 + vf, z };
             p[2] = .{ uf + wf, y0 + vf + hf, z };
             p[3] = .{ uf, y0 + vf + hf, z };
-            uv = [4][2]f32{ .{ 0, 0 }, .{ wf, 0 }, .{ wf, hf }, .{ 0, hf } };
         } else {
             p[0] = .{ uf + wf, y0 + vf, z };
             p[1] = .{ uf, y0 + vf, z };
             p[2] = .{ uf, y0 + vf + hf, z };
             p[3] = .{ uf + wf, y0 + vf + hf, z };
-            uv = [4][2]f32{ .{ wf, 0 }, .{ 0, 0 }, .{ 0, hf }, .{ wf, hf } };
         }
+        uv = [4][2]f32{ .{ 0, 0 }, .{ wf, 0 }, .{ wf, hf }, .{ 0, hf } };
     }
     const idxs = [_]usize{ 0, 1, 2, 0, 2, 3 };
     const sky_norm = @as(f32, @floatFromInt(light.getSkyLight())) / 15.0;

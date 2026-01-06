@@ -3432,7 +3432,8 @@ fn beginShadowPass(ctx_ptr: *anyopaque, cascade_index: u32) void {
 
     if (ctx.shadow_framebuffers[cascade_index] == null) return;
 
-    transitionShadowImage(ctx, cascade_index, c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    // Render pass handles transition from UNDEFINED to DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+    ctx.shadow_image_layouts[cascade_index] = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     var render_pass_info = std.mem.zeroes(c.VkRenderPassBeginInfo);
     render_pass_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -3480,7 +3481,8 @@ fn endShadowPass(ctx_ptr: *anyopaque) void {
     const cascade_index = ctx.shadow_pass_index;
     ctx.shadow_pass_active = false;
 
-    transitionShadowImage(ctx, cascade_index, c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // Render pass handles transition to SHADER_READ_ONLY_OPTIMAL
+    ctx.shadow_image_layouts[cascade_index] = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
 fn updateShadowUniforms(ctx_ptr: *anyopaque, params: rhi.ShadowParams) void {

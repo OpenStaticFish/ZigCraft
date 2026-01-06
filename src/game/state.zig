@@ -6,6 +6,7 @@ pub const AppState = enum {
     world,
     paused,
     settings,
+    resource_packs,
 };
 
 pub const Settings = struct {
@@ -23,6 +24,7 @@ pub const Settings = struct {
     window_width: u32 = 1920,
     window_height: u32 = 1080,
     lod_enabled: bool = false, // Disabled by default due to performance issues
+    texture_pack: []const u8 = "default",
 
     pub const ShadowQuality = struct {
         resolution: u32,
@@ -98,8 +100,32 @@ pub const Settings = struct {
         }) catch return .{};
         defer parsed.deinit();
 
+        var settings = parsed.value;
+        // Deep copy the texture pack string so it survives deinit
+        if (std.mem.eql(u8, settings.texture_pack, "default")) {
+            settings.texture_pack = "default";
+        } else {
+            settings.texture_pack = allocator.dupe(u8, settings.texture_pack) catch "default";
+        }
+
         std.log.info("Settings loaded from ~/{s}", .{config_path});
-        return parsed.value;
+        return settings;
+    }
+
+    pub fn deinit(self: *Settings, allocator: std.mem.Allocator) void {
+        if (!std.mem.eql(u8, self.texture_pack, "default")) {
+            allocator.free(self.texture_pack);
+        }
+    }
+
+    pub fn setTexturePack(self: *Settings, allocator: std.mem.Allocator, name: []const u8) !void {
+        if (std.mem.eql(u8, self.texture_pack, name)) return;
+        if (!std.mem.eql(u8, self.texture_pack, "default")) allocator.free(self.texture_pack);
+        if (std.mem.eql(u8, name, "default")) {
+            self.texture_pack = "default";
+        } else {
+            self.texture_pack = try allocator.dupe(u8, name);
+        }
     }
 
     /// Save settings to ~/.config/zigcraft/settings.json

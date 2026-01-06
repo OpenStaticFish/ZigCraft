@@ -117,6 +117,14 @@ pub const BlockType = enum(u8) {
 
     _,
 
+    /// Returns true if block color should be multiplied by biome tint
+    pub fn isTintable(self: BlockType) bool {
+        return switch (self) {
+            .leaves, .mangrove_leaves, .jungle_leaves, .acacia_leaves, .tall_grass, .water => true,
+            else => false,
+        };
+    }
+
     pub fn isAir(self: BlockType) bool {
         return self == .air;
     }

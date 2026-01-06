@@ -129,9 +129,8 @@ pub const RenderGraph = struct {
     }
 
     fn executeMainPass(rhi: RHI, world: *World, camera: *Camera, aspect: f32, shader: rhi_pkg.ShaderHandle, atlas_handle: rhi_pkg.TextureHandle) void {
-        _ = rhi;
-        _ = shader;
-        _ = atlas_handle;
+        rhi.bindShader(shader);
+        rhi.bindTexture(atlas_handle, 1);
         // rhi.beginMainPass() is now called in execute() to prevent clearing sky
         const view_proj = Mat4.perspectiveReverseZ(camera.fov, aspect, camera.near, camera.far).multiply(camera.getViewMatrixOriginCentered());
         world.render(view_proj, camera.position);

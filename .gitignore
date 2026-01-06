@@ -1,6 +1,8 @@
 zig-cache/
 .zig-cache/
 zig-out/
+blocks-temp/
+libs/zig-image/
 result
 .direnv/
 *-profile*

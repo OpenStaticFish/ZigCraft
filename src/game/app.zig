@@ -26,6 +26,7 @@ const RHI = rhi_pkg.RHI;
 const rhi_vulkan = @import("../engine/graphics/rhi_vulkan.zig");
 const TextureAtlas = @import("../engine/graphics/texture_atlas.zig").TextureAtlas;
 const RenderGraph = @import("../engine/graphics/render_graph.zig").RenderGraph;
+const ResourcePackManager = @import("../engine/graphics/resource_pack.zig").ResourcePackManager;
 
 const AppState = @import("state.zig").AppState;
 const Settings = @import("state.zig").Settings;
@@ -226,10 +227,11 @@ const CloudState = struct {
     }
 };
 
-const DebugState = packed struct {
+const DebugState = struct {
     shadows: bool = false,
     cascade_idx: usize = 0,
     show_fps: bool = false,
+    show_block_info: bool = false,
 };
 
 pub const App = struct {
@@ -238,6 +240,7 @@ pub const App = struct {
 
     rhi: RHI,
     shader: rhi_pkg.ShaderHandle = rhi_pkg.InvalidShaderHandle,
+    resource_pack_manager: ResourcePackManager,
     atlas: TextureAtlas,
     render_graph: RenderGraph,
     atmosphere: AtmosphereState,
@@ -287,7 +290,17 @@ pub const App = struct {
 
         try rhi.init(allocator, null);
 
-        const atlas = try TextureAtlas.init(allocator, rhi);
+        var resource_pack_manager = ResourcePackManager.init(allocator);
+        try resource_pack_manager.scanPacks();
+        if (resource_pack_manager.packExists(settings.texture_pack)) {
+            try resource_pack_manager.setActivePack(settings.texture_pack);
+        } else if (resource_pack_manager.packExists("default")) {
+            try resource_pack_manager.setActivePack("default");
+        }
+
+        const atlas = try TextureAtlas.init(allocator, rhi, &resource_pack_manager);
+        atlas.bind(1);
+
         var atmosphere = AtmosphereState{};
         atmosphere.setTimeOfDay(0.25);
         const clouds = CloudState{};
@@ -307,6 +320,7 @@ pub const App = struct {
             .window_manager = wm,
             .rhi = rhi,
             .shader = rhi_pkg.InvalidShaderHandle,
+            .resource_pack_manager = resource_pack_manager,
             .atlas = atlas,
             .render_graph = render_graph,
             .atmosphere = atmosphere,
@@ -347,6 +361,8 @@ pub const App = struct {
         self.block_outline.deinit();
         self.hand_renderer.deinit();
         self.atlas.deinit();
+        self.resource_pack_manager.deinit();
+        self.settings.deinit(self.allocator);
         if (self.shader != rhi_pkg.InvalidShaderHandle) self.rhi.destroyShader(self.shader);
         self.rhi.deinit();
 
@@ -370,15 +386,13 @@ pub const App = struct {
 
         if (self.pending_new_world_seed) |seed| {
             self.pending_new_world_seed = null;
+            const lod_config = LODConfig{
+                .lod0_radius = self.settings.render_distance,
+                .lod1_radius = 40,
+                .lod2_radius = 80,
+                .lod3_radius = 160,
+            };
             if (self.settings.lod_enabled) {
-                // LOD0 = render_distance (user-controlled block chunks)
-                // LOD1/2/3 = Fixed large values for "infinite" terrain view
-                const lod_config = LODConfig{
-                    .lod0_radius = self.settings.render_distance,
-                    .lod1_radius = 40,
-                    .lod2_radius = 80,
-                    .lod3_radius = 160,
-                };
                 self.world = World.initWithLOD(self.allocator, self.settings.render_distance, seed, self.rhi, lod_config) catch |err| {
                     log.log.err("Failed to create world with LOD: {}", .{err});
                     self.app_state = .home;
@@ -394,9 +408,7 @@ pub const App = struct {
             if (self.world_map == null) self.world_map = WorldMap.init(self.rhi, 256, 256);
             self.map_controller.show_map = false;
             self.map_controller.map_needs_update = true;
-            // Initialize player at spawn position
-            const spawn_pos = Vec3.init(8, 100, 8);
-            self.player = Player.init(spawn_pos, self.creative_mode);
+            self.player = Player.init(Vec3.init(8, 100, 8), self.creative_mode);
             self.camera = self.player.?.camera;
         }
 
@@ -426,6 +438,10 @@ pub const App = struct {
                         self.seed_focused = false;
                     },
                     .settings => self.app_state = self.last_state,
+                    .resource_packs => {
+                        self.settings.save(self.allocator);
+                        self.app_state = self.last_state;
+                    },
                     .world => {
                         self.app_state = .paused;
                         self.input.setMouseCapture(self.window_manager.window, false);
@@ -458,24 +474,24 @@ pub const App = struct {
             if (self.input.isKeyPressed(.f2)) {
                 self.debug_state.show_fps = !self.debug_state.show_fps;
             }
+            if (self.input.isKeyPressed(.f5)) {
+                self.debug_state.show_block_info = !self.debug_state.show_block_info;
+            }
             if (debug_build and self.input.isKeyPressed(.u)) self.debug_state.shadows = !self.debug_state.shadows;
 
             self.map_controller.update(&self.input, &self.camera, self.time.delta_time, self.window_manager.window, screen_w, screen_h, if (self.world_map) |m| m.width else 256);
 
             if (debug_build and self.debug_state.shadows and self.input.isKeyPressed(.k)) self.debug_state.cascade_idx = (self.debug_state.cascade_idx + 1) % 3;
 
-            // Time controls only available via inventory UI now (moved from 1-4 keys)
             if (self.input.isKeyPressed(.n)) {
                 self.atmosphere.time_scale = if (self.atmosphere.time_scale > 0) @as(f32, 0.0) else @as(f32, 1.0);
             }
 
-            // Inventory toggle (I key)
             if (self.input.isKeyPressed(.i)) {
                 self.inventory_ui_state.toggle();
                 self.input.setMouseCapture(self.window_manager.window, !self.inventory_ui_state.visible);
             }
 
-            // Creative mode toggle (F3 key)
             if (self.input.isKeyPressed(.f3)) {
                 self.creative_mode = !self.creative_mode;
                 if (self.player) |*p| {
@@ -483,7 +499,6 @@ pub const App = struct {
                 }
             }
 
-            // Hotbar selection (1-9 keys) - only when inventory UI is closed
             if (!self.inventory_ui_state.visible) {
                 if (self.input.isKeyPressed(.@"1")) self.inventory.selectSlot(0);
                 if (self.input.isKeyPressed(.@"2")) self.inventory.selectSlot(1);
@@ -494,8 +509,6 @@ pub const App = struct {
                 if (self.input.isKeyPressed(.@"7")) self.inventory.selectSlot(6);
                 if (self.input.isKeyPressed(.@"8")) self.inventory.selectSlot(7);
                 if (self.input.isKeyPressed(.@"9")) self.inventory.selectSlot(8);
-
-                // Scroll wheel for hotbar
                 if (self.input.scroll_y != 0) {
                     self.inventory.scrollSelection(@intFromFloat(self.input.scroll_y));
                 }
@@ -503,37 +516,35 @@ pub const App = struct {
 
             if (in_world) {
                 if (!self.map_controller.show_map and !in_pause and !self.inventory_ui_state.visible) {
-                    // Update player instead of camera directly
                     if (self.player) |*p| {
                         if (self.world) |active_world| {
                             p.update(&self.input, active_world, self.time.delta_time, self.time.elapsed);
                             self.camera = p.camera;
-
-                            // Block interaction (only when not in inventory)
                             if (self.input.isMouseButtonPressed(.left)) {
                                 p.breakTargetBlock(active_world);
+                                self.hand_renderer.swing();
                             }
                             if (self.input.isMouseButtonPressed(.right)) {
                                 if (self.inventory.getSelectedBlock()) |block_type| {
                                     p.placeBlock(active_world, block_type);
+                                    self.hand_renderer.swing();
                                 }
                             }
                         }
                     } else {
-                        // Fallback to camera update if no player
                         self.camera.update(&self.input, self.time.delta_time);
                     }
+                    self.hand_renderer.update(self.time.delta_time);
+                    self.hand_renderer.updateMesh(self.inventory, &self.atlas);
                 }
 
                 if (self.world) |active_world| {
                     if (active_world.render_distance != self.settings.render_distance) {
                         active_world.setRenderDistance(self.settings.render_distance);
                     }
-
                     try active_world.update(self.camera.position, self.time.delta_time);
                 } else self.app_state = .home;
             } else if (in_pause) {
-                // Still update render distance while paused so settings take effect immediately
                 if (self.world) |active_world| {
                     if (active_world.render_distance != self.settings.render_distance) {
                         active_world.setRenderDistance(self.settings.render_distance);
@@ -550,7 +561,6 @@ pub const App = struct {
             if (self.world) |active_world| {
                 const aspect = screen_w / screen_h;
                 const view_proj_render = Mat4.perspectiveReverseZ(self.camera.fov, aspect, self.camera.near, self.camera.far).multiply(self.camera.getViewMatrixOriginCentered());
-
                 const sky_params = rhi_pkg.SkyParams{
                     .cam_pos = self.camera.position,
                     .cam_forward = self.camera.forward,
@@ -584,22 +594,18 @@ pub const App = struct {
                 };
 
                 self.rhi.updateGlobalUniforms(view_proj_render, self.camera.position, self.atmosphere.sun_dir, self.atmosphere.time_of_day, self.atmosphere.fog_color, self.atmosphere.fog_density, self.atmosphere.fog_enabled, self.atmosphere.sun_intensity, self.atmosphere.ambient_intensity, self.settings.textures_enabled, cloud_params);
-
                 self.render_graph.execute(self.rhi, active_world, &self.camera, aspect, sky_params, cloud_params, self.shader, self.atlas.texture.handle, self.settings.shadow_distance, self.settings.getShadowResolution());
 
-                // Draw block outline if player has a target
                 if (self.player) |p| {
-                    if (p.target_block) |target| {
-                        self.block_outline.draw(target.x, target.y, target.z, self.camera.position);
-                    }
+                    if (p.target_block) |target| self.block_outline.draw(target.x, target.y, target.z, self.camera.position);
                 }
+                self.hand_renderer.draw(self.camera.position, self.camera.yaw, self.camera.pitch);
 
                 if (self.ui) |*u| {
                     u.begin();
                     if (self.world_map) |*m| {
                         try self.map_controller.draw(u, screen_w, screen_h, m, &active_world.generator, self.camera.position);
                     }
-                    // FPS counter (F2 toggle, works in release builds)
                     if (self.debug_state.show_fps) {
                         u.drawRect(.{ .x = 10, .y = 10, .width = 80, .height = 30 }, Color.rgba(0, 0, 0, 0.7));
                         Font.drawNumber(u, @intFromFloat(self.time.fps), 15, 15, Color.white);
@@ -627,25 +633,20 @@ pub const App = struct {
                         Font.drawNumber(u, @intCast(stats.mesh_queue), 140, hy + 85, Color.white);
                         Font.drawText(u, "PENDING UP:", 15, hy + 105, 1.5, Color.white);
                         Font.drawNumber(u, @intCast(stats.upload_queue), 140, hy + 105, Color.white);
-                        var hr: i32 = 0;
-                        var mn: i32 = 0;
-                        var si: f32 = 1.0;
                         const h = self.atmosphere.getHours();
-                        hr = @intFromFloat(h);
-                        mn = @intFromFloat((h - @as(f32, @floatFromInt(hr))) * 60.0);
-                        si = self.atmosphere.sun_intensity;
+                        const hr = @as(i32, @intFromFloat(h));
+                        const mn = @as(i32, @intFromFloat((h - @as(f32, @floatFromInt(hr))) * 60.0));
                         Font.drawText(u, "TIME:", 15, hy + 125, 1.5, Color.white);
                         Font.drawNumber(u, hr, 100, hy + 125, Color.white);
                         Font.drawText(u, ":", 125, hy + 125, 1.5, Color.white);
                         Font.drawNumber(u, mn, 140, hy + 125, Color.white);
                         Font.drawText(u, "SUN:", 15, hy + 145, 1.5, Color.white);
-                        Font.drawNumber(u, @intFromFloat(si * 100.0), 100, hy + 145, Color.white);
+                        Font.drawNumber(u, @intFromFloat(self.atmosphere.sun_intensity * 100.0), 100, hy + 145, Color.white);
 
-                        // Region Role Debug (Issue #110)
                         if (self.world) |world| {
-                            const px: i32 = @intFromFloat(self.camera.position.x);
-                            const pz: i32 = @intFromFloat(self.camera.position.z);
-                            const region = world.generator.getRegionInfo(px, pz);
+                            const px_i: i32 = @intFromFloat(self.camera.position.x);
+                            const pz_i: i32 = @intFromFloat(self.camera.position.z);
+                            const region = world.generator.getRegionInfo(px_i, pz_i);
                             const c3 = region_pkg.getRoleColor(region.role);
                             Font.drawText(u, "ROLE:", 15, hy + 165, 1.5, Color.rgba(c3[0], c3[1], c3[2], 1.0));
                             var buf: [32]u8 = undefined;
@@ -653,6 +654,31 @@ pub const App = struct {
                             Font.drawText(u, label, 100, hy + 165, 1.5, Color.white);
                         }
                     }
+
+                    if (self.debug_state.show_block_info) {
+                        if (self.player) |p| {
+                            if (p.target_block) |target| {
+                                if (self.world) |world| {
+                                    const block = world.getBlock(target.x, target.y, target.z);
+                                    const tiles = TextureAtlas.getTilesForBlock(@intFromEnum(block));
+                                    const ux = screen_w - 350;
+                                    var uy: f32 = 10;
+                                    u.drawRect(.{ .x = ux - 10, .y = uy, .width = 350, .height = 80 }, Color.rgba(0, 0, 0, 0.7));
+                                    var buf: [128]u8 = undefined;
+                                    const pos_text = std.fmt.bufPrint(&buf, "BLOCK: {s} ({}, {}, {})", .{ @tagName(block), target.x, target.y, target.z }) catch "BLOCK: ???";
+                                    Font.drawText(u, pos_text, ux, uy + 5, 1.5, Color.white);
+                                    uy += 25;
+                                    const tiles_text = std.fmt.bufPrint(&buf, "TILES: T:{} B:{} S:{}", .{ tiles.top, tiles.bottom, tiles.side }) catch "TILES: ???";
+                                    Font.drawText(u, tiles_text, ux, uy + 5, 1.5, Color.white);
+                                    uy += 25;
+                                    const pack_name = if (self.resource_pack_manager.active_pack) |ap| ap else "Default";
+                                    const pack_text = std.fmt.bufPrint(&buf, "PACK: {s}", .{pack_name}) catch "PACK: ???";
+                                    Font.drawText(u, pack_text, ux, uy + 5, 1.5, Color.white);
+                                }
+                            }
+                        }
+                    }
+
                     if (in_pause) {
                         u.drawRect(.{ .x = 0, .y = 0, .width = screen_w, .height = screen_h }, Color.rgba(0, 0, 0, 0.5));
                         const pw: f32 = 300.0;
@@ -677,98 +703,57 @@ pub const App = struct {
                         }
                     }
 
-                    // === HUD Elements (crosshair, hotbar, inventory) ===
-
-                    // Draw crosshair (only when not in inventory/pause)
                     if (!in_pause and !self.inventory_ui_state.visible) {
                         const cx = screen_w / 2.0;
                         const cy = screen_h / 2.0;
-                        const crosshair_size: f32 = 10;
-                        const crosshair_thickness: f32 = 2;
-                        // Horizontal line
-                        u.drawRect(.{
-                            .x = cx - crosshair_size,
-                            .y = cy - crosshair_thickness / 2,
-                            .width = crosshair_size * 2,
-                            .height = crosshair_thickness,
-                        }, Color.white);
-                        // Vertical line
-                        u.drawRect(.{
-                            .x = cx - crosshair_thickness / 2,
-                            .y = cy - crosshair_size,
-                            .width = crosshair_thickness,
-                            .height = crosshair_size * 2,
-                        }, Color.white);
+                        u.drawRect(.{ .x = cx - 10, .y = cy - 1, .width = 20, .height = 2 }, Color.white);
+                        u.drawRect(.{ .x = cx - 1, .y = cy - 10, .width = 2, .height = 20 }, Color.white);
                     }
-
-                    // Draw hotbar (always visible except during full inventory)
-                    if (!self.inventory_ui_state.visible) {
-                        hotbar.drawDefault(u, &self.inventory, screen_w, screen_h);
-                    }
-
-                    // Draw inventory UI with time controls
+                    if (!self.inventory_ui_state.visible) hotbar.drawDefault(u, &self.inventory, screen_w, screen_h);
                     if (self.inventory_ui_state.visible) {
-                        const time_action = self.inventory_ui_state.draw(
-                            u,
-                            &self.inventory,
-                            mouse_x,
-                            mouse_y,
-                            mouse_clicked,
-                            screen_w,
-                            screen_h,
-                        );
-                        // Handle time control buttons from inventory
+                        const time_action = self.inventory_ui_state.draw(u, &self.inventory, mouse_x, mouse_y, mouse_clicked, screen_w, screen_h);
                         if (time_action) |time_idx| {
                             const times = [_]f32{ 0.0, 0.25, 0.5, 0.75 };
-                            if (time_idx < 4) {
-                                self.atmosphere.setTimeOfDay(times[time_idx]);
-                            }
+                            if (time_idx < 4) self.atmosphere.setTimeOfDay(times[time_idx]);
                         }
                     }
-
-                    // Show mode indicator
                     if (self.creative_mode) {
                         Font.drawText(u, "CREATIVE", screen_w - 100, 10, 1.5, Color.rgba(100, 200, 255, 200));
-                        if (self.player) |p| {
-                            if (p.fly_mode) {
-                                Font.drawText(u, "FLYING", screen_w - 80, 25, 1.5, Color.rgba(150, 255, 150, 200));
-                            }
-                        }
+                        if (self.player) |p| if (p.fly_mode) Font.drawText(u, "FLYING", screen_w - 80, 25, 1.5, Color.rgba(150, 255, 150, 200));
                     }
-
                     u.end();
                 }
             }
         } else if (self.ui) |*u| {
             u.begin();
-            const ctx = Menus.MenuContext{
-                .ui = u,
-                .input = &self.input,
-                .screen_w = screen_w,
-                .screen_h = screen_h,
-                .time = &self.time,
-                .allocator = self.allocator,
-                .window_manager = &self.window_manager,
-            };
+            const ctx = Menus.MenuContext{ .ui = u, .input = &self.input, .screen_w = screen_w, .screen_h = screen_h, .time = &self.time, .allocator = self.allocator, .window_manager = &self.window_manager, .resource_pack_manager = &self.resource_pack_manager };
             switch (self.app_state) {
                 .home => {
                     const action = Menus.drawHome(ctx, &self.app_state, &self.last_state, &self.seed_focused);
                     if (action == .quit) self.input.should_quit = true;
                 },
                 .settings => Menus.drawSettings(ctx, &self.app_state, &self.settings, self.last_state, self.rhi),
+                .resource_packs => {
+                    const prev_pack_ptr = self.settings.texture_pack.ptr;
+                    try Menus.drawResourcePacks(ctx, &self.app_state, &self.settings, self.last_state);
+                    if (prev_pack_ptr != self.settings.texture_pack.ptr) {
+                        self.rhi.waitIdle();
+                        self.atlas.deinit();
+                        self.atlas = try TextureAtlas.init(self.allocator, self.rhi, &self.resource_pack_manager);
+                        self.atlas.bind(1);
+                    }
+                },
                 .singleplayer => try Menus.drawSingleplayer(ctx, &self.app_state, &self.seed_input, &self.seed_focused, &self.pending_new_world_seed),
                 .world, .paused => unreachable,
             }
             u.end();
         }
-
         self.rhi.endFrame();
     }
 
     pub fn run(self: *App) !void {
         self.rhi.setViewport(self.input.window_width, self.input.window_height);
         log.log.info("=== ZigCraft ===", .{});
-
         while (!self.input.should_quit) {
             if (self.pending_world_cleanup or self.pending_new_world_seed != null) {
                 self.rhi.waitIdle();
@@ -778,18 +763,10 @@ pub const App = struct {
                 }
                 self.pending_world_cleanup = false;
             }
-
             if (self.pending_new_world_seed) |seed| {
                 self.pending_new_world_seed = null;
+                const lod_config = LODConfig{ .lod0_radius = self.settings.render_distance, .lod1_radius = 40, .lod2_radius = 80, .lod3_radius = 160 };
                 if (self.settings.lod_enabled) {
-                    // LOD0 = render_distance (user-controlled block chunks)
-                    // LOD1/2/3 = Fixed large values for "infinite" terrain view
-                    const lod_config = LODConfig{
-                        .lod0_radius = self.settings.render_distance,
-                        .lod1_radius = 40,
-                        .lod2_radius = 80,
-                        .lod3_radius = 160,
-                    };
                     self.world = World.initWithLOD(self.allocator, self.settings.render_distance, seed, self.rhi, lod_config) catch |err| {
                         log.log.err("Failed to create world with LOD: {}", .{err});
                         self.app_state = .home;
@@ -805,402 +782,10 @@ pub const App = struct {
                 if (self.world_map == null) self.world_map = WorldMap.init(self.rhi, 256, 256);
                 self.map_controller.show_map = false;
                 self.map_controller.map_needs_update = true;
-                // Initialize player at spawn position
-                const spawn_pos = Vec3.init(8, 100, 8);
-                self.player = Player.init(spawn_pos, self.creative_mode);
+                self.player = Player.init(Vec3.init(8, 100, 8), self.creative_mode);
                 self.camera = self.player.?.camera;
             }
-
-            self.time.update();
-            self.atmosphere.update(self.time.delta_time);
-            self.clouds.update(self.time.delta_time);
-            self.input.beginFrame();
-            self.input.pollEvents();
-            self.rhi.setViewport(self.input.window_width, self.input.window_height);
-            if (self.ui) |*u| u.resize(self.input.window_width, self.input.window_height);
-            const screen_w: f32 = @floatFromInt(self.input.window_width);
-            const screen_h: f32 = @floatFromInt(self.input.window_height);
-            const mouse_pos = self.input.getMousePosition();
-            const mouse_x: f32 = @floatFromInt(mouse_pos.x);
-            const mouse_y: f32 = @floatFromInt(mouse_pos.y);
-            const mouse_clicked = self.input.isMouseButtonPressed(.left);
-
-            if (self.input.isKeyPressed(.escape)) {
-                if (self.map_controller.show_map) {
-                    self.map_controller.show_map = false;
-                    if (self.app_state == .world) self.input.setMouseCapture(self.window_manager.window, true);
-                } else {
-                    switch (self.app_state) {
-                        .home => self.input.should_quit = true,
-                        .singleplayer => {
-                            self.app_state = .home;
-                            self.seed_focused = false;
-                        },
-                        .settings => self.app_state = self.last_state,
-                        .world => {
-                            self.app_state = .paused;
-                            self.input.setMouseCapture(self.window_manager.window, false);
-                        },
-                        .paused => {
-                            self.app_state = .world;
-                            self.input.setMouseCapture(self.window_manager.window, true);
-                        },
-                    }
-                }
-            }
-
-            const in_world = self.app_state == .world;
-            const in_pause = self.app_state == .paused;
-
-            if (in_world or in_pause) {
-                if (in_world and self.input.isKeyPressed(.tab)) self.input.setMouseCapture(self.window_manager.window, !self.input.mouse_captured);
-                if (self.input.isKeyPressed(.f)) {
-                    self.settings.wireframe_enabled = !self.settings.wireframe_enabled;
-                    self.rhi.setWireframe(self.settings.wireframe_enabled);
-                }
-                if (self.input.isKeyPressed(.t)) {
-                    self.settings.textures_enabled = !self.settings.textures_enabled;
-                    self.rhi.setTexturesEnabled(self.settings.textures_enabled);
-                }
-                if (self.input.isKeyPressed(.v)) {
-                    self.settings.vsync = !self.settings.vsync;
-                    self.rhi.setVSync(self.settings.vsync);
-                }
-                if (self.input.isKeyPressed(.f2)) {
-                    self.debug_state.show_fps = !self.debug_state.show_fps;
-                }
-                if (debug_build and self.input.isKeyPressed(.u)) self.debug_state.shadows = !self.debug_state.shadows;
-
-                self.map_controller.update(&self.input, &self.camera, self.time.delta_time, self.window_manager.window, screen_w, screen_h, if (self.world_map) |m| m.width else 256);
-
-                if (debug_build and self.debug_state.shadows and self.input.isKeyPressed(.k)) self.debug_state.cascade_idx = (self.debug_state.cascade_idx + 1) % 3;
-
-                // Time controls only available via inventory UI now (moved from 1-4 keys)
-                if (self.input.isKeyPressed(.n)) {
-                    self.atmosphere.time_scale = if (self.atmosphere.time_scale > 0) @as(f32, 0.0) else @as(f32, 1.0);
-                }
-
-                // Inventory toggle (I key)
-                if (self.input.isKeyPressed(.i)) {
-                    self.inventory_ui_state.toggle();
-                    self.input.setMouseCapture(self.window_manager.window, !self.inventory_ui_state.visible);
-                }
-
-                // Creative mode toggle (F3 key)
-                if (self.input.isKeyPressed(.f3)) {
-                    self.creative_mode = !self.creative_mode;
-                    if (self.player) |*p| {
-                        p.setCreativeMode(self.creative_mode);
-                    }
-                }
-
-                // Hotbar selection (1-9 keys) - only when inventory UI is closed
-                if (!self.inventory_ui_state.visible) {
-                    if (self.input.isKeyPressed(.@"1")) self.inventory.selectSlot(0);
-                    if (self.input.isKeyPressed(.@"2")) self.inventory.selectSlot(1);
-                    if (self.input.isKeyPressed(.@"3")) self.inventory.selectSlot(2);
-                    if (self.input.isKeyPressed(.@"4")) self.inventory.selectSlot(3);
-                    if (self.input.isKeyPressed(.@"5")) self.inventory.selectSlot(4);
-                    if (self.input.isKeyPressed(.@"6")) self.inventory.selectSlot(5);
-                    if (self.input.isKeyPressed(.@"7")) self.inventory.selectSlot(6);
-                    if (self.input.isKeyPressed(.@"8")) self.inventory.selectSlot(7);
-                    if (self.input.isKeyPressed(.@"9")) self.inventory.selectSlot(8);
-
-                    // Scroll wheel for hotbar
-                    if (self.input.scroll_y != 0) {
-                        self.inventory.scrollSelection(@intFromFloat(self.input.scroll_y));
-                    }
-                }
-
-                if (in_world) {
-                    if (!self.map_controller.show_map and !in_pause and !self.inventory_ui_state.visible) {
-                        // Update player instead of camera directly
-                        if (self.player) |*p| {
-                            if (self.world) |active_world| {
-                                p.update(&self.input, active_world, self.time.delta_time, self.time.elapsed);
-                                self.camera = p.camera;
-
-                                // Block interaction (only when not in inventory)
-                                if (self.input.isMouseButtonPressed(.left)) {
-                                    p.breakTargetBlock(active_world);
-                                    self.hand_renderer.swing();
-                                }
-                                if (self.input.isMouseButtonPressed(.right)) {
-                                    if (self.inventory.getSelectedBlock()) |block_type| {
-                                        p.placeBlock(active_world, block_type);
-                                        self.hand_renderer.swing();
-                                    }
-                                }
-                            }
-                        } else {
-                            // Fallback to camera update if no player
-                            self.camera.update(&self.input, self.time.delta_time);
-                        }
-
-                        // Update hand renderer
-                        self.hand_renderer.update(self.time.delta_time);
-                        self.hand_renderer.updateMesh(self.inventory, &self.atlas);
-                    }
-
-                    if (self.world) |active_world| {
-                        if (active_world.render_distance != self.settings.render_distance) {
-                            active_world.setRenderDistance(self.settings.render_distance);
-                        }
-
-                        try active_world.update(self.camera.position, self.time.delta_time);
-                    } else self.app_state = .home;
-                } else if (in_pause) {
-                    // Still update render distance while paused so settings take effect immediately
-                    if (self.world) |active_world| {
-                        if (active_world.render_distance != self.settings.render_distance) {
-                            active_world.setRenderDistance(self.settings.render_distance);
-                        }
-                    }
-                }
-            } else if (self.input.mouse_captured) self.input.setMouseCapture(self.window_manager.window, false);
-
-            const clear_color = if (in_world or in_pause) self.atmosphere.fog_color else Vec3.init(0.07, 0.08, 0.1);
-            self.rhi.setClearColor(clear_color);
-            self.rhi.beginFrame();
-
-            if (in_world or in_pause) {
-                if (self.world) |active_world| {
-                    const aspect = screen_w / screen_h;
-                    const view_proj_render = Mat4.perspectiveReverseZ(self.camera.fov, aspect, self.camera.near, self.camera.far).multiply(self.camera.getViewMatrixOriginCentered());
-
-                    const sky_params = rhi_pkg.SkyParams{
-                        .cam_pos = self.camera.position,
-                        .cam_forward = self.camera.forward,
-                        .cam_right = self.camera.right,
-                        .cam_up = self.camera.up,
-                        .aspect = aspect,
-                        .tan_half_fov = @tan(self.camera.fov / 2.0),
-                        .sun_dir = self.atmosphere.sun_dir,
-                        .sky_color = self.atmosphere.sky_color,
-                        .horizon_color = self.atmosphere.horizon_color,
-                        .sun_intensity = self.atmosphere.sun_intensity,
-                        .moon_intensity = self.atmosphere.moon_intensity,
-                        .time = self.atmosphere.time_of_day,
-                    };
-                    const cloud_params: rhi_pkg.CloudParams = blk: {
-                        const p = self.clouds.getShadowParams();
-                        break :blk .{
-                            .cam_pos = self.camera.position,
-                            .view_proj = view_proj_render,
-                            .sun_dir = self.atmosphere.sun_dir,
-                            .sun_intensity = self.atmosphere.sun_intensity,
-                            .fog_color = self.atmosphere.fog_color,
-                            .fog_density = self.atmosphere.fog_density,
-                            .wind_offset_x = p.wind_offset_x,
-                            .wind_offset_z = p.wind_offset_z,
-                            .cloud_scale = p.cloud_scale,
-                            .cloud_coverage = p.cloud_coverage,
-                            .cloud_height = p.cloud_height,
-                            .base_color = self.clouds.base_color,
-                        };
-                    };
-
-                    self.rhi.updateGlobalUniforms(view_proj_render, self.camera.position, self.atmosphere.sun_dir, self.atmosphere.time_of_day, self.atmosphere.fog_color, self.atmosphere.fog_density, self.atmosphere.fog_enabled, self.atmosphere.sun_intensity, self.atmosphere.ambient_intensity, self.settings.textures_enabled, cloud_params);
-
-                    self.render_graph.execute(self.rhi, active_world, &self.camera, aspect, sky_params, cloud_params, self.shader, self.atlas.texture.handle, self.settings.shadow_distance, self.settings.getShadowResolution());
-
-                    // Draw block outline if player has a target
-                    if (self.player) |p| {
-                        if (p.target_block) |target| {
-                            self.block_outline.draw(target.x, target.y, target.z, self.camera.position);
-                        }
-                    }
-
-                    // Draw held block
-                    self.hand_renderer.draw(self.camera.position, self.camera.yaw, self.camera.pitch);
-
-                    if (self.ui) |*u| {
-                        u.begin();
-                        if (self.world_map) |*m| {
-                            try self.map_controller.draw(u, screen_w, screen_h, m, &active_world.generator, self.camera.position);
-                        }
-                        // FPS counter (F2 toggle, works in release builds)
-                        if (self.debug_state.show_fps) {
-                            u.drawRect(.{ .x = 10, .y = 10, .width = 80, .height = 30 }, Color.rgba(0, 0, 0, 0.7));
-                            Font.drawNumber(u, @intFromFloat(self.time.fps), 15, 15, Color.white);
-                        }
-                        if (debug_build) {
-                            if (!self.debug_state.show_fps) {
-                                u.drawRect(.{ .x = 10, .y = 10, .width = 80, .height = 30 }, Color.rgba(0, 0, 0, 0.7));
-                                Font.drawNumber(u, @intFromFloat(self.time.fps), 15, 15, Color.white);
-                            }
-                            const stats = active_world.getStats();
-                            const rs = active_world.getRenderStats();
-                            const pc = worldToChunk(@intFromFloat(self.camera.position.x), @intFromFloat(self.camera.position.z));
-                            const hy: f32 = 50.0;
-                            u.drawRect(.{ .x = 10, .y = hy, .width = 220, .height = 170 }, Color.rgba(0, 0, 0, 0.6));
-                            Font.drawText(u, "POS:", 15, hy + 5, 1.5, Color.white);
-                            Font.drawNumber(u, pc.chunk_x, 120, hy + 5, Color.white);
-                            Font.drawNumber(u, pc.chunk_z, 170, hy + 5, Color.white);
-                            Font.drawText(u, "CHUNKS:", 15, hy + 25, 1.5, Color.white);
-                            Font.drawNumber(u, @intCast(stats.chunks_loaded), 140, hy + 25, Color.white);
-                            Font.drawText(u, "VISIBLE:", 15, hy + 45, 1.5, Color.white);
-                            Font.drawNumber(u, @intCast(rs.chunks_rendered), 140, hy + 45, Color.white);
-                            Font.drawText(u, "QUEUED GEN:", 15, hy + 65, 1.5, Color.white);
-                            Font.drawNumber(u, @intCast(stats.gen_queue), 140, hy + 65, Color.white);
-                            Font.drawText(u, "QUEUED MESH:", 15, hy + 85, 1.5, Color.white);
-                            Font.drawNumber(u, @intCast(stats.mesh_queue), 140, hy + 85, Color.white);
-                            Font.drawText(u, "PENDING UP:", 15, hy + 105, 1.5, Color.white);
-                            Font.drawNumber(u, @intCast(stats.upload_queue), 140, hy + 105, Color.white);
-                            var hr: i32 = 0;
-                            var mn: i32 = 0;
-                            var si: f32 = 1.0;
-                            const h = self.atmosphere.getHours();
-                            hr = @intFromFloat(h);
-                            mn = @intFromFloat((h - @as(f32, @floatFromInt(hr))) * 60.0);
-                            si = self.atmosphere.sun_intensity;
-                            Font.drawText(u, "TIME:", 15, hy + 125, 1.5, Color.white);
-                            Font.drawNumber(u, hr, 100, hy + 125, Color.white);
-                            Font.drawText(u, ":", 125, hy + 125, 1.5, Color.white);
-                            Font.drawNumber(u, mn, 140, hy + 125, Color.white);
-                            Font.drawText(u, "SUN:", 15, hy + 145, 1.5, Color.white);
-                            Font.drawNumber(u, @intFromFloat(si * 100.0), 100, hy + 145, Color.white);
-
-                            // Region Role Debug (Issue #110)
-                            if (self.world) |world| {
-                                const px: i32 = @intFromFloat(self.camera.position.x);
-                                const pz: i32 = @intFromFloat(self.camera.position.z);
-                                const region = world.generator.getRegionInfo(px, pz);
-                                const c3 = region_pkg.getRoleColor(region.role);
-                                Font.drawText(u, "ROLE:", 15, hy + 165, 1.5, Color.rgba(c3[0], c3[1], c3[2], 1.0));
-                                var buf: [32]u8 = undefined;
-                                const label = std.fmt.bufPrint(&buf, "{s}", .{@tagName(region.role)}) catch "???";
-                                Font.drawText(u, label, 100, hy + 165, 1.5, Color.white);
-                            }
-                        }
-                        if (in_pause) {
-                            u.drawRect(.{ .x = 0, .y = 0, .width = screen_w, .height = screen_h }, Color.rgba(0, 0, 0, 0.5));
-                            const pw: f32 = 300.0;
-                            const ph: f32 = 48.0;
-                            const px: f32 = (screen_w - pw) * 0.5;
-                            var py: f32 = screen_h * 0.35;
-                            Font.drawTextCentered(u, "PAUSED", screen_w * 0.5, py - 60.0, 3.0, Color.white);
-                            if (Widgets.drawButton(u, .{ .x = px, .y = py, .width = pw, .height = ph }, "RESUME", 2.0, mouse_x, mouse_y, mouse_clicked)) {
-                                self.app_state = .world;
-                                self.input.setMouseCapture(self.window_manager.window, true);
-                            }
-                            py += ph + 16.0;
-                            if (Widgets.drawButton(u, .{ .x = px, .y = py, .width = pw, .height = ph }, "SETTINGS", 2.0, mouse_x, mouse_y, mouse_clicked)) {
-                                self.last_state = .paused;
-                                self.app_state = .settings;
-                            }
-                            py += ph + 16.0;
-                            if (Widgets.drawButton(u, .{ .x = px, .y = py, .width = pw, .height = ph }, "QUIT TO TITLE", 2.0, mouse_x, mouse_y, mouse_clicked)) {
-                                self.app_state = .home;
-                                self.pending_world_cleanup = true;
-                                self.player = null;
-                            }
-                        }
-
-                        // === HUD Elements (crosshair, hotbar, inventory) ===
-
-                        // Draw crosshair (only when not in inventory/pause)
-                        if (!in_pause and !self.inventory_ui_state.visible) {
-                            const cx = screen_w / 2.0;
-                            const cy = screen_h / 2.0;
-                            const crosshair_size: f32 = 10;
-                            const crosshair_thickness: f32 = 2;
-                            // Horizontal line
-                            u.drawRect(.{
-                                .x = cx - crosshair_size,
-                                .y = cy - crosshair_thickness / 2,
-                                .width = crosshair_size * 2,
-                                .height = crosshair_thickness,
-                            }, Color.white);
-                            // Vertical line
-                            u.drawRect(.{
-                                .x = cx - crosshair_thickness / 2,
-                                .y = cy - crosshair_size,
-                                .width = crosshair_thickness,
-                                .height = crosshair_size * 2,
-                            }, Color.white);
-                        }
-
-                        // Draw hotbar (always visible except during full inventory)
-                        if (!self.inventory_ui_state.visible) {
-                            hotbar.drawDefault(u, &self.inventory, screen_w, screen_h);
-                        }
-
-                        // Draw inventory UI with time controls
-                        if (self.inventory_ui_state.visible) {
-                            const time_action = self.inventory_ui_state.draw(
-                                u,
-                                &self.inventory,
-                                mouse_x,
-                                mouse_y,
-                                mouse_clicked,
-                                screen_w,
-                                screen_h,
-                            );
-                            // Handle time control buttons from inventory
-                            if (time_action) |time_idx| {
-                                const times = [_]f32{ 0.0, 0.25, 0.5, 0.75 };
-                                if (time_idx < 4) {
-                                    self.atmosphere.setTimeOfDay(times[time_idx]);
-                                }
-                            }
-                        }
-
-                        // Show mode indicator
-                        if (self.creative_mode) {
-                            Font.drawText(u, "CREATIVE", screen_w - 100, 10, 1.5, Color.rgba(100, 200, 255, 200));
-                            if (self.player) |p| {
-                                if (p.fly_mode) {
-                                    Font.drawText(u, "FLYING", screen_w - 80, 25, 1.5, Color.rgba(150, 255, 150, 200));
-                                }
-                            }
-                        }
-
-                        u.end();
-                    }
-                }
-            } else if (self.ui) |*u| {
-                u.begin();
-                const ctx = Menus.MenuContext{
-                    .ui = u,
-                    .input = &self.input,
-                    .screen_w = screen_w,
-                    .screen_h = screen_h,
-                    .time = &self.time,
-                    .allocator = self.allocator,
-                    .window_manager = &self.window_manager,
-                };
-                switch (self.app_state) {
-                    .home => {
-                        const action = Menus.drawHome(ctx, &self.app_state, &self.last_state, &self.seed_focused);
-                        if (action == .quit) self.input.should_quit = true;
-                    },
-                    .settings => Menus.drawSettings(ctx, &self.app_state, &self.settings, self.last_state, self.rhi),
-                    .singleplayer => try Menus.drawSingleplayer(ctx, &self.app_state, &self.seed_input, &self.seed_focused, &self.pending_new_world_seed),
-                    .world, .paused => unreachable,
-                }
-                u.end();
-            }
-
-            self.rhi.endFrame();
-            if (debug_build and in_world) {
-                if (self.world) |active_world| {
-                    if (self.time.frame_count % 120 == 0) {
-                        const s = active_world.getStats();
-                        const rs = active_world.getRenderStats();
-                        if (active_world.getLODStats()) |lod| {
-                            std.debug.print("FPS: {d:.1} | Chunks: {}/{} | LOD: L1={} L2={} L3={} | Pos: ({d:.1}, {d:.1}, {d:.1})\n", .{ self.time.fps, rs.chunks_rendered, s.chunks_loaded, lod.lod1_loaded, lod.lod2_loaded, lod.lod3_loaded, self.camera.position.x, self.camera.position.y, self.camera.position.z });
-                            // Detailed LOD1/LOD2 state debug
-                            if (lod.lod1_loaded == 0 or lod.lod2_loaded == 0) {
-                                std.debug.print("  LOD1 states: gen={} generated={} meshing={} mesh_ready={} uploading={} renderable={}\n", .{ lod.lod1_generating, lod.lod1_generated, lod.lod1_meshing, lod.lod1_mesh_ready, lod.lod1_uploading, lod.lod1_loaded });
-                                std.debug.print("  LOD2 states: gen={} generated={} meshing={} mesh_ready={} uploading={} renderable={}\n", .{ lod.lod2_generating, lod.lod2_generated, lod.lod2_meshing, lod.lod2_mesh_ready, lod.lod2_uploading, lod.lod2_loaded });
-                            }
-                        } else {
-                            std.debug.print("FPS: {d:.1} | Chunks: {}/{} (culled: {}) | Vertices: {} | Pos: ({d:.1}, {d:.1}, {d:.1})\n", .{ self.time.fps, rs.chunks_rendered, s.chunks_loaded, rs.chunks_culled, rs.vertices_rendered, self.camera.position.x, self.camera.position.y, self.camera.position.z });
-                        }
-                    }
-                }
-            }
+            try self.runSingleFrame();
         }
     }
 };

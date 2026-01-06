@@ -13,6 +13,7 @@ const RHI = @import("../engine/graphics/rhi.zig").RHI;
 const WindowManager = @import("../engine/core/window.zig").WindowManager;
 const log = @import("../engine/core/log.zig");
 const seed_gen = @import("seed.zig");
+const ResourcePackManager = @import("../engine/graphics/resource_pack.zig").ResourcePackManager;
 
 pub const MenuAction = enum {
     none,
@@ -27,6 +28,7 @@ pub const MenuContext = struct {
     time: *const Time,
     allocator: std.mem.Allocator,
     window_manager: ?*WindowManager = null,
+    resource_pack_manager: ?*ResourcePackManager = null,
 };
 
 pub fn drawHome(ctx: MenuContext, app_state: *AppState, last_state: *AppState, seed_focused: *bool) MenuAction {
@@ -49,6 +51,11 @@ pub fn drawHome(ctx: MenuContext, app_state: *AppState, last_state: *AppState, s
     if (Widgets.drawButton(ctx.ui, .{ .x = bx, .y = by, .width = bw, .height = btn_height }, "SINGLEPLAYER", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
         app_state.* = .singleplayer;
         seed_focused.* = true;
+    }
+    by += btn_height + btn_spacing;
+    if (Widgets.drawButton(ctx.ui, .{ .x = bx, .y = by, .width = bw, .height = btn_height }, "TEXTURE PACKS", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
+        last_state.* = .home;
+        app_state.* = .resource_packs;
     }
     by += btn_height + btn_spacing;
     if (Widgets.drawButton(ctx.ui, .{ .x = bx, .y = by, .width = bw, .height = btn_height }, "SETTINGS", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
@@ -355,4 +362,64 @@ pub fn handleSeedTyping(seed_input: *std.ArrayListUnmanaged(u8), allocator: std.
     const digits = [_]Key{ .@"0", .@"1", .@"2", .@"3", .@"4", .@"5", .@"6", .@"7", .@"8", .@"9" };
     inline for (digits) |key| if (input.isKeyPressed(key) and seed_input.items.len < max_len) try seed_input.append(allocator, @intCast(@intFromEnum(key)));
     if (input.isKeyPressed(.space) and seed_input.items.len < max_len) try seed_input.append(allocator, ' ');
+}
+
+pub fn drawResourcePacks(ctx: MenuContext, app_state: *AppState, settings: *Settings, last_state: AppState) !void {
+    const mouse_pos = ctx.input.getMousePosition();
+    const mouse_x: f32 = @floatFromInt(mouse_pos.x);
+    const mouse_y: f32 = @floatFromInt(mouse_pos.y);
+    const mouse_clicked = ctx.input.isMouseButtonPressed(.left);
+    const manager = ctx.resource_pack_manager orelse return;
+
+    // Scale UI
+    const auto_scale: f32 = @max(1.0, ctx.screen_h / 720.0);
+    const ui_scale: f32 = auto_scale * settings.ui_scale;
+    const title_scale: f32 = 3.5 * ui_scale;
+    const btn_scale: f32 = 2.0 * ui_scale;
+
+    const pw: f32 = @min(ctx.screen_w * 0.75, 750.0 * ui_scale);
+    const ph: f32 = @min(ctx.screen_h - 40.0, 800.0 * ui_scale);
+    const px: f32 = (ctx.screen_w - pw) * 0.5;
+    const py: f32 = (ctx.screen_h - ph) * 0.5;
+
+    // Background
+    ctx.ui.drawRect(.{ .x = px, .y = py, .width = pw, .height = ph }, Color.rgba(0.12, 0.14, 0.18, 0.95));
+    ctx.ui.drawRectOutline(.{ .x = px, .y = py, .width = pw, .height = ph }, Color.rgba(0.28, 0.33, 0.42, 1.0), 2.0 * ui_scale);
+
+    Font.drawTextCentered(ctx.ui, "RESOURCE PACKS", ctx.screen_w * 0.5, py + 25.0 * ui_scale, title_scale, Color.white);
+
+    var sy: f32 = py + 100.0 * ui_scale;
+    const btn_width: f32 = pw - 100.0 * ui_scale;
+    const btn_height: f32 = 50.0 * ui_scale;
+    const btn_x: f32 = px + 50.0 * ui_scale;
+
+    // Default pack button
+    const is_default = std.mem.eql(u8, settings.texture_pack, "default");
+    const def_label = if (is_default) "Default (Built-in) [SELECTED]" else "Default (Built-in)";
+
+    if (Widgets.drawButton(ctx.ui, .{ .x = btn_x, .y = sy, .width = btn_width, .height = btn_height }, def_label, btn_scale, mouse_x, mouse_y, mouse_clicked)) {
+        try settings.setTexturePack(ctx.allocator, "default");
+        try manager.setActivePack("default");
+    }
+    sy += btn_height + 10.0 * ui_scale;
+
+    // Available packs
+    const packs = manager.getPackNames();
+    var buffer: [128]u8 = undefined;
+    for (packs) |pack| {
+        const is_selected = std.mem.eql(u8, settings.texture_pack, pack.name);
+        const label = try std.fmt.bufPrint(&buffer, "{s}{s}", .{ pack.name, if (is_selected) " [SELECTED]" else "" });
+
+        if (Widgets.drawButton(ctx.ui, .{ .x = btn_x, .y = sy, .width = btn_width, .height = btn_height }, label, btn_scale, mouse_x, mouse_y, mouse_clicked)) {
+            try settings.setTexturePack(ctx.allocator, pack.name);
+            try manager.setActivePack(pack.name);
+        }
+        sy += btn_height + 10.0 * ui_scale;
+    }
+
+    // Back button
+    if (Widgets.drawButton(ctx.ui, .{ .x = px + (pw - 150.0 * ui_scale) * 0.5, .y = py + ph - 70.0 * ui_scale, .width = 150.0 * ui_scale, .height = 50.0 * ui_scale }, "BACK", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
+        settings.save(ctx.allocator);
+        app_state.* = last_state;
+    }
 }
