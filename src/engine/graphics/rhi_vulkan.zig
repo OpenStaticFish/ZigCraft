@@ -48,7 +48,8 @@ const GlobalUniforms = extern struct {
     cloud_coverage: f32,
     cloud_shadow_strength: f32,
     cloud_height: f32,
-    padding: [2]f32, // Align to 16 bytes
+    pbr_enabled: f32, // 1.0 = PBR textures available
+    padding: f32, // Align to 16 bytes
 };
 
 /// Shadow cascade uniforms for CSM. Bound to descriptor set 0, binding 2.
@@ -2341,7 +2342,8 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
         .cloud_coverage = cloud_params.cloud_coverage,
         .cloud_shadow_strength = 0.15,
         .cloud_height = cloud_params.cloud_height,
-        .padding = .{ 0, 0 },
+        .pbr_enabled = if (cloud_params.pbr_enabled) 1.0 else 0.0,
+        .padding = 0,
     };
 
     var map_ptr: ?*anyopaque = null;

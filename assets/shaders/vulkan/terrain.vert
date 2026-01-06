@@ -17,6 +17,8 @@ layout(location = 5) out float vSkyLight;
 layout(location = 6) out float vBlockLight;
 layout(location = 7) out vec3 vFragPosWorld;
 layout(location = 8) out float vViewDepth;
+layout(location = 9) out vec3 vTangent;
+layout(location = 10) out vec3 vBitangent;
 
 layout(set = 0, binding = 0) uniform GlobalUniforms {
     mat4 view_proj;
@@ -63,4 +65,21 @@ void main() {
     
     vFragPosWorld = worldPos.xyz;
     vViewDepth = clipPos.w;
+
+    // Compute tangent and bitangent from the normal for TBN matrix
+    // This works for axis-aligned block faces
+    vec3 absNormal = abs(aNormal);
+    if (absNormal.y > 0.9) {
+        // Top/bottom face
+        vTangent = vec3(1.0, 0.0, 0.0);
+        vBitangent = vec3(0.0, 0.0, aNormal.y > 0.0 ? 1.0 : -1.0);
+    } else if (absNormal.x > 0.9) {
+        // East/west face
+        vTangent = vec3(0.0, 0.0, aNormal.x > 0.0 ? -1.0 : 1.0);
+        vBitangent = vec3(0.0, 1.0, 0.0);
+    } else {
+        // North/south face
+        vTangent = vec3(aNormal.z > 0.0 ? 1.0 : -1.0, 0.0, 0.0);
+        vBitangent = vec3(0.0, 1.0, 0.0);
+    }
 }

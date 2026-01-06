@@ -127,6 +127,7 @@ pub const CloudParams = struct {
     wind_offset_x: f32 = 0.0,
     wind_offset_z: f32 = 0.0,
     base_color: Vec3 = Vec3.init(1.0, 1.0, 1.0),
+    pbr_enabled: bool = false,
 };
 
 /// RGBA color for UI rendering

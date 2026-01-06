@@ -1,9 +1,37 @@
 //! Resource Pack Manager for loading texture packs.
 //! Supports loading textures from PNG files using stb_image with fallback to solid colors.
+//! Supports PBR texture maps: diffuse, normal, roughness, displacement.
 
 const std = @import("std");
 const log = @import("../core/log.zig");
 const c = @import("../../c.zig").c;
+
+/// PBR map types
+pub const PBRMapType = enum {
+    diffuse, // Base color / albedo (or legacy single texture)
+    normal, // Normal map (OpenGL format)
+    roughness, // Roughness map
+    displacement, // Displacement/height map
+
+    pub fn getSuffix(self: PBRMapType) []const u8 {
+        return switch (self) {
+            .diffuse => "_diff",
+            .normal => "_nor_gl",
+            .roughness => "_rough",
+            .displacement => "_disp",
+        };
+    }
+
+    pub fn getDefaultSuffix(self: PBRMapType) []const u8 {
+        // Alternative suffixes for compatibility
+        return switch (self) {
+            .diffuse => "", // No suffix for diffuse (backward compat)
+            .normal => "_normal",
+            .roughness => "_roughness",
+            .displacement => "_height",
+        };
+    }
+};
 
 /// Texture name to file mapping for blocks
 pub const TextureMapping = struct {
@@ -72,6 +100,25 @@ pub const LoadedTexture = struct {
     }
 };
 
+/// PBR texture set for a single block texture
+pub const PBRTextureSet = struct {
+    diffuse: ?LoadedTexture,
+    normal: ?LoadedTexture,
+    roughness: ?LoadedTexture,
+    displacement: ?LoadedTexture,
+
+    pub fn hasPBR(self: *const PBRTextureSet) bool {
+        return self.normal != null or self.roughness != null or self.displacement != null;
+    }
+
+    pub fn deinit(self: *PBRTextureSet, allocator: std.mem.Allocator) void {
+        if (self.diffuse) |*tex| tex.deinit(allocator);
+        if (self.normal) |*tex| tex.deinit(allocator);
+        if (self.roughness) |*tex| tex.deinit(allocator);
+        if (self.displacement) |*tex| tex.deinit(allocator);
+    }
+};
+
 pub const PackInfo = struct {
     name: []const u8,
     path: []const u8,
@@ -86,6 +133,8 @@ pub const ResourcePackManager = struct {
     base_path: []const u8,
     available_packs: std.ArrayListUnmanaged(PackInfo),
     active_pack: ?[]const u8,
+    /// Whether the active pack uses PBR folder structure
+    uses_pbr_structure: bool,
 
     const Self = @This();
 
@@ -95,6 +144,7 @@ pub const ResourcePackManager = struct {
             .base_path = "assets/textures",
             .available_packs = .{},
             .active_pack = null,
+            .uses_pbr_structure = false,
         };
     }
 
@@ -130,6 +180,43 @@ pub const ResourcePackManager = struct {
         if (self.active_pack) |old| self.allocator.free(old);
         self.active_pack = try self.allocator.dupe(u8, pack_name);
         log.log.info("Active texture pack set to: {s}", .{pack_name});
+
+        // Detect if this pack uses PBR folder structure
+        self.uses_pbr_structure = self.detectPBRStructure();
+        if (self.uses_pbr_structure) {
+            log.log.info("Detected PBR folder structure in pack: {s}", .{pack_name});
+        }
+    }
+
+    /// Detect if the pack uses PBR folder structure (e.g., stone/stone_diff.png)
+    fn detectPBRStructure(self: *Self) bool {
+        const pack_path = self.getActivePackPath() orelse return false;
+
+        // Check if any block subfolder exists with PBR files
+        const test_blocks = [_][]const u8{ "stone", "dirt", "cobblestone" };
+        for (test_blocks) |block_name| {
+            const subfolder_path = std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ pack_path, block_name }) catch continue;
+            defer self.allocator.free(subfolder_path);
+
+            var dir = std.fs.cwd().openDir(subfolder_path, .{}) catch continue;
+            dir.close();
+
+            // Subfolder exists, check for PBR files
+            const diff_path = std.fmt.allocPrint(self.allocator, "{s}/{s}_diff.png", .{ subfolder_path, block_name }) catch continue;
+            defer self.allocator.free(diff_path);
+
+            if (std.fs.cwd().access(diff_path, .{})) |_| {
+                return true;
+            } else |_| {
+                // Also check for just the block name (e.g., stone/stone.png)
+                const base_path = std.fmt.allocPrint(self.allocator, "{s}/{s}.png", .{ subfolder_path, block_name }) catch continue;
+                defer self.allocator.free(base_path);
+                if (std.fs.cwd().access(base_path, .{})) |_| {
+                    return true;
+                } else |_| {}
+            }
+        }
+        return false;
     }
 
     pub fn getActivePackPath(self: *const Self) ?[]const u8 {
@@ -139,8 +226,23 @@ pub const ResourcePackManager = struct {
         return null;
     }
 
+    /// Check if the active pack has PBR textures
+    pub fn hasPBRSupport(self: *const Self) bool {
+        return self.uses_pbr_structure;
+    }
+
+    /// Load a texture (backward compatible - returns diffuse/base color)
     pub fn loadTexture(self: *Self, texture_name: []const u8) ?LoadedTexture {
         const pack_path = self.getActivePackPath() orelse return null;
+
+        // First, try PBR folder structure: pack/block_name/block_name_diff.png or pack/block_name/block_name.png
+        if (self.uses_pbr_structure) {
+            if (self.loadPBRTexture(pack_path, texture_name, .diffuse)) |tex| {
+                return tex;
+            }
+        }
+
+        // Fall back to flat structure: pack/block_name.png
         for (BLOCK_TEXTURES) |mapping| {
             if (std.mem.eql(u8, mapping.name, texture_name)) {
                 for (mapping.files) |file_name| {
@@ -151,6 +253,77 @@ pub const ResourcePackManager = struct {
                 break;
             }
         }
+        return null;
+    }
+
+    /// Load a specific PBR map type for a texture
+    pub fn loadPBRMap(self: *Self, texture_name: []const u8, map_type: PBRMapType) ?LoadedTexture {
+        const pack_path = self.getActivePackPath() orelse return null;
+
+        if (!self.uses_pbr_structure) return null;
+
+        return self.loadPBRTexture(pack_path, texture_name, map_type);
+    }
+
+    /// Load all PBR maps for a texture
+    pub fn loadPBRTextureSet(self: *Self, texture_name: []const u8) PBRTextureSet {
+        return .{
+            .diffuse = self.loadPBRMap(texture_name, .diffuse) orelse self.loadTexture(texture_name),
+            .normal = self.loadPBRMap(texture_name, .normal),
+            .roughness = self.loadPBRMap(texture_name, .roughness),
+            .displacement = self.loadPBRMap(texture_name, .displacement),
+        };
+    }
+
+    /// Load a PBR texture from the folder structure
+    fn loadPBRTexture(self: *Self, pack_path: []const u8, texture_name: []const u8, map_type: PBRMapType) ?LoadedTexture {
+        // Try: pack/texture_name/texture_name_suffix.png
+        const suffix = map_type.getSuffix();
+        const alt_suffix = map_type.getDefaultSuffix();
+
+        // Primary: stone/stone_diff.png
+        const primary_path = std.fmt.allocPrint(
+            self.allocator,
+            "{s}/{s}/{s}{s}.png",
+            .{ pack_path, texture_name, texture_name, suffix },
+        ) catch return null;
+        defer self.allocator.free(primary_path);
+
+        if (self.loadImageFile(primary_path)) |tex| {
+            log.log.debug("Loaded PBR {s}: {s}", .{ @tagName(map_type), primary_path });
+            return tex;
+        }
+
+        // Alternative suffix: stone/stone_normal.png
+        if (alt_suffix.len > 0) {
+            const alt_path = std.fmt.allocPrint(
+                self.allocator,
+                "{s}/{s}/{s}{s}.png",
+                .{ pack_path, texture_name, texture_name, alt_suffix },
+            ) catch return null;
+            defer self.allocator.free(alt_path);
+
+            if (self.loadImageFile(alt_path)) |tex| {
+                log.log.debug("Loaded PBR {s} (alt): {s}", .{ @tagName(map_type), alt_path });
+                return tex;
+            }
+        }
+
+        // For diffuse, also try just the base name: stone/stone.png
+        if (map_type == .diffuse) {
+            const base_path = std.fmt.allocPrint(
+                self.allocator,
+                "{s}/{s}/{s}.png",
+                .{ pack_path, texture_name, texture_name },
+            ) catch return null;
+            defer self.allocator.free(base_path);
+
+            if (self.loadImageFile(base_path)) |tex| {
+                log.log.debug("Loaded PBR diffuse (base): {s}", .{base_path});
+                return tex;
+            }
+        }
+
         return null;
     }
 

@@ -300,6 +300,10 @@ pub const App = struct {
 
         const atlas = try TextureAtlas.init(allocator, rhi, &resource_pack_manager);
         atlas.bind(1);
+        // Bind PBR textures if available
+        atlas.bindNormal(6);
+        atlas.bindRoughness(7);
+        atlas.bindDisplacement(8);
 
         var atmosphere = AtmosphereState{};
         atmosphere.setTimeOfDay(0.25);
@@ -590,6 +594,7 @@ pub const App = struct {
                         .cloud_coverage = p.cloud_coverage,
                         .cloud_height = p.cloud_height,
                         .base_color = self.clouds.base_color,
+                        .pbr_enabled = self.atlas.has_pbr,
                     };
                 };
 
@@ -741,6 +746,10 @@ pub const App = struct {
                         self.atlas.deinit();
                         self.atlas = try TextureAtlas.init(self.allocator, self.rhi, &self.resource_pack_manager);
                         self.atlas.bind(1);
+                        // Bind PBR textures if available
+                        self.atlas.bindNormal(6);
+                        self.atlas.bindRoughness(7);
+                        self.atlas.bindDisplacement(8);
                     }
                 },
                 .singleplayer => try Menus.drawSingleplayer(ctx, &self.app_state, &self.seed_input, &self.seed_focused, &self.pending_new_world_seed),
