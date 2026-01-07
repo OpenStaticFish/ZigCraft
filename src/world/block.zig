@@ -210,14 +210,21 @@ pub const BlockType = enum(u8) {
 
     /// Get light emission level (0-15)
     pub fn getLightEmission(self: BlockType) u4 {
+        const rgb = self.getLightEmissionRGB();
+        return @max(rgb[0], @max(rgb[1], rgb[2]));
+    }
+
+    /// Get RGB light emission level (0-15 per channel)
+    pub fn getLightEmissionRGB(self: BlockType) [3]u4 {
         return switch (self) {
-            .water => 0, // Water doesn't emit light
-            .cactus => 0,
-            .coal_ore => 0,
-            .iron_ore => 0,
-            .gold_ore => 0,
-            .glowstone => 15,
-            else => 0,
+            .glowstone => .{ 15, 14, 10 }, // Warm yellow
+            .water => .{ 0, 0, 0 },
+            .cactus => .{ 0, 0, 0 },
+            .coal_ore => .{ 0, 0, 0 },
+            .iron_ore => .{ 0, 0, 0 },
+            .gold_ore => .{ 0, 0, 0 },
+            // Add more light emitters here later (torches, lava, etc)
+            else => .{ 0, 0, 0 },
         };
     }
 

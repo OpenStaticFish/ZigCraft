@@ -119,10 +119,10 @@ pub const HandRenderer = struct {
     }
 
     fn addQuad(verts: *[36]Vertex, idx: *usize, p0: [3]f32, p1: [3]f32, p2: [3]f32, p3: [3]f32, normal: [3]f32, tile: u8, color: [3]f32) void {
-        const v0 = Vertex{ .pos = p0, .color = color, .normal = normal, .uv = .{ 0, 0 }, .tile_id = @floatFromInt(tile), .skylight = 15, .blocklight = 15, .ao = 1.0 };
-        const v1 = Vertex{ .pos = p1, .color = color, .normal = normal, .uv = .{ 1, 0 }, .tile_id = @floatFromInt(tile), .skylight = 15, .blocklight = 15, .ao = 1.0 };
-        const v2 = Vertex{ .pos = p2, .color = color, .normal = normal, .uv = .{ 1, 1 }, .tile_id = @floatFromInt(tile), .skylight = 15, .blocklight = 15, .ao = 1.0 };
-        const v3 = Vertex{ .pos = p3, .color = color, .normal = normal, .uv = .{ 0, 1 }, .tile_id = @floatFromInt(tile), .skylight = 15, .blocklight = 15, .ao = 1.0 };
+        const v0 = Vertex{ .pos = p0, .color = color, .normal = normal, .uv = .{ 0, 0 }, .tile_id = @floatFromInt(tile), .skylight = 15, .blocklight = .{ 15, 15, 15 }, .ao = 1.0 };
+        const v1 = Vertex{ .pos = p1, .color = color, .normal = normal, .uv = .{ 1, 0 }, .tile_id = @floatFromInt(tile), .skylight = 15, .blocklight = .{ 15, 15, 15 }, .ao = 1.0 };
+        const v2 = Vertex{ .pos = p2, .color = color, .normal = normal, .uv = .{ 1, 1 }, .tile_id = @floatFromInt(tile), .skylight = 15, .blocklight = .{ 15, 15, 15 }, .ao = 1.0 };
+        const v3 = Vertex{ .pos = p3, .color = color, .normal = normal, .uv = .{ 0, 1 }, .tile_id = @floatFromInt(tile), .skylight = 15, .blocklight = .{ 15, 15, 15 }, .ao = 1.0 };
 
         verts[idx.*] = v0;
         idx.* += 1;

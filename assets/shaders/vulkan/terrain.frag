@@ -6,7 +6,7 @@ layout(location = 2) in vec2 vTexCoord;
 layout(location = 3) flat in int vTileID;
 layout(location = 4) in float vDistance;
 layout(location = 5) in float vSkyLight;
-layout(location = 6) in float vBlockLight;
+layout(location = 6) in vec3 vBlockLight;
 layout(location = 7) in vec3 vFragPosWorld;
 layout(location = 8) in float vViewDepth;
 layout(location = 9) in vec3 vTangent;
@@ -417,17 +417,17 @@ void main() {
                 vec3 envColor = texture(uEnvMap, envUV).rgb;
                 
                 float skyLight = vSkyLight * global.lighting.x;
-                float blockLight = vBlockLight;
+                vec3 blockLight = vBlockLight;
                 // IBL intensity 0.8 - more visible effect from HDRI
                 // Clamp envColor to prevent HDR values from blowing out
                 // Apply AO to ambient lighting (darkens corners and crevices)
-                vec3 ambientColor = albedo * (min(envColor, vec3(3.0)) * skyLight * 0.8 + vec3(blockLight)) * vAO;
+                vec3 ambientColor = albedo * (min(envColor, vec3(3.0)) * skyLight * 0.8 + blockLight) * vAO;
                 
                 color = ambientColor + Lo;
             } else {
                 // Non-PBR blocks with PBR enabled: use simplified IBL-aware lighting
                 float directLight = nDotL * global.params.w * (1.0 - totalShadow);
-                float blockLight = vBlockLight;
+                vec3 blockLight = vBlockLight;
                 
                 // Sample IBL for ambient (even for non-PBR blocks)
                 vec2 envUV = SampleSphericalMap(normalize(N));
@@ -436,7 +436,7 @@ void main() {
                 // IBL ambient with intensity 0.8 for non-PBR blocks
                 float skyLight = vSkyLight * global.lighting.x;
                 // Apply AO to ambient lighting
-                vec3 ambientColor = albedo * (min(envColor, vec3(3.0)) * skyLight * 0.8 + vec3(blockLight)) * vAO;
+                vec3 ambientColor = albedo * (min(envColor, vec3(3.0)) * skyLight * 0.8 + blockLight) * vAO;
                 
                 // Direct lighting
                 vec3 sunColor = vec3(1.0, 0.98, 0.95) * global.params.w;
@@ -448,8 +448,8 @@ void main() {
             // Legacy lighting (PBR disabled)
             float directLight = nDotL * global.params.w * (1.0 - totalShadow);
             float skyLight = vSkyLight * (global.lighting.x + directLight * 0.8);
-            float blockLight = vBlockLight;
-            float lightLevel = max(skyLight, blockLight);
+            vec3 blockLight = vBlockLight;
+            float lightLevel = max(skyLight, max(blockLight.r, max(blockLight.g, blockLight.b)));
             lightLevel = max(lightLevel, global.lighting.x * 0.5);
             lightLevel = clamp(lightLevel, 0.0, 1.0);
             
@@ -460,8 +460,8 @@ void main() {
         // Vertex color only mode
         float directLight = nDotL * global.params.w * (1.0 - totalShadow);
         float skyLight = vSkyLight * (global.lighting.x + directLight * 0.8);
-        float blockLight = vBlockLight;
-        float lightLevel = max(skyLight, blockLight);
+        vec3 blockLight = vBlockLight;
+        float lightLevel = max(skyLight, max(blockLight.r, max(blockLight.g, blockLight.b)));
         lightLevel = max(lightLevel, global.lighting.x * 0.5);
         lightLevel = clamp(lightLevel, 0.0, 1.0);
         

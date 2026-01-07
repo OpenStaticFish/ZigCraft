@@ -1567,7 +1567,9 @@ pub const TerrainGenerator = struct {
         x: u8,
         y: u16,
         z: u8,
-        level: u4,
+        r: u4,
+        g: u4,
+        b: u4,
     };
 
     pub fn computeBlockLight(self: *const TerrainGenerator, chunk: *Chunk) !void {
@@ -1580,10 +1582,17 @@ pub const TerrainGenerator = struct {
                 var local_x: u32 = 0;
                 while (local_x < CHUNK_SIZE_X) : (local_x += 1) {
                     const block = chunk.getBlock(local_x, y, local_z);
-                    const emission = block.getLightEmission();
-                    if (emission > 0) {
-                        chunk.setBlockLight(local_x, y, local_z, emission);
-                        try queue.append(self.allocator, .{ .x = @intCast(local_x), .y = @intCast(y), .z = @intCast(local_z), .level = emission });
+                    const emission = block.getLightEmissionRGB();
+                    if (emission[0] > 0 or emission[1] > 0 or emission[2] > 0) {
+                        chunk.setBlockLightRGB(local_x, y, local_z, emission[0], emission[1], emission[2]);
+                        try queue.append(self.allocator, .{
+                            .x = @intCast(local_x),
+                            .y = @intCast(y),
+                            .z = @intCast(local_z),
+                            .r = emission[0],
+                            .g = emission[1],
+                            .b = emission[2],
+                        });
                     }
                 }
             }
@@ -1591,7 +1600,6 @@ pub const TerrainGenerator = struct {
         var head: usize = 0;
         while (head < queue.items.len) : (head += 1) {
             const node = queue.items[head];
-            if (node.level <= 1) continue;
             const neighbors = [6][3]i32{ .{ 1, 0, 0 }, .{ -1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, -1, 0 }, .{ 0, 0, 1 }, .{ 0, 0, -1 } };
             for (neighbors) |offset| {
                 const nx = @as(i32, node.x) + offset[0];
@@ -1603,11 +1611,28 @@ pub const TerrainGenerator = struct {
                     const uz: u32 = @intCast(nz);
                     const block = chunk.getBlock(ux, uy, uz);
                     if (!block.isOpaque()) {
-                        const current_level = chunk.getBlockLight(ux, uy, uz);
-                        const next_level = node.level - 1;
-                        if (next_level > current_level) {
-                            chunk.setBlockLight(ux, uy, uz, next_level);
-                            try queue.append(self.allocator, .{ .x = @intCast(nx), .y = @intCast(ny), .z = @intCast(nz), .level = next_level });
+                        const current_light = chunk.getLight(ux, uy, uz);
+                        const current_r = current_light.getBlockLightR();
+                        const current_g = current_light.getBlockLightG();
+                        const current_b = current_light.getBlockLightB();
+
+                        const next_r: u4 = if (node.r > 1) node.r - 1 else 0;
+                        const next_g: u4 = if (node.g > 1) node.g - 1 else 0;
+                        const next_b: u4 = if (node.b > 1) node.b - 1 else 0;
+
+                        if (next_r > current_r or next_g > current_g or next_b > current_b) {
+                            const new_r = @max(next_r, current_r);
+                            const new_g = @max(next_g, current_g);
+                            const new_b = @max(next_b, current_b);
+                            chunk.setBlockLightRGB(ux, uy, uz, new_r, new_g, new_b);
+                            try queue.append(self.allocator, .{
+                                .x = @intCast(nx),
+                                .y = @intCast(ny),
+                                .z = @intCast(nz),
+                                .r = new_r,
+                                .g = new_g,
+                                .b = new_b,
+                            });
                         }
                     }
                 }

@@ -76,7 +76,7 @@ pub const Vertex = extern struct {
     uv: [2]f32,
     tile_id: f32,
     skylight: f32,
-    blocklight: f32,
+    blocklight: [3]f32, // RGB block light
     ao: f32, // Ambient occlusion (0.0 = fully occluded, 1.0 = no occlusion)
 };
 
@@ -215,6 +215,14 @@ pub const RHI = struct {
         setClearColor: *const fn (ctx: *anyopaque, color: Vec3) void,
         beginMainPass: *const fn (ctx: *anyopaque) void,
         endMainPass: *const fn (ctx: *anyopaque) void,
+
+        // G-Pass for SSAO/Reflections
+        beginGPass: *const fn (ctx: *anyopaque) void,
+        endGPass: *const fn (ctx: *anyopaque) void,
+
+        // SSAO Computation
+        computeSSAO: *const fn (ctx: *anyopaque) void,
+
         endFrame: *const fn (ctx: *anyopaque) void,
         waitIdle: *const fn (ctx: *anyopaque) void,
 
@@ -352,6 +360,18 @@ pub const RHI = struct {
 
     pub fn endMainPass(self: RHI) void {
         self.vtable.endMainPass(self.ptr);
+    }
+
+    pub fn beginGPass(self: RHI) void {
+        self.vtable.beginGPass(self.ptr);
+    }
+
+    pub fn endGPass(self: RHI) void {
+        self.vtable.endGPass(self.ptr);
+    }
+
+    pub fn computeSSAO(self: RHI) void {
+        self.vtable.computeSSAO(self.ptr);
     }
 
     pub fn endFrame(self: RHI) void {

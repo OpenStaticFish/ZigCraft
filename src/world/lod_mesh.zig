@@ -308,7 +308,7 @@ fn addSmoothQuad(
         .uv = .{ 0, 0 },
         .tile_id = -1.0,
         .skylight = 1.0,
-        .blocklight = 0,
+        .blocklight = .{ 0, 0, 0 },
         .ao = 1.0,
     });
     try vertices.append(allocator, .{
@@ -318,7 +318,7 @@ fn addSmoothQuad(
         .uv = .{ 1, 0 },
         .tile_id = -1.0,
         .skylight = 1.0,
-        .blocklight = 0,
+        .blocklight = .{ 0, 0, 0 },
         .ao = 1.0,
     });
     try vertices.append(allocator, .{
@@ -328,7 +328,7 @@ fn addSmoothQuad(
         .uv = .{ 1, 1 },
         .tile_id = -1.0,
         .skylight = 1.0,
-        .blocklight = 0,
+        .blocklight = .{ 0, 0, 0 },
         .ao = 1.0,
     });
 
@@ -340,7 +340,7 @@ fn addSmoothQuad(
         .uv = .{ 0, 0 },
         .tile_id = -1.0,
         .skylight = 1.0,
-        .blocklight = 0,
+        .blocklight = .{ 0, 0, 0 },
         .ao = 1.0,
     });
     try vertices.append(allocator, .{
@@ -350,7 +350,7 @@ fn addSmoothQuad(
         .uv = .{ 1, 1 },
         .tile_id = -1.0,
         .skylight = 1.0,
-        .blocklight = 0,
+        .blocklight = .{ 0, 0, 0 },
         .ao = 1.0,
     });
     try vertices.append(allocator, .{
@@ -360,7 +360,7 @@ fn addSmoothQuad(
         .uv = .{ 0, 1 },
         .tile_id = -1.0,
         .skylight = 1.0,
-        .blocklight = 0,
+        .blocklight = .{ 0, 0, 0 },
         .ao = 1.0,
     });
 }
@@ -378,7 +378,7 @@ fn addTopFaceQuad(allocator: std.mem.Allocator, vertices: *std.ArrayListUnmanage
         .uv = .{ 0, 0 },
         .tile_id = -1.0,
         .skylight = 1.0,
-        .blocklight = 0,
+        .blocklight = .{ 0, 0, 0 },
         .ao = 1.0,
     });
     try vertices.append(allocator, .{
@@ -388,7 +388,7 @@ fn addTopFaceQuad(allocator: std.mem.Allocator, vertices: *std.ArrayListUnmanage
         .uv = .{ 1, 0 },
         .tile_id = -1.0,
         .skylight = 1.0,
-        .blocklight = 0,
+        .blocklight = .{ 0, 0, 0 },
         .ao = 1.0,
     });
     try vertices.append(allocator, .{
@@ -398,7 +398,7 @@ fn addTopFaceQuad(allocator: std.mem.Allocator, vertices: *std.ArrayListUnmanage
         .uv = .{ 1, 1 },
         .tile_id = -1.0,
         .skylight = 1.0,
-        .blocklight = 0,
+        .blocklight = .{ 0, 0, 0 },
         .ao = 1.0,
     });
 
@@ -410,7 +410,7 @@ fn addTopFaceQuad(allocator: std.mem.Allocator, vertices: *std.ArrayListUnmanage
         .uv = .{ 0, 0 },
         .tile_id = -1.0,
         .skylight = 1.0,
-        .blocklight = 0,
+        .blocklight = .{ 0, 0, 0 },
         .ao = 1.0,
     });
     try vertices.append(allocator, .{
@@ -420,7 +420,7 @@ fn addTopFaceQuad(allocator: std.mem.Allocator, vertices: *std.ArrayListUnmanage
         .uv = .{ 1, 1 },
         .tile_id = -1.0,
         .skylight = 1.0,
-        .blocklight = 0,
+        .blocklight = .{ 0, 0, 0 },
         .ao = 1.0,
     });
     try vertices.append(allocator, .{
@@ -430,7 +430,7 @@ fn addTopFaceQuad(allocator: std.mem.Allocator, vertices: *std.ArrayListUnmanage
         .uv = .{ 0, 1 },
         .tile_id = -1.0,
         .skylight = 1.0,
-        .blocklight = 0,
+        .blocklight = .{ 0, 0, 0 },
         .ao = 1.0,
     });
 }
@@ -475,14 +475,14 @@ fn addSideFaceQuad(allocator: std.mem.Allocator, vertices: *std.ArrayListUnmanag
     };
 
     // Triangle 1
-    try vertices.append(allocator, .{ .pos = corners[0], .color = color, .normal = normal, .uv = .{ 0, 0 }, .tile_id = -1.0, .skylight = 1.0, .blocklight = 0, .ao = 1.0 });
-    try vertices.append(allocator, .{ .pos = corners[1], .color = color, .normal = normal, .uv = .{ 1, 0 }, .tile_id = -1.0, .skylight = 1.0, .blocklight = 0, .ao = 1.0 });
-    try vertices.append(allocator, .{ .pos = corners[2], .color = color, .normal = normal, .uv = .{ 1, 1 }, .tile_id = -1.0, .skylight = 1.0, .blocklight = 0, .ao = 1.0 });
+    try vertices.append(allocator, .{ .pos = corners[0], .color = color, .normal = normal, .uv = .{ 0, 0 }, .tile_id = -1.0, .skylight = 1.0, .blocklight = .{ 0, 0, 0 }, .ao = 1.0 });
+    try vertices.append(allocator, .{ .pos = corners[1], .color = color, .normal = normal, .uv = .{ 1, 0 }, .tile_id = -1.0, .skylight = 1.0, .blocklight = .{ 0, 0, 0 }, .ao = 1.0 });
+    try vertices.append(allocator, .{ .pos = corners[2], .color = color, .normal = normal, .uv = .{ 1, 1 }, .tile_id = -1.0, .skylight = 1.0, .blocklight = .{ 0, 0, 0 }, .ao = 1.0 });
 
     // Triangle 2
-    try vertices.append(allocator, .{ .pos = corners[0], .color = color, .normal = normal, .uv = .{ 0, 0 }, .tile_id = -1.0, .skylight = 1.0, .blocklight = 0, .ao = 1.0 });
-    try vertices.append(allocator, .{ .pos = corners[2], .color = color, .normal = normal, .uv = .{ 1, 1 }, .tile_id = -1.0, .skylight = 1.0, .blocklight = 0, .ao = 1.0 });
-    try vertices.append(allocator, .{ .pos = corners[3], .color = color, .normal = normal, .uv = .{ 0, 1 }, .tile_id = -1.0, .skylight = 1.0, .blocklight = 0, .ao = 1.0 });
+    try vertices.append(allocator, .{ .pos = corners[0], .color = color, .normal = normal, .uv = .{ 0, 0 }, .tile_id = -1.0, .skylight = 1.0, .blocklight = .{ 0, 0, 0 }, .ao = 1.0 });
+    try vertices.append(allocator, .{ .pos = corners[2], .color = color, .normal = normal, .uv = .{ 1, 1 }, .tile_id = -1.0, .skylight = 1.0, .blocklight = .{ 0, 0, 0 }, .ao = 1.0 });
+    try vertices.append(allocator, .{ .pos = corners[3], .color = color, .normal = normal, .uv = .{ 0, 1 }, .tile_id = -1.0, .skylight = 1.0, .blocklight = .{ 0, 0, 0 }, .ao = 1.0 });
 }
 
 /// LOD Mesh Builder - builds meshes for LOD regions

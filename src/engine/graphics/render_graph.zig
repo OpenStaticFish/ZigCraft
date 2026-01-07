@@ -11,6 +11,9 @@ pub const RenderPass = enum {
     shadow_cascade_0,
     shadow_cascade_1,
     shadow_cascade_2,
+    g_pass, // Depth + Normals
+    ssao, // SSAO calculation
+    ssao_blur, // SSAO smoothing
     main_opaque,
     main_transparent,
     sky,
@@ -28,6 +31,9 @@ pub const RenderGraph = struct {
             .shadow_cascade_0,
             .shadow_cascade_1,
             .shadow_cascade_2,
+            .g_pass,
+            .ssao,
+            .ssao_blur,
             .sky,
             .main_opaque,
             .clouds,
@@ -85,6 +91,9 @@ pub const RenderGraph = struct {
             .shadow_cascade_0 => RenderGraph.executeShadowPass(0, rhi, world, camera, aspect, sky_params.sun_dir, shadow_distance, shadow_resolution),
             .shadow_cascade_1 => RenderGraph.executeShadowPass(1, rhi, world, camera, aspect, sky_params.sun_dir, shadow_distance, shadow_resolution),
             .shadow_cascade_2 => RenderGraph.executeShadowPass(2, rhi, world, camera, aspect, sky_params.sun_dir, shadow_distance, shadow_resolution),
+            .g_pass => RenderGraph.executeGPass(rhi, world, camera, aspect),
+            .ssao => RenderGraph.executeSSAOPass(rhi, camera, aspect),
+            .ssao_blur => RenderGraph.executeSSAOBlurPass(rhi),
             .main_opaque => RenderGraph.executeMainPass(rhi, world, camera, aspect, main_shader, atlas_handle),
             .main_transparent => {},
             .sky => RenderGraph.executeSkyPass(rhi, camera, aspect, sky_params),
@@ -92,6 +101,24 @@ pub const RenderGraph = struct {
             .ui => {},
             .post_process => {},
         }
+    }
+
+    fn executeGPass(rhi: RHI, world: *World, camera: *Camera, aspect: f32) void {
+        rhi.beginGPass();
+        const view_proj = Mat4.perspectiveReverseZ(camera.fov, aspect, camera.near, camera.far).multiply(camera.getViewMatrixOriginCentered());
+        world.render(view_proj, camera.position);
+        rhi.endGPass();
+    }
+
+    fn executeSSAOPass(rhi: RHI, camera: *Camera, aspect: f32) void {
+        _ = camera;
+        _ = aspect;
+        rhi.computeSSAO();
+    }
+
+    fn executeSSAOBlurPass(rhi: RHI) void {
+        _ = rhi;
+        // Blur is currently part of computeSSAO in this simple implementation
     }
 
     fn executeShadowPass(cascade_idx: usize, rhi: RHI, world: *World, camera: *Camera, aspect: f32, light_dir: Vec3, shadow_distance: f32, shadow_resolution: u32) void {

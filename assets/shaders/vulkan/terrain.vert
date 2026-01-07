@@ -6,7 +6,7 @@ layout(location = 2) in vec3 aNormal;
 layout(location = 3) in vec2 aTexCoord;
 layout(location = 4) in float aTileID;
 layout(location = 5) in float aSkyLight;
-layout(location = 6) in float aBlockLight;
+layout(location = 6) in vec3 aBlockLight;
 layout(location = 7) in float aAO;
 
 layout(location = 0) out vec3 vColor;
@@ -15,7 +15,7 @@ layout(location = 2) out vec2 vTexCoord;
 layout(location = 3) flat out int vTileID;
 layout(location = 4) out float vDistance;
 layout(location = 5) out float vSkyLight;
-layout(location = 6) out float vBlockLight;
+layout(location = 6) out vec3 vBlockLight;
 layout(location = 7) out vec3 vFragPosWorld;
 layout(location = 8) out float vViewDepth;
 layout(location = 9) out vec3 vTangent;

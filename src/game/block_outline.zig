@@ -23,7 +23,7 @@ fn makeVertex(x: f32, y: f32, z: f32) Vertex {
         .uv = .{ 0, 0 },
         .tile_id = 0,
         .skylight = 15,
-        .blocklight = 15,
+        .blocklight = .{ 15, 15, 15 },
         .ao = 1.0,
     };
 }

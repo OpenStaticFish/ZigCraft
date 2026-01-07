@@ -73,10 +73,10 @@ const SkyPushConstants = extern struct {
 
 /// Vulkan buffer with backing memory.
 const VulkanBuffer = struct {
-    buffer: c.VkBuffer,
-    memory: c.VkDeviceMemory,
-    size: c.VkDeviceSize,
-    is_host_visible: bool,
+    buffer: c.VkBuffer = null,
+    memory: c.VkDeviceMemory = null,
+    size: c.VkDeviceSize = 0,
+    is_host_visible: bool = false,
 };
 
 /// Vulkan texture with image, view, and sampler.
@@ -249,6 +249,41 @@ const VulkanContext = struct {
     msaa_color_image: c.VkImage,
     msaa_color_memory: c.VkDeviceMemory,
     msaa_color_view: c.VkImageView,
+
+    // SSAO resources
+    g_normal_image: c.VkImage = null,
+    g_normal_memory: c.VkDeviceMemory = null,
+    g_normal_view: c.VkImageView = null,
+    ssao_image: c.VkImage = null,
+    ssao_memory: c.VkDeviceMemory = null,
+    ssao_view: c.VkImageView = null,
+    ssao_blur_image: c.VkImage = null,
+    ssao_blur_memory: c.VkDeviceMemory = null,
+    ssao_blur_view: c.VkImageView = null,
+    ssao_noise_image: c.VkImage = null,
+    ssao_noise_memory: c.VkDeviceMemory = null,
+    ssao_noise_view: c.VkImageView = null,
+    ssao_kernel_ubo: VulkanBuffer = .{},
+
+    // G-Pass & SSAO Passes
+    g_render_pass: c.VkRenderPass = null,
+    ssao_render_pass: c.VkRenderPass = null,
+    ssao_blur_render_pass: c.VkRenderPass = null,
+    g_framebuffer: c.VkFramebuffer = null,
+    ssao_framebuffer: c.VkFramebuffer = null,
+    ssao_blur_framebuffer: c.VkFramebuffer = null,
+
+    // SSAO Pipelines
+    g_pipeline: c.VkPipeline = null,
+    g_pipeline_layout: c.VkPipelineLayout = null,
+    ssao_pipeline: c.VkPipeline = null,
+    ssao_pipeline_layout: c.VkPipelineLayout = null,
+    ssao_blur_pipeline: c.VkPipeline = null,
+    ssao_blur_pipeline_layout: c.VkPipelineLayout = null,
+    ssao_descriptor_set_layout: c.VkDescriptorSetLayout = null,
+    ssao_descriptor_sets: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorSet = undefined,
+    ssao_blur_descriptor_set_layout: c.VkDescriptorSetLayout = null,
+    ssao_blur_descriptor_sets: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorSet = undefined,
 
     shadow_resolution: u32,
     memory_type_index: u32,
@@ -775,8 +810,8 @@ fn createMainPipelines(ctx: *VulkanContext) !void {
         attribute_descriptions[3] = .{ .binding = 0, .location = 3, .format = c.VK_FORMAT_R32G32_SFLOAT, .offset = 9 * 4 };
         attribute_descriptions[4] = .{ .binding = 0, .location = 4, .format = c.VK_FORMAT_R32_SFLOAT, .offset = 11 * 4 };
         attribute_descriptions[5] = .{ .binding = 0, .location = 5, .format = c.VK_FORMAT_R32_SFLOAT, .offset = 12 * 4 };
-        attribute_descriptions[6] = .{ .binding = 0, .location = 6, .format = c.VK_FORMAT_R32_SFLOAT, .offset = 13 * 4 };
-        attribute_descriptions[7] = .{ .binding = 0, .location = 7, .format = c.VK_FORMAT_R32_SFLOAT, .offset = 14 * 4 }; // AO
+        attribute_descriptions[6] = .{ .binding = 0, .location = 6, .format = c.VK_FORMAT_R32G32B32_SFLOAT, .offset = 13 * 4 }; // BlockLight RGB
+        attribute_descriptions[7] = .{ .binding = 0, .location = 7, .format = c.VK_FORMAT_R32_SFLOAT, .offset = 16 * 4 }; // AO
         var vertex_input_info = std.mem.zeroes(c.VkPipelineVertexInputStateCreateInfo);
         vertex_input_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
         vertex_input_info.vertexBindingDescriptionCount = 1;
@@ -2404,6 +2439,78 @@ fn abortFrame(ctx_ptr: *anyopaque) void {
     ctx.frame_in_progress = false;
 }
 
+const SSAOParams = extern struct {
+    projection: Mat4,
+    invProjection: Mat4,
+    samples: [64][4]f32,
+    radius: f32 = 0.5,
+    bias: f32 = 0.025,
+    _padding: [2]f32 = undefined,
+};
+
+fn lerp(a: f32, b: f32, f: f32) f32 {
+    return a + f * (b - a);
+}
+
+fn setupGRenderPass(ctx: *VulkanContext) !void {
+    var normal_attachment = std.mem.zeroes(c.VkAttachmentDescription);
+    normal_attachment.format = c.VK_FORMAT_R8G8B8A8_UNORM;
+    normal_attachment.samples = c.VK_SAMPLE_COUNT_1_BIT;
+    normal_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR;
+    normal_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_STORE;
+    normal_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+    normal_attachment.finalLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    var depth_attachment = std.mem.zeroes(c.VkAttachmentDescription);
+    depth_attachment.format = ctx.depth_format; // I need to make sure depth_format is stored
+    depth_attachment.samples = c.VK_SAMPLE_COUNT_1_BIT;
+    depth_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_STORE;
+    depth_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+    depth_attachment.finalLayout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+
+    var normal_ref = c.VkAttachmentReference{ .attachment = 0, .layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+    var depth_ref = c.VkAttachmentReference{ .attachment = 1, .layout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+
+    var subpass = std.mem.zeroes(c.VkSubpassDescription);
+    subpass.pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &normal_ref;
+    subpass.pDepthStencilAttachment = &depth_ref;
+
+    var dependency = std.mem.zeroes(c.VkSubpassDependency);
+    dependency.srcSubpass = c.VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass = 0;
+    dependency.srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcAccessMask = 0;
+    dependency.dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+    var attachments = [_]c.VkAttachmentDescription{ normal_attachment, depth_attachment };
+    var rp_info = std.mem.zeroes(c.VkRenderPassCreateInfo);
+    rp_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    rp_info.attachmentCount = 2;
+    rp_info.pAttachments = &attachments[0];
+    rp_info.subpassCount = 1;
+    rp_info.pSubpasses = &subpass;
+    rp_info.dependencyCount = 1;
+    rp_info.pDependencies = &dependency;
+
+    try checkVk(c.vkCreateRenderPass(ctx.vk_device, &rp_info, null, &ctx.g_render_pass));
+}
+
+fn beginGPass(ctx_ptr: *anyopaque) void {
+    _ = ctx_ptr;
+}
+
+fn endGPass(ctx_ptr: *anyopaque) void {
+    _ = ctx_ptr;
+}
+
+fn computeSSAO(ctx_ptr: *anyopaque) void {
+    _ = ctx_ptr;
+}
+
 fn endFrame(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
@@ -3858,6 +3965,9 @@ const vtable = rhi.RHI.VTable{
     .setClearColor = setClearColor,
     .beginMainPass = beginMainPass,
     .endMainPass = endMainPass,
+    .beginGPass = beginGPass,
+    .endGPass = endGPass,
+    .computeSSAO = computeSSAO,
     .endFrame = endFrame,
     .waitIdle = waitIdle,
     .beginShadowPass = beginShadowPass,

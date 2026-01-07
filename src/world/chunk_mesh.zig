@@ -260,9 +260,11 @@ pub const ChunkMesh = struct {
                     if (nxt_opt == null) break;
                     const nxt = nxt_opt.?;
                     if (nxt.block != k.block or nxt.side != k.side) break;
-                    const sky_diff = @as(i8, @intCast(nxt.light.sky_light)) - @as(i8, @intCast(k.light.sky_light));
-                    const block_diff = @as(i8, @intCast(nxt.light.block_light)) - @as(i8, @intCast(k.light.block_light));
-                    if (@abs(sky_diff) > 1 or @abs(block_diff) > 1) break;
+                    const sky_diff = @as(i8, @intCast(nxt.light.getSkyLight())) - @as(i8, @intCast(k.light.getSkyLight()));
+                    const r_diff = @as(i8, @intCast(nxt.light.getBlockLightR())) - @as(i8, @intCast(k.light.getBlockLightR()));
+                    const g_diff = @as(i8, @intCast(nxt.light.getBlockLightG())) - @as(i8, @intCast(k.light.getBlockLightG()));
+                    const b_diff = @as(i8, @intCast(nxt.light.getBlockLightB())) - @as(i8, @intCast(k.light.getBlockLightB()));
+                    if (@abs(sky_diff) > 1 or @abs(r_diff) > 1 or @abs(g_diff) > 1 or @abs(b_diff) > 1) break;
 
                     const diff_r = @abs(nxt.color[0] - k.color[0]);
                     const diff_g = @abs(nxt.color[1] - k.color[1]);
@@ -278,9 +280,11 @@ pub const ChunkMesh = struct {
                         if (nxt_opt == null) break :outer;
                         const nxt = nxt_opt.?;
                         if (nxt.block != k.block or nxt.side != k.side) break :outer;
-                        const sky_diff = @as(i8, @intCast(nxt.light.sky_light)) - @as(i8, @intCast(k.light.sky_light));
-                        const block_diff = @as(i8, @intCast(nxt.light.block_light)) - @as(i8, @intCast(k.light.block_light));
-                        if (@abs(sky_diff) > 1 or @abs(block_diff) > 1) break :outer;
+                        const sky_diff = @as(i8, @intCast(nxt.light.getSkyLight())) - @as(i8, @intCast(k.light.getSkyLight()));
+                        const r_diff = @as(i8, @intCast(nxt.light.getBlockLightR())) - @as(i8, @intCast(k.light.getBlockLightR()));
+                        const g_diff = @as(i8, @intCast(nxt.light.getBlockLightG())) - @as(i8, @intCast(k.light.getBlockLightG()));
+                        const b_diff = @as(i8, @intCast(nxt.light.getBlockLightB())) - @as(i8, @intCast(k.light.getBlockLightB()));
+                        if (@abs(sky_diff) > 1 or @abs(r_diff) > 1 or @abs(g_diff) > 1 or @abs(b_diff) > 1) break :outer;
 
                         const diff_r = @abs(nxt.color[0] - k.color[0]);
                         const diff_g = @abs(nxt.color[1] - k.color[1]);
@@ -571,7 +575,11 @@ fn addGreedyFace(allocator: std.mem.Allocator, verts: *std.ArrayListUnmanaged(Ve
     }
 
     const sky_norm = @as(f32, @floatFromInt(light.getSkyLight())) / 15.0;
-    const block_norm = @as(f32, @floatFromInt(light.getBlockLight())) / 15.0;
+    const block_norm = [3]f32{
+        @as(f32, @floatFromInt(light.getBlockLightR())) / 15.0,
+        @as(f32, @floatFromInt(light.getBlockLightG())) / 15.0,
+        @as(f32, @floatFromInt(light.getBlockLightB())) / 15.0,
+    };
 
     for (idxs) |i| {
         try verts.append(allocator, Vertex{
