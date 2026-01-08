@@ -63,10 +63,11 @@ void main() {
     if (cloudValue < threshold) discard;
 
     vec3 nightTint = pow(vec3(0.1, 0.12, 0.2), vec3(2.2));
-    vec3 dayColor = uBaseColor;
+    vec3 dayColor = vec3(0.85, 0.85, 0.9); // Slightly dimmer clouds
     vec3 cloudColor = mix(nightTint, dayColor, uSunIntensity);
     float lightFactor = clamp(uSunDir.y, 0.0, 1.0);
-    cloudColor *= (0.7 + 0.3 * lightFactor);
+    // Reduce max brightness to prevent blowing out the sky
+    cloudColor *= (0.5 + 0.3 * lightFactor);
 
     float vDistance = length(vWorldPos - uCameraPos);
     float fogFactor = 1.0 - exp(-vDistance * uFogDensity * 0.4);

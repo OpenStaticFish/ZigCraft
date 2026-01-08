@@ -54,6 +54,7 @@ const AtmosphereState = struct {
     moon_dir: Vec3 = Vec3.init(0, -1, 0),
     sky_color: Vec3 = Vec3.init(0.5, 0.7, 1.0),
     horizon_color: Vec3 = Vec3.init(0.8, 0.85, 0.95),
+    sun_color: Vec3 = Vec3.init(1.0, 1.0, 1.0),
     fog_color: Vec3 = Vec3.init(0.6, 0.75, 0.95),
     ambient_intensity: f32 = 0.3,
     fog_density: f32 = 0.0015,
@@ -124,8 +125,8 @@ const AtmosphereState = struct {
         }
 
         self.moon_intensity = (1.0 - self.sun_intensity) * 0.15;
-        const day_ambient: f32 = 0.30;
-        const night_ambient: f32 = 0.08;
+        const day_ambient: f32 = 0.70;
+        const night_ambient: f32 = 0.15;
         self.ambient_intensity = std.math.lerp(night_ambient, day_ambient, self.sun_intensity);
     }
 
@@ -140,36 +141,48 @@ const AtmosphereState = struct {
         const day_horizon = Vec3.init(0.7, 0.8, 0.95).toLinear();
         const night_sky = Vec3.init(0.02, 0.02, 0.08).toLinear();
         const night_horizon = Vec3.init(0.05, 0.05, 0.12).toLinear();
-        const dawn_sky = Vec3.init(0.4, 0.4, 0.6).toLinear();
-        const dawn_horizon = Vec3.init(1.0, 0.5, 0.3).toLinear();
-        const dusk_sky = Vec3.init(0.35, 0.25, 0.5).toLinear();
-        const dusk_horizon = Vec3.init(1.0, 0.4, 0.2).toLinear();
+        const dawn_sky = Vec3.init(0.25, 0.3, 0.5).toLinear();
+        const dawn_horizon = Vec3.init(0.95, 0.55, 0.2).toLinear();
+        const dusk_sky = Vec3.init(0.25, 0.3, 0.5).toLinear();
+        const dusk_horizon = Vec3.init(0.95, 0.55, 0.2).toLinear();
+
+        const day_sun = Vec3.init(1.0, 0.95, 0.9).toLinear();
+        const dawn_sun = Vec3.init(1.0, 0.85, 0.6).toLinear();
+        const dusk_sun = Vec3.init(1.0, 0.85, 0.6).toLinear();
+        const night_sun = Vec3.init(0.04, 0.04, 0.1).toLinear();
 
         if (t < DAWN_START) {
             self.sky_color = night_sky;
             self.horizon_color = night_horizon;
+            self.sun_color = night_sun;
         } else if (t < DAWN_END) {
             const blend = smoothstep(DAWN_START, DAWN_END, t);
             self.sky_color = lerpVec3(night_sky, dawn_sky, blend);
             self.horizon_color = lerpVec3(night_horizon, dawn_horizon, blend);
+            self.sun_color = lerpVec3(night_sun, dawn_sun, blend);
         } else if (t < 0.35) {
             const blend = smoothstep(DAWN_END, 0.35, t);
             self.sky_color = lerpVec3(dawn_sky, day_sky, blend);
             self.horizon_color = lerpVec3(dawn_horizon, day_horizon, blend);
+            self.sun_color = lerpVec3(dawn_sun, day_sun, blend);
         } else if (t < DUSK_START) {
             self.sky_color = day_sky;
             self.horizon_color = day_horizon;
+            self.sun_color = day_sun;
         } else if (t < 0.75) {
             const blend = smoothstep(DUSK_START, 0.75, t);
             self.sky_color = lerpVec3(day_sky, dusk_sky, blend);
             self.horizon_color = lerpVec3(day_horizon, dusk_horizon, blend);
+            self.sun_color = lerpVec3(day_sun, dusk_sun, blend);
         } else if (t < DUSK_END) {
             const blend = smoothstep(0.75, DUSK_END, t);
             self.sky_color = lerpVec3(dusk_sky, night_sky, blend);
             self.horizon_color = lerpVec3(dusk_horizon, night_horizon, blend);
+            self.sun_color = lerpVec3(dusk_sun, night_sun, blend);
         } else {
             self.sky_color = night_sky;
             self.horizon_color = night_horizon;
+            self.sun_color = night_sun;
         }
 
         self.fog_color = self.horizon_color;
@@ -633,6 +646,10 @@ pub const App = struct {
                         .pbr_quality = self.settings.pbr_quality,
                         .exposure = self.settings.exposure,
                         .saturation = self.settings.saturation,
+                        .volumetric_enabled = self.settings.volumetric_lighting_enabled,
+                        .volumetric_density = self.settings.volumetric_density,
+                        .volumetric_steps = self.settings.volumetric_steps,
+                        .volumetric_scattering = self.settings.volumetric_scattering,
                     };
                 };
 
@@ -644,7 +661,7 @@ pub const App = struct {
                     .env = if (self.env_map) |t| t.handle else 0,
                 };
 
-                self.rhi.updateGlobalUniforms(view_proj_render, self.camera.position, self.atmosphere.sun_dir, self.atmosphere.time_of_day, self.atmosphere.fog_color, self.atmosphere.fog_density, self.atmosphere.fog_enabled, self.atmosphere.sun_intensity, self.atmosphere.ambient_intensity, self.settings.textures_enabled, cloud_params);
+                self.rhi.updateGlobalUniforms(view_proj_render, self.camera.position, self.atmosphere.sun_dir, self.atmosphere.sun_color, self.atmosphere.time_of_day, self.atmosphere.fog_color, self.atmosphere.fog_density, self.atmosphere.fog_enabled, self.atmosphere.sun_intensity, self.atmosphere.ambient_intensity, self.settings.textures_enabled, cloud_params);
                 self.render_graph.execute(self.rhi, active_world, &self.camera, aspect, sky_params, cloud_params, self.shader, atlas_handles, self.settings.shadow_distance, self.settings.getShadowResolution());
 
                 if (self.player) |p| {

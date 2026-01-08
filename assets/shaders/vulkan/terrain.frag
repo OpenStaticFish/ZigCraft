@@ -19,12 +19,14 @@ layout(set = 0, binding = 0) uniform GlobalUniforms {
     mat4 view_proj;
     vec4 cam_pos;
     vec4 sun_dir;
+    vec4 sun_color;
     vec4 fog_color;
     vec4 cloud_wind_offset; // xy = offset, z = scale, w = coverage
     vec4 params; // x = time, y = fog_density, z = fog_enabled, w = sun_intensity
     vec4 lighting; // x = ambient, y = use_texture, z = pbr_enabled, w = cloud_shadow_strength
     vec4 cloud_params; // x = cloud_height, y = shadow_samples, z = shadow_blend, w = cloud_shadows
     vec4 pbr_params; // x = pbr_quality, y = exposure, z = saturation, w = unused
+    vec4 volumetric_params; // x = enabled, y = density, z = steps, w = scattering
     vec4 viewport_size; // xy = width/height
 } global;
 
@@ -159,6 +161,74 @@ float calculateShadow(vec3 fragPosWorld, float nDotL, int layer) {
 
 // PBR functions
 const float PI = 3.14159265359;
+
+// Henyey-Greenstein Phase Function for Mie Scattering (Phase 4)
+float henyeyGreenstein(float g, float cosTheta) {
+    float g2 = g * g;
+    return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * cosTheta, 0.01), 1.5));
+}
+
+// Simple shadow sampler for volumetric points, optimized
+float getVolShadow(vec3 p, float viewDepth) {
+    int layer = 2;
+    if (viewDepth < shadows.cascade_splits[0]) layer = 0;
+    else if (viewDepth < shadows.cascade_splits[1]) layer = 1;
+
+    vec4 lightSpacePos = shadows.light_space_matrices[layer] * vec4(p, 1.0);
+    vec3 proj = lightSpacePos.xyz / lightSpacePos.w;
+    proj.xy = proj.xy * 0.5 + 0.5;
+    
+    if (proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0 || proj.z > 1.0) return 1.0;
+    
+    return texture(uShadowMaps, vec4(proj.xy, float(layer), proj.z - 0.002));
+}
+
+// Raymarched God Rays (Phase 4)
+// Energy-conserving volumetric lighting with transmittance
+vec4 calculateVolumetric(vec3 rayStart, vec3 rayEnd, float dither) {
+    if (global.volumetric_params.x < 0.5) return vec4(0.0, 0.0, 0.0, 1.0);
+    
+    vec3 rayDir = rayEnd - rayStart;
+    float totalDist = length(rayDir);
+    rayDir /= totalDist;
+    
+    float maxDist = min(totalDist, 180.0); 
+    int steps = int(global.volumetric_params.z);
+    float stepSize = maxDist / float(steps);
+    
+    float cosTheta = dot(rayDir, normalize(global.sun_dir.xyz));
+    float phase = henyeyGreenstein(global.volumetric_params.w, cosTheta);
+    
+    // Use the actual sun color for scattering
+    vec3 sunColor = global.sun_color.rgb * global.params.w;
+    vec3 accumulatedScattering = vec3(0.0);
+    float transmittance = 1.0;
+    float baseDensity = global.volumetric_params.y;
+    
+    for (int i = 0; i < steps; i++) {
+        float d = (float(i) + dither) * stepSize;
+        vec3 p = rayStart + rayDir * d;
+        
+        // Fix: Clamp height to avoid density explosion below sea level
+        // Assuming Y=0 is bottom of world. Fog is densest at Y=0 and decays upwards.
+        float height = max(0.0, p.y); 
+        float heightFactor = exp(-height * 0.02); // Adjusted falloff rate
+        
+        // Clamp density to ensure non-negative and reasonable values
+        float density = clamp(baseDensity * heightFactor, 0.0, 1.0);
+        
+        if (density > 0.0) {
+            float shadow = getVolShadow(p, d);
+            vec3 stepScattering = sunColor * shadow * phase * density * stepSize;
+            
+            accumulatedScattering += stepScattering * transmittance;
+            transmittance *= exp(-density * stepSize);
+        }
+    }
+    
+    return vec4(accumulatedScattering, transmittance);
+}
+
 
 // Normal Distribution Function (GGX/Trowbridge-Reitz)
 float DistributionGGX(vec3 N, vec3 H, float roughness) {
@@ -436,7 +506,8 @@ void main() {
                 vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);
                 
                 float NdotL = max(dot(N, L), 0.0);
-                vec3 sunColor = pow(vec3(1.0, 0.98, 0.95), vec3(2.2)) * global.params.w;
+                // Boost sun brightness for clearer day lighting
+                vec3 sunColor = pow(vec3(1.0, 0.98, 0.95), vec3(2.2)) * global.params.w * 1.5;
                 vec3 Lo = (kD * albedo / PI + specular) * sunColor * NdotL * (1.0 - totalShadow);
                 
                 // Ambient lighting (IBL)
@@ -449,7 +520,8 @@ void main() {
                 // Clamp envColor to prevent HDR values from blowing out
                 // Apply AO to ambient lighting (darkens corners and crevices)
                 // Combine baked Voxel AO with dynamic Screen-Space AO
-                vec3 ambientColor = albedo * (min(envColor, vec3(3.0)) * skyLight * 0.8 + blockLight) * ao * ssao;
+                // Boost ambient sky light to prevent dark shadows
+                vec3 ambientColor = albedo * (min(envColor, vec3(3.0)) * skyLight * 1.2 + blockLight) * ao * ssao;
                 
                 color = ambientColor + Lo;
             } else {
@@ -495,6 +567,13 @@ void main() {
         
         // Apply AO to vertex color mode
         color = vColor * lightLevel * ao * ssao;
+    }
+
+    // Volumetric Lighting (Phase 4)
+    if (global.volumetric_params.x > 0.5) {
+        float dither = cloudHash(gl_FragCoord.xy + vec2(global.params.x));
+        vec4 volumetric = calculateVolumetric(global.cam_pos.xyz, vFragPosWorld, dither);
+        color = color * volumetric.a + volumetric.rgb;
     }
 
     // Fog

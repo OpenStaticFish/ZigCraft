@@ -150,7 +150,7 @@ pub const RenderGraph = struct {
         // without overwriting the global UBO (which holds the main camera view_proj).
         rhi.beginShadowPass(@intCast(cascade_idx));
 
-        rhi.updateGlobalUniforms(light_space_matrix, camera.position, Vec3.zero, 0, Vec3.zero, 0, false, 0, 0, false, .{});
+        rhi.updateGlobalUniforms(light_space_matrix, camera.position, Vec3.zero, Vec3.zero, 0, Vec3.zero, 0, false, 0, 0, false, .{});
 
         // renderShadowPass uses the bound pipeline/shader with the matrix we just set
         world.renderShadowPass(light_space_matrix, camera.position);

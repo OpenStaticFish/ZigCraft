@@ -42,6 +42,12 @@ pub const Settings = struct {
     // Cloud Settings
     cloud_shadows_enabled: bool = true,
 
+    // Volumetric Lighting Settings (Phase 4)
+    volumetric_lighting_enabled: bool = true,
+    volumetric_density: f32 = 0.05, // Fog density
+    volumetric_steps: u32 = 24, // Raymarching steps
+    volumetric_scattering: f32 = 0.8, // Mie scattering anisotropy (G)
+
     // Texture Settings
     max_texture_resolution: u32 = 512, // 16, 32, 64, 128, 256, 512
 
@@ -118,36 +124,44 @@ pub const Settings = struct {
         cloud_shadows_enabled: bool,
         exposure: f32,
         saturation: f32,
+        volumetric_lighting_enabled: bool,
+        volumetric_density: f32,
+        volumetric_steps: u32,
+        volumetric_scattering: f32,
     };
 
     pub const GRAPHICS_PRESETS = [_]PresetConfig{
         // LOW: Prioritize performance
-        .{ .preset = .low, .shadow_quality = 0, .shadow_pcf_samples = 4, .shadow_cascade_blend = false, .pbr_enabled = false, .pbr_quality = 0, .msaa_samples = 1, .anisotropic_filtering = 1, .max_texture_resolution = 64, .cloud_shadows_enabled = false, .exposure = 1.0, .saturation = 1.0 },
+        .{ .preset = .low, .shadow_quality = 0, .shadow_pcf_samples = 4, .shadow_cascade_blend = false, .pbr_enabled = false, .pbr_quality = 0, .msaa_samples = 1, .anisotropic_filtering = 1, .max_texture_resolution = 64, .cloud_shadows_enabled = false, .exposure = 1.0, .saturation = 1.0, .volumetric_lighting_enabled = false, .volumetric_density = 0.0, .volumetric_steps = 4, .volumetric_scattering = 0.5 },
 
         // MEDIUM: Balanced
-        .{ .preset = .medium, .shadow_quality = 1, .shadow_pcf_samples = 8, .shadow_cascade_blend = false, .pbr_enabled = true, .pbr_quality = 1, .msaa_samples = 2, .anisotropic_filtering = 4, .max_texture_resolution = 128, .cloud_shadows_enabled = true, .exposure = 1.0, .saturation = 1.1 },
+        .{ .preset = .medium, .shadow_quality = 1, .shadow_pcf_samples = 8, .shadow_cascade_blend = false, .pbr_enabled = true, .pbr_quality = 1, .msaa_samples = 2, .anisotropic_filtering = 4, .max_texture_resolution = 128, .cloud_shadows_enabled = true, .exposure = 1.0, .saturation = 1.0, .volumetric_lighting_enabled = true, .volumetric_density = 0.00005, .volumetric_steps = 6, .volumetric_scattering = 0.7 },
 
-        // HIGH: Quality focus (target for RX 5700 XT)
-        .{ .preset = .high, .shadow_quality = 2, .shadow_pcf_samples = 12, .shadow_cascade_blend = true, .pbr_enabled = true, .pbr_quality = 2, .msaa_samples = 4, .anisotropic_filtering = 8, .max_texture_resolution = 256, .cloud_shadows_enabled = true, .exposure = 1.0, .saturation = 1.1 },
+        // HIGH: Quality focus
+        .{ .preset = .high, .shadow_quality = 2, .shadow_pcf_samples = 12, .shadow_cascade_blend = true, .pbr_enabled = true, .pbr_quality = 2, .msaa_samples = 4, .anisotropic_filtering = 8, .max_texture_resolution = 256, .cloud_shadows_enabled = true, .exposure = 1.0, .saturation = 1.0, .volumetric_lighting_enabled = true, .volumetric_density = 0.0001, .volumetric_steps = 8, .volumetric_scattering = 0.75 },
 
         // ULTRA: Maximum quality
-        .{ .preset = .ultra, .shadow_quality = 3, .shadow_pcf_samples = 16, .shadow_cascade_blend = true, .pbr_enabled = true, .pbr_quality = 2, .msaa_samples = 8, .anisotropic_filtering = 16, .max_texture_resolution = 512, .cloud_shadows_enabled = true, .exposure = 1.0, .saturation = 1.2 },
+        .{ .preset = .ultra, .shadow_quality = 3, .shadow_pcf_samples = 16, .shadow_cascade_blend = true, .pbr_enabled = true, .pbr_quality = 2, .msaa_samples = 4, .anisotropic_filtering = 16, .max_texture_resolution = 512, .cloud_shadows_enabled = true, .exposure = 1.0, .saturation = 1.0, .volumetric_lighting_enabled = true, .volumetric_density = 0.0002, .volumetric_steps = 12, .volumetric_scattering = 0.8 },
     };
 
     pub fn applyPreset(self: *Settings, preset_idx: usize) void {
         if (preset_idx >= GRAPHICS_PRESETS.len) return;
-        const preset = GRAPHICS_PRESETS[preset_idx];
-        self.shadow_quality = preset.shadow_quality;
-        self.shadow_pcf_samples = preset.shadow_pcf_samples;
-        self.shadow_cascade_blend = preset.shadow_cascade_blend;
-        self.pbr_enabled = preset.pbr_enabled;
-        self.pbr_quality = preset.pbr_quality;
-        self.msaa_samples = preset.msaa_samples;
-        self.anisotropic_filtering = preset.anisotropic_filtering;
-        self.max_texture_resolution = preset.max_texture_resolution;
-        self.cloud_shadows_enabled = preset.cloud_shadows_enabled;
-        self.exposure = preset.exposure;
-        self.saturation = preset.saturation;
+        const config = GRAPHICS_PRESETS[preset_idx];
+        self.shadow_quality = config.shadow_quality;
+        self.shadow_pcf_samples = config.shadow_pcf_samples;
+        self.shadow_cascade_blend = config.shadow_cascade_blend;
+        self.pbr_enabled = config.pbr_enabled;
+        self.pbr_quality = config.pbr_quality;
+        self.msaa_samples = config.msaa_samples;
+        self.anisotropic_filtering = config.anisotropic_filtering;
+        self.max_texture_resolution = config.max_texture_resolution;
+        self.cloud_shadows_enabled = config.cloud_shadows_enabled;
+        self.exposure = config.exposure;
+        self.saturation = config.saturation;
+        self.volumetric_lighting_enabled = config.volumetric_lighting_enabled;
+        self.volumetric_density = config.volumetric_density;
+        self.volumetric_steps = config.volumetric_steps;
+        self.volumetric_scattering = config.volumetric_scattering;
     }
 
     pub fn getPresetIndex(self: *const Settings) usize {

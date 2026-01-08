@@ -144,9 +144,14 @@ pub const CloudParams = struct {
     shadow_blend: bool = true,
     cloud_shadows: bool = true,
     pbr_quality: u8 = 2,
+    // Volumetric lighting parameters (Phase 4)
+    volumetric_enabled: bool = true,
+    volumetric_density: f32 = 0.05,
+    volumetric_steps: u32 = 24,
+    volumetric_scattering: f32 = 0.8,
     // Tone mapping parameters
-    exposure: f32 = 1.0, // Default neutral exposure
-    saturation: f32 = 1.1, // Slight saturation boost to counter AgX desaturation
+    exposure: f32 = 1.0,
+    saturation: f32 = 1.1,
 };
 
 /// RGBA color for UI rendering
@@ -241,7 +246,7 @@ pub const RHI = struct {
 
         // Uniforms
         setModelMatrix: *const fn (ctx: *anyopaque, model: Mat4, mask_radius: f32) void,
-        updateGlobalUniforms: *const fn (ctx: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void,
+        updateGlobalUniforms: *const fn (ctx: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, sun_color: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void,
         updateShadowUniforms: *const fn (ctx: *anyopaque, params: ShadowParams) void,
         setTextureUniforms: *const fn (ctx: *anyopaque, texture_enabled: bool, shadow_map_handles: [SHADOW_CASCADE_COUNT]TextureHandle) void,
 
@@ -399,8 +404,8 @@ pub const RHI = struct {
         self.vtable.endShadowPass(self.ptr);
     }
 
-    pub fn updateGlobalUniforms(self: RHI, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void {
-        self.vtable.updateGlobalUniforms(self.ptr, view_proj, cam_pos, sun_dir, time, fog_color, fog_density, fog_enabled, sun_intensity, ambient, use_texture, cloud_params);
+    pub fn updateGlobalUniforms(self: RHI, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, sun_color: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void {
+        self.vtable.updateGlobalUniforms(self.ptr, view_proj, cam_pos, sun_dir, sun_color, time, fog_color, fog_density, fog_enabled, sun_intensity, ambient, use_texture, cloud_params);
     }
 
     pub fn updateShadowUniforms(self: RHI, params: ShadowParams) void {

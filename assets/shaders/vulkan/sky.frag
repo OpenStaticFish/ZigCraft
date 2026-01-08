@@ -14,6 +14,101 @@ layout(push_constant) uniform SkyPC {
     vec4 time;
 } pc;
 
+layout(set = 0, binding = 0) uniform GlobalUniforms {
+    mat4 view_proj;
+    vec4 cam_pos;
+    vec4 sun_dir;
+    vec4 sun_color;
+    vec4 fog_color;
+    vec4 cloud_wind_offset;
+    vec4 params;
+    vec4 lighting;
+    vec4 cloud_params;
+    vec4 pbr_params;
+    vec4 volumetric_params;
+    vec4 viewport_size;
+} global;
+
+layout(set = 0, binding = 2) uniform ShadowUniforms {
+    mat4 light_space_matrices[3];
+    vec4 cascade_splits;
+    vec4 shadow_texel_sizes;
+} shadows;
+
+layout(set = 0, binding = 3) uniform sampler2DArrayShadow uShadowMaps;
+
+
+
+const float PI = 3.14159265359;
+
+float cloudHash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+// Henyey-Greenstein Phase Function for Mie Scattering (Phase 4)
+float henyeyGreenstein(float g, float cosTheta) {
+    float g2 = g * g;
+    return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * cosTheta, 0.01), 1.5));
+}
+
+// Simple shadow sampler for volumetric points, optimized
+float getVolShadow(vec3 p, float viewDepth) {
+    int layer = 2; // Sky is far, but raymarched points can be near
+    if (viewDepth < shadows.cascade_splits[0]) layer = 0;
+    else if (viewDepth < shadows.cascade_splits[1]) layer = 1;
+
+    vec4 lightSpacePos = shadows.light_space_matrices[layer] * vec4(p, 1.0);
+    vec3 proj = lightSpacePos.xyz / lightSpacePos.w;
+    proj.xy = proj.xy * 0.5 + 0.5;
+    
+    if (proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0 || proj.z > 1.0) return 1.0;
+    
+    return texture(uShadowMaps, vec4(proj.xy, float(layer), proj.z - 0.002));
+}
+
+// Raymarched God Rays (Phase 4)
+// Energy-conserving volumetric lighting with transmittance for sky
+vec4 calculateVolumetric(vec3 rayStart, vec3 rayDir, float dither) {
+    if (global.volumetric_params.x < 0.5) return vec4(0.0, 0.0, 0.0, 1.0);
+    
+    // Removed sun-angle culling to fix sky banding
+    float cosSun = dot(rayDir, normalize(global.sun_dir.xyz));
+    // if (cosSun < 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
+    
+    float maxDist = 180.0; 
+    int steps = int(global.volumetric_params.z);
+    float stepSize = maxDist / float(steps);
+    
+    float phase = henyeyGreenstein(global.volumetric_params.w, cosSun);
+    
+    // Use the actual sun color for scattering
+    vec3 sunColor = global.sun_color.rgb * global.params.w;
+    vec3 accumulatedScattering = vec3(0.0);
+    float transmittance = 1.0;
+    float baseDensity = global.volumetric_params.y;
+    
+    for (int i = 0; i < steps; i++) {
+        float d = (float(i) + dither) * stepSize;
+        vec3 p = rayStart + rayDir * d;
+        // Fix: Clamp height to avoid density explosion below sea level
+        float height = max(0.0, p.y);
+        float heightFalloff = exp(-height * 0.02);
+        float density = baseDensity * heightFalloff;
+        
+        if (density > 0.0) {
+            float shadow = getVolShadow(p, d);
+            vec3 stepScattering = sunColor * shadow * phase * density * stepSize;
+            
+            accumulatedScattering += stepScattering * transmittance;
+            transmittance *= exp(-density * stepSize);
+        }
+    }
+    
+    return vec4(accumulatedScattering, transmittance);
+}
+
 float hash21(vec2 p) {
     p = fract(p * vec2(234.34, 435.345));
     p += dot(p, p + 34.23);
@@ -91,6 +186,13 @@ void main() {
     finalColor += sunDisc * sunColor * pc.params.z;
     finalColor += moonDisc * moonColor * pc.params.w * 3.0;
     finalColor += vec3(starIntensity);
+
+    // Volumetric Scattering (Phase 4)
+    if (global.volumetric_params.x > 0.5) {
+        float dither = cloudHash(gl_FragCoord.xy + vec2(global.params.x));
+        vec4 volumetric = calculateVolumetric(global.cam_pos.xyz, dir, dither);
+        finalColor = finalColor * volumetric.a + volumetric.rgb;
+    }
 
     FragColor = vec4(finalColor, 1.0);
 }

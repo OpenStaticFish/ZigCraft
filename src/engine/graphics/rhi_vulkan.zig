@@ -36,12 +36,14 @@ const GlobalUniforms = extern struct {
     view_proj: Mat4, // Combined view-projection matrix
     cam_pos: [4]f32, // Camera world position (w unused)
     sun_dir: [4]f32, // Sun direction (w unused)
+    sun_color: [4]f32, // Sun color (w unused)
     fog_color: [4]f32, // Fog RGB (a unused)
     cloud_wind_offset: [4]f32, // xy = offset, z = scale, w = coverage
     params: [4]f32, // x = time, y = fog_density, z = fog_enabled, w = sun_intensity
     lighting: [4]f32, // x = ambient, y = use_texture, z = pbr_enabled, w = cloud_shadow_strength
     cloud_params: [4]f32, // x = cloud_height, y = shadow_samples, z = shadow_blend, w = cloud_shadows
     pbr_params: [4]f32, // x = pbr_quality, y = exposure, z = saturation, w = unused
+    volumetric_params: [4]f32, // x = enabled, y = density, z = steps, w = scattering
     viewport_size: [4]f32, // xy = width/height, zw = unused
 };
 
@@ -2230,6 +2232,8 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
     sky_push_constant.size = 128; // Standard SkyPushConstants size
     var sky_layout_info = std.mem.zeroes(c.VkPipelineLayoutCreateInfo);
     sky_layout_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    sky_layout_info.setLayoutCount = 1;
+    sky_layout_info.pSetLayouts = &ctx.descriptor_set_layout;
     sky_layout_info.pushConstantRangeCount = 1;
     sky_layout_info.pPushConstantRanges = &sky_push_constant;
     try checkVk(c.vkCreatePipelineLayout(ctx.vk_device, &sky_layout_info, null, &ctx.sky_pipeline_layout));
@@ -3121,7 +3125,14 @@ fn recreateSwapchain(ctx: *VulkanContext) void {
     // 2. Recreate Swapchain
     var cap: c.VkSurfaceCapabilitiesKHR = undefined;
     _ = c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ctx.physical_device, ctx.surface, &cap);
-    ctx.swapchain_extent = .{ .width = @intCast(w), .height = @intCast(h) };
+
+    if (cap.currentExtent.width != 0xFFFFFFFF) {
+        ctx.swapchain_extent = cap.currentExtent;
+    } else {
+        ctx.swapchain_extent = .{ .width = @intCast(w), .height = @intCast(h) };
+        ctx.swapchain_extent.width = std.math.clamp(ctx.swapchain_extent.width, cap.minImageExtent.width, cap.maxImageExtent.width);
+        ctx.swapchain_extent.height = std.math.clamp(ctx.swapchain_extent.height, cap.minImageExtent.height, cap.maxImageExtent.height);
+    }
 
     var swapchain_info = std.mem.zeroes(c.VkSwapchainCreateInfoKHR);
     swapchain_info.sType = c.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -3234,7 +3245,7 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
 
     ensureFrameReady(ctx);
 
-    ctx.frame_in_progress = true;
+    ctx.frame_in_progress = false; // Reset initially
     ctx.draw_call_count = 0;
     ctx.main_pass_active = false;
     ctx.shadow_pass_active = false;
@@ -3252,6 +3263,7 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
 
     if (result == c.VK_ERROR_OUT_OF_DATE_KHR) {
         recreateSwapchain(ctx);
+        // Frame execution must stop here. subsequent passes check ctx.frame_in_progress.
         return;
     } else if (result != c.VK_SUCCESS and result != c.VK_SUBOPTIMAL_KHR) {
         return;
@@ -3698,7 +3710,7 @@ fn waitIdle(ctx_ptr: *anyopaque) void {
     }
 }
 
-fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, time_val: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: rhi.CloudParams) void {
+fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, sun_color: Vec3, time_val: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: rhi.CloudParams) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
 
@@ -3713,12 +3725,14 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
         .view_proj = view_proj,
         .cam_pos = .{ cam_pos.x, cam_pos.y, cam_pos.z, 0 },
         .sun_dir = .{ sun_dir.x, sun_dir.y, sun_dir.z, 0 },
+        .sun_color = .{ sun_color.x, sun_color.y, sun_color.z, 0 },
         .fog_color = .{ fog_color.x, fog_color.y, fog_color.z, 1 },
         .cloud_wind_offset = .{ cloud_params.wind_offset_x, cloud_params.wind_offset_z, cloud_params.cloud_scale, cloud_params.cloud_coverage },
         .params = .{ time_val, fog_density, if (fog_enabled) 1.0 else 0.0, sun_intensity },
         .lighting = .{ ambient, if (use_texture) 1.0 else 0.0, if (cloud_params.pbr_enabled) 1.0 else 0.0, 0.15 },
         .cloud_params = .{ cloud_params.cloud_height, @floatFromInt(cloud_params.shadow_samples), if (cloud_params.shadow_blend) 1.0 else 0.0, if (cloud_params.cloud_shadows) 1.0 else 0.0 },
         .pbr_params = .{ @floatFromInt(cloud_params.pbr_quality), cloud_params.exposure, cloud_params.saturation, 0 },
+        .volumetric_params = .{ if (cloud_params.volumetric_enabled) 1.0 else 0.0, cloud_params.volumetric_density, @floatFromInt(cloud_params.volumetric_steps), cloud_params.volumetric_scattering },
         .viewport_size = .{ @floatFromInt(ctx.swapchain_extent.width), @floatFromInt(ctx.swapchain_extent.height), 0, 0 },
     };
 
@@ -4904,6 +4918,7 @@ fn drawSky(ctx_ptr: *anyopaque, params: rhi.SkyParams) void {
 
     const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
     c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.sky_pipeline);
+    c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.sky_pipeline_layout, 0, 1, &ctx.descriptor_sets[ctx.current_sync_frame], 0, null);
     ctx.terrain_pipeline_bound = false;
     c.vkCmdPushConstants(command_buffer, ctx.sky_pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(SkyPushConstants), &pc);
     c.vkCmdDraw(command_buffer, 3, 1, 0, 0);
