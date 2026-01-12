@@ -34,6 +34,8 @@ pub const BufferUsage = enum {
     vertex,
     index,
     uniform,
+    indirect,
+    storage,
 };
 
 pub const TextureFormat = enum {
@@ -100,6 +102,13 @@ pub const DrawIndirectCommand = extern struct {
     instanceCount: u32,
     firstVertex: u32,
     firstInstance: u32,
+};
+
+pub const InstanceData = extern struct {
+    view_proj: Mat4,
+    model: Mat4,
+    mask_radius: f32,
+    padding: [3]f32,
 };
 
 /// Sky rendering parameters
@@ -247,6 +256,8 @@ pub const RHI = struct {
 
         // Uniforms
         setModelMatrix: *const fn (ctx: *anyopaque, model: Mat4, mask_radius: f32) void,
+        setInstanceBuffer: *const fn (ctx: *anyopaque, handle: BufferHandle) void,
+        setLODInstanceBuffer: *const fn (ctx: *anyopaque, handle: BufferHandle) void, // Separate LOD instance buffer binding
         updateGlobalUniforms: *const fn (ctx: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, sun_color: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void,
         updateShadowUniforms: *const fn (ctx: *anyopaque, params: ShadowParams) void,
         setTextureUniforms: *const fn (ctx: *anyopaque, texture_enabled: bool, shadow_map_handles: [SHADOW_CASCADE_COUNT]TextureHandle) void,
@@ -255,6 +266,7 @@ pub const RHI = struct {
         draw: *const fn (ctx: *anyopaque, handle: BufferHandle, count: u32, mode: DrawMode) void,
         drawOffset: *const fn (ctx: *anyopaque, handle: BufferHandle, count: u32, mode: DrawMode, offset: usize) void,
         drawIndirect: *const fn (ctx: *anyopaque, handle: BufferHandle, command_buffer: BufferHandle, offset: usize, draw_count: u32, stride: u32) void,
+        drawInstance: *const fn (ctx: *anyopaque, handle: BufferHandle, count: u32, instance_index: u32) void,
         drawSky: *const fn (ctx: *anyopaque, params: SkyParams) void,
 
         // Textures
@@ -264,6 +276,8 @@ pub const RHI = struct {
         updateTexture: *const fn (ctx: *anyopaque, handle: TextureHandle, data: []const u8) void,
 
         getAllocator: *const fn (ctx: *anyopaque) std.mem.Allocator,
+        getFrameIndex: *const fn (ctx: *anyopaque) usize,
+        supportsIndirectFirstInstance: *const fn (ctx: *anyopaque) bool,
 
         // Rendering options
         setViewport: *const fn (ctx: *anyopaque, width: u32, height: u32) void,
@@ -417,6 +431,14 @@ pub const RHI = struct {
         self.vtable.setModelMatrix(self.ptr, model, mask_radius);
     }
 
+    pub fn setInstanceBuffer(self: RHI, handle: BufferHandle) void {
+        self.vtable.setInstanceBuffer(self.ptr, handle);
+    }
+
+    pub fn setLODInstanceBuffer(self: RHI, handle: BufferHandle) void {
+        self.vtable.setLODInstanceBuffer(self.ptr, handle);
+    }
+
     pub fn setTextureUniforms(self: RHI, texture_enabled: bool, shadow_map_handles: [SHADOW_CASCADE_COUNT]TextureHandle) void {
         self.vtable.setTextureUniforms(self.ptr, texture_enabled, shadow_map_handles);
     }
@@ -431,6 +453,10 @@ pub const RHI = struct {
 
     pub fn drawIndirect(self: RHI, handle: BufferHandle, command_buffer: BufferHandle, offset: usize, draw_count: u32, stride: u32) void {
         self.vtable.drawIndirect(self.ptr, handle, command_buffer, offset, draw_count, stride);
+    }
+
+    pub fn drawInstance(self: RHI, handle: BufferHandle, count: u32, instance_index: u32) void {
+        self.vtable.drawInstance(self.ptr, handle, count, instance_index);
     }
 
     pub fn drawSky(self: RHI, params: SkyParams) void {
@@ -456,6 +482,14 @@ pub const RHI = struct {
 
     pub fn getAllocator(self: RHI) std.mem.Allocator {
         return self.vtable.getAllocator(self.ptr);
+    }
+
+    pub fn getFrameIndex(self: RHI) usize {
+        return self.vtable.getFrameIndex(self.ptr);
+    }
+
+    pub fn supportsIndirectFirstInstance(self: RHI) bool {
+        return self.vtable.supportsIndirectFirstInstance(self.ptr);
     }
 
     // Rendering options

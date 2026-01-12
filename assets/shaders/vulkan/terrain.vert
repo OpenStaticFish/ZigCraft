@@ -41,12 +41,11 @@ layout(push_constant) uniform ModelUniforms {
     float _pad0;
     float _pad1;
     float _pad2;
-} pc;
+} model_data;
 
 void main() {
-    vec4 worldPos = pc.model * vec4(aPos, 1.0);
-    // Use the view_proj from push constants to avoid UBO race conditions
-    vec4 clipPos = pc.view_proj * worldPos;
+    vec4 worldPos = model_data.model * vec4(aPos, 1.0);
+    vec4 clipPos = model_data.view_proj * worldPos;
     
     // Vulkan has inverted Y in clip space compared to OpenGL
     gl_Position = clipPos;

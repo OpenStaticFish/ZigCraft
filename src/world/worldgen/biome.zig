@@ -730,7 +730,8 @@ pub fn computeClimateParams(
     max_height: i32,
 ) ClimateParams {
     // Normalize elevation: 0 = below sea, 0.3 = sea level, 1.0 = max height
-    const height_above_sea = @max(0, height - sea_level);
+    // Use conditional to avoid integer overflow when height < sea_level
+    const height_above_sea: i32 = if (height > sea_level) height - sea_level else 0;
     const elevation_range = max_height - sea_level;
     const elevation = if (elevation_range > 0)
         0.3 + 0.7 * @as(f32, @floatFromInt(height_above_sea)) / @as(f32, @floatFromInt(elevation_range))
