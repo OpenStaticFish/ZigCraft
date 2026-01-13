@@ -79,10 +79,7 @@ pub fn drawHome(ctx: MenuContext, app_state: *AppState, last_state: *AppState, s
 
 pub fn saveAllSettings(ctx: MenuContext, settings: *Settings) void {
     settings.save(ctx.allocator);
-    var input_settings = InputSettings.init(ctx.allocator);
-    defer input_settings.deinit();
-    input_settings.input_mapper = ctx.input_mapper.*;
-    input_settings.save() catch |err| {
+    InputSettings.saveFromMapper(ctx.allocator, ctx.input_mapper.*) catch |err| {
         log.log.err("Failed to save input settings: {}", .{err});
     };
 }

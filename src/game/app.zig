@@ -231,10 +231,7 @@ pub const App = struct {
 
     pub fn saveAllSettings(self: *const App) void {
         self.settings.save(self.allocator);
-        var input_settings = InputSettings.init(self.allocator);
-        defer input_settings.deinit();
-        input_settings.input_mapper = self.input_mapper;
-        input_settings.save() catch |err| {
+        InputSettings.saveFromMapper(self.allocator, self.input_mapper) catch |err| {
             log.log.err("Failed to save input settings: {}", .{err});
         };
     }

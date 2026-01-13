@@ -305,51 +305,51 @@ pub const InputMapper = struct {
     /// Current bindings for all actions
     bindings: [GameAction.count]ActionBinding,
 
-    /// Initialize with default bindings
+    /// Initialize a new InputMapper with default bindings.
     pub fn init() InputMapper {
         return .{
             .bindings = DEFAULT_BINDINGS,
         };
     }
 
-    /// Reset all bindings to their default values
+    /// Reset all bindings to their default values.
     pub fn resetToDefaults(self: *InputMapper) void {
         self.bindings = DEFAULT_BINDINGS;
     }
 
-    /// Reset an individual action to its default value
+    /// Reset an individual action to its default value.
     pub fn resetActionToDefault(self: *InputMapper, action: GameAction) void {
         self.bindings[@intFromEnum(action)] = DEFAULT_BINDINGS[@intFromEnum(action)];
     }
 
-    /// Set a new binding for an action
+    /// Set a new binding for an action.
     pub fn setBinding(self: *InputMapper, action: GameAction, binding: InputBinding) void {
         self.bindings[@intFromEnum(action)].primary = binding;
     }
 
-    /// Set an alternate binding for an action
+    /// Set an alternate binding for an action.
     pub fn setAlternateBinding(self: *InputMapper, action: GameAction, binding: InputBinding) void {
         self.bindings[@intFromEnum(action)].alternate = binding;
     }
 
-    /// Get the current binding for an action
+    /// Get the current binding for an action.
     pub fn getBinding(self: *const InputMapper, action: GameAction) ActionBinding {
         return self.bindings[@intFromEnum(action)];
     }
 
-    /// Check if a continuous/held action is currently active (e.g., movement)
+    /// Check if a continuous/held action is currently active (e.g., movement).
     pub fn isActionActive(self: *const InputMapper, input: *const Input, action: GameAction) bool {
         const binding = self.bindings[@intFromEnum(action)];
         return self.isBindingStateActive(input, binding.primary) or self.isBindingStateActive(input, binding.alternate);
     }
 
-    /// Check if a trigger action was pressed this frame (e.g., jump, toggle)
+    /// Check if a trigger action was pressed this frame (e.g., jump, toggle).
     pub fn isActionPressed(self: *const InputMapper, input: *const Input, action: GameAction) bool {
         const binding = self.bindings[@intFromEnum(action)];
         return self.isBindingStatePressed(input, binding.primary) or self.isBindingStatePressed(input, binding.alternate);
     }
 
-    /// Check if an action was released this frame
+    /// Check if an action was released this frame.
     pub fn isActionReleased(self: *const InputMapper, input: *const Input, action: GameAction) bool {
         const binding = self.bindings[@intFromEnum(action)];
         return self.isBindingStateReleased(input, binding.primary) or self.isBindingStateReleased(input, binding.alternate);
@@ -382,7 +382,7 @@ pub const InputMapper = struct {
         };
     }
 
-    /// Get movement vector based on current bindings
+    /// Get movement vector based on current bindings.
     pub fn getMovementVector(self: *const InputMapper, input: *const Input) struct { x: f32, z: f32 } {
         var x: f32 = 0;
         var z: f32 = 0;
@@ -397,7 +397,7 @@ pub const InputMapper = struct {
     // Serialization
     // ========================================================================
 
-    /// Serialize bindings to a JSON string
+    /// Serialize bindings to a JSON string.
     pub fn serialize(self: *const InputMapper, allocator: std.mem.Allocator) ![]u8 {
         var buffer = std.ArrayList(u8).empty;
         var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &buffer);
@@ -407,7 +407,7 @@ pub const InputMapper = struct {
         return aw.toOwnedSlice();
     }
 
-    /// Deserialize bindings from JSON data
+    /// Deserialize bindings from JSON data.
     pub fn deserialize(self: *InputMapper, allocator: std.mem.Allocator, data: []const u8) !void {
         var parsed = try std.json.parseFromSlice([GameAction.count]ActionBinding, allocator, data, .{
             .ignore_unknown_fields = true,
@@ -444,4 +444,13 @@ test "InputBinding equality" {
     try std.testing.expect(b1.eql(b2));
     try std.testing.expect(b2.eql(b1));
     try std.testing.expect(!b1.eql(b3));
+}
+
+test "InputMapper resetActionToDefault" {
+    var mapper = InputMapper.init();
+    mapper.setBinding(.move_forward, .{ .key = .up });
+    try std.testing.expect(mapper.getBinding(.move_forward).primary.key == .up);
+
+    mapper.resetActionToDefault(.move_forward);
+    try std.testing.expect(mapper.getBinding(.move_forward).primary.key == .w);
 }

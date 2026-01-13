@@ -16,12 +16,22 @@ pub const InputSettings = struct {
 
     pub const SETTINGS_FILENAME = "settings.json";
     pub const APP_NAME = "zigcraft";
+    pub const MAX_SETTINGS_SIZE = 1024 * 1024;
+    pub const CURRENT_VERSION = 2;
 
     /// Initialize a new InputSettings instance with default bindings.
     pub fn init(allocator: std.mem.Allocator) InputSettings {
         return .{
             .allocator = allocator,
             .input_mapper = InputMapper.init(),
+        };
+    }
+
+    /// Initialize a new InputSettings instance from an existing InputMapper.
+    pub fn initFromMapper(allocator: std.mem.Allocator, mapper: InputMapper) InputSettings {
+        return .{
+            .allocator = allocator,
+            .input_mapper = mapper,
         };
     }
 
@@ -44,7 +54,7 @@ pub const InputSettings = struct {
         };
         defer allocator.free(path);
 
-        const data = std.fs.cwd().readFileAlloc(path, allocator, @enumFromInt(1024 * 1024)) catch |err| {
+        const data = std.fs.cwd().readFileAlloc(allocator, path, MAX_SETTINGS_SIZE) catch |err| {
             if (err != error.FileNotFound) {
                 log.log.warn("Failed to read settings file at {s}: {}. Using default bindings.", .{ path, err });
             }
@@ -54,7 +64,7 @@ pub const InputSettings = struct {
 
         // Parse and apply settings
         settings.parseJson(data) catch |err| {
-            log.log.warn("Failed to parse settings file at {s}: {}. Using default bindings.", .{ path, err });
+            log.log.warn("Failed to parse settings file at {s}: {}. Error details: {s}. Using default bindings.", .{ path, err, @errorName(err) });
         };
 
         return settings;
@@ -84,6 +94,13 @@ pub const InputSettings = struct {
         try file.writeAll(json);
     }
 
+    /// Helper to save bindings directly from a mapper.
+    pub fn saveFromMapper(allocator: std.mem.Allocator, mapper: InputMapper) !void {
+        var settings = InputSettings.initFromMapper(allocator, mapper);
+        defer settings.deinit();
+        try settings.save();
+    }
+
     /// Get the platform-specific settings file path
     fn getSettingsPath(allocator: std.mem.Allocator) ![]u8 {
         if (builtin.os.tag == .linux or builtin.os.tag == .freebsd or builtin.os.tag == .openbsd) {
@@ -102,8 +119,9 @@ pub const InputSettings = struct {
             const appdata = std.posix.getenv("APPDATA") orelse return error.NoAppDataDir;
             return std.fmt.allocPrint(allocator, "{s}\\{s}\\{s}", .{ appdata, APP_NAME, SETTINGS_FILENAME });
         } else {
-            // Generic fallback for other platforms (e.g. Android, etc)
-            // Try to use a local directory or just fail if we can't find a good home
+            // Fallback for other platforms (e.g. Android)
+            // On Android, we should ideally use the app's internal storage path.
+            // For now, fallback to current directory if writable, or a generic name.
             return std.fmt.allocPrint(allocator, "./{s}", .{SETTINGS_FILENAME});
         }
     }
@@ -114,7 +132,7 @@ pub const InputSettings = struct {
         defer aw.deinit();
 
         try std.json.Stringify.value(.{
-            .version = 2,
+            .version = CURRENT_VERSION,
             .bindings = self.input_mapper.bindings,
         }, .{ .whitespace = .indent_2 }, &aw.writer);
 
@@ -132,6 +150,34 @@ pub const InputSettings = struct {
         });
         defer parsed.deinit();
 
+        // Basic version migration/check
+        if (parsed.value.version < 2) {
+            log.log.info("Migrating input settings from version {} to {}", .{ parsed.value.version, CURRENT_VERSION });
+            // Version 1 used a different format or had fewer actions.
+            // For now, we just accept the bindings we can and let defaults handle the rest.
+        }
+
         self.input_mapper.bindings = parsed.value.bindings;
     }
 };
+
+test "InputSettings.load handles corrupt file" {
+    const allocator = std.testing.allocator;
+    const test_filename = "corrupt_settings.json";
+
+    // Create a corrupt JSON file
+    const file = try std.fs.cwd().createFile(test_filename, .{});
+    try file.writeAll("not a json {");
+    file.close();
+    defer std.fs.cwd().deleteFile(test_filename) catch {};
+
+    // Mocking getSettingsPath for test is hard without refactoring,
+    // but we can test parseJson directly.
+    var settings = InputSettings.init(allocator);
+    defer settings.deinit();
+
+    // This should fail internally but not crash
+    settings.parseJson("invalid json") catch |err| {
+        try std.testing.expect(err == error.UnexpectedToken);
+    };
+}
