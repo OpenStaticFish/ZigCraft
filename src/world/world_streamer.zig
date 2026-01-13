@@ -225,6 +225,8 @@ pub const WorldStreamer = struct {
                             });
                             data.chunk.state = .generating;
                         },
+                        // .queued_for_generation is handled implicitly by the job queue.
+                        // .generating state persists until the job completes.
                         else => {},
                     }
                 }

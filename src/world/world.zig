@@ -188,6 +188,10 @@ pub const World = struct {
         }
     }
 
+    /// Get chunk data at chunk coordinates.
+    /// WARNING: Returned pointer is only guaranteed valid if called from the main thread
+    /// and used before the next call to World.update (which may unload chunks).
+    /// If accessing from a background thread, the chunk must be pinned first.
     pub fn getChunk(self: *World, cx: i32, cz: i32) ?*ChunkData {
         self.storage.chunks_mutex.lockShared();
         defer self.storage.chunks_mutex.unlockShared();

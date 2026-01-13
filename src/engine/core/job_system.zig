@@ -66,6 +66,8 @@ pub const Job = struct {
     }
 };
 
+pub const REPRIORITIZE_THRESHOLD = 16;
+
 pub const JobQueue = struct {
     mutex: Mutex,
     cond: Condition,
@@ -80,7 +82,7 @@ pub const JobQueue = struct {
     // Lazy re-prioritization: mark dirty instead of immediate rebuild
     needs_reprioritize: bool = false,
     // Threshold: only reprioritize if queue has this many items
-    reprioritize_threshold: usize = 16,
+    reprioritize_threshold: usize = REPRIORITIZE_THRESHOLD,
 
     fn compareJobs(context: void, a: Job, b: Job) std.math.Order {
         _ = context;
@@ -97,7 +99,7 @@ pub const JobQueue = struct {
             .abort_worker = false,
             .allocator = allocator,
             .needs_reprioritize = false,
-            .reprioritize_threshold = 16,
+            .reprioritize_threshold = REPRIORITIZE_THRESHOLD,
         };
     }
 
