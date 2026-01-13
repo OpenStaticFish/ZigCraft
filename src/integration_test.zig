@@ -28,7 +28,8 @@ test "smoke test: launch, generate, render, exit" {
 
     try app.runSingleFrame();
 
-    try testing.expect(app.world != null);
-    const stats = app.world.?.getStats();
+    try testing.expect(app.game_session != null);
+    const session = app.game_session.?;
+    const stats = session.world.getStats();
     try testing.expect(stats.chunks_loaded > 0);
 }
