@@ -26,7 +26,8 @@ const RHI = rhi_pkg.RHI;
 const rhi_vulkan = @import("../engine/graphics/rhi_vulkan.zig");
 const TextureAtlas = @import("../engine/graphics/texture_atlas.zig").TextureAtlas;
 const Texture = @import("../engine/graphics/texture.zig").Texture;
-const RenderGraph = @import("../engine/graphics/render_graph.zig").RenderGraph;
+const render_graph_pkg = @import("../engine/graphics/render_graph.zig");
+const RenderGraph = render_graph_pkg.RenderGraph;
 const ResourcePackManager = @import("../engine/graphics/resource_pack.zig").ResourcePackManager;
 
 const AppState = @import("state.zig").AppState;
@@ -258,6 +259,12 @@ pub const App = struct {
     atlas: TextureAtlas,
     env_map: ?@import("../engine/graphics/texture.zig").Texture,
     render_graph: RenderGraph,
+    shadow_passes: [3]render_graph_pkg.ShadowPass,
+    g_pass: render_graph_pkg.GPass,
+    ssao_pass: render_graph_pkg.SSAOPass,
+    sky_pass: render_graph_pkg.SkyPass,
+    opaque_pass: render_graph_pkg.OpaquePass,
+    cloud_pass: render_graph_pkg.CloudPass,
     atmosphere: AtmosphereState,
     clouds: CloudState,
 
@@ -346,7 +353,6 @@ pub const App = struct {
         var atmosphere = AtmosphereState{};
         atmosphere.setTimeOfDay(0.25);
         const clouds = CloudState{};
-        const render_graph = RenderGraph.init(allocator);
 
         const camera = Camera.init(.{
             .position = Vec3.init(8, 100, 8),
@@ -365,7 +371,17 @@ pub const App = struct {
             .resource_pack_manager = resource_pack_manager,
             .atlas = atlas,
             .env_map = env_map,
-            .render_graph = render_graph,
+            .render_graph = RenderGraph.init(allocator),
+            .shadow_passes = .{
+                render_graph_pkg.ShadowPass.init(0),
+                render_graph_pkg.ShadowPass.init(1),
+                render_graph_pkg.ShadowPass.init(2),
+            },
+            .g_pass = .{},
+            .ssao_pass = .{},
+            .sky_pass = .{},
+            .opaque_pass = .{},
+            .cloud_pass = .{},
             .atmosphere = atmosphere,
             .clouds = clouds,
             .settings = settings,
@@ -391,6 +407,16 @@ pub const App = struct {
             .debug_state = .{},
         };
 
+        // Build RenderGraph (OCP: We can easily modify this list based on quality)
+        try app.render_graph.addPass(app.shadow_passes[0].pass());
+        try app.render_graph.addPass(app.shadow_passes[1].pass());
+        try app.render_graph.addPass(app.shadow_passes[2].pass());
+        try app.render_graph.addPass(app.g_pass.pass());
+        try app.render_graph.addPass(app.ssao_pass.pass());
+        try app.render_graph.addPass(app.sky_pass.pass());
+        try app.render_graph.addPass(app.opaque_pass.pass());
+        try app.render_graph.addPass(app.cloud_pass.pass());
+
         return app;
     }
 
@@ -401,6 +427,7 @@ pub const App = struct {
 
         if (self.ui) |*u| u.deinit();
 
+        self.render_graph.deinit();
         self.block_outline.deinit();
         self.hand_renderer.deinit();
         self.atlas.deinit();
@@ -666,7 +693,21 @@ pub const App = struct {
                 };
 
                 self.rhi.updateGlobalUniforms(view_proj_render, self.camera.position, self.atmosphere.sun_dir, self.atmosphere.sun_color, self.atmosphere.time_of_day, self.atmosphere.fog_color, self.atmosphere.fog_density, self.atmosphere.fog_enabled, self.atmosphere.sun_intensity, self.atmosphere.ambient_intensity, self.settings.textures_enabled, cloud_params);
-                self.render_graph.execute(self.rhi, active_world, &self.camera, aspect, sky_params, cloud_params, self.shader, atlas_handles, self.settings.shadow_distance, self.settings.getShadowResolution(), self.settings.ssao_enabled);
+
+                const render_ctx = render_graph_pkg.SceneContext{
+                    .rhi = self.rhi,
+                    .world = active_world,
+                    .camera = &self.camera,
+                    .aspect = aspect,
+                    .sky_params = sky_params,
+                    .cloud_params = cloud_params,
+                    .main_shader = self.shader,
+                    .atlas = atlas_handles,
+                    .shadow_distance = self.settings.shadow_distance,
+                    .shadow_resolution = self.settings.getShadowResolution(),
+                    .ssao_enabled = self.settings.ssao_enabled,
+                };
+                self.render_graph.execute(render_ctx);
 
                 if (self.player) |p| {
                     if (p.target_block) |target| self.block_outline.draw(target.x, target.y, target.z, self.camera.position);

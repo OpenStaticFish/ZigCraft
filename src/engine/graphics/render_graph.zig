@@ -7,187 +7,232 @@ const Mat4 = @import("../math/mat4.zig").Mat4;
 const Vec3 = @import("../math/vec3.zig").Vec3;
 const CSM = @import("csm.zig");
 
-pub const RenderPass = enum {
-    shadow_cascade_0,
-    shadow_cascade_1,
-    shadow_cascade_2,
-    g_pass, // Depth + Normals
-    ssao, // SSAO calculation
-    ssao_blur, // SSAO smoothing
-    main_opaque,
-    main_transparent,
-    sky,
-    clouds,
-    ui,
-    post_process,
+pub const SceneContext = struct {
+    rhi: RHI,
+    world: *World,
+    camera: *Camera,
+    aspect: f32,
+    sky_params: rhi_pkg.SkyParams,
+    cloud_params: rhi_pkg.CloudParams,
+    main_shader: rhi_pkg.ShaderHandle,
+    atlas: rhi_pkg.TextureAtlasHandles,
+    shadow_distance: f32,
+    shadow_resolution: u32,
+    ssao_enabled: bool,
+};
+
+pub const IRenderPass = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        name: []const u8,
+        /// Returns true if this pass requires the main render pass (swapchain output) to be active.
+        needs_main_pass: bool = false,
+        execute: *const fn (ptr: *anyopaque, ctx: SceneContext) void,
+    };
+
+    pub fn execute(self: IRenderPass, ctx: SceneContext) void {
+        self.vtable.execute(self.ptr, ctx);
+    }
+
+    pub fn name(self: IRenderPass) []const u8 {
+        return self.vtable.name;
+    }
+
+    pub fn needsMainPass(self: IRenderPass) bool {
+        return self.vtable.needs_main_pass;
+    }
 };
 
 pub const RenderGraph = struct {
-    passes: []const RenderPass,
+    passes: std.ArrayListUnmanaged(IRenderPass),
+    allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) RenderGraph {
-        _ = allocator;
-        // NOTE: G-Pass/SSAO re-enabled
-        const default_passes = &[_]RenderPass{
-            .shadow_cascade_0,
-            .shadow_cascade_1,
-            .shadow_cascade_2,
-            .g_pass,
-            .ssao,
-            .ssao_blur,
-            .sky,
-            .main_opaque,
-            .clouds,
-        };
         return .{
-            .passes = default_passes,
+            .passes = .{},
+            .allocator = allocator,
         };
     }
 
-    pub fn execute(
-        self: *const RenderGraph,
-        rhi: RHI,
-        world: *World,
-        camera: *Camera,
-        aspect: f32,
-        sky_params: rhi_pkg.SkyParams,
-        cloud_params: rhi_pkg.CloudParams,
-        main_shader: rhi_pkg.ShaderHandle,
-        atlas: rhi_pkg.TextureAtlasHandles,
-        shadow_distance: f32,
-        shadow_resolution: u32,
-        ssao_enabled: bool,
-    ) void {
+    pub fn deinit(self: *RenderGraph) void {
+        self.passes.deinit(self.allocator);
+    }
+
+    pub fn addPass(self: *RenderGraph, pass: IRenderPass) !void {
+        try self.passes.append(self.allocator, pass);
+    }
+
+    pub fn execute(self: *const RenderGraph, ctx: SceneContext) void {
         var main_pass_started = false;
-        for (self.passes) |pass| {
-            // Skip SSAO passes if disabled. Also skip g_pass as it's only used for SSAO.
-            if (!ssao_enabled and (pass == .ssao or pass == .ssao_blur or pass == .g_pass)) continue;
-
-            // Start main render pass (clears buffer) only once before the first non-shadow pass
-            switch (pass) {
-                .shadow_cascade_0, .shadow_cascade_1, .shadow_cascade_2 => {},
-                .ssao, .ssao_blur => {}, // SSAO passes don't start the main pass
-                else => {
-                    if (!main_pass_started) {
-                        rhi.beginMainPass();
-                        main_pass_started = true;
-                    }
-                },
+        for (self.passes.items) |pass| {
+            // Handle main pass transition
+            if (pass.needsMainPass() and !main_pass_started) {
+                ctx.rhi.beginMainPass();
+                main_pass_started = true;
             }
-            self.executePass(pass, rhi, world, camera, aspect, sky_params, cloud_params, main_shader, atlas, shadow_distance, shadow_resolution);
+
+            pass.execute(ctx);
         }
     }
+};
 
-    fn executePass(
-        self: *const RenderGraph,
-        pass: RenderPass,
-        rhi: RHI,
-        world: *World,
-        camera: *Camera,
-        aspect: f32,
-        sky_params: rhi_pkg.SkyParams,
-        cloud_params: rhi_pkg.CloudParams,
-        main_shader: rhi_pkg.ShaderHandle,
-        atlas: rhi_pkg.TextureAtlasHandles,
-        shadow_distance: f32,
-        shadow_resolution: u32,
-    ) void {
-        _ = self;
-        switch (pass) {
-            .shadow_cascade_0 => RenderGraph.executeShadowPass(0, rhi, world, camera, aspect, sky_params.sun_dir, shadow_distance, shadow_resolution),
-            .shadow_cascade_1 => RenderGraph.executeShadowPass(1, rhi, world, camera, aspect, sky_params.sun_dir, shadow_distance, shadow_resolution),
-            .shadow_cascade_2 => RenderGraph.executeShadowPass(2, rhi, world, camera, aspect, sky_params.sun_dir, shadow_distance, shadow_resolution),
-            .g_pass => RenderGraph.executeGPass(rhi, world, camera, aspect, atlas),
-            .ssao => RenderGraph.executeSSAOPass(rhi, camera, aspect),
-            .ssao_blur => RenderGraph.executeSSAOBlurPass(rhi),
-            .main_opaque => RenderGraph.executeMainPass(rhi, world, camera, aspect, main_shader, atlas),
-            .main_transparent => {},
-            .sky => RenderGraph.executeSkyPass(rhi, camera, aspect, sky_params),
-            .clouds => RenderGraph.executeCloudsPass(rhi, camera, aspect, cloud_params),
-            .ui => {},
-            .post_process => {},
-        }
+// --- Standard Pass Implementations ---
+
+pub const ShadowPass = struct {
+    cascade_index: u32,
+
+    pub fn init(cascade_index: u32) ShadowPass {
+        return .{ .cascade_index = cascade_index };
     }
 
-    fn executeGPass(rhi: RHI, world: *World, camera: *Camera, aspect: f32, atlas: rhi_pkg.TextureAtlasHandles) void {
-        rhi.beginGPass();
-        rhi.bindTexture(atlas.diffuse, 1);
-        const view_proj = Mat4.perspectiveReverseZ(camera.fov, aspect, camera.near, camera.far).multiply(camera.getViewMatrixOriginCentered());
-        world.render(view_proj, camera.position);
-        rhi.endGPass();
+    pub fn pass(self: *ShadowPass) IRenderPass {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .name = "ShadowPass",
+                .needs_main_pass = false,
+                .execute = execute,
+            },
+        };
     }
 
-    fn executeSSAOPass(rhi: RHI, camera: *Camera, aspect: f32) void {
-        _ = camera;
-        _ = aspect;
-        rhi.computeSSAO();
-    }
-
-    fn executeSSAOBlurPass(rhi: RHI) void {
-        _ = rhi;
-        // Blur is currently part of computeSSAO in this simple implementation
-    }
-
-    fn executeShadowPass(cascade_idx: usize, rhi: RHI, world: *World, camera: *Camera, aspect: f32, light_dir: Vec3, shadow_distance: f32, shadow_resolution: u32) void {
-        var light_space_matrix = Mat4.identity;
+    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+        const self: *ShadowPass = @ptrCast(@alignCast(ptr));
+        const cascade_idx = self.cascade_index;
+        const rhi = ctx.rhi;
 
         const cascades = CSM.computeCascades(
-            shadow_resolution,
-            camera.fov,
-            aspect,
+            ctx.shadow_resolution,
+            ctx.camera.fov,
+            ctx.aspect,
             0.1,
-            shadow_distance,
-            light_dir,
-            camera.getViewMatrixOriginCentered(),
+            ctx.shadow_distance,
+            ctx.sky_params.sun_dir,
+            ctx.camera.getViewMatrixOriginCentered(),
             true,
         );
-        light_space_matrix = cascades.light_space_matrices[cascade_idx];
+        const light_space_matrix = cascades.light_space_matrices[cascade_idx];
 
-        // Update shadow uniforms UBO (binding 2)
         rhi.updateShadowUniforms(.{
             .light_space_matrices = cascades.light_space_matrices,
             .cascade_splits = cascades.cascade_splits,
             .shadow_texel_sizes = cascades.texel_sizes,
         });
 
-        // Start the shadow pass BEFORE updating global uniforms for the shadow pass matrix.
-        // This ensures updateGlobalUniforms detects shadow_pass_active=true and sets the matrix
-        // without overwriting the global UBO (which holds the main camera view_proj).
-        rhi.beginShadowPass(@intCast(cascade_idx));
-
-        rhi.updateGlobalUniforms(light_space_matrix, camera.position, Vec3.zero, Vec3.zero, 0, Vec3.zero, 0, false, 0, 0, false, .{});
-
-        // renderShadowPass uses the bound pipeline/shader with the matrix we just set
-        world.renderShadowPass(light_space_matrix, camera.position);
+        rhi.beginShadowPass(cascade_idx);
+        rhi.updateGlobalUniforms(light_space_matrix, ctx.camera.position, Vec3.zero, Vec3.zero, 0, Vec3.zero, 0, false, 0, 0, false, .{});
+        ctx.world.renderShadowPass(light_space_matrix, ctx.camera.position);
         rhi.endShadowPass();
     }
+};
 
-    fn executeMainPass(rhi: RHI, world: *World, camera: *Camera, aspect: f32, shader: rhi_pkg.ShaderHandle, atlas: rhi_pkg.TextureAtlasHandles) void {
-        rhi.bindShader(shader);
-        rhi.bindTexture(atlas.diffuse, 1);
-        rhi.bindTexture(atlas.normal, 6);
-        rhi.bindTexture(atlas.roughness, 7);
-        rhi.bindTexture(atlas.displacement, 8);
-        rhi.bindTexture(atlas.env, 9);
-        // rhi.beginMainPass() is now called in execute() to prevent clearing sky
-        const view_proj = Mat4.perspectiveReverseZ(camera.fov, aspect, camera.near, camera.far).multiply(camera.getViewMatrixOriginCentered());
-        world.render(view_proj, camera.position);
+pub const GPass = struct {
+    pub fn pass(self: *GPass) IRenderPass {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .name = "GPass",
+                .needs_main_pass = false,
+                .execute = execute,
+            },
+        };
     }
 
-    fn executeSkyPass(rhi: RHI, camera: *Camera, aspect: f32, params: rhi_pkg.SkyParams) void {
-        _ = aspect;
-        _ = camera;
-        rhi.drawSky(params);
+    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+        _ = ptr;
+        if (!ctx.ssao_enabled) return;
+
+        ctx.rhi.beginGPass();
+        ctx.rhi.bindTexture(ctx.atlas.diffuse, 1);
+        const view_proj = Mat4.perspectiveReverseZ(ctx.camera.fov, ctx.aspect, ctx.camera.near, ctx.camera.far).multiply(ctx.camera.getViewMatrixOriginCentered());
+        ctx.world.render(view_proj, ctx.camera.position);
+        ctx.rhi.endGPass();
+    }
+};
+
+pub const SSAOPass = struct {
+    pub fn pass(self: *SSAOPass) IRenderPass {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .name = "SSAOPass",
+                .needs_main_pass = false,
+                .execute = execute,
+            },
+        };
     }
 
-    fn executeCloudsPass(rhi: RHI, camera: *Camera, aspect: f32, params: rhi_pkg.CloudParams) void {
-        // Use reverse-Z projection for Vulkan to match the depth buffer setup
-        const view_proj = Mat4.perspectiveReverseZ(camera.fov, aspect, camera.near, camera.far).multiply(camera.getViewMatrixOriginCentered());
+    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+        _ = ptr;
+        if (!ctx.ssao_enabled) return;
+        ctx.rhi.computeSSAO();
+    }
+};
 
-        var final_params = params;
-        final_params.view_proj = view_proj;
-        final_params.cam_pos = camera.position;
+pub const SkyPass = struct {
+    pub fn pass(self: *SkyPass) IRenderPass {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .name = "SkyPass",
+                .needs_main_pass = true,
+                .execute = execute,
+            },
+        };
+    }
 
-        rhi.drawClouds(final_params);
+    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+        _ = ptr;
+        ctx.rhi.drawSky(ctx.sky_params);
+    }
+};
+
+pub const OpaquePass = struct {
+    pub fn pass(self: *OpaquePass) IRenderPass {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .name = "OpaquePass",
+                .needs_main_pass = true,
+                .execute = execute,
+            },
+        };
+    }
+
+    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+        _ = ptr;
+        const rhi = ctx.rhi;
+        rhi.bindShader(ctx.main_shader);
+        rhi.bindTexture(ctx.atlas.diffuse, 1);
+        rhi.bindTexture(ctx.atlas.normal, 6);
+        rhi.bindTexture(ctx.atlas.roughness, 7);
+        rhi.bindTexture(ctx.atlas.displacement, 8);
+        rhi.bindTexture(ctx.atlas.env, 9);
+        const view_proj = Mat4.perspectiveReverseZ(ctx.camera.fov, ctx.aspect, ctx.camera.near, ctx.camera.far).multiply(ctx.camera.getViewMatrixOriginCentered());
+        ctx.world.render(view_proj, ctx.camera.position);
+    }
+};
+
+pub const CloudPass = struct {
+    pub fn pass(self: *CloudPass) IRenderPass {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .name = "CloudPass",
+                .needs_main_pass = true,
+                .execute = execute,
+            },
+        };
+    }
+
+    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+        _ = ptr;
+        const view_proj = Mat4.perspectiveReverseZ(ctx.camera.fov, ctx.aspect, ctx.camera.near, ctx.camera.far).multiply(ctx.camera.getViewMatrixOriginCentered());
+        var params = ctx.cloud_params;
+        params.view_proj = view_proj;
+        params.cam_pos = ctx.camera.position;
+        ctx.rhi.drawClouds(params);
     }
 };
