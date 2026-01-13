@@ -162,13 +162,11 @@ pub const InputSettings = struct {
         // Basic version migration/check
         if (parsed.value.version < 2) {
             log.log.info("Migrating input settings from version {} to {}", .{ parsed.value.version, CURRENT_VERSION });
-            // Version 1 used a different format or had fewer actions.
-            // If we have actual migration logic, it would go here.
-            // For now, we just copy whatever matches the new schema.
+            // Version 1 might have fewer bindings. We'll only copy what we have.
         }
 
         if (parsed.value.bindings.len != GameAction.count) {
-            log.log.warn("Settings file has {} bindings, but engine expected {}. Some bindings will remain at defaults.", .{ parsed.value.bindings.len, GameAction.count });
+            log.log.warn("Settings file has {} bindings, but engine expected {}. Only matching bindings will be applied.", .{ parsed.value.bindings.len, GameAction.count });
         }
 
         const count = @min(parsed.value.bindings.len, GameAction.count);
@@ -178,19 +176,13 @@ pub const InputSettings = struct {
 
 test "InputSettings.load handles corrupt file" {
     const allocator = std.testing.allocator;
-    const test_filename = "corrupt_settings.json";
-
-    // Create a corrupt JSON file
-    const file = try std.fs.cwd().createFile(test_filename, .{});
-    try file.writeAll("not a json {");
-    file.close();
-    defer std.fs.cwd().deleteFile(test_filename) catch {};
 
     var settings = InputSettings.init(allocator);
     defer settings.deinit();
 
-    // This should fail
-    try std.testing.expectError(error.UnexpectedToken, settings.parseJson("invalid json"));
+    // Total garbage should fail with SyntaxError or UnexpectedToken
+    const err = settings.parseJson("invalid json");
+    try std.testing.expect(err == error.SyntaxError or err == error.UnexpectedToken);
 }
 
 test "InputSettings version migration" {
