@@ -38,7 +38,7 @@ pub const VulkanSwapchain = struct {
             .device = device,
             .window = window,
         };
-        try self.recreate(msaa_samples);
+        try self.create(msaa_samples);
         return self;
     }
 
@@ -85,6 +85,10 @@ pub const VulkanSwapchain = struct {
     pub fn recreate(self: *VulkanSwapchain, msaa_samples: u8) !void {
         _ = c.vkDeviceWaitIdle(self.device.vk_device);
         self.cleanup();
+        try self.create(msaa_samples);
+    }
+
+    fn create(self: *VulkanSwapchain, msaa_samples: u8) !void {
         try self.createSwapchain();
         try self.createDepthBuffer(msaa_samples);
         try self.createMSAAResources(msaa_samples);

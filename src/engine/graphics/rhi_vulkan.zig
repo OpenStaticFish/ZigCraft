@@ -246,11 +246,6 @@ const VulkanContext = struct {
     anisotropic_filtering: u8,
     msaa_samples: u8,
 
-    // MSAA resources (only allocated when msaa_samples > 1)
-    msaa_color_image: c.VkImage,
-    msaa_color_memory: c.VkDeviceMemory,
-    msaa_color_view: c.VkImageView,
-
     // SSAO resources
     g_normal_image: c.VkImage = null,
     g_normal_memory: c.VkDeviceMemory = null,
@@ -366,6 +361,99 @@ const VulkanContext = struct {
     debug_shadow_vao: c.VkBuffer,
 };
 
+fn destroyShadowResources(ctx: *VulkanContext) void {
+    const vk = ctx.vulkan_device.vk_device;
+    if (ctx.shadow_pipeline != null) c.vkDestroyPipeline(vk, ctx.shadow_pipeline, null);
+    if (ctx.shadow_render_pass != null) c.vkDestroyRenderPass(vk, ctx.shadow_render_pass, null);
+    if (ctx.shadow_sampler != null) c.vkDestroySampler(vk, ctx.shadow_sampler, null);
+    for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
+        if (ctx.shadow_framebuffers[i] != null) c.vkDestroyFramebuffer(vk, ctx.shadow_framebuffers[i], null);
+        if (ctx.shadow_image_views[i] != null) c.vkDestroyImageView(vk, ctx.shadow_image_views[i], null);
+        ctx.shadow_framebuffers[i] = null;
+        ctx.shadow_image_views[i] = null;
+    }
+    if (ctx.shadow_image_view != null) c.vkDestroyImageView(vk, ctx.shadow_image_view, null);
+    if (ctx.shadow_image != null) c.vkDestroyImage(vk, ctx.shadow_image, null);
+    if (ctx.shadow_image_memory != null) c.vkFreeMemory(vk, ctx.shadow_image_memory, null);
+    ctx.shadow_pipeline = null;
+    ctx.shadow_render_pass = null;
+    ctx.shadow_sampler = null;
+    ctx.shadow_image_view = null;
+    ctx.shadow_image = null;
+    ctx.shadow_image_memory = null;
+}
+
+fn destroyGPassResources(ctx: *VulkanContext) void {
+    const vk = ctx.vulkan_device.vk_device;
+    if (ctx.g_pipeline != null) c.vkDestroyPipeline(vk, ctx.g_pipeline, null);
+    if (ctx.g_pipeline_layout != null) c.vkDestroyPipelineLayout(vk, ctx.g_pipeline_layout, null);
+    if (ctx.g_framebuffer != null) c.vkDestroyFramebuffer(vk, ctx.g_framebuffer, null);
+    if (ctx.g_render_pass != null) c.vkDestroyRenderPass(vk, ctx.g_render_pass, null);
+    if (ctx.g_normal_view != null) c.vkDestroyImageView(vk, ctx.g_normal_view, null);
+    if (ctx.g_normal_image != null) c.vkDestroyImage(vk, ctx.g_normal_image, null);
+    if (ctx.g_normal_memory != null) c.vkFreeMemory(vk, ctx.g_normal_memory, null);
+    if (ctx.g_depth_view != null) c.vkDestroyImageView(vk, ctx.g_depth_view, null);
+    if (ctx.g_depth_image != null) c.vkDestroyImage(vk, ctx.g_depth_image, null);
+    if (ctx.g_depth_memory != null) c.vkFreeMemory(vk, ctx.g_depth_memory, null);
+    ctx.g_pipeline = null;
+    ctx.g_pipeline_layout = null;
+    ctx.g_framebuffer = null;
+    ctx.g_render_pass = null;
+    ctx.g_normal_view = null;
+    ctx.g_normal_image = null;
+    ctx.g_normal_memory = null;
+    ctx.g_depth_view = null;
+    ctx.g_depth_image = null;
+    ctx.g_depth_memory = null;
+}
+
+fn destroySSAOResources(ctx: *VulkanContext) void {
+    const vk = ctx.vulkan_device.vk_device;
+    if (ctx.ssao_pipeline != null) c.vkDestroyPipeline(vk, ctx.ssao_pipeline, null);
+    if (ctx.ssao_blur_pipeline != null) c.vkDestroyPipeline(vk, ctx.ssao_blur_pipeline, null);
+    if (ctx.ssao_pipeline_layout != null) c.vkDestroyPipelineLayout(vk, ctx.ssao_pipeline_layout, null);
+    if (ctx.ssao_blur_pipeline_layout != null) c.vkDestroyPipelineLayout(vk, ctx.ssao_blur_pipeline_layout, null);
+    if (ctx.ssao_descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(vk, ctx.ssao_descriptor_set_layout, null);
+    if (ctx.ssao_blur_descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(vk, ctx.ssao_blur_descriptor_set_layout, null);
+    if (ctx.ssao_framebuffer != null) c.vkDestroyFramebuffer(vk, ctx.ssao_framebuffer, null);
+    if (ctx.ssao_blur_framebuffer != null) c.vkDestroyFramebuffer(vk, ctx.ssao_blur_framebuffer, null);
+    if (ctx.ssao_render_pass != null) c.vkDestroyRenderPass(vk, ctx.ssao_render_pass, null);
+    if (ctx.ssao_blur_render_pass != null) c.vkDestroyRenderPass(vk, ctx.ssao_blur_render_pass, null);
+    if (ctx.ssao_view != null) c.vkDestroyImageView(vk, ctx.ssao_view, null);
+    if (ctx.ssao_image != null) c.vkDestroyImage(vk, ctx.ssao_image, null);
+    if (ctx.ssao_memory != null) c.vkFreeMemory(vk, ctx.ssao_memory, null);
+    if (ctx.ssao_blur_view != null) c.vkDestroyImageView(vk, ctx.ssao_blur_view, null);
+    if (ctx.ssao_blur_image != null) c.vkDestroyImage(vk, ctx.ssao_blur_image, null);
+    if (ctx.ssao_blur_memory != null) c.vkFreeMemory(vk, ctx.ssao_blur_memory, null);
+    if (ctx.ssao_noise_view != null) c.vkDestroyImageView(vk, ctx.ssao_noise_view, null);
+    if (ctx.ssao_noise_image != null) c.vkDestroyImage(vk, ctx.ssao_noise_image, null);
+    if (ctx.ssao_noise_memory != null) c.vkFreeMemory(vk, ctx.ssao_noise_memory, null);
+    if (ctx.ssao_kernel_ubo.buffer != null) c.vkDestroyBuffer(vk, ctx.ssao_kernel_ubo.buffer, null);
+    if (ctx.ssao_kernel_ubo.memory != null) c.vkFreeMemory(vk, ctx.ssao_kernel_ubo.memory, null);
+    if (ctx.ssao_sampler != null) c.vkDestroySampler(vk, ctx.ssao_sampler, null);
+    ctx.ssao_pipeline = null;
+    ctx.ssao_blur_pipeline = null;
+    ctx.ssao_pipeline_layout = null;
+    ctx.ssao_blur_pipeline_layout = null;
+    ctx.ssao_descriptor_set_layout = null;
+    ctx.ssao_blur_descriptor_set_layout = null;
+    ctx.ssao_framebuffer = null;
+    ctx.ssao_blur_framebuffer = null;
+    ctx.ssao_render_pass = null;
+    ctx.ssao_blur_render_pass = null;
+    ctx.ssao_view = null;
+    ctx.ssao_image = null;
+    ctx.ssao_memory = null;
+    ctx.ssao_blur_view = null;
+    ctx.ssao_blur_image = null;
+    ctx.ssao_blur_memory = null;
+    ctx.ssao_noise_view = null;
+    ctx.ssao_noise_image = null;
+    ctx.ssao_noise_memory = null;
+    ctx.ssao_kernel_ubo = .{};
+    ctx.ssao_sampler = null;
+}
+
 /// Converts VkResult to Zig error for consistent error handling.
 fn checkVk(result: c.VkResult) !void {
     if (result != c.VK_SUCCESS) return error.VulkanError;
@@ -439,106 +527,6 @@ fn createVulkanBuffer(ctx: *VulkanContext, size: usize, usage: c.VkBufferUsageFl
 
     const is_host_visible = (properties & c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
     return .{ .buffer = buffer, .memory = memory, .size = mem_reqs.size, .is_host_visible = is_host_visible };
-}
-
-/// Creates MSAA color image resources when msaa_samples > 1.
-/// Call after swapchain creation since we need extent and format.
-fn createMSAAResources(ctx: *VulkanContext) void {
-    // Only create MSAA resources if multisampling is enabled
-    if (ctx.msaa_samples <= 1) {
-        ctx.msaa_color_image = null;
-        ctx.msaa_color_memory = null;
-        ctx.msaa_color_view = null;
-        return;
-    }
-
-    const sample_count = getMSAASampleCountFlag(ctx.msaa_samples);
-
-    // Create MSAA color image
-    var image_info = std.mem.zeroes(c.VkImageCreateInfo);
-    image_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    image_info.imageType = c.VK_IMAGE_TYPE_2D;
-    image_info.extent.width = ctx.vulkan_swapchain.extent.width;
-    image_info.extent.height = ctx.vulkan_swapchain.extent.height;
-    image_info.extent.depth = 1;
-    image_info.mipLevels = 1;
-    image_info.arrayLayers = 1;
-    image_info.format = ctx.vulkan_swapchain.image_format;
-    image_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
-    image_info.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
-    // TRANSIENT_ATTACHMENT for lazily-allocated memory (GPU optimization)
-    image_info.usage = c.VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    image_info.samples = sample_count;
-    image_info.sharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
-
-    if (c.vkCreateImage(ctx.vulkan_device.vk_device, &image_info, null, &ctx.msaa_color_image) != c.VK_SUCCESS) {
-        std.log.err("Failed to create MSAA color image", .{});
-        ctx.msaa_color_image = null;
-        return;
-    }
-
-    // Allocate memory
-    var mem_reqs: c.VkMemoryRequirements = undefined;
-    c.vkGetImageMemoryRequirements(ctx.vulkan_device.vk_device, ctx.msaa_color_image, &mem_reqs);
-
-    var alloc_info = std.mem.zeroes(c.VkMemoryAllocateInfo);
-    alloc_info.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    alloc_info.allocationSize = mem_reqs.size;
-    // Try LAZILY_ALLOCATED first for transient attachments, fall back to DEVICE_LOCAL
-    const lazy_mem_type = findMemoryType(ctx.vulkan_device.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT | c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (lazy_mem_type != 0) {
-        alloc_info.memoryTypeIndex = lazy_mem_type;
-    } else {
-        alloc_info.memoryTypeIndex = findMemoryType(ctx.vulkan_device.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    }
-
-    if (c.vkAllocateMemory(ctx.vulkan_device.vk_device, &alloc_info, null, &ctx.msaa_color_memory) != c.VK_SUCCESS) {
-        std.log.err("Failed to allocate MSAA color memory", .{});
-        c.vkDestroyImage(ctx.vulkan_device.vk_device, ctx.msaa_color_image, null);
-        ctx.msaa_color_image = null;
-        return;
-    }
-
-    _ = c.vkBindImageMemory(ctx.vulkan_device.vk_device, ctx.msaa_color_image, ctx.msaa_color_memory, 0);
-
-    // Create image view
-    var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
-    view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    view_info.image = ctx.msaa_color_image;
-    view_info.viewType = c.VK_IMAGE_VIEW_TYPE_2D;
-    view_info.format = ctx.vulkan_swapchain.image_format;
-    view_info.subresourceRange.aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT;
-    view_info.subresourceRange.baseMipLevel = 0;
-    view_info.subresourceRange.levelCount = 1;
-    view_info.subresourceRange.baseArrayLayer = 0;
-    view_info.subresourceRange.layerCount = 1;
-
-    if (c.vkCreateImageView(ctx.vulkan_device.vk_device, &view_info, null, &ctx.msaa_color_view) != c.VK_SUCCESS) {
-        std.log.err("Failed to create MSAA color image view", .{});
-        c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.msaa_color_memory, null);
-        c.vkDestroyImage(ctx.vulkan_device.vk_device, ctx.msaa_color_image, null);
-        ctx.msaa_color_image = null;
-        ctx.msaa_color_memory = null;
-        return;
-    }
-
-    std.log.info("Created MSAA {}x color image ({}x{})", .{ ctx.msaa_samples, ctx.vulkan_swapchain.extent.width, ctx.vulkan_swapchain.extent.height });
-}
-
-/// Destroys MSAA resources if they exist.
-fn destroyMSAAResources(ctx: *VulkanContext) void {
-    if (ctx.msaa_color_view != null) {
-        c.vkDestroyImageView(ctx.vulkan_device.vk_device, ctx.msaa_color_view, null);
-        ctx.msaa_color_view = null;
-    }
-    if (ctx.msaa_color_image != null) {
-        c.vkDestroyImage(ctx.vulkan_device.vk_device, ctx.msaa_color_image, null);
-        ctx.msaa_color_image = null;
-    }
-    if (ctx.msaa_color_memory != null) {
-        c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.msaa_color_memory, null);
-        ctx.msaa_color_memory = null;
-    }
 }
 
 /// Helper to create a texture sampler based on config and global anisotropy.
@@ -726,6 +714,7 @@ fn createMainRenderPass(ctx: *VulkanContext) !void {
 /// Creates G-Pass resources: render pass, normal image, framebuffer, and pipeline.
 /// G-Pass outputs world-space normals to a RGB texture for SSAO sampling.
 fn createGPassResources(ctx: *VulkanContext) !void {
+    destroyGPassResources(ctx);
     const normal_format = c.VK_FORMAT_R8G8B8A8_UNORM; // Store normals in [0,1] range
 
     // 1. Create G-Pass render pass (outputs: normal color + depth)
@@ -1014,6 +1003,7 @@ fn createGPassResources(ctx: *VulkanContext) !void {
 
 /// Creates SSAO resources: render pass, AO image, noise texture, kernel UBO, framebuffer, pipeline.
 fn createSSAOResources(ctx: *VulkanContext) !void {
+    destroySSAOResources(ctx);
     const ao_format = c.VK_FORMAT_R8_UNORM; // Single channel AO output
 
     // 1. Create SSAO render pass (outputs: single-channel AO)
@@ -1544,9 +1534,9 @@ fn createMainFramebuffers(ctx: *VulkanContext) !void {
         framebuffer_info.height = ctx.vulkan_swapchain.extent.height;
         framebuffer_info.layers = 1;
 
-        if (use_msaa and ctx.msaa_color_view != null) {
+        if (use_msaa and ctx.vulkan_swapchain.msaa_color_view != null) {
             // MSAA framebuffer: [msaa_color, depth, swapchain_resolve]
-            const fb_attachments = [_]c.VkImageView{ ctx.msaa_color_view.?, ctx.vulkan_swapchain.depth_image_view, iv };
+            const fb_attachments = [_]c.VkImageView{ ctx.vulkan_swapchain.msaa_color_view.?, ctx.vulkan_swapchain.depth_image_view, iv };
             framebuffer_info.attachmentCount = 3;
             framebuffer_info.pAttachments = &fb_attachments[0];
             try checkVk(c.vkCreateFramebuffer(ctx.vulkan_device.vk_device, &framebuffer_info, null, &fb));
@@ -2633,130 +2623,55 @@ fn deinit(ctx_ptr: *anyopaque) void {
         _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
 
         destroyMainRenderPassAndPipelines(ctx);
+        destroyShadowResources(ctx);
+        destroyGPassResources(ctx);
+        destroySSAOResources(ctx);
 
-        // Clean up UI pipeline
-        if (ctx.ui_pipeline != null) c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.ui_pipeline, null);
-        if (ctx.ui_pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.vulkan_device.vk_device, ctx.ui_pipeline_layout, null);
-        if (ctx.ui_tex_pipeline != null) c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.ui_tex_pipeline, null);
-        if (ctx.ui_tex_pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.vulkan_device.vk_device, ctx.ui_tex_pipeline_layout, null);
-        if (ctx.ui_tex_descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(ctx.vulkan_device.vk_device, ctx.ui_tex_descriptor_set_layout, null);
-        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-            if (ctx.ui_vbos[i].buffer != null) c.vkDestroyBuffer(ctx.vulkan_device.vk_device, ctx.ui_vbos[i].buffer, null);
-            if (ctx.ui_vbos[i].memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.ui_vbos[i].memory, null);
-        }
+        // Clean up remaining resources
+        if (ctx.descriptor_pool != null) c.vkDestroyDescriptorPool(ctx.vulkan_device.vk_device, ctx.descriptor_pool, null);
 
-        // Clean up debug shadow pipeline
-        if (ctx.debug_shadow_pipeline != null) c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.debug_shadow_pipeline, null);
-        if (ctx.debug_shadow_pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.vulkan_device.vk_device, ctx.debug_shadow_pipeline_layout, null);
-        if (ctx.debug_shadow_descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(ctx.vulkan_device.vk_device, ctx.debug_shadow_descriptor_set_layout, null);
-        if (ctx.debug_shadow_vbo.buffer != null) c.vkDestroyBuffer(ctx.vulkan_device.vk_device, ctx.debug_shadow_vbo.buffer, null);
-        if (ctx.debug_shadow_vbo.memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.debug_shadow_vbo.memory, null);
-
-        // Clean up cloud pipeline
-        if (ctx.cloud_pipeline != null) c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.cloud_pipeline, null);
-        if (ctx.cloud_pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.vulkan_device.vk_device, ctx.cloud_pipeline_layout, null);
-        if (ctx.cloud_vbo.buffer != null) c.vkDestroyBuffer(ctx.vulkan_device.vk_device, ctx.cloud_vbo.buffer, null);
-        if (ctx.cloud_vbo.memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.cloud_vbo.memory, null);
-        if (ctx.cloud_ebo.buffer != null) c.vkDestroyBuffer(ctx.vulkan_device.vk_device, ctx.cloud_ebo.buffer, null);
-        if (ctx.cloud_ebo.memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.cloud_ebo.memory, null);
-
-        // Clean up sky pipeline
-        if (ctx.sky_pipeline != null) c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.sky_pipeline, null);
-        if (ctx.sky_pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.vulkan_device.vk_device, ctx.sky_pipeline_layout, null);
-
-        // Clean up shadow pipeline
-        if (ctx.shadow_pipeline != null) c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.shadow_pipeline, null);
-
-        // Clean up G-Pass resources
-        if (ctx.g_pipeline != null) c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.g_pipeline, null);
-        if (ctx.g_framebuffer != null) c.vkDestroyFramebuffer(ctx.vulkan_device.vk_device, ctx.g_framebuffer, null);
-        if (ctx.g_render_pass != null) c.vkDestroyRenderPass(ctx.vulkan_device.vk_device, ctx.g_render_pass, null);
-        if (ctx.g_normal_view != null) c.vkDestroyImageView(ctx.vulkan_device.vk_device, ctx.g_normal_view, null);
-        if (ctx.g_normal_image != null) c.vkDestroyImage(ctx.vulkan_device.vk_device, ctx.g_normal_image, null);
-        if (ctx.g_normal_memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.g_normal_memory, null);
-        if (ctx.g_depth_view != null) c.vkDestroyImageView(ctx.vulkan_device.vk_device, ctx.g_depth_view, null);
-        if (ctx.g_depth_image != null) c.vkDestroyImage(ctx.vulkan_device.vk_device, ctx.g_depth_image, null);
-        if (ctx.g_depth_memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.g_depth_memory, null);
-
-        // Clean up SSAO resources
-        if (ctx.ssao_pipeline != null) c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.ssao_pipeline, null);
-        if (ctx.ssao_blur_pipeline != null) c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.ssao_blur_pipeline, null);
-        if (ctx.ssao_pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.vulkan_device.vk_device, ctx.ssao_pipeline_layout, null);
-        if (ctx.ssao_blur_pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.vulkan_device.vk_device, ctx.ssao_blur_pipeline_layout, null);
-        if (ctx.ssao_descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(ctx.vulkan_device.vk_device, ctx.ssao_descriptor_set_layout, null);
-        if (ctx.ssao_blur_descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(ctx.vulkan_device.vk_device, ctx.ssao_blur_descriptor_set_layout, null);
-        if (ctx.ssao_framebuffer != null) c.vkDestroyFramebuffer(ctx.vulkan_device.vk_device, ctx.ssao_framebuffer, null);
-        if (ctx.ssao_blur_framebuffer != null) c.vkDestroyFramebuffer(ctx.vulkan_device.vk_device, ctx.ssao_blur_framebuffer, null);
-        if (ctx.ssao_render_pass != null) c.vkDestroyRenderPass(ctx.vulkan_device.vk_device, ctx.ssao_render_pass, null);
-        if (ctx.ssao_blur_render_pass != null) c.vkDestroyRenderPass(ctx.vulkan_device.vk_device, ctx.ssao_blur_render_pass, null);
-        if (ctx.ssao_view != null) c.vkDestroyImageView(ctx.vulkan_device.vk_device, ctx.ssao_view, null);
-        if (ctx.ssao_image != null) c.vkDestroyImage(ctx.vulkan_device.vk_device, ctx.ssao_image, null);
-        if (ctx.ssao_memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.ssao_memory, null);
-        if (ctx.ssao_blur_view != null) c.vkDestroyImageView(ctx.vulkan_device.vk_device, ctx.ssao_blur_view, null);
-        if (ctx.ssao_blur_image != null) c.vkDestroyImage(ctx.vulkan_device.vk_device, ctx.ssao_blur_image, null);
-        if (ctx.ssao_blur_memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.ssao_blur_memory, null);
-        if (ctx.ssao_noise_view != null) c.vkDestroyImageView(ctx.vulkan_device.vk_device, ctx.ssao_noise_view, null);
-        if (ctx.ssao_noise_image != null) c.vkDestroyImage(ctx.vulkan_device.vk_device, ctx.ssao_noise_image, null);
-        if (ctx.ssao_noise_memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.ssao_noise_memory, null);
-        if (ctx.ssao_kernel_ubo.buffer != null) c.vkDestroyBuffer(ctx.vulkan_device.vk_device, ctx.ssao_kernel_ubo.buffer, null);
-        if (ctx.ssao_kernel_ubo.memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.ssao_kernel_ubo.memory, null);
-        if (ctx.ssao_sampler != null) c.vkDestroySampler(ctx.vulkan_device.vk_device, ctx.ssao_sampler, null);
-
-        for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
-            if (ctx.shadow_framebuffers[i] != null) c.vkDestroyFramebuffer(ctx.vulkan_device.vk_device, ctx.shadow_framebuffers[i], null);
-            if (ctx.shadow_image_views[i] != null) c.vkDestroyImageView(ctx.vulkan_device.vk_device, ctx.shadow_image_views[i], null);
-        }
-        if (ctx.shadow_image_view != null) c.vkDestroyImageView(ctx.vulkan_device.vk_device, ctx.shadow_image_view, null);
-        if (ctx.shadow_image != null) c.vkDestroyImage(ctx.vulkan_device.vk_device, ctx.shadow_image, null);
-        if (ctx.shadow_image_memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.shadow_image_memory, null);
-
-        if (ctx.shadow_render_pass != null) c.vkDestroyRenderPass(ctx.vulkan_device.vk_device, ctx.shadow_render_pass, null);
-        if (ctx.shadow_sampler != null) c.vkDestroySampler(ctx.vulkan_device.vk_device, ctx.shadow_sampler, null);
-
-        if (ctx.pipeline != null) c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.pipeline, null);
-        if (ctx.wireframe_pipeline != null) c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.wireframe_pipeline, null);
         if (ctx.pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.vulkan_device.vk_device, ctx.pipeline_layout, null);
+        if (ctx.sky_pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.vulkan_device.vk_device, ctx.sky_pipeline_layout, null);
+        if (ctx.ui_pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.vulkan_device.vk_device, ctx.ui_pipeline_layout, null);
+        if (ctx.ui_tex_pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.vulkan_device.vk_device, ctx.ui_tex_pipeline_layout, null);
+        if (ctx.debug_shadow_pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.vulkan_device.vk_device, ctx.debug_shadow_pipeline_layout, null);
+        if (ctx.cloud_pipeline_layout != null) c.vkDestroyPipelineLayout(ctx.vulkan_device.vk_device, ctx.cloud_pipeline_layout, null);
 
-        ctx.vulkan_swapchain.deinit();
+        if (ctx.descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(ctx.vulkan_device.vk_device, ctx.descriptor_set_layout, null);
+        if (ctx.ui_tex_descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(ctx.vulkan_device.vk_device, ctx.ui_tex_descriptor_set_layout, null);
+        if (ctx.debug_shadow_descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(ctx.vulkan_device.vk_device, ctx.debug_shadow_descriptor_set_layout, null);
 
-        // Clean up MSAA resources
-        destroyMSAAResources(ctx);
+        if (ctx.dummy_shadow_view != null) c.vkDestroyImageView(ctx.vulkan_device.vk_device, ctx.dummy_shadow_view, null);
+        if (ctx.dummy_shadow_image != null) c.vkDestroyImage(ctx.vulkan_device.vk_device, ctx.dummy_shadow_image, null);
+        if (ctx.dummy_shadow_memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.dummy_shadow_memory, null);
 
-        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-            if (ctx.image_available_semaphores[i] != null) c.vkDestroySemaphore(ctx.vulkan_device.vk_device, ctx.image_available_semaphores[i], null);
-            if (ctx.render_finished_semaphores[i] != null) c.vkDestroySemaphore(ctx.vulkan_device.vk_device, ctx.render_finished_semaphores[i], null);
-            if (ctx.in_flight_fences[i] != null) c.vkDestroyFence(ctx.vulkan_device.vk_device, ctx.in_flight_fences[i], null);
-        }
-
-        if (ctx.command_pool != null) c.vkDestroyCommandPool(ctx.vulkan_device.vk_device, ctx.command_pool, null);
-        if (ctx.transfer_command_pool != null) c.vkDestroyCommandPool(ctx.vulkan_device.vk_device, ctx.transfer_command_pool, null);
-
-        // Clean up Staging Buffers
-        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-            ctx.staging_buffers[i].deinit(ctx.vulkan_device.vk_device);
-        }
-
-        // Clean up UBOS
-        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-            if (ctx.global_ubos_mapped[i] != null) c.vkUnmapMemory(ctx.vulkan_device.vk_device, ctx.global_ubos[i].memory);
-            if (ctx.shadow_ubos_mapped[i] != null) c.vkUnmapMemory(ctx.vulkan_device.vk_device, ctx.shadow_ubos[i].memory);
-
-            if (ctx.global_ubos[i].buffer != null) c.vkDestroyBuffer(ctx.vulkan_device.vk_device, ctx.global_ubos[i].buffer, null);
-            if (ctx.global_ubos[i].memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.global_ubos[i].memory, null);
-            if (ctx.shadow_ubos[i].buffer != null) c.vkDestroyBuffer(ctx.vulkan_device.vk_device, ctx.shadow_ubos[i].buffer, null);
-            if (ctx.shadow_ubos[i].memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.shadow_ubos[i].memory, null);
-        }
         if (ctx.model_ubo.buffer != null) c.vkDestroyBuffer(ctx.vulkan_device.vk_device, ctx.model_ubo.buffer, null);
         if (ctx.model_ubo.memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.model_ubo.memory, null);
         if (ctx.dummy_instance_buffer.buffer != null) c.vkDestroyBuffer(ctx.vulkan_device.vk_device, ctx.dummy_instance_buffer.buffer, null);
         if (ctx.dummy_instance_buffer.memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.dummy_instance_buffer.memory, null);
 
-        if (ctx.descriptor_pool != null) c.vkDestroyDescriptorPool(ctx.vulkan_device.vk_device, ctx.descriptor_pool, null);
-        if (ctx.descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(ctx.vulkan_device.vk_device, ctx.descriptor_set_layout, null);
+        ctx.vulkan_swapchain.deinit();
 
-        if (ctx.dummy_shadow_view != null) c.vkDestroyImageView(ctx.vulkan_device.vk_device, ctx.dummy_shadow_view, null);
-        if (ctx.dummy_shadow_image != null) c.vkDestroyImage(ctx.vulkan_device.vk_device, ctx.dummy_shadow_image, null);
-        if (ctx.dummy_shadow_memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.dummy_shadow_memory, null);
+        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+            if (ctx.ui_vbos[i].buffer != null) c.vkDestroyBuffer(ctx.vulkan_device.vk_device, ctx.ui_vbos[i].buffer, null);
+            if (ctx.ui_vbos[i].memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.ui_vbos[i].memory, null);
+            if (ctx.global_ubos[i].buffer != null) c.vkDestroyBuffer(ctx.vulkan_device.vk_device, ctx.global_ubos[i].buffer, null);
+            if (ctx.global_ubos[i].memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.global_ubos[i].memory, null);
+            if (ctx.shadow_ubos[i].buffer != null) c.vkDestroyBuffer(ctx.vulkan_device.vk_device, ctx.shadow_ubos[i].buffer, null);
+            if (ctx.shadow_ubos[i].memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, ctx.shadow_ubos[i].memory, null);
+
+            if (ctx.image_available_semaphores[i] != null) c.vkDestroySemaphore(ctx.vulkan_device.vk_device, ctx.image_available_semaphores[i], null);
+            if (ctx.render_finished_semaphores[i] != null) c.vkDestroySemaphore(ctx.vulkan_device.vk_device, ctx.render_finished_semaphores[i], null);
+            if (ctx.in_flight_fences[i] != null) c.vkDestroyFence(ctx.vulkan_device.vk_device, ctx.in_flight_fences[i], null);
+
+            ctx.staging_buffers[i].deinit(ctx.vulkan_device.vk_device);
+
+            for (ctx.buffer_deletion_queue[i].items) |zombie| {
+                if (zombie.buffer != null) c.vkDestroyBuffer(ctx.vulkan_device.vk_device, zombie.buffer, null);
+                if (zombie.memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, zombie.memory, null);
+            }
+            ctx.buffer_deletion_queue[i].deinit(ctx.allocator);
+        }
 
         var buf_iter = ctx.buffers.iterator();
         while (buf_iter.next()) |entry| {
@@ -2774,19 +2689,11 @@ fn deinit(ctx_ptr: *anyopaque) void {
         }
         ctx.textures.deinit();
 
-        for (0..MAX_FRAMES_IN_FLIGHT) |frame_i| {
-            for (ctx.buffer_deletion_queue[frame_i].items) |zombie| {
-                if (zombie.buffer != null) c.vkDestroyBuffer(ctx.vulkan_device.vk_device, zombie.buffer, null);
-                if (zombie.memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, zombie.memory, null);
-            }
-            ctx.buffer_deletion_queue[frame_i].deinit(ctx.allocator);
-        }
+        if (ctx.command_pool != null) c.vkDestroyCommandPool(ctx.vulkan_device.vk_device, ctx.command_pool, null);
+        if (ctx.transfer_command_pool != null) c.vkDestroyCommandPool(ctx.vulkan_device.vk_device, ctx.transfer_command_pool, null);
 
-        c.vkDestroyDevice(ctx.vulkan_device.vk_device, null);
+        ctx.vulkan_device.deinit();
     }
-    if (ctx.vulkan_device.surface != null) c.vkDestroySurfaceKHR(ctx.vulkan_device.instance, ctx.vulkan_device.surface, null);
-    if (ctx.vulkan_device.instance != null) c.vkDestroyInstance(ctx.vulkan_device.instance, null);
-
     ctx.allocator.destroy(ctx);
 }
 
@@ -2898,24 +2805,26 @@ fn recreateSwapchain(ctx: *VulkanContext) void {
     _ = c.SDL_GetWindowSizeInPixels(ctx.window, &w, &h);
     if (w == 0 or h == 0) return;
 
-    // 1. Destroy existing main rendering stack
+    // 1. Destroy existing stacks
     destroyMainRenderPassAndPipelines(ctx);
+    destroyGPassResources(ctx);
+    destroySSAOResources(ctx);
 
-    // 2. Recreate Swapchain
+    // 2. Recreate Swapchain (includes main RP and framebuffers)
     ctx.vulkan_swapchain.recreate(ctx.msaa_samples) catch |err| {
         std.log.err("Failed to recreate swapchain: {}", .{err});
         return;
     };
 
     // 3. Recreate dependent resources
-    createMSAAResources(ctx);
-    createMainRenderPass(ctx) catch {};
-    createMainFramebuffers(ctx) catch {};
     createMainPipelines(ctx) catch {};
+    createGPassResources(ctx) catch {};
+    createSSAOResources(ctx) catch {};
 
     ctx.framebuffer_resized = false;
     std.log.info("Vulkan swapchain recreated: {}x{} (SDL pixels: {}x{}, MSAA {}x)", .{ ctx.vulkan_swapchain.extent.width, ctx.vulkan_swapchain.extent.height, w, h, ctx.msaa_samples });
 }
+
 fn ensureFrameReady(ctx: *VulkanContext) void {
     if (ctx.transfer_ready) return;
 
@@ -5042,9 +4951,9 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_dev
     ctx.vulkan_swapchain.depth_image = null;
     ctx.vulkan_swapchain.depth_image_view = null;
     ctx.vulkan_swapchain.depth_image_memory = null;
-    ctx.msaa_color_image = null;
-    ctx.msaa_color_view = null;
-    ctx.msaa_color_memory = null;
+    ctx.vulkan_swapchain.msaa_color_image = null;
+    ctx.vulkan_swapchain.msaa_color_view = null;
+    ctx.vulkan_swapchain.msaa_color_memory = null;
     ctx.pipeline = null;
     ctx.pipeline_layout = null;
     ctx.wireframe_pipeline = null;
@@ -5073,6 +4982,7 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_dev
     ctx.anisotropic_filtering = anisotropic_filtering;
     ctx.msaa_samples = msaa_samples;
     ctx.shadow_sampler = null;
+
     ctx.shadow_extent = .{ .width = 0, .height = 0 };
     ctx.shadow_image = null;
     ctx.shadow_image_view = null;
