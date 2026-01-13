@@ -4,6 +4,9 @@
 const std = @import("std");
 const BlockType = @import("../block.zig").BlockType;
 
+/// Minimum sum threshold for biome blend calculation to avoid division by near-zero values
+const BLEND_EPSILON: f32 = 0.0001;
+
 /// Represents a range of values for biome parameter matching
 pub const Range = struct {
     min: f32,
@@ -787,7 +790,7 @@ pub fn selectBiomeBlended(params: ClimateParams) BiomeSelection {
 
     var blend: f32 = 0.0;
     const sum = best_score + second_score;
-    if (sum > 0.0001) {
+    if (sum > BLEND_EPSILON) {
         blend = second_score / sum;
     }
 

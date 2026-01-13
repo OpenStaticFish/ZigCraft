@@ -168,7 +168,6 @@ pub const HeightSampler = struct {
                 slope_suppress = path_info.influence * 0.6;
             },
             .river => {
-                // Use RIVER_DEPTH constant for consistency
                 path_depth = path_info.influence * RIVER_DEPTH;
                 slope_suppress = path_info.influence * 0.8;
             },

@@ -102,7 +102,12 @@ pub const ChunkStorage = struct {
     pub fn remove(self: *ChunkStorage, cx: i32, cz: i32, vertex_allocator: anytype) bool {
         self.chunks_mutex.lock();
         defer self.chunks_mutex.unlock();
+        return self.removeUnlocked(cx, cz, vertex_allocator);
+    }
 
+    /// Remove a chunk without acquiring the lock.
+    /// SAFETY: Caller must hold chunks_mutex (exclusive lock)!
+    pub fn removeUnlocked(self: *ChunkStorage, cx: i32, cz: i32, vertex_allocator: anytype) bool {
         const key = ChunkKey{ .x = cx, .z = cz };
         if (self.chunks.fetchRemove(key)) |entry| {
             entry.value.*.mesh.deinit(vertex_allocator);
