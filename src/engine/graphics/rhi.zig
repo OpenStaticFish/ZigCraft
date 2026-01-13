@@ -221,6 +221,8 @@ pub const IResourceFactory = struct {
         updateTexture: *const fn (ptr: *anyopaque, handle: TextureHandle, data: []const u8) void,
         createShader: *const fn (ptr: *anyopaque, vertex_src: [*c]const u8, fragment_src: [*c]const u8) RhiError!ShaderHandle,
         destroyShader: *const fn (ptr: *anyopaque, handle: ShaderHandle) void,
+        mapBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) ?*anyopaque,
+        unmapBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
     };
 
     pub fn createBuffer(self: IResourceFactory, size: usize, usage: BufferUsage) BufferHandle {
@@ -249,6 +251,12 @@ pub const IResourceFactory = struct {
     }
     pub fn destroyShader(self: IResourceFactory, handle: ShaderHandle) void {
         self.vtable.destroyShader(self.ptr, handle);
+    }
+    pub fn mapBuffer(self: IResourceFactory, handle: BufferHandle) ?*anyopaque {
+        return self.vtable.mapBuffer(self.ptr, handle);
+    }
+    pub fn unmapBuffer(self: IResourceFactory, handle: BufferHandle) void {
+        self.vtable.unmapBuffer(self.ptr, handle);
     }
 };
 
@@ -288,14 +296,18 @@ pub const IRenderContext = struct {
 
         setClearColor: *const fn (ptr: *anyopaque, color: Vec3) void,
 
-        // UI logic (to be moved eventually)
-        beginUI: *const fn (ptr: *anyopaque, screen_width: f32, screen_height: f32) void,
-        endUI: *const fn (ptr: *anyopaque) void,
-        drawUIQuad: *const fn (ptr: *anyopaque, rect: Rect, color: Color) void,
-        drawUITexturedQuad: *const fn (ptr: *anyopaque, texture: TextureHandle, rect: Rect) void,
+        // 2D / UI primitives
+        begin2DPass: *const fn (ptr: *anyopaque, screen_width: f32, screen_height: f32) void,
+        end2DPass: *const fn (ptr: *anyopaque) void,
+        drawRect2D: *const fn (ptr: *anyopaque, rect: Rect, color: Color) void,
+        drawTexture2D: *const fn (ptr: *anyopaque, texture: TextureHandle, rect: Rect) void,
+
         drawSky: *const fn (ptr: *anyopaque, params: SkyParams) void,
         beginCloudPass: *const fn (ptr: *anyopaque, params: CloudParams) void,
         drawDebugShadowMap: *const fn (ptr: *anyopaque, cascade_index: usize, depth_map_handle: TextureHandle) void,
+
+        // Bind UI Pipeline (replaces beginUI/drawUIQuad internal logic)
+        bindUIPipeline: *const fn (ptr: *anyopaque, textured: bool) void,
     };
 
     pub fn beginFrame(self: IRenderContext) void {
@@ -478,17 +490,17 @@ pub const RHI = struct {
     }
 
     // Pass-throughs
-    pub fn beginUI(self: RHI, width: f32, height: f32) void {
-        self.vtable.render.beginUI(self.ptr, width, height);
+    pub fn begin2DPass(self: RHI, width: f32, height: f32) void {
+        self.vtable.render.begin2DPass(self.ptr, width, height);
     }
-    pub fn endUI(self: RHI) void {
-        self.vtable.render.endUI(self.ptr);
+    pub fn end2DPass(self: RHI) void {
+        self.vtable.render.end2DPass(self.ptr);
     }
-    pub fn drawUIQuad(self: RHI, rect: Rect, color: Color) void {
-        self.vtable.render.drawUIQuad(self.ptr, rect, color);
+    pub fn drawRect2D(self: RHI, rect: Rect, color: Color) void {
+        self.vtable.render.drawRect2D(self.ptr, rect, color);
     }
-    pub fn drawUITexturedQuad(self: RHI, handle: TextureHandle, rect: Rect) void {
-        self.vtable.render.drawUITexturedQuad(self.ptr, handle, rect);
+    pub fn drawTexture2D(self: RHI, handle: TextureHandle, rect: Rect) void {
+        self.vtable.render.drawTexture2D(self.ptr, handle, rect);
     }
     pub fn drawSky(self: RHI, params: SkyParams) void {
         self.vtable.render.drawSky(self.ptr, params);
@@ -535,5 +547,8 @@ pub const RHI = struct {
     }
     pub fn setMSAA(self: RHI, samples: u8) void {
         self.vtable.setMSAA(self.ptr, samples);
+    }
+    pub fn bindUIPipeline(self: RHI, textured: bool) void {
+        self.vtable.render.bindUIPipeline(self.ptr, textured);
     }
 };

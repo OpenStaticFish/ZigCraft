@@ -34,22 +34,22 @@ pub const UISystem = struct {
 
     /// Begin UI rendering (call before drawing any UI elements)
     pub fn begin(self: *UISystem) void {
-        self.renderer.beginUI(self.screen_width, self.screen_height);
+        self.renderer.begin2DPass(self.screen_width, self.screen_height);
     }
 
     /// End UI rendering (call after drawing all UI elements)
     pub fn end(self: *UISystem) void {
-        self.renderer.endUI();
+        self.renderer.end2DPass();
     }
 
     /// Draw a filled rectangle
     pub fn drawRect(self: *UISystem, rect: Rect, color: Color) void {
-        self.renderer.drawUIQuad(rect, color);
+        self.renderer.drawRect2D(rect, color);
     }
 
     /// Draw a textured rectangle
     pub fn drawTexture(self: *UISystem, texture_id: rhi.TextureHandle, rect: Rect) void {
-        self.renderer.drawUITexturedQuad(texture_id, rect);
+        self.renderer.drawTexture2D(texture_id, rect);
     }
 
     /// Draw a rectangle outline

@@ -4544,8 +4544,8 @@ fn pushConstants(ctx_ptr: *anyopaque, stages: rhi.ShaderStageFlags, offset: u32,
     c.vkCmdPushConstants(cb, ctx.pipeline_layout, vk_stages, offset, size, data);
 }
 
-// UI Rendering functions
-fn beginUI(ctx_ptr: *anyopaque, screen_width: f32, screen_height: f32) void {
+// 2D Rendering functions
+fn begin2DPass(ctx_ptr: *anyopaque, screen_width: f32, screen_height: f32) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
     if (!ctx.main_pass_active) beginMainPass(ctx_ptr);
@@ -4576,7 +4576,7 @@ fn beginUI(ctx_ptr: *anyopaque, screen_width: f32, screen_height: f32) void {
     c.vkCmdPushConstants(command_buffer, ctx.ui_pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf(Mat4), &proj.data);
 }
 
-fn endUI(ctx_ptr: *anyopaque) void {
+fn end2DPass(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.ui_in_progress) return;
 
@@ -4590,7 +4590,7 @@ fn endUI(ctx_ptr: *anyopaque) void {
     ctx.ui_in_progress = false;
 }
 
-fn drawUIQuad(ctx_ptr: *anyopaque, rect: rhi.Rect, color: rhi.Color) void {
+fn drawRect2D(ctx_ptr: *anyopaque, rect: rhi.Rect, color: rhi.Color) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
 
     const x = rect.x;
@@ -4623,7 +4623,23 @@ fn drawUIQuad(ctx_ptr: *anyopaque, rect: rhi.Rect, color: rhi.Color) void {
     }
 }
 
-fn drawUITexturedQuad(ctx_ptr: *anyopaque, texture: rhi.TextureHandle, rect: rhi.Rect) void {
+fn bindUIPipeline(ctx_ptr: *anyopaque, textured: bool) void {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    if (!ctx.frame_in_progress) return;
+
+    // Reset this so other pipelines know to rebind if they are called next
+    ctx.terrain_pipeline_bound = false;
+
+    const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
+
+    if (textured) {
+        c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.ui_tex_pipeline);
+    } else {
+        c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.ui_pipeline);
+    }
+}
+
+fn drawTexture2D(ctx_ptr: *anyopaque, texture: rhi.TextureHandle, rect: rhi.Rect) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress or !ctx.ui_in_progress) return;
 
@@ -4632,7 +4648,7 @@ fn drawUITexturedQuad(ctx_ptr: *anyopaque, texture: rhi.TextureHandle, rect: rhi
 
     const tex_opt = ctx.textures.get(texture);
     if (tex_opt == null) {
-        std.log.err("drawUITexturedQuad: Texture handle {} not found in textures map!", .{texture});
+        std.log.err("drawTexture2D: Texture handle {} not found in textures map!", .{texture});
         return;
     }
     const tex = tex_opt.?;
@@ -4837,6 +4853,32 @@ fn destroyShader(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle) void {
     _ = handle;
 }
 
+fn mapBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle) ?*anyopaque {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    const buf_opt = ctx.buffers.get(handle);
+    ctx.mutex.unlock();
+
+    if (buf_opt) |buf| {
+        var map_ptr: ?*anyopaque = null;
+        if (c.vkMapMemory(ctx.vulkan_device.vk_device, buf.memory, 0, buf.size, 0, &map_ptr) == c.VK_SUCCESS) {
+            return map_ptr;
+        }
+    }
+    return null;
+}
+
+fn unmapBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle) void {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    const buf_opt = ctx.buffers.get(handle);
+    ctx.mutex.unlock();
+
+    if (buf_opt) |buf| {
+        c.vkUnmapMemory(ctx.vulkan_device.vk_device, buf.memory);
+    }
+}
+
 fn bindShader(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle) void {
     _ = ctx_ptr;
     _ = handle;
@@ -4885,6 +4927,8 @@ const vtable = rhi.RHI.VTable{
         .updateTexture = updateTexture,
         .createShader = createShader,
         .destroyShader = destroyShader,
+        .mapBuffer = mapBuffer,
+        .unmapBuffer = unmapBuffer,
     },
     .render = .{
         .beginFrame = beginFrame,
@@ -4914,15 +4958,15 @@ const vtable = rhi.RHI.VTable{
         .bindBuffer = bindBuffer,
         .pushConstants = pushConstants,
         .setClearColor = setClearColor,
-        .beginUI = beginUI,
-        .endUI = endUI,
-        .drawUIQuad = drawUIQuad,
-        .drawUITexturedQuad = drawUITexturedQuad,
+        .begin2DPass = begin2DPass,
+        .end2DPass = end2DPass,
+        .drawRect2D = drawRect2D,
+        .drawTexture2D = drawTexture2D,
         .drawSky = drawSky,
         .beginCloudPass = beginCloudPass,
         .drawDebugShadowMap = drawDebugShadowMap,
+        .bindUIPipeline = bindUIPipeline,
     },
-
     .query = .{
         .getFrameIndex = getFrameIndex,
         .supportsIndirectFirstInstance = supportsIndirectFirstInstance,
