@@ -54,7 +54,7 @@ pub const InputSettings = struct {
         };
         defer allocator.free(path);
 
-        const data = std.fs.cwd().readFileAlloc(allocator, path, MAX_SETTINGS_SIZE) catch |err| {
+        const data = std.fs.cwd().readFileAlloc(path, allocator, .limited(MAX_SETTINGS_SIZE)) catch |err| {
             if (err != error.FileNotFound) {
                 log.log.warn("Failed to read settings file at {s}: {}. Using default bindings.", .{ path, err });
             }
