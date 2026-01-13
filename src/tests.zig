@@ -32,6 +32,13 @@ const BiomeId = @import("world/worldgen/biome.zig").BiomeId;
 // Worldgen modules
 const Noise = @import("zig-noise").Noise;
 
+// Issue #147: Modular terrain generation subsystems
+const NoiseSampler = @import("world/worldgen/noise_sampler.zig").NoiseSampler;
+const HeightSampler = @import("world/worldgen/height_sampler.zig").HeightSampler;
+const SurfaceBuilder = @import("world/worldgen/surface_builder.zig").SurfaceBuilder;
+const CoastalSurfaceType = @import("world/worldgen/surface_builder.zig").CoastalSurfaceType;
+const BiomeSource = @import("world/worldgen/biome.zig").BiomeSource;
+
 // ============================================================================
 // Vec3 Tests
 // ============================================================================
@@ -1602,4 +1609,306 @@ test "selectBiomeWithConstraints uses Voronoi selection" {
 
     const result = biome_mod.selectBiomeWithConstraints(climate, structural);
     try testing.expectEqual(result, .desert);
+}
+
+// ============================================================================
+// Issue #147: Modular Terrain Generation Pipeline Tests
+// ============================================================================
+
+test "NoiseSampler deterministic output" {
+    const sampler = NoiseSampler.init(12345);
+
+    // Same inputs should give same outputs
+    const c1 = sampler.getContinentalness(100.0, 200.0, 0);
+    const c2 = sampler.getContinentalness(100.0, 200.0, 0);
+    try testing.expectEqual(c1, c2);
+
+    // Different positions should give different values
+    const c3 = sampler.getContinentalness(500.0, 600.0, 0);
+    try testing.expect(c1 != c3);
+}
+
+test "NoiseSampler values in expected range" {
+    const sampler = NoiseSampler.init(42);
+
+    // Continentalness should be 0-1
+    const c = sampler.getContinentalness(0.0, 0.0, 0);
+    try testing.expect(c >= 0.0 and c <= 1.0);
+
+    // Temperature should be 0-1
+    const t = sampler.getTemperature(0.0, 0.0, 0);
+    try testing.expect(t >= 0.0 and t <= 1.0);
+
+    // Humidity should be 0-1
+    const h = sampler.getHumidity(0.0, 0.0, 0);
+    try testing.expect(h >= 0.0 and h <= 1.0);
+}
+
+test "NoiseSampler batch sampling matches individual" {
+    const sampler = NoiseSampler.init(99999);
+    const x: f32 = 123.0;
+    const z: f32 = 456.0;
+    const reduction: u8 = 0;
+
+    // Get values individually
+    const warp = sampler.computeWarp(x, z, reduction);
+    const xw = x + warp.x;
+    const zw = z + warp.z;
+    const c_individual = sampler.getContinentalness(xw, zw, reduction);
+    const t_individual = sampler.getTemperature(xw, zw, reduction);
+
+    // Get values via batch
+    const column = sampler.sampleColumn(x, z, reduction);
+
+    // Should match
+    try testing.expectEqual(c_individual, column.continentalness);
+    try testing.expectEqual(t_individual, column.temperature);
+}
+
+test "NoiseSampler different seeds produce different results" {
+    const sampler1 = NoiseSampler.init(111);
+    const sampler2 = NoiseSampler.init(222);
+
+    const c1 = sampler1.getContinentalness(100.0, 100.0, 0);
+    const c2 = sampler2.getContinentalness(100.0, 100.0, 0);
+
+    try testing.expect(c1 != c2);
+}
+
+test "HeightSampler continental zones" {
+    const sampler = HeightSampler.init();
+    const world_class_mod = @import("world/worldgen/world_class.zig");
+
+    // Deep ocean
+    try testing.expectEqual(world_class_mod.ContinentalZone.deep_ocean, sampler.getContinentalZone(0.1));
+
+    // Ocean
+    try testing.expectEqual(world_class_mod.ContinentalZone.ocean, sampler.getContinentalZone(0.25));
+
+    // Coast
+    try testing.expectEqual(world_class_mod.ContinentalZone.coast, sampler.getContinentalZone(0.38));
+
+    // Inland low
+    try testing.expectEqual(world_class_mod.ContinentalZone.inland_low, sampler.getContinentalZone(0.50));
+
+    // Inland high
+    try testing.expectEqual(world_class_mod.ContinentalZone.inland_high, sampler.getContinentalZone(0.70));
+
+    // Mountain core
+    try testing.expectEqual(world_class_mod.ContinentalZone.mountain_core, sampler.getContinentalZone(0.90));
+}
+
+test "HeightSampler ocean detection" {
+    const sampler = HeightSampler.init();
+
+    try testing.expect(sampler.isOcean(0.0));
+    try testing.expect(sampler.isOcean(0.34));
+    try testing.expect(!sampler.isOcean(0.35));
+    try testing.expect(!sampler.isOcean(0.5));
+}
+
+test "HeightSampler mountain mask range" {
+    const sampler = HeightSampler.init();
+
+    // Mountain mask should be in 0-1 range
+    const m1 = sampler.getMountainMask(0.8, 0.3, 0.8);
+    try testing.expect(m1 >= 0.0 and m1 <= 1.0);
+
+    const m2 = sampler.getMountainMask(0.2, 0.8, 0.4);
+    try testing.expect(m2 >= 0.0 and m2 <= 1.0);
+}
+
+test "SurfaceBuilder coastal type detection" {
+    const builder = SurfaceBuilder.init();
+
+    // Sand beach: low slope, near ocean, at sea level
+    const sand = builder.getCoastalSurfaceType(0.37, 1, 65, 0.3);
+    try testing.expectEqual(CoastalSurfaceType.sand_beach, sand);
+
+    // Cliff: high slope
+    const cliff = builder.getCoastalSurfaceType(0.37, 6, 65, 0.3);
+    try testing.expectEqual(CoastalSurfaceType.cliff, cliff);
+
+    // Gravel beach: high erosion
+    const gravel = builder.getCoastalSurfaceType(0.37, 2, 65, 0.8);
+    try testing.expectEqual(CoastalSurfaceType.gravel_beach, gravel);
+
+    // Too far inland: no coastal type
+    const inland = builder.getCoastalSurfaceType(0.50, 1, 70, 0.3);
+    try testing.expectEqual(CoastalSurfaceType.none, inland);
+}
+
+test "SurfaceBuilder bedrock at y=0" {
+    const builder = SurfaceBuilder.init();
+    const block = builder.getBlockAt(0, 50, .plains, 3, false, false);
+    try testing.expectEqual(BlockType.bedrock, block);
+}
+
+test "SurfaceBuilder water above terrain below sea level" {
+    const builder = SurfaceBuilder.init();
+    const block = builder.getBlockAt(60, 55, .plains, 3, false, true);
+    try testing.expectEqual(BlockType.water, block);
+}
+
+test "SurfaceBuilder air above terrain above sea level" {
+    const builder = SurfaceBuilder.init();
+    const block = builder.getBlockAt(80, 70, .plains, 3, false, false);
+    try testing.expectEqual(BlockType.air, block);
+}
+
+test "BiomeSource initialization" {
+    const source = BiomeSource.init();
+    try testing.expect(source.params.sea_level == 64);
+    try testing.expect(source.params.edge_detection_enabled == true);
+}
+
+test "BiomeSource ocean detection" {
+    const source = BiomeSource.init();
+    try testing.expect(source.isOcean(0.2));
+    try testing.expect(!source.isOcean(0.5));
+}
+
+test "BiomeSource selectBiome hot dry returns desert" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+    const source = BiomeSource.init();
+
+    // Hot and dry climate params -> should select desert
+    const climate = biome_mod.ClimateParams{
+        .temperature = 0.9, // Hot
+        .humidity = 0.1, // Dry
+        .elevation = 0.4,
+        .continentalness = 0.6, // Inland
+        .ruggedness = 0.2,
+    };
+
+    const structural = biome_mod.StructuralParams{
+        .height = 70,
+        .slope = 2,
+        .continentalness = 0.6,
+        .ridge_mask = 0.1,
+    };
+
+    const result = source.selectBiome(climate, structural, 0.0);
+    try testing.expectEqual(result, BiomeId.desert);
+}
+
+test "BiomeSource selectBiome cold wet returns taiga" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+    const source = BiomeSource.init();
+
+    // Cold and wet climate -> should select taiga
+    const climate = biome_mod.ClimateParams{
+        .temperature = 0.2, // Cold
+        .humidity = 0.7, // Wet
+        .elevation = 0.4,
+        .continentalness = 0.6,
+        .ruggedness = 0.3,
+    };
+
+    const structural = biome_mod.StructuralParams{
+        .height = 72,
+        .slope = 1,
+        .continentalness = 0.6,
+        .ridge_mask = 0.1,
+    };
+
+    const result = source.selectBiome(climate, structural, 0.0);
+    try testing.expectEqual(result, BiomeId.taiga);
+}
+
+test "BiomeSource selectBiome river override" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+    const source = BiomeSource.init();
+
+    // Normal land params but high river mask -> should return river
+    const climate = biome_mod.ClimateParams{
+        .temperature = 0.5,
+        .humidity = 0.5,
+        .elevation = 0.4,
+        .continentalness = 0.6,
+        .ruggedness = 0.2,
+    };
+
+    const structural = biome_mod.StructuralParams{
+        .height = 70,
+        .slope = 1,
+        .continentalness = 0.6,
+        .ridge_mask = 0.1,
+    };
+
+    // High river mask should force river biome
+    const result = source.selectBiome(climate, structural, 0.9);
+    try testing.expectEqual(result, BiomeId.river);
+}
+
+test "BiomeSource selectBiomeSimplified returns valid biome" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+    const source = BiomeSource.init();
+
+    // Test various climate combinations return valid biomes
+    const climate1 = biome_mod.ClimateParams{
+        .temperature = 0.9,
+        .humidity = 0.1,
+        .elevation = 0.4,
+        .continentalness = 0.6,
+        .ruggedness = 0.2,
+    };
+
+    const result1 = source.selectBiomeSimplified(climate1);
+    try testing.expectEqual(result1, BiomeId.desert);
+
+    // Ocean check
+    const climate2 = biome_mod.ClimateParams{
+        .temperature = 0.5,
+        .humidity = 0.5,
+        .elevation = 0.4,
+        .continentalness = 0.1, // Deep ocean
+        .ruggedness = 0.2,
+    };
+
+    const result2 = source.selectBiomeSimplified(climate2);
+    try testing.expectEqual(result2, BiomeId.deep_ocean);
+}
+
+test "BiomeSource getColor returns valid packed RGB" {
+    const source = BiomeSource.init();
+
+    // Desert should be sand-colored
+    const desert_color = source.getColor(BiomeId.desert);
+    try testing.expect(desert_color != 0);
+
+    // Ocean should be blue-ish
+    const ocean_color = source.getColor(BiomeId.ocean);
+    try testing.expect(ocean_color != desert_color);
+}
+
+test "BiomeSource selectBiomeWithEdge no edge returns primary only" {
+    const biome_mod = @import("world/worldgen/biome.zig");
+    const source = BiomeSource.init();
+
+    const climate = biome_mod.ClimateParams{
+        .temperature = 0.5,
+        .humidity = 0.5,
+        .elevation = 0.4,
+        .continentalness = 0.6,
+        .ruggedness = 0.2,
+    };
+
+    const structural = biome_mod.StructuralParams{
+        .height = 70,
+        .slope = 1,
+        .continentalness = 0.6,
+        .ridge_mask = 0.1,
+    };
+
+    // No edge detected
+    const edge_info = biome_mod.BiomeEdgeInfo{
+        .base_biome = BiomeId.plains,
+        .neighbor_biome = null,
+        .edge_band = .none,
+    };
+
+    const result = source.selectBiomeWithEdge(climate, structural, 0.0, edge_info);
+    try testing.expectEqual(result.primary, result.secondary);
+    try testing.expectEqual(result.blend_factor, 0.0);
 }

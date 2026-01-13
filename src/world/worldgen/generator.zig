@@ -10,6 +10,13 @@
 //! - LOD1: Skip worm caves, reduced decoration density
 //! - LOD2: Skip all caves, skip decorations, simplified noise
 //! - LOD3: Heightmap-only, no 3D data
+//!
+//! Modular Architecture (Issue #147):
+//! The generator now delegates to specialized subsystems:
+//! - NoiseSampler: Pure noise generation
+//! - HeightSampler: Terrain height computation
+//! - SurfaceBuilder: Surface block placement
+//! - BiomeSource: Biome selection (in biome.zig)
 
 const std = @import("std");
 const noise_mod = @import("noise.zig");
@@ -23,6 +30,7 @@ const CaveSystem = @import("caves.zig").CaveSystem;
 const deco_mod = @import("decorations.zig");
 const biome_mod = @import("biome.zig");
 const BiomeId = biome_mod.BiomeId;
+const BiomeSource = biome_mod.BiomeSource;
 const region_pkg = @import("region.zig");
 const RegionSystem = region_pkg.RegionSystem;
 const RegionInfo = region_pkg.RegionInfo;
@@ -49,6 +57,15 @@ const Biome = @import("../block.zig").Biome;
 const lod_chunk = @import("../lod_chunk.zig");
 const LODLevel = lod_chunk.LODLevel;
 const LODSimplifiedData = lod_chunk.LODSimplifiedData;
+
+// Issue #147: Import modular subsystems
+const noise_sampler_mod = @import("noise_sampler.zig");
+pub const NoiseSampler = noise_sampler_mod.NoiseSampler;
+const height_sampler_mod = @import("height_sampler.zig");
+pub const HeightSampler = height_sampler_mod.HeightSampler;
+const surface_builder_mod = @import("surface_builder.zig");
+pub const SurfaceBuilder = surface_builder_mod.SurfaceBuilder;
+pub const CoastalSurfaceType = surface_builder_mod.CoastalSurfaceType;
 
 // ============================================================================
 // LOD Generation Options (Issue #114)
@@ -221,6 +238,9 @@ const Params = struct {
 };
 
 pub const TerrainGenerator = struct {
+    // DEPRECATED (Issue #147): These noise fields are retained for backward compatibility.
+    // New code should use noise_sampler subsystem instead. These will be removed in a future version.
+    // The noise_sampler contains identical noise generators initialized with the same seed.
     warp_noise_x: ConfiguredNoise,
     warp_noise_z: ConfiguredNoise,
     continentalness_noise: ConfiguredNoise,
@@ -248,13 +268,20 @@ pub const TerrainGenerator = struct {
     cache_center_x: i32,
     cache_center_z: i32,
 
-    // V7-style multi-layer terrain noises (Issue #105)
+    // DEPRECATED (Issue #147): V7-style noises - use noise_sampler instead
     terrain_base: ConfiguredNoise,
     terrain_alt: ConfiguredNoise,
     height_select: ConfiguredNoise,
     terrain_persist: ConfiguredNoise,
-    // Variant noise for sub-biomes (Issue #110)
     variant_noise: ConfiguredNoise,
+
+    // Issue #147: Modular subsystems for terrain generation
+    // These provide clean, testable interfaces to terrain generation components.
+    // New code should use these subsystems instead of the deprecated noise fields above.
+    noise_sampler: NoiseSampler,
+    height_sampler: HeightSampler,
+    surface_builder: SurfaceBuilder,
+    biome_source: BiomeSource,
 
     /// Distance threshold for cache recentering (blocks).
     /// When player is this far from cache center, recenter the cache.
@@ -309,7 +336,44 @@ pub const TerrainGenerator = struct {
             // variant_noise: Low-frequency noise for sub-biomes (Issue #110)
             // Spread 250 blocks for reasonably sized patches
             .variant_noise = ConfiguredNoise.init(makeNoiseParams(seed, 1008, 250, 1.0, 0.0, 3, 0.5)),
+
+            // Issue #147: Initialize modular subsystems
+            .noise_sampler = NoiseSampler.init(seed),
+            .height_sampler = HeightSampler.init(),
+            .surface_builder = SurfaceBuilder.init(),
+            .biome_source = BiomeSource.init(),
         };
+    }
+
+    // =========================================================================
+    // Issue #147: Subsystem Accessors
+    // These provide direct access to modular subsystems for callers that need
+    // isolated functionality without the full generator.
+    // =========================================================================
+
+    /// Get the noise sampler subsystem for direct noise value access
+    pub fn getNoiseSampler(self: *const TerrainGenerator) *const NoiseSampler {
+        return &self.noise_sampler;
+    }
+
+    /// Get the height sampler subsystem for terrain height computation
+    pub fn getHeightSampler(self: *const TerrainGenerator) *const HeightSampler {
+        return &self.height_sampler;
+    }
+
+    /// Get the surface builder subsystem for surface block placement
+    pub fn getSurfaceBuilder(self: *const TerrainGenerator) *const SurfaceBuilder {
+        return &self.surface_builder;
+    }
+
+    /// Get the biome source subsystem for biome selection
+    pub fn getBiomeSource(self: *const TerrainGenerator) *const BiomeSource {
+        return &self.biome_source;
+    }
+
+    /// Get the world seed
+    pub fn getSeed(self: *const TerrainGenerator) u64 {
+        return self.noise_sampler.getSeed();
     }
 
     /// Get region info for a specific world position
@@ -1262,14 +1326,7 @@ pub const TerrainGenerator = struct {
         return smoothstep(p.river_min, p.river_max, river_val);
     }
 
-    /// Coastal surface type determined by structural signals (continentalness, slope, erosion)
-    /// Replaces the post-process shore_dist search with structure-first approach
-    pub const CoastalSurfaceType = enum {
-        none, // Not in coastal zone OR near inland water (use biome default)
-        sand_beach, // Gentle slope near sea level, adjacent to OCEAN -> sand
-        gravel_beach, // High erosion coastal area adjacent to OCEAN -> gravel
-        cliff, // Steep slope in coastal zone -> stone
-    };
+    // CoastalSurfaceType is now imported from surface_builder.zig (Issue #147)
 
     /// Determine coastal surface type based on structural signals
     ///

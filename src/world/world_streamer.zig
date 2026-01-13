@@ -325,7 +325,7 @@ pub const WorldStreamer = struct {
         }
 
         for (to_remove.items) |key| {
-            _ = self.storage.remove(key.x, key.z, vertex_allocator);
+            _ = self.storage.removeUnlocked(key.x, key.z, vertex_allocator);
         }
         self.storage.chunks_mutex.unlock();
     }
