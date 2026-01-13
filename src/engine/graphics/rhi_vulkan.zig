@@ -3465,7 +3465,7 @@ fn setTextureUniforms(ctx_ptr: *anyopaque, texture_enabled: bool, shadow_map_han
     ctx.descriptors_updated = false;
 }
 
-fn drawClouds(ctx_ptr: *anyopaque, params: rhi.CloudParams) void {
+fn beginCloudPass(ctx_ptr: *anyopaque, params: rhi.CloudParams) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
     if (!ctx.main_pass_active) beginMainPass(ctx_ptr);
@@ -3497,12 +3497,6 @@ fn drawClouds(ctx_ptr: *anyopaque, params: rhi.CloudParams) void {
     };
 
     c.vkCmdPushConstants(command_buffer, ctx.cloud_pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(CloudPushConstants), &pc);
-
-    // Bind cloud mesh
-    const offset: c.VkDeviceSize = 0;
-    c.vkCmdBindVertexBuffers(command_buffer, 0, 1, &ctx.cloud_vbo.buffer, &offset);
-    c.vkCmdBindIndexBuffer(command_buffer, ctx.cloud_ebo.buffer, 0, c.VK_INDEX_TYPE_UINT16);
-    c.vkCmdDrawIndexed(command_buffer, 6, 1, 0, 0, 0);
 }
 
 fn drawDebugShadowMap(ctx_ptr: *anyopaque, cascade_index: usize, depth_map_handle: rhi.TextureHandle) void {
@@ -4925,9 +4919,10 @@ const vtable = rhi.RHI.VTable{
         .drawUIQuad = drawUIQuad,
         .drawUITexturedQuad = drawUITexturedQuad,
         .drawSky = drawSky,
-        .drawClouds = drawClouds,
+        .beginCloudPass = beginCloudPass,
         .drawDebugShadowMap = drawDebugShadowMap,
     },
+
     .query = .{
         .getFrameIndex = getFrameIndex,
         .supportsIndirectFirstInstance = supportsIndirectFirstInstance,

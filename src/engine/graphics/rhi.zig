@@ -294,7 +294,7 @@ pub const IRenderContext = struct {
         drawUIQuad: *const fn (ptr: *anyopaque, rect: Rect, color: Color) void,
         drawUITexturedQuad: *const fn (ptr: *anyopaque, texture: TextureHandle, rect: Rect) void,
         drawSky: *const fn (ptr: *anyopaque, params: SkyParams) void,
-        drawClouds: *const fn (ptr: *anyopaque, params: CloudParams) void,
+        beginCloudPass: *const fn (ptr: *anyopaque, params: CloudParams) void,
         drawDebugShadowMap: *const fn (ptr: *anyopaque, cascade_index: usize, depth_map_handle: TextureHandle) void,
     };
 
@@ -455,6 +455,10 @@ pub const RHI = struct {
         self.vtable.render.updateGlobalUniforms(self.ptr, view_proj, cam_pos, sun_dir, sun_color, time, fog_color, fog_density, fog_enabled, sun_intensity, ambient, use_texture, cloud_params);
     }
 
+    pub fn bindBuffer(self: RHI, handle: BufferHandle, usage: BufferUsage) void {
+        self.vtable.render.bindBuffer(self.ptr, handle, usage);
+    }
+
     pub fn getFrameIndex(self: RHI) usize {
         return self.vtable.query.getFrameIndex(self.ptr);
     }
@@ -489,8 +493,8 @@ pub const RHI = struct {
     pub fn drawSky(self: RHI, params: SkyParams) void {
         self.vtable.render.drawSky(self.ptr, params);
     }
-    pub fn drawClouds(self: RHI, params: CloudParams) void {
-        self.vtable.render.drawClouds(self.ptr, params);
+    pub fn beginCloudPass(self: RHI, params: CloudParams) void {
+        self.vtable.render.beginCloudPass(self.ptr, params);
     }
     pub fn beginShadowPass(self: RHI, cascade: u32, matrix: Mat4) void {
         self.vtable.render.beginShadowPass(self.ptr, cascade, matrix);

@@ -49,23 +49,20 @@ pub const AtmosphereSystem = struct {
     }
 
     pub fn renderClouds(self: *AtmosphereSystem, params: rhi.CloudParams, view_proj: Mat4) void {
-        // We will move the logic from rhi_vulkan.zig to use rhi primitives here
-        // But for Phase 4 to work without a massive RHI rewrite,
-        // we'll first just delegate and then gradually move primitives.
+        // Phase 5 Refactor: Use RHI primitives
 
         var final_params = params;
         final_params.view_proj = view_proj;
         final_params.cam_pos = params.cam_pos;
 
-        // Instead of calling rhi.drawClouds(params) which uses internal RHI VBO,
-        // we want to use self.cloud_vbo.
+        // 1. Bind pipeline and push constants
+        self.rhi.beginCloudPass(final_params);
 
-        // To do this properly, RHI needs a way to draw with a specific VBO/EBO.
-        // We have rhi.draw(handle, count, mode).
+        // 2. Bind geometry (now owned by this system)
+        self.rhi.bindBuffer(self.cloud_vbo, .vertex);
+        self.rhi.bindBuffer(self.cloud_ebo, .index);
 
-        // Let's see if we can use that.
-        // But clouds need a specific shader.
-
-        self.rhi.drawClouds(final_params);
+        // 3. Draw
+        self.rhi.drawIndexed(self.cloud_vbo, self.cloud_ebo, 6);
     }
 };
