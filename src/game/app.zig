@@ -154,7 +154,6 @@ pub const App = struct {
         // Load custom bindings
         var input_settings = InputSettings.load(allocator);
         defer input_settings.deinit();
-        const input_mapper = input_settings.input_mapper;
 
         const app = try allocator.create(App);
         app.* = .{
@@ -180,7 +179,7 @@ pub const App = struct {
             .cloud_pass = .{},
             .settings = settings,
             .input = input,
-            .input_mapper = input_mapper,
+            .input_mapper = input_settings.input_mapper,
             .time = time,
             .camera = camera,
             .ui = ui,

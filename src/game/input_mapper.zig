@@ -15,91 +15,91 @@ const Input = @import("../engine/input/input.zig").Input;
 /// Gameplay code should query these actions instead of specific keys.
 pub const GameAction = enum(u8) {
     // Movement
-    /// Move player forward
+    /// Move player forward (Default: W)
     move_forward,
-    /// Move player backward
+    /// Move player backward (Default: S)
     move_backward,
-    /// Strafe player left
+    /// Strafe player left (Default: A)
     move_left,
-    /// Strafe player right
+    /// Strafe player right (Default: D)
     move_right,
-    /// Jump or fly up
+    /// Jump or fly up (Default: Space)
     jump,
-    /// Crouch or fly down
+    /// Crouch or fly down (Default: Left Shift)
     crouch,
-    /// Sprint (increase speed)
+    /// Sprint (increase speed) (Default: Left Ctrl)
     sprint,
     /// Toggle fly mode (detected via double-tap jump usually)
     fly,
 
     // Interaction
-    /// Primary action (e.g., mine block)
+    /// Primary action (e.g., mine block) (Default: Left Click)
     interact_primary,
-    /// Secondary action (e.g., place block)
+    /// Secondary action (e.g., place block) (Default: Right Click)
     interact_secondary,
 
     // UI/Menu toggles
-    /// Open/close inventory
+    /// Open/close inventory (Default: I)
     inventory,
-    /// Toggle mouse capture or menu
+    /// Toggle mouse capture or menu (Default: Tab)
     tab_menu,
-    /// Pause the game
+    /// Pause the game (Default: Escape)
     pause,
 
     // Hotbar slots
-    /// Select hotbar slot 1
+    /// Select hotbar slot 1 (Default: 1)
     slot_1,
-    /// Select hotbar slot 2
+    /// Select hotbar slot 2 (Default: 2)
     slot_2,
-    /// Select hotbar slot 3
+    /// Select hotbar slot 3 (Default: 3)
     slot_3,
-    /// Select hotbar slot 4
+    /// Select hotbar slot 4 (Default: 4)
     slot_4,
-    /// Select hotbar slot 5
+    /// Select hotbar slot 5 (Default: 5)
     slot_5,
-    /// Select hotbar slot 6
+    /// Select hotbar slot 6 (Default: 6)
     slot_6,
-    /// Select hotbar slot 7
+    /// Select hotbar slot 7 (Default: 7)
     slot_7,
-    /// Select hotbar slot 8
+    /// Select hotbar slot 8 (Default: 8)
     slot_8,
-    /// Select hotbar slot 9
+    /// Select hotbar slot 9 (Default: 9)
     slot_9,
 
     // Debug/toggles
-    /// Toggle wireframe rendering
+    /// Toggle wireframe rendering (Default: F)
     toggle_wireframe,
-    /// Toggle textures
+    /// Toggle textures (Default: T)
     toggle_textures,
-    /// Toggle VSync
+    /// Toggle VSync (Default: V)
     toggle_vsync,
-    /// Toggle FPS counter
+    /// Toggle FPS counter (Default: F2)
     toggle_fps,
-    /// Toggle block information overlay
+    /// Toggle block information overlay (Default: F5)
     toggle_block_info,
-    /// Toggle shadow debug view
+    /// Toggle shadow debug view (Default: U)
     toggle_shadows,
-    /// Cycle through shadow cascades
+    /// Cycle through shadow cascades (Default: K)
     cycle_cascade,
-    /// Pause/resume time
+    /// Pause/resume time (Default: N)
     toggle_time_scale,
-    /// Toggle creative mode
+    /// Toggle creative mode (Default: F3)
     toggle_creative,
 
     // Map controls
-    /// Open/close world map
+    /// Open/close world map (Default: M)
     toggle_map,
-    /// Zoom in on map
+    /// Zoom in on map (Default: + / Numpad +)
     map_zoom_in,
-    /// Zoom out on map
+    /// Zoom out on map (Default: - / Numpad -)
     map_zoom_out,
-    /// Center map on player
+    /// Center map on player (Default: Space)
     map_center,
 
     // UI navigation
-    /// Confirm menu selection
+    /// Confirm menu selection (Default: Enter)
     ui_confirm,
-    /// Go back in menu or close
+    /// Go back in menu or close (Default: Escape)
     ui_back,
 
     pub const count = @typeInfo(GameAction).@"enum".fields.len;
@@ -109,29 +109,36 @@ pub const GameAction = enum(u8) {
 pub const InputBinding = union(enum) {
     key: Key,
     mouse_button: MouseButton,
-    /// Alternative key binding (e.g., numpad + for zoom)
+    /// Alternative key binding (treated same as key for equality)
     key_alt: Key,
     none: void,
 
-    /// Returns true if both bindings represent the same physical input
+    /// Returns true if both bindings represent the same physical input.
+    /// Bidirectional: Treats .key and .key_alt as equivalent if they share the same Key value.
     pub fn eql(self: InputBinding, other: InputBinding) bool {
+        const self_key = switch (self) {
+            .key, .key_alt => |k| k,
+            else => null,
+        };
+        const other_key = switch (other) {
+            .key, .key_alt => |k| k,
+            else => null,
+        };
+
+        if (self_key != null and other_key != null) {
+            return self_key.? == other_key.?;
+        }
+
         return switch (self) {
-            .key => |k| switch (other) {
-                .key => |ok| k == ok,
-                else => false,
-            },
             .mouse_button => |mb| switch (other) {
                 .mouse_button => |omb| mb == omb,
-                else => false,
-            },
-            .key_alt => |k| switch (other) {
-                .key_alt => |ok| k == ok,
                 else => false,
             },
             .none => switch (other) {
                 .none => true,
                 else => false,
             },
+            else => false,
         };
     }
 
@@ -235,6 +242,64 @@ pub const ActionBinding = struct {
     }
 };
 
+/// Default bindings for all actions. Stored as a static array to avoid heap allocation.
+pub const DEFAULT_BINDINGS = blk: {
+    var bindings: [GameAction.count]ActionBinding = undefined;
+
+    // Movement
+    bindings[@intFromEnum(GameAction.move_forward)] = ActionBinding.init(.{ .key = .w });
+    bindings[@intFromEnum(GameAction.move_backward)] = ActionBinding.init(.{ .key = .s });
+    bindings[@intFromEnum(GameAction.move_left)] = ActionBinding.init(.{ .key = .a });
+    bindings[@intFromEnum(GameAction.move_right)] = ActionBinding.init(.{ .key = .d });
+    bindings[@intFromEnum(GameAction.jump)] = ActionBinding.init(.{ .key = .space });
+    bindings[@intFromEnum(GameAction.crouch)] = ActionBinding.init(.{ .key = .left_shift });
+    bindings[@intFromEnum(GameAction.sprint)] = ActionBinding.init(.{ .key = .left_ctrl });
+    bindings[@intFromEnum(GameAction.fly)] = ActionBinding.init(.{ .none = {} });
+
+    // Interaction
+    bindings[@intFromEnum(GameAction.interact_primary)] = ActionBinding.init(.{ .mouse_button = .left });
+    bindings[@intFromEnum(GameAction.interact_secondary)] = ActionBinding.init(.{ .mouse_button = .right });
+
+    // UI/Menu
+    bindings[@intFromEnum(GameAction.inventory)] = ActionBinding.init(.{ .key = .i });
+    bindings[@intFromEnum(GameAction.tab_menu)] = ActionBinding.init(.{ .key = .tab });
+    bindings[@intFromEnum(GameAction.pause)] = ActionBinding.init(.{ .key = .escape });
+
+    // Hotbar slots
+    bindings[@intFromEnum(GameAction.slot_1)] = ActionBinding.init(.{ .key = .@"1" });
+    bindings[@intFromEnum(GameAction.slot_2)] = ActionBinding.init(.{ .key = .@"2" });
+    bindings[@intFromEnum(GameAction.slot_3)] = ActionBinding.init(.{ .key = .@"3" });
+    bindings[@intFromEnum(GameAction.slot_4)] = ActionBinding.init(.{ .key = .@"4" });
+    bindings[@intFromEnum(GameAction.slot_5)] = ActionBinding.init(.{ .key = .@"5" });
+    bindings[@intFromEnum(GameAction.slot_6)] = ActionBinding.init(.{ .key = .@"6" });
+    bindings[@intFromEnum(GameAction.slot_7)] = ActionBinding.init(.{ .key = .@"7" });
+    bindings[@intFromEnum(GameAction.slot_8)] = ActionBinding.init(.{ .key = .@"8" });
+    bindings[@intFromEnum(GameAction.slot_9)] = ActionBinding.init(.{ .key = .@"9" });
+
+    // Debug toggles
+    bindings[@intFromEnum(GameAction.toggle_wireframe)] = ActionBinding.init(.{ .key = .f });
+    bindings[@intFromEnum(GameAction.toggle_textures)] = ActionBinding.init(.{ .key = .t });
+    bindings[@intFromEnum(GameAction.toggle_vsync)] = ActionBinding.init(.{ .key = .v });
+    bindings[@intFromEnum(GameAction.toggle_fps)] = ActionBinding.init(.{ .key = .f2 });
+    bindings[@intFromEnum(GameAction.toggle_block_info)] = ActionBinding.init(.{ .key = .f5 });
+    bindings[@intFromEnum(GameAction.toggle_shadows)] = ActionBinding.init(.{ .key = .u });
+    bindings[@intFromEnum(GameAction.cycle_cascade)] = ActionBinding.init(.{ .key = .k });
+    bindings[@intFromEnum(GameAction.toggle_time_scale)] = ActionBinding.init(.{ .key = .n });
+    bindings[@intFromEnum(GameAction.toggle_creative)] = ActionBinding.init(.{ .key = .f3 });
+
+    // Map controls
+    bindings[@intFromEnum(GameAction.toggle_map)] = ActionBinding.init(.{ .key = .m });
+    bindings[@intFromEnum(GameAction.map_zoom_in)] = ActionBinding.initWithAlt(.{ .key = .plus }, .{ .key_alt = .kp_plus });
+    bindings[@intFromEnum(GameAction.map_zoom_out)] = ActionBinding.initWithAlt(.{ .key = .minus }, .{ .key_alt = .kp_minus });
+    bindings[@intFromEnum(GameAction.map_center)] = ActionBinding.init(.{ .key = .space });
+
+    // UI navigation
+    bindings[@intFromEnum(GameAction.ui_confirm)] = ActionBinding.init(.{ .key = .enter });
+    bindings[@intFromEnum(GameAction.ui_back)] = ActionBinding.init(.{ .key = .escape });
+
+    break :blk bindings;
+};
+
 /// Input mapper that translates physical inputs to logical game actions.
 pub const InputMapper = struct {
     /// Current bindings for all actions
@@ -242,69 +307,19 @@ pub const InputMapper = struct {
 
     /// Initialize with default bindings
     pub fn init() InputMapper {
-        var mapper: InputMapper = undefined;
-        mapper.resetToDefaults();
-        return mapper;
+        return .{
+            .bindings = DEFAULT_BINDINGS,
+        };
     }
 
     /// Reset all bindings to their default values
     pub fn resetToDefaults(self: *InputMapper) void {
-        // Movement
-        self.bindings[@intFromEnum(GameAction.move_forward)] = ActionBinding.init(.{ .key = .w });
-        self.bindings[@intFromEnum(GameAction.move_backward)] = ActionBinding.init(.{ .key = .s });
-        self.bindings[@intFromEnum(GameAction.move_left)] = ActionBinding.init(.{ .key = .a });
-        self.bindings[@intFromEnum(GameAction.move_right)] = ActionBinding.init(.{ .key = .d });
-        self.bindings[@intFromEnum(GameAction.jump)] = ActionBinding.init(.{ .key = .space });
-        self.bindings[@intFromEnum(GameAction.crouch)] = ActionBinding.init(.{ .key = .left_shift });
-        self.bindings[@intFromEnum(GameAction.sprint)] = ActionBinding.init(.{ .key = .left_ctrl });
-        self.bindings[@intFromEnum(GameAction.fly)] = ActionBinding.init(.{ .none = {} });
-
-        // Interaction
-        self.bindings[@intFromEnum(GameAction.interact_primary)] = ActionBinding.init(.{ .mouse_button = .left });
-        self.bindings[@intFromEnum(GameAction.interact_secondary)] = ActionBinding.init(.{ .mouse_button = .right });
-
-        // UI/Menu
-        self.bindings[@intFromEnum(GameAction.inventory)] = ActionBinding.init(.{ .key = .i });
-        self.bindings[@intFromEnum(GameAction.tab_menu)] = ActionBinding.init(.{ .key = .tab });
-        self.bindings[@intFromEnum(GameAction.pause)] = ActionBinding.init(.{ .key = .escape });
-
-        // Hotbar slots
-        self.bindings[@intFromEnum(GameAction.slot_1)] = ActionBinding.init(.{ .key = .@"1" });
-        self.bindings[@intFromEnum(GameAction.slot_2)] = ActionBinding.init(.{ .key = .@"2" });
-        self.bindings[@intFromEnum(GameAction.slot_3)] = ActionBinding.init(.{ .key = .@"3" });
-        self.bindings[@intFromEnum(GameAction.slot_4)] = ActionBinding.init(.{ .key = .@"4" });
-        self.bindings[@intFromEnum(GameAction.slot_5)] = ActionBinding.init(.{ .key = .@"5" });
-        self.bindings[@intFromEnum(GameAction.slot_6)] = ActionBinding.init(.{ .key = .@"6" });
-        self.bindings[@intFromEnum(GameAction.slot_7)] = ActionBinding.init(.{ .key = .@"7" });
-        self.bindings[@intFromEnum(GameAction.slot_8)] = ActionBinding.init(.{ .key = .@"8" });
-        self.bindings[@intFromEnum(GameAction.slot_9)] = ActionBinding.init(.{ .key = .@"9" });
-
-        // Debug toggles
-        self.bindings[@intFromEnum(GameAction.toggle_wireframe)] = ActionBinding.init(.{ .key = .f });
-        self.bindings[@intFromEnum(GameAction.toggle_textures)] = ActionBinding.init(.{ .key = .t });
-        self.bindings[@intFromEnum(GameAction.toggle_vsync)] = ActionBinding.init(.{ .key = .v });
-        self.bindings[@intFromEnum(GameAction.toggle_fps)] = ActionBinding.init(.{ .key = .f2 });
-        self.bindings[@intFromEnum(GameAction.toggle_block_info)] = ActionBinding.init(.{ .key = .f5 });
-        self.bindings[@intFromEnum(GameAction.toggle_shadows)] = ActionBinding.init(.{ .key = .u });
-        self.bindings[@intFromEnum(GameAction.cycle_cascade)] = ActionBinding.init(.{ .key = .k });
-        self.bindings[@intFromEnum(GameAction.toggle_time_scale)] = ActionBinding.init(.{ .key = .n });
-        self.bindings[@intFromEnum(GameAction.toggle_creative)] = ActionBinding.init(.{ .key = .f3 });
-
-        // Map controls
-        self.bindings[@intFromEnum(GameAction.toggle_map)] = ActionBinding.init(.{ .key = .m });
-        self.bindings[@intFromEnum(GameAction.map_zoom_in)] = ActionBinding.initWithAlt(.{ .key = .plus }, .{ .key_alt = .kp_plus });
-        self.bindings[@intFromEnum(GameAction.map_zoom_out)] = ActionBinding.initWithAlt(.{ .key = .minus }, .{ .key_alt = .kp_minus });
-        self.bindings[@intFromEnum(GameAction.map_center)] = ActionBinding.init(.{ .key = .space });
-
-        // UI navigation
-        self.bindings[@intFromEnum(GameAction.ui_confirm)] = ActionBinding.init(.{ .key = .enter });
-        self.bindings[@intFromEnum(GameAction.ui_back)] = ActionBinding.init(.{ .key = .escape });
+        self.bindings = DEFAULT_BINDINGS;
     }
 
     /// Reset an individual action to its default value
-    pub fn resetAction(self: *InputMapper, action: GameAction) void {
-        const defaults = init();
-        self.bindings[@intFromEnum(action)] = defaults.bindings[@intFromEnum(action)];
+    pub fn resetActionToDefault(self: *InputMapper, action: GameAction) void {
+        self.bindings[@intFromEnum(action)] = DEFAULT_BINDINGS[@intFromEnum(action)];
     }
 
     /// Set a new binding for an action
@@ -419,4 +434,14 @@ test "InputMapper serialization" {
     try restored.deserialize(allocator, json);
 
     try std.testing.expect(restored.getBinding(.jump).primary.key == .up);
+}
+
+test "InputBinding equality" {
+    const b1 = InputBinding{ .key = .w };
+    const b2 = InputBinding{ .key_alt = .w };
+    const b3 = InputBinding{ .key = .s };
+
+    try std.testing.expect(b1.eql(b2));
+    try std.testing.expect(b2.eql(b1));
+    try std.testing.expect(!b1.eql(b3));
 }
