@@ -114,6 +114,6 @@ pub const AudioSystem = struct {
 
     /// Stop all currently playing sounds.
     pub fn stopAll(self: *AudioSystem) void {
-        self.backend.stopAll();
+        self.backend.stopAllVoices();
     }
 };

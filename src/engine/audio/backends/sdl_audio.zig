@@ -147,7 +147,9 @@ const Mixer = struct {
             var pan: f32 = 0.0; // -1.0 left, 1.0 right
             if (dist > 0.001) {
                 const dir = to_sound.normalize();
-                pan = dir.dot(self.listener_right);
+                if (dir.lengthSquared() > 0) {
+                    pan = dir.dot(self.listener_right);
+                }
             }
 
             // Stereo balance (Unity-style: Center=1.0, Hard Pan=1.0 on one side)
@@ -260,8 +262,8 @@ const Mixer = struct {
                 const hi = u8_buf[valid_pos_idx * 2 + 1];
 
                 // Bug Risk 4: Endianness - Use SDL_AUDIO_S16 (Little Endian)
-                // We perform explicit little-endian decoding
-                const sample: i16 = @bitCast(@as(u16, lo) | (@as(u16, hi) << 8));
+                // Use portable conversion instead of manual bit shifting
+                const sample: i16 = std.mem.readInt(i16, &[2]u8{ lo, hi }, .little);
 
                 // Mix stereo
                 mix_buf[i * 2] += @intFromFloat(@as(f32, @floatFromInt(sample)) * voice.effective_volume_l);
@@ -296,6 +298,12 @@ pub const SDLAudioError = error{
     SDLInitFailed,
     SDLStreamFailed,
 };
+
+// unused error warning suppression
+test "SDLAudioError usage" {
+    _ = SDLAudioError.SDLInitFailed;
+    _ = SDLAudioError.SDLStreamFailed;
+}
 
 pub const SDLAudioBackend = struct {
     backend: backend.IAudioBackend, // Interface wrapper
@@ -351,7 +359,7 @@ pub const SDLAudioBackend = struct {
         self.allocator.destroy(self);
     }
 
-    pub fn stopAll(self: *SDLAudioBackend) void {
+    pub fn stopAllVoices(self: *SDLAudioBackend) void {
         self.mixer.stopAll();
     }
 
@@ -390,6 +398,11 @@ pub const SDLAudioBackend = struct {
         self.mixer.stopVoice(handle);
     }
 
+    fn stopAll(ptr: *anyopaque) void {
+        const self: *SDLAudioBackend = @ptrCast(@alignCast(ptr));
+        self.mixer.stopAll();
+    }
+
     fn setMasterVolume(ptr: *anyopaque, vol: f32) void {
         const self: *SDLAudioBackend = @ptrCast(@alignCast(ptr));
         self.mixer.mutex.lock();
@@ -416,6 +429,7 @@ pub const SDLAudioBackend = struct {
         .setListener = setListener,
         .playSound = playSound,
         .stopVoice = stopVoice,
+        .stopAll = stopAll,
         .setMasterVolume = setMasterVolume,
         .setCategoryVolume = setCategoryVolume,
     };

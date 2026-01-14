@@ -13,6 +13,7 @@ pub const IAudioBackend = struct {
         setListener: *const fn (ptr: *anyopaque, position: Vec3, forward: Vec3, up: Vec3) void,
         playSound: *const fn (ptr: *anyopaque, sound_data: *const types.SoundData, config: types.PlayConfig) types.VoiceHandle,
         stopVoice: *const fn (ptr: *anyopaque, handle: types.VoiceHandle) void,
+        stopAll: *const fn (ptr: *anyopaque) void,
         setMasterVolume: *const fn (ptr: *anyopaque, volume: f32) void,
         setCategoryVolume: *const fn (ptr: *anyopaque, category: types.SoundCategory, volume: f32) void,
     };
@@ -31,6 +32,10 @@ pub const IAudioBackend = struct {
 
     pub fn stopVoice(self: IAudioBackend, handle: types.VoiceHandle) void {
         self.vtable.stopVoice(self.ptr, handle);
+    }
+
+    pub fn stopAll(self: IAudioBackend) void {
+        self.vtable.stopAll(self.ptr);
     }
 
     pub fn setMasterVolume(self: IAudioBackend, volume: f32) void {
