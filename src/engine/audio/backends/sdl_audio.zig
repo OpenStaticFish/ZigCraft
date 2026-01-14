@@ -7,7 +7,7 @@ const backend = @import("../backend.zig");
 const Vec3 = @import("../../math/vec3.zig").Vec3;
 const log = @import("../../core/log.zig");
 
-// Constants
+// Constants - configurable?
 const MAX_VOICES = 64;
 const MIX_RATE = 44100;
 const MIX_CHANNELS = 2; // Stereo
@@ -33,9 +33,13 @@ const Voice = struct {
     // Calculated per frame
     effective_volume_l: f32 = 1.0,
     effective_volume_r: f32 = 1.0,
+
+    // Priority/Age for stealing
+    start_time: i64 = 0, // Ticks when started
 };
 
 const Mixer = struct {
+    mutex: std.Thread.Mutex = .{},
     voices: [MAX_VOICES]Voice = undefined,
     master_volume: f32 = 1.0,
     music_volume: f32 = 0.5,
@@ -54,28 +58,45 @@ const Mixer = struct {
     }
 
     pub fn play(self: *Mixer, sound: *const types.SoundData, config: types.PlayConfig) void {
-        // Find free voice
-        for (&self.voices) |*voice| {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var oldest_idx: usize = 0;
+        var oldest_time: i64 = std.math.maxInt(i64);
+        var found_slot = false;
+
+        // Find free voice or oldest voice
+        for (&self.voices, 0..) |*voice, i| {
             if (!voice.active) {
-                voice.* = .{
-                    .active = true,
-                    .sound_data = sound,
-                    .cursor = 0,
-                    .loop = config.loop,
-                    .pitch = config.pitch,
-                    .base_volume = config.volume,
-                    .category = config.category,
-                    .is_spatial = config.is_spatial,
-                    .position = config.position,
-                    .min_dist = config.min_distance,
-                    .max_dist = config.max_distance,
-                };
-                // Initial update to set volume
-                self.updateVoiceSpatial(voice);
-                return;
+                oldest_idx = i;
+                found_slot = true;
+                break;
+            }
+            if (voice.start_time < oldest_time) {
+                oldest_time = voice.start_time;
+                oldest_idx = i;
             }
         }
-        // Could implement voice stealing here (steal oldest or lowest priority)
+
+        // Voice stealing if full (or just picking the free one found)
+        const voice = &self.voices[oldest_idx];
+
+        voice.* = .{
+            .active = true,
+            .sound_data = sound,
+            .cursor = 0,
+            .loop = config.loop,
+            .pitch = config.pitch,
+            .base_volume = std.math.clamp(config.volume, 0.0, 1.0),
+            .category = config.category,
+            .is_spatial = config.is_spatial,
+            .position = config.position,
+            .min_dist = config.min_distance,
+            .max_dist = config.max_distance,
+            .start_time = @intCast(c.SDL_GetTicksNS()),
+        };
+        // Initial update to set volume
+        self.updateVoiceSpatial(voice);
     }
 
     fn updateVoiceSpatial(self: *Mixer, voice: *Voice) void {
@@ -83,10 +104,10 @@ const Mixer = struct {
 
         // Apply category volume
         switch (voice.category) {
+            .master => {}, // Already applied
             .music => vol *= self.music_volume,
             .sfx => vol *= self.sfx_volume,
             .ambient => vol *= self.ambient_volume,
-            else => {},
         }
 
         if (voice.is_spatial) {
@@ -128,6 +149,9 @@ const Mixer = struct {
     }
 
     pub fn update(self: *Mixer) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         self.listener_right = self.listener_fwd.cross(self.listener_up).normalize();
 
         for (&self.voices) |*voice| {
@@ -139,6 +163,9 @@ const Mixer = struct {
 
     // Mix samples into the output buffer (S16 stereo)
     pub fn mix(self: *Mixer, stream: *c.SDL_AudioStream, _: c_int) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         // We only mix if we need more data. SDL3 stream buffers for us.
         // But here we are just pushing data.
 
@@ -166,6 +193,12 @@ const Mixer = struct {
         for (&self.voices) |*voice| {
             if (!voice.active) continue;
 
+            // Critical Issue 1: Null check
+            if (voice.sound_data == null) {
+                voice.active = false;
+                continue;
+            }
+
             const data = voice.sound_data.?;
             const u8_buf = data.buffer;
 
@@ -174,7 +207,9 @@ const Mixer = struct {
 
             var i: usize = 0;
             while (i < SAMPLES_TO_MIX) : (i += 1) {
-                if (voice.cursor * 2 >= u8_buf.len) {
+                // Critical Issue 2: Fix OOB check
+                // We need 2 bytes for a sample
+                if (voice.cursor * 2 + 2 > u8_buf.len) {
                     if (voice.loop) {
                         voice.cursor = 0;
                     } else {
@@ -186,6 +221,11 @@ const Mixer = struct {
                 // Read sample (Mono S16)
                 const lo = u8_buf[voice.cursor * 2];
                 const hi = u8_buf[voice.cursor * 2 + 1];
+
+                // Bug Risk 4: Endianness
+                // SDL defines MIX_FORMAT as SDL_AUDIO_S16 (Little Endian usually)
+                // We assume source data is little endian for now as well (test tone is)
+                // Proper fix is to use SDL_ConvertAudio if source format differs, but for now explicit LE cast:
                 const sample: i16 = @bitCast(@as(u16, lo) | (@as(u16, hi) << 8));
 
                 // Mix stereo
@@ -205,6 +245,20 @@ const Mixer = struct {
 
         _ = c.SDL_PutAudioStreamData(stream, &out_buf, out_buf.len * 2);
     }
+
+    pub fn stopAll(self: *Mixer) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (&self.voices) |*voice| {
+            voice.active = false;
+        }
+    }
+};
+
+pub const SDLAudioError = error{
+    SDLInitFailed,
+    SDLStreamFailed,
 };
 
 pub const SDLAudioBackend = struct {
@@ -217,7 +271,7 @@ pub const SDLAudioBackend = struct {
         // Init SDL Audio if not already
         if (!c.SDL_InitSubSystem(c.SDL_INIT_AUDIO)) {
             log.log.err("Failed to init SDL Audio: {s}", .{c.SDL_GetError()});
-            return error.SDLInitFailed;
+            return SDLAudioError.SDLInitFailed;
         }
 
         // Create Stream
@@ -230,7 +284,7 @@ pub const SDLAudioBackend = struct {
         const stream = c.SDL_OpenAudioDeviceStream(c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, null, null);
         if (stream == null) {
             log.log.err("Failed to open audio stream: {s}", .{c.SDL_GetError()});
-            return error.SDLStreamFailed;
+            return SDLAudioError.SDLStreamFailed;
         }
 
         const mixer = try allocator.create(Mixer);
@@ -259,6 +313,10 @@ pub const SDLAudioBackend = struct {
         self.allocator.destroy(self);
     }
 
+    pub fn stopAll(self: *SDLAudioBackend) void {
+        self.mixer.stopAll();
+    }
+
     // IAudioBackend impl
 
     fn update(ptr: *anyopaque) void {
@@ -277,6 +335,8 @@ pub const SDLAudioBackend = struct {
 
     fn setListener(ptr: *anyopaque, pos: Vec3, fwd: Vec3, up: Vec3) void {
         const self: *SDLAudioBackend = @ptrCast(@alignCast(ptr));
+        self.mixer.mutex.lock();
+        defer self.mixer.mutex.unlock();
         self.mixer.listener_pos = pos;
         self.mixer.listener_fwd = fwd;
         self.mixer.listener_up = up;
@@ -289,16 +349,22 @@ pub const SDLAudioBackend = struct {
 
     fn setMasterVolume(ptr: *anyopaque, vol: f32) void {
         const self: *SDLAudioBackend = @ptrCast(@alignCast(ptr));
-        self.mixer.master_volume = vol;
+        self.mixer.mutex.lock();
+        defer self.mixer.mutex.unlock();
+        self.mixer.master_volume = std.math.clamp(vol, 0.0, 1.0);
     }
 
     fn setCategoryVolume(ptr: *anyopaque, cat: types.SoundCategory, vol: f32) void {
         const self: *SDLAudioBackend = @ptrCast(@alignCast(ptr));
+        self.mixer.mutex.lock();
+        defer self.mixer.mutex.unlock();
+        const clamped = std.math.clamp(vol, 0.0, 1.0);
+
         switch (cat) {
-            .master => self.mixer.master_volume = vol,
-            .music => self.mixer.music_volume = vol,
-            .sfx => self.mixer.sfx_volume = vol,
-            .ambient => self.mixer.ambient_volume = vol,
+            .master => self.mixer.master_volume = clamped,
+            .music => self.mixer.music_volume = clamped,
+            .sfx => self.mixer.sfx_volume = clamped,
+            .ambient => self.mixer.ambient_volume = clamped,
         }
     }
 
