@@ -6,6 +6,11 @@ const Vec3 = @import("../math/vec3.zig").Vec3;
 pub const SoundHandle = u32;
 pub const InvalidSoundHandle: SoundHandle = 0;
 
+pub const VoiceHandle = struct {
+    id: u32,
+    generation: u32,
+};
+
 pub const AudioFormat = enum {
     unsigned8,
     signed16,

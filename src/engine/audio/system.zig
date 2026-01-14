@@ -62,44 +62,54 @@ pub const AudioSystem = struct {
     /// volume: 0.0 to 1.0
     pub fn setMasterVolume(self: *AudioSystem, volume: f32) void {
         if (!self.enabled) return;
-        self.backend.backend.setMasterVolume(volume);
+        const clamped = std.math.clamp(volume, 0.0, 1.0);
+        self.backend.backend.setMasterVolume(clamped);
     }
 
     /// Set volume for a specific category (Music, SFX, Ambient).
     /// volume: 0.0 to 1.0
     pub fn setCategoryVolume(self: *AudioSystem, category: types.SoundCategory, volume: f32) void {
         if (!self.enabled) return;
-        self.backend.backend.setCategoryVolume(category, volume);
+        const clamped = std.math.clamp(volume, 0.0, 1.0);
+        self.backend.backend.setCategoryVolume(category, clamped);
     }
 
     /// Play a sound by name (2D, no spatialization).
-    pub fn play(self: *AudioSystem, name: []const u8) void {
-        if (!self.enabled) return;
+    pub fn play(self: *AudioSystem, name: []const u8) ?types.VoiceHandle {
+        if (!self.enabled) return null;
 
         const handle = self.manager.getSoundByName(name);
         if (handle == types.InvalidSoundHandle) {
             log.log.warn("Sound not found: {s}", .{name});
-            return;
+            return null;
         }
 
         if (self.manager.getSound(handle)) |sound| {
-            self.backend.backend.playSound(sound, .{});
+            return self.backend.backend.playSound(sound, .{});
         }
+        return null;
     }
 
     /// Play a 3D spatial sound at the given position.
-    pub fn playSpatial(self: *AudioSystem, name: []const u8, pos: Vec3) void {
-        if (!self.enabled) return;
+    pub fn playSpatial(self: *AudioSystem, name: []const u8, pos: Vec3) ?types.VoiceHandle {
+        if (!self.enabled) return null;
 
         const handle = self.manager.getSoundByName(name);
-        if (handle == types.InvalidSoundHandle) return;
+        if (handle == types.InvalidSoundHandle) return null;
 
         if (self.manager.getSound(handle)) |sound| {
-            self.backend.backend.playSound(sound, .{
+            return self.backend.backend.playSound(sound, .{
                 .is_spatial = true,
                 .position = pos,
             });
         }
+        return null;
+    }
+
+    /// Stop a specific voice handle.
+    pub fn stop(self: *AudioSystem, handle: types.VoiceHandle) void {
+        if (!self.enabled) return;
+        self.backend.backend.stopVoice(handle);
     }
 
     /// Stop all currently playing sounds.

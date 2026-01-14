@@ -35,11 +35,14 @@ const Voice = struct {
 
     // Priority/Age for stealing
     start_time: i64 = 0, // Ticks when started
+    id: u32 = 0,
+    generation: u32 = 0,
 };
 
 const Mixer = struct {
     mutex: std.Thread.Mutex = .{},
     voices: [MAX_VOICES]Voice = undefined,
+    voice_generation_counter: u32 = 1,
     master_volume: f32 = 1.0,
     music_volume: f32 = 0.5,
     sfx_volume: f32 = 1.0,
@@ -56,7 +59,7 @@ const Mixer = struct {
         };
     }
 
-    pub fn play(self: *Mixer, sound: *const types.SoundData, config: types.PlayConfig) void {
+    pub fn play(self: *Mixer, sound: *const types.SoundData, config: types.PlayConfig) types.VoiceHandle {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -79,6 +82,8 @@ const Mixer = struct {
 
         // Voice stealing if full (or just picking the free one found)
         const voice = &self.voices[oldest_idx];
+        const gen = self.voice_generation_counter;
+        self.voice_generation_counter += 1;
 
         voice.* = .{
             .active = true,
@@ -93,9 +98,25 @@ const Mixer = struct {
             .min_dist = config.min_distance,
             .max_dist = config.max_distance,
             .start_time = @intCast(c.SDL_GetTicksNS()),
+            .id = @intCast(oldest_idx),
+            .generation = gen,
         };
         // Initial update to set volume
         self.updateVoiceSpatial(voice);
+
+        return .{ .id = @intCast(oldest_idx), .generation = gen };
+    }
+
+    pub fn stopVoice(self: *Mixer, handle: types.VoiceHandle) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (handle.id >= MAX_VOICES) return;
+        const voice = &self.voices[handle.id];
+
+        if (voice.active and voice.generation == handle.generation) {
+            voice.active = false;
+        }
     }
 
     fn updateVoiceSpatial(self: *Mixer, voice: *Voice) void {
@@ -232,10 +253,8 @@ const Mixer = struct {
                 const lo = u8_buf[valid_pos_idx * 2];
                 const hi = u8_buf[valid_pos_idx * 2 + 1];
 
-                // Bug Risk 4: Endianness
-                // SDL defines MIX_FORMAT as SDL_AUDIO_S16 (Little Endian usually)
-                // We assume source data is little endian for now as well (test tone is)
-                // Proper fix is to use SDL_ConvertAudio if source format differs, but for now explicit LE cast:
+                // Bug Risk 4: Endianness - Use SDL_AUDIO_S16 (Little Endian)
+                // We perform explicit little-endian decoding
                 const sample: i16 = @bitCast(@as(u16, lo) | (@as(u16, hi) << 8));
 
                 // Mix stereo
@@ -280,9 +299,11 @@ pub const SDLAudioBackend = struct {
 
     pub fn create(allocator: std.mem.Allocator) !*SDLAudioBackend {
         // Init SDL Audio if not already
-        if (!c.SDL_InitSubSystem(c.SDL_INIT_AUDIO)) {
-            log.log.err("Failed to init SDL Audio: {s}", .{c.SDL_GetError()});
-            return SDLAudioError.SDLInitFailed;
+        if (c.SDL_WasInit(c.SDL_INIT_AUDIO) == 0) {
+            if (!c.SDL_InitSubSystem(c.SDL_INIT_AUDIO)) {
+                log.log.err("Failed to init SDL Audio: {s}", .{c.SDL_GetError()});
+                return SDLAudioError.SDLInitFailed;
+            }
         }
 
         // Create Stream
@@ -353,9 +374,14 @@ pub const SDLAudioBackend = struct {
         self.mixer.listener_up = up;
     }
 
-    fn playSound(ptr: *anyopaque, sound: *const types.SoundData, config: types.PlayConfig) void {
+    fn playSound(ptr: *anyopaque, sound: *const types.SoundData, config: types.PlayConfig) types.VoiceHandle {
         const self: *SDLAudioBackend = @ptrCast(@alignCast(ptr));
-        self.mixer.play(sound, config);
+        return self.mixer.play(sound, config);
+    }
+
+    fn stopVoice(ptr: *anyopaque, handle: types.VoiceHandle) void {
+        const self: *SDLAudioBackend = @ptrCast(@alignCast(ptr));
+        self.mixer.stopVoice(handle);
     }
 
     fn setMasterVolume(ptr: *anyopaque, vol: f32) void {
@@ -383,6 +409,7 @@ pub const SDLAudioBackend = struct {
         .update = update,
         .setListener = setListener,
         .playSound = playSound,
+        .stopVoice = stopVoice,
         .setMasterVolume = setMasterVolume,
         .setCategoryVolume = setCategoryVolume,
     };
