@@ -35,6 +35,7 @@ const RenderGraph = render_graph_pkg.RenderGraph;
 const AtmosphereSystem = @import("../engine/graphics/atmosphere_system.zig").AtmosphereSystem;
 const MaterialSystem = @import("../engine/graphics/material_system.zig").MaterialSystem;
 const ResourcePackManager = @import("../engine/graphics/resource_pack.zig").ResourcePackManager;
+const AudioSystem = @import("../engine/audio/system.zig").AudioSystem;
 
 const AppState = @import("state.zig").AppState;
 const Settings = @import("state.zig").Settings;
@@ -63,6 +64,7 @@ pub const App = struct {
     render_graph: RenderGraph,
     atmosphere_system: *AtmosphereSystem,
     material_system: *MaterialSystem,
+    audio_system: *AudioSystem,
     shadow_passes: [3]render_graph_pkg.ShadowPass,
     g_pass: render_graph_pkg.GPass,
     ssao_pass: render_graph_pkg.SSAOPass,
@@ -142,6 +144,7 @@ pub const App = struct {
         }
 
         const atmosphere_system = try AtmosphereSystem.init(allocator, rhi);
+        const audio_system = try AudioSystem.init(allocator);
 
         const camera = Camera.init(.{
             .position = Vec3.init(8, 100, 8),
@@ -166,6 +169,7 @@ pub const App = struct {
             .render_graph = RenderGraph.init(allocator),
             .atmosphere_system = atmosphere_system,
             .material_system = undefined,
+            .audio_system = audio_system,
             .shadow_passes = .{
                 render_graph_pkg.ShadowPass.init(0),
                 render_graph_pkg.ShadowPass.init(1),
@@ -215,6 +219,7 @@ pub const App = struct {
         self.render_graph.deinit();
         self.atmosphere_system.deinit();
         self.material_system.deinit();
+        self.audio_system.deinit();
         self.atlas.deinit();
         if (self.env_map) |*t| t.deinit();
         self.resource_pack_manager.deinit();
@@ -297,6 +302,9 @@ pub const App = struct {
         }
 
         self.time.update();
+
+        // Update Audio Listener
+        self.audio_system.update(self.camera.position, self.camera.forward, self.camera.up);
 
         const in_world = self.app_state == .world;
         const in_pause = self.app_state == .paused;
