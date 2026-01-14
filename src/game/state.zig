@@ -1,16 +1,5 @@
 const std = @import("std");
 
-pub const AppState = enum {
-    home,
-    singleplayer,
-    world,
-    paused,
-    settings,
-    resource_packs,
-    environment,
-    graphics,
-};
-
 pub const Settings = struct {
     render_distance: i32 = 15,
     mouse_sensitivity: f32 = 50.0,

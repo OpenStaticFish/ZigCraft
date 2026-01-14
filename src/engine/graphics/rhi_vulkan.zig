@@ -2930,6 +2930,8 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
     );
 
     ctx.frame_in_progress = true;
+    ctx.ui_vertex_offset = 0;
+    ctx.ui_flushed_vertex_count = 0;
     ctx.ui_tex_descriptor_next[ctx.current_sync_frame] = 0;
     ctx.debug_shadow_descriptor_next[ctx.current_sync_frame] = 0;
 
@@ -3307,35 +3309,39 @@ fn transitionShadowImage(ctx: *VulkanContext, cascade_index: u32, new_layout: c.
 
 fn beginMainPass(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
-    if (!ctx.frame_in_progress or ctx.main_pass_active) return;
-
-    ensureNoRenderPassActive(ctx_ptr);
-
-    ctx.terrain_pipeline_bound = false;
-
-    var render_pass_info = std.mem.zeroes(c.VkRenderPassBeginInfo);
-    render_pass_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    render_pass_info.renderPass = ctx.vulkan_swapchain.main_render_pass;
-    render_pass_info.framebuffer = ctx.vulkan_swapchain.framebuffers.items[ctx.image_index];
-    render_pass_info.renderArea.offset = .{ .x = 0, .y = 0 };
-    render_pass_info.renderArea.extent = ctx.vulkan_swapchain.extent;
-
-    var clear_values: [3]c.VkClearValue = undefined;
-    clear_values[0] = .{ .color = .{ .float32 = ctx.clear_color } };
-    clear_values[1] = .{ .depthStencil = .{ .depth = 0.0, .stencil = 0 } };
-
-    if (ctx.msaa_samples > 1) {
-        // For MSAA, we have 3 attachments, but only the first two (MSAA color/depth) need clearing.
-        // The third (resolve) is overwritten. However, some drivers expect a clear value for each attachment.
-        clear_values[2] = .{ .color = .{ .float32 = ctx.clear_color } };
-        render_pass_info.clearValueCount = 3;
-    } else {
-        render_pass_info.clearValueCount = 2;
-    }
-    render_pass_info.pClearValues = &clear_values[0];
+    if (!ctx.frame_in_progress) return;
+    if (ctx.vulkan_swapchain.extent.width == 0 or ctx.vulkan_swapchain.extent.height == 0) return;
 
     const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
-    c.vkCmdBeginRenderPass(command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
+    if (!ctx.main_pass_active) {
+        ensureNoRenderPassActive(ctx_ptr);
+
+        ctx.terrain_pipeline_bound = false;
+
+        var render_pass_info = std.mem.zeroes(c.VkRenderPassBeginInfo);
+        render_pass_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        render_pass_info.renderPass = ctx.vulkan_swapchain.main_render_pass;
+        render_pass_info.framebuffer = ctx.vulkan_swapchain.framebuffers.items[ctx.image_index];
+        render_pass_info.renderArea.offset = .{ .x = 0, .y = 0 };
+        render_pass_info.renderArea.extent = ctx.vulkan_swapchain.extent;
+
+        var clear_values: [3]c.VkClearValue = undefined;
+        clear_values[0] = .{ .color = .{ .float32 = ctx.clear_color } };
+        clear_values[1] = .{ .depthStencil = .{ .depth = 0.0, .stencil = 0 } };
+
+        if (ctx.msaa_samples > 1) {
+            // For MSAA, we have 3 attachments, but only the first two (MSAA color/depth) need clearing.
+            // The third (resolve) is overwritten. However, some drivers expect a clear value for each attachment.
+            clear_values[2] = .{ .color = .{ .float32 = ctx.clear_color } };
+            render_pass_info.clearValueCount = 3;
+        } else {
+            render_pass_info.clearValueCount = 2;
+        }
+        render_pass_info.pClearValues = &clear_values[0];
+
+        c.vkCmdBeginRenderPass(command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
+        ctx.main_pass_active = true;
+    }
 
     var viewport = std.mem.zeroes(c.VkViewport);
     viewport.x = 0.0;
@@ -3350,8 +3356,6 @@ fn beginMainPass(ctx_ptr: *anyopaque) void {
     scissor.offset = .{ .x = 0, .y = 0 };
     scissor.extent = ctx.vulkan_swapchain.extent;
     c.vkCmdSetScissor(command_buffer, 0, 1, &scissor);
-
-    ctx.main_pass_active = true;
 }
 
 fn endMainPass(ctx_ptr: *anyopaque) void {
@@ -3482,6 +3486,7 @@ fn beginCloudPass(ctx_ptr: *anyopaque, params: rhi.CloudParams) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
     if (!ctx.main_pass_active) beginMainPass(ctx_ptr);
+    if (!ctx.main_pass_active) return;
 
     // Use dedicated cloud pipeline
     if (ctx.cloud_pipeline == null) return;
@@ -4245,6 +4250,9 @@ fn getMaxMSAASamples(ctx_ptr: *anyopaque) u8 {
 fn drawIndexed(ctx_ptr: *anyopaque, vbo_handle: rhi.BufferHandle, ebo_handle: rhi.BufferHandle, count: u32) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
+    if (!ctx.main_pass_active and !ctx.shadow_pass_active and !ctx.g_pass_active) beginMainPass(ctx_ptr);
+
+    if (!ctx.main_pass_active and !ctx.shadow_pass_active and !ctx.g_pass_active) return;
 
     ctx.mutex.lock();
     const vbo_opt = ctx.buffers.get(vbo_handle);
@@ -4254,11 +4262,29 @@ fn drawIndexed(ctx_ptr: *anyopaque, vbo_handle: rhi.BufferHandle, ebo_handle: rh
     if (vbo_opt) |vbo| {
         if (ebo_opt) |ebo| {
             ctx.draw_call_count += 1;
-            const cb = ctx.command_buffers[ctx.current_sync_frame];
+            const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
+
+            // Use simple pipeline binding logic
+            if (!ctx.terrain_pipeline_bound) {
+                const selected_pipeline = if (ctx.wireframe_enabled and ctx.wireframe_pipeline != null)
+                    ctx.wireframe_pipeline
+                else
+                    ctx.pipeline;
+                if (selected_pipeline == null) return;
+                c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, selected_pipeline);
+                ctx.terrain_pipeline_bound = true;
+            }
+
+            const descriptor_set = if (ctx.lod_mode)
+                &ctx.lod_descriptor_sets[ctx.current_sync_frame]
+            else
+                &ctx.descriptor_sets[ctx.current_sync_frame];
+            c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_layout, 0, 1, descriptor_set, 0, null);
+
             const offset: c.VkDeviceSize = 0;
-            c.vkCmdBindVertexBuffers(cb, 0, 1, &vbo.buffer, &offset);
-            c.vkCmdBindIndexBuffer(cb, ebo.buffer, 0, c.VK_INDEX_TYPE_UINT16);
-            c.vkCmdDrawIndexed(cb, count, 1, 0, 0, 0);
+            c.vkCmdBindVertexBuffers(command_buffer, 0, 1, &vbo.buffer, &offset);
+            c.vkCmdBindIndexBuffer(command_buffer, ebo.buffer, 0, c.VK_INDEX_TYPE_UINT16);
+            c.vkCmdDrawIndexed(command_buffer, count, 1, 0, 0, 0);
         }
     }
 }
@@ -4267,6 +4293,8 @@ fn drawIndirect(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, command_buffer: r
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
     if (!ctx.main_pass_active and !ctx.shadow_pass_active and !ctx.g_pass_active) beginMainPass(ctx_ptr);
+
+    if (!ctx.main_pass_active and !ctx.shadow_pass_active and !ctx.g_pass_active) return;
 
     const use_shadow = ctx.shadow_pass_active;
     const use_g_pass = ctx.g_pass_active;
@@ -4441,6 +4469,9 @@ fn drawOffset(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: r
     if (!ctx.frame_in_progress) return;
     if (!ctx.main_pass_active and !ctx.shadow_pass_active and !ctx.g_pass_active) beginMainPass(ctx_ptr);
 
+    // If we failed to start a pass (e.g. minimized window), abort draw
+    if (!ctx.main_pass_active and !ctx.shadow_pass_active and !ctx.g_pass_active) return;
+
     _ = mode;
 
     const use_shadow = ctx.shadow_pass_active;
@@ -4512,6 +4543,7 @@ fn drawOffset(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: r
 }
 
 fn flushUI(ctx: *VulkanContext) void {
+    if (!ctx.main_pass_active) return;
     if (ctx.ui_vertex_offset / (6 * @sizeOf(f32)) > ctx.ui_flushed_vertex_count) {
         const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
 
@@ -4562,12 +4594,11 @@ fn begin2DPass(ctx_ptr: *anyopaque, screen_width: f32, screen_height: f32) void 
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
     if (!ctx.main_pass_active) beginMainPass(ctx_ptr);
+    if (!ctx.main_pass_active) return;
 
     ctx.ui_screen_width = screen_width;
     ctx.ui_screen_height = screen_height;
     ctx.ui_in_progress = true;
-    ctx.ui_vertex_offset = 0;
-    ctx.ui_flushed_vertex_count = 0;
 
     // Map current frame's UI VBO memory
     const ui_vbo = ctx.ui_vbos[ctx.current_sync_frame];
@@ -4587,6 +4618,12 @@ fn begin2DPass(ctx_ptr: *anyopaque, screen_width: f32, screen_height: f32) void 
     // Set orthographic projection
     const proj = Mat4.orthographic(0, ctx.ui_screen_width, ctx.ui_screen_height, 0, -1, 1);
     c.vkCmdPushConstants(command_buffer, ctx.ui_pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf(Mat4), &proj.data);
+
+    // Force Viewport/Scissor to match UI screen size
+    const viewport = c.VkViewport{ .x = 0, .y = 0, .width = ctx.ui_screen_width, .height = ctx.ui_screen_height, .minDepth = 0, .maxDepth = 1 };
+    c.vkCmdSetViewport(command_buffer, 0, 1, &viewport);
+    const scissor = c.VkRect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = @intFromFloat(ctx.ui_screen_width), .height = @intFromFloat(ctx.ui_screen_height) } };
+    c.vkCmdSetScissor(command_buffer, 0, 1, &scissor);
 }
 
 fn end2DPass(ctx_ptr: *anyopaque) void {
@@ -4733,6 +4770,7 @@ fn drawTexture2D(ctx_ptr: *anyopaque, texture: rhi.TextureHandle, rect: rhi.Rect
 
     // 6. Restore normal UI state for subsequent calls
     c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.ui_pipeline);
+    c.vkCmdPushConstants(command_buffer, ctx.ui_pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf(Mat4), &proj.data);
 }
 
 fn ensureNoRenderPassActive(ctx_ptr: *anyopaque) void {
@@ -4746,12 +4784,12 @@ fn beginShadowPass(ctx_ptr: *anyopaque, cascade_index: u32, light_space_matrix: 
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
 
+    if (ctx.shadow_framebuffers[cascade_index] == null) return;
+
     ctx.shadow_pass_active = true;
     ctx.shadow_pass_index = cascade_index;
     ctx.shadow_pass_matrix = light_space_matrix;
     ctx.shadow_pipeline_bound = false;
-
-    if (ctx.shadow_framebuffers[cascade_index] == null) return;
 
     // Render pass handles transition from UNDEFINED to DEPTH_STENCIL_ATTACHMENT_OPTIMAL
     ctx.shadow_image_layouts[cascade_index] = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
@@ -4830,6 +4868,7 @@ fn drawSky(ctx_ptr: *anyopaque, params: rhi.SkyParams) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
     if (!ctx.main_pass_active) beginMainPass(ctx_ptr);
+    if (!ctx.main_pass_active) return;
 
     if (ctx.sky_pipeline == null) return;
 

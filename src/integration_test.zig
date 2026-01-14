@@ -11,6 +11,8 @@ const testing = std.testing;
 
 const App = @import("game/app.zig").App;
 
+const WorldScreen = @import("game/screens/world.zig").WorldScreen;
+
 test "smoke test: launch, generate, render, exit" {
     const test_allocator = testing.allocator;
 
@@ -23,13 +25,17 @@ test "smoke test: launch, generate, render, exit" {
     };
     defer app.deinit();
 
-    app.app_state = .world;
-    app.pending_new_world_seed = 12345;
+    const world_screen = try WorldScreen.init(test_allocator, app.engineContext(), 12345);
+    app.screen_manager.setScreen(world_screen.screen());
 
     try app.runSingleFrame();
 
-    try testing.expect(app.game_session != null);
-    const session = app.game_session.?;
-    const stats = session.world.getStats();
+    // The screen manager handles the screen transition in the next update/draw cycle
+    // In our implementation, setScreen sets next_screen, and update() consumes it.
+
+    try testing.expect(app.screen_manager.stack.items.len > 0);
+
+    const stats = world_screen.session.world.getStats();
+
     try testing.expect(stats.chunks_loaded > 0);
 }
