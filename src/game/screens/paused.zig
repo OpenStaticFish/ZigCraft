@@ -57,6 +57,9 @@ pub const PausedScreen = struct {
             try ctx.screen_manager.stack.items[ctx.screen_manager.stack.items.len - 2].draw(ui);
         }
 
+        ui.begin();
+        defer ui.end();
+
         const screen_w: f32 = @floatFromInt(ctx.input.window_width);
         const screen_h: f32 = @floatFromInt(ctx.input.window_height);
 

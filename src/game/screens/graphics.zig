@@ -55,6 +55,9 @@ pub const GraphicsScreen = struct {
             try ctx.screen_manager.stack.items[ctx.screen_manager.stack.items.len - 2].draw(ui);
         }
 
+        ui.begin();
+        defer ui.end();
+
         const mouse_pos = ctx.input.getMousePosition();
         const mouse_x: f32 = @floatFromInt(mouse_pos.x);
         const mouse_y: f32 = @floatFromInt(mouse_pos.y);

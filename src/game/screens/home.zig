@@ -42,6 +42,9 @@ pub const HomeScreen = struct {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         const ctx = self.context;
 
+        ui.begin();
+        defer ui.end();
+
         const mouse_pos = ctx.input.getMousePosition();
         const mouse_x: f32 = @floatFromInt(mouse_pos.x);
         const mouse_y: f32 = @floatFromInt(mouse_pos.y);

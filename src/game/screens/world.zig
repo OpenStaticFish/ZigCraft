@@ -155,6 +155,9 @@ pub const WorldScreen = struct {
         if (self.session.player.target_block) |target| self.session.block_outline.draw(target.x, target.y, target.z, camera.position);
         self.session.hand_renderer.draw(camera.position, camera.yaw, camera.pitch);
 
+        ui.begin();
+        defer ui.end();
+
         const mouse_pos = ctx.input.getMousePosition();
         const mouse_x: f32 = @floatFromInt(mouse_pos.x);
         const mouse_y: f32 = @floatFromInt(mouse_pos.y);

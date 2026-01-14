@@ -232,9 +232,7 @@ pub const App = struct {
         self.rhi.beginFrame();
 
         if (self.ui) |*u| {
-            u.begin();
             try self.screen_manager.draw(u);
-            u.end();
         }
 
         self.rhi.endFrame();
