@@ -8,7 +8,7 @@ pub const InvalidSoundHandle: SoundHandle = 0;
 
 pub const VoiceHandle = struct {
     id: u32,
-    generation: u32,
+    generation: u64,
 };
 
 pub const AudioFormat = enum {

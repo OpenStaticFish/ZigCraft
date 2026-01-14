@@ -36,13 +36,13 @@ const Voice = struct {
     // Priority/Age for stealing
     start_time: i64 = 0, // Ticks when started
     id: u32 = 0,
-    generation: u32 = 0,
+    generation: u64 = 0,
 };
 
 const Mixer = struct {
     mutex: std.Thread.Mutex = .{},
     voices: [MAX_VOICES]Voice = undefined,
-    voice_generation_counter: u32 = 1,
+    voice_generation_counter: u64 = 1,
     master_volume: f32 = 1.0,
     music_volume: f32 = 0.5,
     sfx_volume: f32 = 1.0,
@@ -230,7 +230,13 @@ const Mixer = struct {
                 // Nearest-neighbor resampling
                 const pos_idx = @as(usize, @intFromFloat(voice.cursor));
 
-                // Critical Issue 2: Fix OOB check
+                // Critical Issue 2: Fix OOB check & Overflow
+                // Check if pos_idx is so large that * 2 would overflow (usize max / 2)
+                if (pos_idx > std.math.maxInt(usize) / 2) {
+                    voice.active = false;
+                    break;
+                }
+
                 // We need 2 bytes for a sample
                 if (pos_idx * 2 + 2 > u8_buf.len) {
                     if (voice.loop) {
@@ -243,7 +249,7 @@ const Mixer = struct {
 
                 // Re-calculate pos after potential loop wrap
                 const valid_pos_idx = @as(usize, @intFromFloat(voice.cursor));
-                if (valid_pos_idx * 2 + 2 > u8_buf.len) {
+                if (valid_pos_idx > std.math.maxInt(usize) / 2 or valid_pos_idx * 2 + 2 > u8_buf.len) {
                     // Double check in case pitch incremented past end exactly at loop point
                     voice.active = false;
                     break;
