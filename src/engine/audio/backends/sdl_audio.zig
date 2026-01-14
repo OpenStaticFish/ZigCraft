@@ -8,12 +8,13 @@ const Vec3 = @import("../../math/vec3.zig").Vec3;
 const log = @import("../../core/log.zig");
 
 pub const AudioConfig = struct {
-    max_voices: u32 = 64,
-    mix_rate: u32 = 44100,
-    mix_channels: u8 = 2,
+    // Currently, these values are informational as the backend uses static limits.
+    // In the future, we can use these to allocate dynamic buffers.
+    max_voices: u32 = MAX_VOICES,
+    mix_rate: u32 = MIX_RATE,
+    mix_channels: u8 = MIX_CHANNELS,
 };
 
-// Hardcoded for now until dynamic allocation is refactored
 pub const MAX_VOICES = 64;
 pub const MIX_RATE = 44100;
 pub const MIX_CHANNELS = 2; // Stereo
@@ -327,7 +328,11 @@ pub const SDLAudioBackend = struct {
 
     pub const CreateError = std.mem.Allocator.Error || SDLAudioError;
 
-    pub fn create(allocator: std.mem.Allocator, _: AudioConfig) CreateError!*SDLAudioBackend {
+    pub fn create(allocator: std.mem.Allocator, config: AudioConfig) CreateError!*SDLAudioBackend {
+        // We accept config to adhere to the interface/pattern, even if we don't use it yet
+        // for dynamic allocation (using static MAX_VOICES for now).
+        _ = config;
+
         // Init SDL Audio if not already
         if (c.SDL_WasInit(c.SDL_INIT_AUDIO) == 0) {
             if (!c.SDL_InitSubSystem(c.SDL_INIT_AUDIO)) {
@@ -392,7 +397,10 @@ pub const SDLAudioBackend = struct {
         const MIN_QUEUED = MIX_RATE * MIX_CHANNELS * 2 / 10; // 100ms
 
         if (queued < MIN_QUEUED) {
-            // mix() acquires the mutex internally
+            // mix() acquires the mutex internally.
+            // Note: In this architecture, mix() is called from the main thread to push data.
+            // The Mixer struct is protected by a mutex to allow safe concurrent access if we
+            // later move mixing to the audio callback thread or another worker thread.
             self.mixer.mix(self.stream, 0);
         }
     }

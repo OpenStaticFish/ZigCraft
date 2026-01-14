@@ -70,11 +70,7 @@ pub const SoundManager = struct {
             const val = @sin(t * 440.0 * std.math.tau);
             const sample: i16 = @intFromFloat(val * 16000.0); // 50% volume
 
-            const lo: u8 = @intCast(sample & 0xFF);
-            const hi: u8 = @intCast((sample >> 8) & 0xFF);
-
-            buffer[i * 2] = lo;
-            buffer[i * 2 + 1] = hi;
+            std.mem.writeInt(i16, buffer[i * 2 ..][0..2], sample, .little);
         }
 
         const sound = types.SoundData{
