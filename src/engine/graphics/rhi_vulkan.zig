@@ -1966,7 +1966,8 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
 
     var model_push_constant = std.mem.zeroes(c.VkPushConstantRange);
     model_push_constant.stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT;
-    model_push_constant.size = @max(@sizeOf(ModelUniforms), @sizeOf(ShadowModelUniforms));
+    // Increase size to 256 to account for potential alignment/padding discrepancies in shaders (e.g. 144 bytes)
+    model_push_constant.size = 256;
     var pipeline_layout_info = std.mem.zeroes(c.VkPipelineLayoutCreateInfo);
     pipeline_layout_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipeline_layout_info.setLayoutCount = 1;
@@ -2872,6 +2873,13 @@ fn ensureFrameReady(ctx: *VulkanContext) void {
 
 fn beginFrame(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+
+    // Check if an explicit resize was requested (e.g. by setViewport detecting a mismatch)
+    if (ctx.framebuffer_resized) {
+        recreateSwapchain(ctx);
+        // Note: recreateSwapchain resets framebuffer_resized to false.
+        // We continue execution to acquire the image from the NEW swapchain.
+    }
 
     ensureFrameReady(ctx);
 
@@ -4108,6 +4116,13 @@ fn updateTexture(ctx_ptr: *anyopaque, handle: rhi.TextureHandle, data: []const u
 
 fn setViewport(ctx_ptr: *anyopaque, width: u32, height: u32) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+
+    // Check if the requested viewport size matches the current swapchain extent.
+    // If not, flag a resize so the swapchain is recreated at the beginning of the next frame.
+    if (width != ctx.vulkan_swapchain.extent.width or height != ctx.vulkan_swapchain.extent.height) {
+        ctx.framebuffer_resized = true;
+    }
+
     if (!ctx.frame_in_progress) return;
 
     const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
