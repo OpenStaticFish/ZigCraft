@@ -20,7 +20,8 @@ pub const AudioSystem = struct {
     pub fn init(allocator: std.mem.Allocator) !*AudioSystem {
         log.log.info("Initializing Audio System...", .{});
 
-        const backend_inst = try sdl_backend.SDLAudioBackend.create(allocator);
+        const config = sdl_backend.AudioConfig{};
+        const backend_inst = try sdl_backend.SDLAudioBackend.create(allocator, config);
 
         const self = try allocator.create(AudioSystem);
         self.* = .{
@@ -33,6 +34,11 @@ pub const AudioSystem = struct {
         _ = try self.manager.createTestSound("test_tone");
 
         return self;
+    }
+
+    /// Play a test sound at the specified position to verify spatial audio.
+    pub fn playTestSpatial(self: *AudioSystem, pos: Vec3) void {
+        _ = self.playSpatial("test_tone", pos);
     }
 
     /// Shutdown the audio system and free resources.

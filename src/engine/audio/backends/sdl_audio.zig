@@ -7,6 +7,13 @@ const backend = @import("../backend.zig");
 const Vec3 = @import("../../math/vec3.zig").Vec3;
 const log = @import("../../core/log.zig");
 
+pub const AudioConfig = struct {
+    max_voices: u32 = 64,
+    mix_rate: u32 = 44100,
+    mix_channels: u8 = 2,
+};
+
+// Hardcoded for now until dynamic allocation is refactored
 pub const MAX_VOICES = 64;
 pub const MIX_RATE = 44100;
 pub const MIX_CHANNELS = 2; // Stereo
@@ -40,6 +47,9 @@ const Voice = struct {
 };
 
 const Mixer = struct {
+    /// Mutex protecting all mixer state.
+    /// Acquired by all public methods: play, stop, update, mix.
+    /// Safe to call from any thread (Main or Audio Callback).
     mutex: std.Thread.Mutex = .{},
     voices: [MAX_VOICES]Voice = undefined,
     voice_generation_counter: u64 = 1,
@@ -299,19 +309,15 @@ pub const SDLAudioError = error{
     SDLStreamFailed,
 };
 
-// unused error warning suppression
-test "SDLAudioError usage" {
-    _ = SDLAudioError.SDLInitFailed;
-    _ = SDLAudioError.SDLStreamFailed;
-}
-
 pub const SDLAudioBackend = struct {
     backend: backend.IAudioBackend, // Interface wrapper
     allocator: std.mem.Allocator,
     stream: *c.SDL_AudioStream,
     mixer: *Mixer,
 
-    pub fn create(allocator: std.mem.Allocator) !*SDLAudioBackend {
+    pub const CreateError = std.mem.Allocator.Error || SDLAudioError;
+
+    pub fn create(allocator: std.mem.Allocator, _: AudioConfig) CreateError!*SDLAudioBackend {
         // Init SDL Audio if not already
         if (c.SDL_WasInit(c.SDL_INIT_AUDIO) == 0) {
             if (!c.SDL_InitSubSystem(c.SDL_INIT_AUDIO)) {
@@ -365,6 +371,7 @@ pub const SDLAudioBackend = struct {
 
     // IAudioBackend impl
 
+    /// Update logic, called from the main thread usually.
     fn update(ptr: *anyopaque) void {
         const self: *SDLAudioBackend = @ptrCast(@alignCast(ptr));
         self.mixer.update();
@@ -375,6 +382,7 @@ pub const SDLAudioBackend = struct {
         const MIN_QUEUED = MIX_RATE * MIX_CHANNELS * 2 / 10; // 100ms
 
         if (queued < MIN_QUEUED) {
+            // mix() acquires the mutex internally
             self.mixer.mix(self.stream, 0);
         }
     }
