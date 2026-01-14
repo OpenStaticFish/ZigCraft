@@ -4747,12 +4747,12 @@ fn beginShadowPass(ctx_ptr: *anyopaque, cascade_index: u32, light_space_matrix: 
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
 
+    if (ctx.shadow_framebuffers[cascade_index] == null) return;
+
     ctx.shadow_pass_active = true;
     ctx.shadow_pass_index = cascade_index;
     ctx.shadow_pass_matrix = light_space_matrix;
     ctx.shadow_pipeline_bound = false;
-
-    if (ctx.shadow_framebuffers[cascade_index] == null) return;
 
     // Render pass handles transition from UNDEFINED to DEPTH_STENCIL_ATTACHMENT_OPTIMAL
     ctx.shadow_image_layouts[cascade_index] = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
