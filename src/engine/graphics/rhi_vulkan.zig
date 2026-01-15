@@ -2037,6 +2037,33 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
     shadow_rp_info.pAttachments = &shadow_depth_desc;
     shadow_rp_info.subpassCount = 1;
     shadow_rp_info.pSubpasses = &shadow_subpass;
+
+    // Add subpass dependencies for proper synchronization
+    var shadow_dependencies = [_]c.VkSubpassDependency{
+        // 1. External -> Subpass 0: Wait for previous reads to finish before writing
+        .{
+            .srcSubpass = c.VK_SUBPASS_EXTERNAL,
+            .dstSubpass = 0,
+            .srcStageMask = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            .dstStageMask = c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+            .srcAccessMask = c.VK_ACCESS_SHADER_READ_BIT,
+            .dstAccessMask = c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            .dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT,
+        },
+        // 2. Subpass 0 -> External: Wait for writes to finish before subsequent reads (sampling)
+        .{
+            .srcSubpass = 0,
+            .dstSubpass = c.VK_SUBPASS_EXTERNAL,
+            .srcStageMask = c.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+            .dstStageMask = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            .srcAccessMask = c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            .dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT,
+            .dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT,
+        },
+    };
+    shadow_rp_info.dependencyCount = 2;
+    shadow_rp_info.pDependencies = &shadow_dependencies;
+
     try checkVk(c.vkCreateRenderPass(ctx.vulkan_device.vk_device, &shadow_rp_info, null, &ctx.shadow_render_pass));
 
     ctx.shadow_extent = .{ .width = shadow_res, .height = shadow_res };
