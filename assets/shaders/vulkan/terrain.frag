@@ -89,7 +89,6 @@ layout(set = 0, binding = 3) uniform sampler2DArrayShadow uShadowMaps;
 layout(set = 0, binding = 4) uniform sampler2DArray uShadowMapsRegular;
 
 layout(push_constant) uniform ModelUniforms {
-    mat4 view_proj;
     mat4 model;
     float mask_radius;
     float _pad0;

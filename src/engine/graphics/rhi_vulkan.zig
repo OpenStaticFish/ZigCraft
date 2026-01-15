@@ -2842,6 +2842,10 @@ fn ensureFrameReady(ctx: *VulkanContext) void {
     const wait_res = c.vkWaitForFences(ctx.vulkan_device.vk_device, 1, &fence, c.VK_TRUE, timeout_ns);
     if (wait_res == c.VK_TIMEOUT) {
         std.log.err("Vulkan GPU timeout! Possible GPU hang detected. System lockup prevented.", .{});
+        // CRITICAL: Do NOT proceed to reset fences or command buffers.
+        // The GPU is stuck. We cannot recover safely without device loss.
+        // Crashing the application is safer than crashing the OS/Driver by race conditions.
+        @panic("GPU Timeout / Hang Detected");
     }
 
     // Reset fence
