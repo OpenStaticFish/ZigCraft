@@ -34,6 +34,13 @@ pub const EngineContext = struct {
     time: *Time,
 
     screen_manager: *ScreenManager,
+    safe_render_mode: bool,
+    skip_world_update: bool,
+    skip_world_render: bool,
+    disable_shadow_draw: bool,
+    disable_gpass_draw: bool,
+    disable_ssao: bool,
+    disable_clouds: bool,
 
     /// Saves all persistent application settings.
     /// Screens should call this when settings are modified, typically on a 'Back' action.
@@ -174,6 +181,21 @@ pub const ScreenManager = struct {
         // For now, just draw the top one
         if (self.stack.items.len > 0) {
             try self.stack.items[self.stack.items.len - 1].draw(ui);
+        }
+    }
+
+    /// Draws the screen directly below the given screen pointer in the stack.
+    /// Used by overlay screens (pause, settings) to render their parent screen as background.
+    pub fn drawParentScreen(self: *ScreenManager, current_ptr: *anyopaque, ui: *UISystem) !void {
+        // Find this screen's index in the stack
+        for (self.stack.items, 0..) |screen, i| {
+            if (screen.ptr == current_ptr) {
+                // Found ourselves, draw the screen below us if it exists
+                if (i > 0) {
+                    try self.stack.items[i - 1].draw(ui);
+                }
+                return;
+            }
         }
     }
 };

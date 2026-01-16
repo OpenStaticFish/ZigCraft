@@ -53,9 +53,7 @@ pub const PausedScreen = struct {
         const ctx = self.context;
 
         // Draw the world in the background (the screen below us in the stack)
-        if (ctx.screen_manager.stack.items.len > 1) {
-            try ctx.screen_manager.stack.items[ctx.screen_manager.stack.items.len - 2].draw(ui);
-        }
+        try ctx.screen_manager.drawParentScreen(ptr, ui);
 
         ui.begin();
         defer ui.end();
@@ -98,10 +96,9 @@ pub const PausedScreen = struct {
     }
 
     pub fn onExit(ptr: *anyopaque) void {
-        const self: *@This() = @ptrCast(@alignCast(ptr));
-        // Restore mouse capture when leaving pause menu (if going back to world)
-        // If we are going to title screen, it will be released again in HomeScreen.onEnter if needed
-        self.context.input.setMouseCapture(self.context.window_manager.window, true);
+        _ = ptr;
+        // No longer capturing here, as the parent screen (World) will capture in its onEnter()
+        // and child screens (Settings) don't want the mouse captured.
     }
 
     pub fn screen(self: *@This()) IScreen {

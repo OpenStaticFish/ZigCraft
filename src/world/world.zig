@@ -47,6 +47,9 @@ pub const World = struct {
     render_distance: i32,
     rhi: RHI,
     paused: bool = false,
+    max_uploads_per_frame: usize,
+    safe_mode: bool,
+    safe_render_distance: i32,
 
     // LOD System (Issue #114)
     lod_manager: ?*LODManager,
@@ -56,16 +59,32 @@ pub const World = struct {
         const world = try allocator.create(World);
 
         const storage = ChunkStorage.init(allocator);
+        const safe_mode_env = std.posix.getenv("ZIGCRAFT_SAFE_MODE");
+        const safe_mode = if (safe_mode_env) |val|
+            !(std.mem.eql(u8, val, "0") or std.mem.eql(u8, val, "false"))
+        else
+            false;
+        const safe_render_distance: i32 = if (safe_mode) @min(render_distance, 8) else render_distance;
+        const max_uploads: usize = if (safe_mode) @as(usize, 4) else @as(usize, 32);
+        if (safe_mode) {
+            std.log.warn("ZIGCRAFT_SAFE_MODE enabled: limiting uploads to {} per frame", .{max_uploads});
+            if (safe_render_distance != render_distance) {
+                std.log.warn("ZIGCRAFT_SAFE_MODE clamped render distance to {}", .{safe_render_distance});
+            }
+        }
 
         world.* = .{
             .storage = storage,
             .streamer = undefined,
             .renderer = undefined,
             .allocator = allocator,
-            .render_distance = render_distance,
+            .render_distance = safe_render_distance,
             .generator = TerrainGenerator.init(seed, allocator),
             .rhi = rhi,
             .paused = false,
+            .max_uploads_per_frame = max_uploads,
+            .safe_mode = safe_mode,
+            .safe_render_distance = safe_render_distance,
             .lod_manager = null,
             .lod_enabled = false,
         };
@@ -129,15 +148,20 @@ pub const World = struct {
 
     /// Set render distance and trigger chunk loading/unloading update
     pub fn setRenderDistance(self: *World, distance: i32) void {
-        if (self.render_distance != distance) {
-            std.log.info("Render distance changed: {} -> {}", .{ self.render_distance, distance });
-            self.render_distance = distance;
-            self.streamer.setRenderDistance(distance);
+        const target = if (self.safe_mode) @min(distance, self.safe_render_distance) else distance;
+
+        if (self.render_distance != target) {
+            if (self.safe_mode and target != distance) {
+                std.log.warn("ZIGCRAFT_SAFE_MODE clamped render distance {} -> {}", .{ distance, target });
+            }
+            std.log.info("Render distance changed: {} -> {}", .{ self.render_distance, target });
+            self.render_distance = target;
+            self.streamer.setRenderDistance(target);
 
             // Only update LOD0 radius - LOD1/2/3 are fixed for "infinite" terrain view
             if (self.lod_manager) |lod_mgr| {
-                lod_mgr.config.lod0_radius = distance;
-                std.log.info("LOD0 radius updated to match render distance: {}", .{distance});
+                lod_mgr.config.lod0_radius = target;
+                std.log.info("LOD0 radius updated to match render distance: {}", .{target});
             }
         }
     }
@@ -199,10 +223,14 @@ pub const World = struct {
     }
 
     pub fn update(self: *World, player_pos: Vec3, dt: f32) !void {
+        // Process deferred vertex memory reclamation for this frame slot.
+        // Safe because beginFrame() has already waited for this slot's fence.
+        self.renderer.vertex_allocator.tick(self.renderer.rhi.getFrameIndex());
+
         try self.streamer.update(player_pos, dt, self.lod_manager);
 
         // Process a few uploads per frame
-        self.streamer.processUploads(self.renderer.vertex_allocator, 32);
+        self.streamer.processUploads(self.renderer.vertex_allocator, self.max_uploads_per_frame);
 
         // Process unloads
         try self.streamer.processUnloads(player_pos, self.renderer.vertex_allocator, self.lod_manager);

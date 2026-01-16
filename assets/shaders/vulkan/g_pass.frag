@@ -17,12 +17,15 @@ layout(set = 0, binding = 0) uniform GlobalUniforms {
     mat4 view_proj;
     vec4 cam_pos;
     vec4 sun_dir;
+    vec4 sun_color;
     vec4 fog_color;
     vec4 cloud_wind_offset;
     vec4 params;
     vec4 lighting;
     vec4 cloud_params;
     vec4 pbr_params;
+    vec4 volumetric_params;
+    vec4 viewport_size;
 } global;
 
 void main() {

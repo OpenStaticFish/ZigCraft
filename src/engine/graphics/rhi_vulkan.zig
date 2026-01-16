@@ -250,6 +250,7 @@ const VulkanContext = struct {
     present_mode: c.VkPresentModeKHR,
     anisotropic_filtering: u8,
     msaa_samples: u8,
+    safe_mode: bool,
 
     // SSAO resources
     g_normal_image: c.VkImage = null,
@@ -282,6 +283,8 @@ const VulkanContext = struct {
     g_framebuffer: c.VkFramebuffer = null,
     ssao_framebuffer: c.VkFramebuffer = null,
     ssao_blur_framebuffer: c.VkFramebuffer = null,
+    // Track the extent G-pass resources were created with (for mismatch detection)
+    g_pass_extent: c.VkExtent2D = .{ .width = 0, .height = 0 },
 
     // SSAO Pipelines
     g_pipeline: c.VkPipeline = null,
@@ -291,9 +294,9 @@ const VulkanContext = struct {
     ssao_blur_pipeline: c.VkPipeline = null,
     ssao_blur_pipeline_layout: c.VkPipelineLayout = null,
     ssao_descriptor_set_layout: c.VkDescriptorSetLayout = null,
-    ssao_descriptor_sets: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorSet = undefined,
+    ssao_descriptor_sets: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorSet = .{null} ** MAX_FRAMES_IN_FLIGHT,
     ssao_blur_descriptor_set_layout: c.VkDescriptorSetLayout = null,
-    ssao_blur_descriptor_sets: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorSet = undefined,
+    ssao_blur_descriptor_sets: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorSet = .{null} ** MAX_FRAMES_IN_FLIGHT,
 
     shadow_resolution: u32,
     memory_type_index: u32,
@@ -414,10 +417,27 @@ fn destroyGPassResources(ctx: *VulkanContext) void {
 
 fn destroySSAOResources(ctx: *VulkanContext) void {
     const vk = ctx.vulkan_device.vk_device;
+    if (vk == null) return;
+
     if (ctx.ssao_pipeline != null) c.vkDestroyPipeline(vk, ctx.ssao_pipeline, null);
     if (ctx.ssao_blur_pipeline != null) c.vkDestroyPipeline(vk, ctx.ssao_blur_pipeline, null);
     if (ctx.ssao_pipeline_layout != null) c.vkDestroyPipelineLayout(vk, ctx.ssao_pipeline_layout, null);
     if (ctx.ssao_blur_pipeline_layout != null) c.vkDestroyPipelineLayout(vk, ctx.ssao_blur_pipeline_layout, null);
+
+    // Free descriptor sets before destroying layout
+    if (ctx.descriptor_pool != null) {
+        for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+            if (ctx.ssao_descriptor_sets[i] != null) {
+                _ = c.vkFreeDescriptorSets(vk, ctx.descriptor_pool, 1, &ctx.ssao_descriptor_sets[i]);
+                ctx.ssao_descriptor_sets[i] = null;
+            }
+            if (ctx.ssao_blur_descriptor_sets[i] != null) {
+                _ = c.vkFreeDescriptorSets(vk, ctx.descriptor_pool, 1, &ctx.ssao_blur_descriptor_sets[i]);
+                ctx.ssao_blur_descriptor_sets[i] = null;
+            }
+        }
+    }
+
     if (ctx.ssao_descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(vk, ctx.ssao_descriptor_set_layout, null);
     if (ctx.ssao_blur_descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(vk, ctx.ssao_blur_descriptor_set_layout, null);
     if (ctx.ssao_framebuffer != null) c.vkDestroyFramebuffer(vk, ctx.ssao_framebuffer, null);
@@ -490,6 +510,55 @@ fn findMemoryType(physical_device: c.VkPhysicalDevice, type_filter: u32, propert
         }
     }
     return 0;
+}
+
+/// Transitions an array of images to SHADER_READ_ONLY_OPTIMAL layout.
+fn transitionImagesToShaderRead(ctx: *VulkanContext, images: []const c.VkImage, is_depth: bool) !void {
+    if (images.len == 0) return;
+
+    var cmd_info = std.mem.zeroes(c.VkCommandBufferAllocateInfo);
+    cmd_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmd_info.commandPool = ctx.command_pool;
+    cmd_info.level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmd_info.commandBufferCount = 1;
+
+    var cmd: c.VkCommandBuffer = null;
+    try checkVk(c.vkAllocateCommandBuffers(ctx.vulkan_device.vk_device, &cmd_info, &cmd));
+
+    var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
+    begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    try checkVk(c.vkBeginCommandBuffer(cmd, &begin_info));
+
+    const aspect_mask: c.VkImageAspectFlags = if (is_depth) c.VK_IMAGE_ASPECT_DEPTH_BIT else c.VK_IMAGE_ASPECT_COLOR_BIT;
+
+    var barriers: [4]c.VkImageMemoryBarrier = undefined;
+    const count = @min(images.len, 4);
+
+    for (0..count) |i| {
+        barriers[i] = std.mem.zeroes(c.VkImageMemoryBarrier);
+        barriers[i].sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barriers[i].oldLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+        barriers[i].newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barriers[i].srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+        barriers[i].dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+        barriers[i].image = images[i];
+        barriers[i].subresourceRange = .{ .aspectMask = aspect_mask, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
+        barriers[i].srcAccessMask = 0;
+        barriers[i].dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+    }
+
+    c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, @intCast(count), &barriers[0]);
+
+    try checkVk(c.vkEndCommandBuffer(cmd));
+
+    var submit_info = std.mem.zeroes(c.VkSubmitInfo);
+    submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &cmd;
+    try checkVk(c.vkQueueSubmit(ctx.vulkan_device.queue, 1, &submit_info, null));
+    try checkVk(c.vkQueueWaitIdle(ctx.vulkan_device.queue));
+    c.vkFreeCommandBuffers(ctx.vulkan_device.vk_device, ctx.command_pool, 1, &cmd);
 }
 
 /// Converts MSAA sample count (1, 2, 4, 8) to Vulkan sample count flag.
@@ -991,6 +1060,14 @@ fn createGPassResources(ctx: *VulkanContext) !void {
         try checkVk(c.vkCreateGraphicsPipelines(ctx.vulkan_device.vk_device, null, 1, &pipe_info, null, &ctx.g_pipeline));
     }
 
+    // Transition G-buffer images to SHADER_READ_ONLY_OPTIMAL (needed if SSAO is disabled)
+    const g_images = [_]c.VkImage{ctx.g_normal_image};
+    try transitionImagesToShaderRead(ctx, &g_images, false);
+    const d_images = [_]c.VkImage{ctx.g_depth_image};
+    try transitionImagesToShaderRead(ctx, &d_images, true);
+
+    // Store the extent we created resources with for mismatch detection
+    ctx.g_pass_extent = ctx.vulkan_swapchain.extent;
     std.log.info("G-Pass resources created ({}x{})", .{ ctx.vulkan_swapchain.extent.width, ctx.vulkan_swapchain.extent.height });
 }
 
@@ -1511,7 +1588,32 @@ fn createSSAOResources(ctx: *VulkanContext) !void {
         blur_write.pImageInfo = &blur_image_info;
 
         c.vkUpdateDescriptorSets(ctx.vulkan_device.vk_device, 1, &blur_write, 0, null);
+
+        // Binding 10: SSAO Map (blur output) in the MAIN descriptor sets
+        var main_ssao_info = c.VkDescriptorImageInfo{
+            .sampler = ctx.ssao_sampler,
+            .imageView = ctx.ssao_blur_view,
+            .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        var main_ssao_write = std.mem.zeroes(c.VkWriteDescriptorSet);
+        main_ssao_write.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        main_ssao_write.dstSet = ctx.descriptor_sets[i];
+        main_ssao_write.dstBinding = 10;
+        main_ssao_write.descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        main_ssao_write.descriptorCount = 1;
+        main_ssao_write.pImageInfo = &main_ssao_info;
+        c.vkUpdateDescriptorSets(ctx.vulkan_device.vk_device, 1, &main_ssao_write, 0, null);
+
+        // Also update LOD descriptor sets
+        main_ssao_write.dstSet = ctx.lod_descriptor_sets[i];
+        c.vkUpdateDescriptorSets(ctx.vulkan_device.vk_device, 1, &main_ssao_write, 0, null);
     }
+
+    // 11. Transition SSAO images to SHADER_READ_ONLY_OPTIMAL
+    // This is needed because if SSAO is disabled, the pass is skipped,
+    // but the terrain shader still samples the (undefined) texture.
+    const ssao_images = [_]c.VkImage{ ctx.ssao_image, ctx.ssao_blur_image };
+    try transitionImagesToShaderRead(ctx, &ssao_images, false);
 
     std.log.info("SSAO resources created ({}x{})", .{ ctx.vulkan_swapchain.extent.width, ctx.vulkan_swapchain.extent.height });
 }
@@ -1866,14 +1968,6 @@ fn destroyMainRenderPassAndPipelines(ctx: *VulkanContext) void {
         c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.sky_pipeline, null);
         ctx.sky_pipeline = null;
     }
-    if (ctx.wireframe_pipeline != null) {
-        c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.wireframe_pipeline, null);
-        ctx.wireframe_pipeline = null;
-    }
-    if (ctx.sky_pipeline != null) {
-        c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.sky_pipeline, null);
-        ctx.sky_pipeline = null;
-    }
     if (ctx.ui_pipeline != null) {
         c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.ui_pipeline, null);
         ctx.ui_pipeline = null;
@@ -1923,7 +2017,8 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
     cb_alloc_info.commandPool = ctx.transfer_command_pool;
     try checkVk(c.vkAllocateCommandBuffers(ctx.vulkan_device.vk_device, &cb_alloc_info, &ctx.transfer_command_buffers[0]));
 
-    for (0..MAX_FRAMES_IN_FLIGHT) |frame_i| ctx.staging_buffers[frame_i] = try StagingBuffer.init(ctx, 64 * 1024 * 1024);
+    // Increase staging buffer size to 256MB to avoid overflow during heavy load (e.g. chunk loading)
+    for (0..MAX_FRAMES_IN_FLIGHT) |frame_i| ctx.staging_buffers[frame_i] = try StagingBuffer.init(ctx, 256 * 1024 * 1024);
     ctx.transfer_ready = false;
 
     // 9. Layouts & Descriptors
@@ -2228,11 +2323,15 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
         .{ .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 256 * MAX_FRAMES_IN_FLIGHT },
         .{ .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 16 * MAX_FRAMES_IN_FLIGHT },
     };
-    var dp_info = std.mem.zeroes(c.VkDescriptorPoolCreateInfo);
-    dp_info.sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dp_info.poolSizeCount = 3;
-    dp_info.pPoolSizes = &pool_sizes[0];
-    dp_info.maxSets = 256 * MAX_FRAMES_IN_FLIGHT;
+    var dp_info = c.VkDescriptorPoolCreateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .flags = c.VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+        .poolSizeCount = 3,
+        .pPoolSizes = &pool_sizes[0],
+        .maxSets = 256 * MAX_FRAMES_IN_FLIGHT,
+        .pNext = null,
+    };
+    std.log.info("Creating descriptor pool with flags: {X}", .{dp_info.flags});
     try checkVk(c.vkCreateDescriptorPool(ctx.vulkan_device.vk_device, &dp_info, null, &ctx.descriptor_pool));
 
     for (0..MAX_FRAMES_IN_FLIGHT) |i| {
@@ -2422,26 +2521,6 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
         dummy_barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
 
         c.vkCmdPipelineBarrier(init_cmd, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &dummy_barrier);
-
-        // Transition SSAO blur image to SHADER_READ_ONLY_OPTIMAL (needed even when SSAO passes are disabled)
-        if (ctx.ssao_blur_image != null) {
-            var ssao_blur_barrier = std.mem.zeroes(c.VkImageMemoryBarrier);
-            ssao_blur_barrier.sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            ssao_blur_barrier.oldLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
-            ssao_blur_barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            ssao_blur_barrier.srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
-            ssao_blur_barrier.dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
-            ssao_blur_barrier.image = ctx.ssao_blur_image;
-            ssao_blur_barrier.subresourceRange.aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT;
-            ssao_blur_barrier.subresourceRange.baseMipLevel = 0;
-            ssao_blur_barrier.subresourceRange.levelCount = 1;
-            ssao_blur_barrier.subresourceRange.baseArrayLayer = 0;
-            ssao_blur_barrier.subresourceRange.layerCount = 1;
-            ssao_blur_barrier.srcAccessMask = 0;
-            ssao_blur_barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
-
-            c.vkCmdPipelineBarrier(init_cmd, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &ssao_blur_barrier);
-        }
 
         try checkVk(c.vkEndCommandBuffer(init_cmd));
 
@@ -2815,9 +2894,9 @@ fn destroyBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle) void {
     ctx.mutex.unlock();
 
     if (entry_opt) |entry| {
-        // Queue to the OTHER frame slot so it's deleted after waiting on that frame's fence
-        // This ensures at least MAX_FRAMES_IN_FLIGHT frames pass before deletion
-        const delete_frame = (ctx.current_sync_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+        // Queue to the CURRENT frame slot so deletion happens after this slot's fence is signaled
+        // (i.e., after MAX_FRAMES_IN_FLIGHT frames have elapsed).
+        const delete_frame = ctx.current_sync_frame;
         ctx.buffer_deletion_queue[delete_frame].append(ctx.allocator, .{ .buffer = entry.value.buffer, .memory = entry.value.memory }) catch {
             std.log.err("Failed to queue buffer deletion (OOM). Leaking buffer.", .{});
         };
@@ -2830,6 +2909,7 @@ fn recreateSwapchain(ctx: *VulkanContext) void {
     var w: c_int = 0;
     var h: c_int = 0;
     _ = c.SDL_GetWindowSizeInPixels(ctx.window, &w, &h);
+    std.log.info("recreateSwapchain: window size = {}x{}", .{ w, h });
     if (w == 0 or h == 0) return;
 
     // 1. Destroy existing stacks
@@ -2851,9 +2931,15 @@ fn recreateSwapchain(ctx: *VulkanContext) void {
     };
 
     // 3. Recreate dependent resources
-    createMainPipelines(ctx) catch {};
-    createGPassResources(ctx) catch {};
-    createSSAOResources(ctx) catch {};
+    createMainPipelines(ctx) catch |err| {
+        std.log.err("Failed to recreate main pipelines: {}", .{err});
+    };
+    createGPassResources(ctx) catch |err| {
+        std.log.err("Failed to recreate G-pass resources: {}", .{err});
+    };
+    createSSAOResources(ctx) catch |err| {
+        std.log.err("Failed to recreate SSAO resources: {}", .{err});
+    };
 
     ctx.framebuffer_resized = false;
     std.log.info("Vulkan swapchain recreated: {}x{} (SDL pixels: {}x{}, MSAA {}x)", .{ ctx.vulkan_swapchain.extent.width, ctx.vulkan_swapchain.extent.height, w, h, ctx.msaa_samples });
@@ -2902,6 +2988,29 @@ fn ensureFrameReady(ctx: *VulkanContext) void {
     ctx.transfer_ready = true;
 }
 
+/// Recreates the image_available semaphore for the current sync frame.
+/// Used when vkAcquireNextImageKHR fails but may have signaled the semaphore.
+/// Per Vulkan spec, binary semaphores may be signaled even on acquire failure.
+fn resetAcquireSemaphore(ctx: *VulkanContext) void {
+    std.log.debug("Resetting acquire semaphore for frame {}", .{ctx.current_sync_frame});
+
+    c.vkDestroySemaphore(ctx.vulkan_device.vk_device, ctx.image_available_semaphores[ctx.current_sync_frame], null);
+
+    var semaphore_info = std.mem.zeroes(c.VkSemaphoreCreateInfo);
+    semaphore_info.sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    _ = c.vkCreateSemaphore(ctx.vulkan_device.vk_device, &semaphore_info, null, &ctx.image_available_semaphores[ctx.current_sync_frame]);
+}
+
+fn resetRenderFinishedSemaphore(ctx: *VulkanContext) void {
+    std.log.debug("Resetting render-finished semaphore for frame {}", .{ctx.current_sync_frame});
+
+    c.vkDestroySemaphore(ctx.vulkan_device.vk_device, ctx.render_finished_semaphores[ctx.current_sync_frame], null);
+
+    var semaphore_info = std.mem.zeroes(c.VkSemaphoreCreateInfo);
+    semaphore_info.sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    _ = c.vkCreateSemaphore(ctx.vulkan_device.vk_device, &semaphore_info, null, &ctx.render_finished_semaphores[ctx.current_sync_frame]);
+}
+
 fn beginFrame(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
 
@@ -2934,9 +3043,20 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
 
     if (result == c.VK_ERROR_OUT_OF_DATE_KHR) {
         recreateSwapchain(ctx);
-        // Frame execution must stop here. subsequent passes check ctx.frame_in_progress.
+        // Semaphore may have been signaled even on failure - recreate to clear pending state
+        resetAcquireSemaphore(ctx);
+        return;
+    } else if (result == c.VK_ERROR_SURFACE_LOST_KHR) {
+        // Surface lost can happen on Wayland during fullscreen transitions
+        // Skip this frame and hope the surface recovers
+        std.log.warn("Vulkan surface lost during vkAcquireNextImageKHR - skipping frame", .{});
+        resetAcquireSemaphore(ctx);
         return;
     } else if (result != c.VK_SUCCESS and result != c.VK_SUBOPTIMAL_KHR) {
+        // Wait for device to be idle before destroying/recreating resources to prevent crash
+        _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
+        // Semaphore may have been signaled even on failure - recreate to clear pending state
+        resetAcquireSemaphore(ctx);
         return;
     }
 
@@ -3103,13 +3223,9 @@ fn abortFrame(ctx_ptr: *anyopaque) void {
     fence_info.flags = c.VK_FENCE_CREATE_SIGNALED_BIT;
 
     // Recreating semaphores is the most robust way to "abort" their pending status from AcquireNextImage
-    c.vkDestroySemaphore(ctx.vulkan_device.vk_device, ctx.image_available_semaphores[ctx.current_sync_frame], null);
-    c.vkDestroySemaphore(ctx.vulkan_device.vk_device, ctx.render_finished_semaphores[ctx.current_sync_frame], null);
-
-    var semaphore_info = std.mem.zeroes(c.VkSemaphoreCreateInfo);
-    semaphore_info.sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    _ = c.vkCreateSemaphore(ctx.vulkan_device.vk_device, &semaphore_info, null, &ctx.image_available_semaphores[ctx.current_sync_frame]);
-    _ = c.vkCreateSemaphore(ctx.vulkan_device.vk_device, &semaphore_info, null, &ctx.render_finished_semaphores[ctx.current_sync_frame]);
+    resetAcquireSemaphore(ctx);
+    // Also reset render_finished semaphore since we didn't submit
+    resetRenderFinishedSemaphore(ctx);
 
     ctx.frame_in_progress = false;
 }
@@ -3117,6 +3233,25 @@ fn abortFrame(ctx_ptr: *anyopaque) void {
 fn beginGPass(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress or ctx.g_pass_active) return;
+
+    // Safety: Skip G-pass if resources are not available
+    if (ctx.g_render_pass == null or ctx.g_framebuffer == null or ctx.g_pipeline == null) {
+        std.log.warn("beginGPass: skipping - resources null (rp={}, fb={}, pipeline={})", .{ ctx.g_render_pass != null, ctx.g_framebuffer != null, ctx.g_pipeline != null });
+        return;
+    }
+
+    // Safety: Check for size mismatch between G-pass resources and current swapchain
+    if (ctx.g_pass_extent.width != ctx.vulkan_swapchain.extent.width or ctx.g_pass_extent.height != ctx.vulkan_swapchain.extent.height) {
+        std.log.warn("beginGPass: size mismatch! G-pass={}x{}, swapchain={}x{} - recreating", .{ ctx.g_pass_extent.width, ctx.g_pass_extent.height, ctx.vulkan_swapchain.extent.width, ctx.vulkan_swapchain.extent.height });
+        _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
+        createGPassResources(ctx) catch |err| {
+            std.log.err("Failed to recreate G-pass resources: {}", .{err});
+            return;
+        };
+        createSSAOResources(ctx) catch |err| {
+            std.log.err("Failed to recreate SSAO resources: {}", .{err});
+        };
+    }
 
     ensureNoRenderPassActive(ctx_ptr);
 
@@ -3129,6 +3264,11 @@ fn beginGPass(ctx_ptr: *anyopaque) void {
     render_pass_info.framebuffer = ctx.g_framebuffer;
     render_pass_info.renderArea.offset = .{ .x = 0, .y = 0 };
     render_pass_info.renderArea.extent = ctx.vulkan_swapchain.extent;
+
+    // Debug: log extent on first few frames
+    if (ctx.frame_index < 10) {
+        std.log.debug("beginGPass frame {}: extent {}x{}", .{ ctx.frame_index, ctx.vulkan_swapchain.extent.width, ctx.vulkan_swapchain.extent.height });
+    }
 
     var clear_values: [2]c.VkClearValue = undefined;
     clear_values[0] = .{ .color = .{ .float32 = .{ 0, 0, 0, 1 } } };
@@ -3158,6 +3298,14 @@ fn endGPass(ctx_ptr: *anyopaque) void {
 fn computeSSAO(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
+
+    // Safety: Skip SSAO if resources are not available
+    if (ctx.ssao_render_pass == null or ctx.ssao_framebuffer == null or ctx.ssao_pipeline == null) {
+        return;
+    }
+    if (ctx.ssao_blur_render_pass == null or ctx.ssao_blur_framebuffer == null or ctx.ssao_blur_pipeline == null) {
+        return;
+    }
 
     ensureNoRenderPassActive(ctx_ptr);
 
@@ -3273,7 +3421,19 @@ fn endFrame(ctx_ptr: *anyopaque) void {
     submit_info.signalSemaphoreCount = 1;
     submit_info.pSignalSemaphores = &signal_semaphores;
 
-    _ = c.vkQueueSubmit(ctx.vulkan_device.queue, 1, &submit_info, ctx.in_flight_fences[ctx.current_sync_frame]);
+    const submit_result = c.vkQueueSubmit(ctx.vulkan_device.queue, 1, &submit_info, ctx.in_flight_fences[ctx.current_sync_frame]);
+    if (submit_result == c.VK_ERROR_DEVICE_LOST) {
+        std.log.err("Vulkan device lost during vkQueueSubmit", .{});
+        @panic("Vulkan device lost");
+    } else if (submit_result != c.VK_SUCCESS) {
+        std.log.err("vkQueueSubmit failed with result: {d}", .{submit_result});
+        _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
+        resetAcquireSemaphore(ctx);
+        resetRenderFinishedSemaphore(ctx);
+        ctx.transfer_ready = false;
+        ctx.frame_in_progress = false;
+        return;
+    }
 
     var present_info = std.mem.zeroes(c.VkPresentInfoKHR);
     present_info.sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -3285,11 +3445,31 @@ fn endFrame(ctx_ptr: *anyopaque) void {
     present_info.pSwapchains = &swapchains;
     present_info.pImageIndices = &ctx.image_index;
 
-    const result = c.vkQueuePresentKHR(ctx.vulkan_device.queue, &present_info);
+    const present_result = c.vkQueuePresentKHR(ctx.vulkan_device.queue, &present_info);
 
-    if (result == c.VK_ERROR_OUT_OF_DATE_KHR or result == c.VK_SUBOPTIMAL_KHR or ctx.framebuffer_resized) {
+    if (present_result == c.VK_ERROR_DEVICE_LOST) {
+        std.log.err("Vulkan device lost during vkQueuePresentKHR", .{});
+        @panic("Vulkan device lost");
+    }
+
+    if (present_result == c.VK_ERROR_SURFACE_LOST_KHR) {
+        // Surface lost can happen on Wayland during fullscreen transitions
+        std.log.warn("Vulkan surface lost during vkQueuePresentKHR - will recreate swapchain", .{});
+        _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
+        recreateSwapchain(ctx);
+        resetRenderFinishedSemaphore(ctx);
+    } else if (present_result == c.VK_ERROR_OUT_OF_DATE_KHR or present_result == c.VK_SUBOPTIMAL_KHR or ctx.framebuffer_resized) {
         ctx.framebuffer_resized = false;
         recreateSwapchain(ctx);
+        resetRenderFinishedSemaphore(ctx);
+    } else if (present_result != c.VK_SUCCESS) {
+        std.log.err("vkQueuePresentKHR failed with result: {d}", .{present_result});
+        _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
+        resetRenderFinishedSemaphore(ctx);
+    }
+
+    if (ctx.safe_mode) {
+        _ = c.vkQueueWaitIdle(ctx.vulkan_device.queue);
     }
 
     ctx.transfer_ready = false;
@@ -3350,6 +3530,11 @@ fn beginMainPass(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
     if (ctx.vulkan_swapchain.extent.width == 0 or ctx.vulkan_swapchain.extent.height == 0) return;
+
+    // Safety: Ensure framebuffer is valid
+    if (ctx.vulkan_swapchain.main_render_pass == null) return;
+    if (ctx.vulkan_swapchain.framebuffers.items.len == 0) return;
+    if (ctx.image_index >= ctx.vulkan_swapchain.framebuffers.items.len) return;
 
     const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
     if (!ctx.main_pass_active) {
@@ -4528,6 +4713,13 @@ fn drawOffset(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: r
     ctx.mutex.unlock();
 
     if (vbo_opt) |vbo| {
+        const vertex_stride: u64 = @sizeOf(rhi.Vertex);
+        const required_bytes: u64 = @as(u64, offset) + @as(u64, count) * vertex_stride;
+        if (required_bytes > vbo.size) {
+            std.log.err("drawOffset: vertex buffer overrun (handle={}, offset={}, count={}, size={})", .{ handle, offset, count, vbo.size });
+            return;
+        }
+
         ctx.draw_call_count += 1;
 
         const command_buffer = ctx.command_buffers[ctx.current_sync_frame];
@@ -4830,6 +5022,8 @@ fn beginShadowPass(ctx_ptr: *anyopaque, cascade_index: u32, light_space_matrix: 
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (!ctx.frame_in_progress) return;
 
+    // Safety: Ensure shadow resources are available
+    if (ctx.shadow_render_pass == null) return;
     if (ctx.shadow_framebuffers[cascade_index] == null) return;
 
     ctx.shadow_pass_active = true;
@@ -5146,6 +5340,15 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_dev
     ctx.textures_enabled = true;
     ctx.vsync_enabled = true;
     ctx.present_mode = c.VK_PRESENT_MODE_FIFO_KHR;
+
+    const safe_mode_env = std.posix.getenv("ZIGCRAFT_SAFE_MODE");
+    ctx.safe_mode = if (safe_mode_env) |val|
+        !(std.mem.eql(u8, val, "0") or std.mem.eql(u8, val, "false"))
+    else
+        false;
+    if (ctx.safe_mode) {
+        std.log.warn("ZIGCRAFT_SAFE_MODE enabled: throttling uploads and forcing GPU idle each frame", .{});
+    }
 
     for (0..MAX_FRAMES_IN_FLIGHT) |i| {
         ctx.command_buffers[i] = null;

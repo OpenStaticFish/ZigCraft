@@ -92,6 +92,28 @@ pub fn build(b: *std.Build) void {
     const run_integration_tests = b.addRunArtifact(exe_integration_tests);
     test_integration_step.dependOn(&run_integration_tests.step);
 
+    // Robust Vulkan demo executable
+    const robust_root_module = b.createModule(.{
+        .root_source_file = b.path("src/engine/graphics/vulkan_robust.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const robust_demo = b.addExecutable(.{
+        .name = "robust-demo",
+        .root_module = robust_root_module,
+    });
+    robust_demo.linkLibC();
+    robust_demo.linkSystemLibrary("vulkan");
+
+    b.installArtifact(robust_demo);
+
+    const run_robust_cmd = b.addRunArtifact(robust_demo);
+    run_robust_cmd.step.dependOn(b.getInstallStep());
+
+    const run_robust_step = b.step("run-robust", "Run the GPU robustness demo");
+    run_robust_step.dependOn(&run_robust_cmd.step);
+
     const validate_vulkan_terrain_vert = b.addSystemCommand(&.{ "glslangValidator", "-V", "assets/shaders/vulkan/terrain.vert" });
     const validate_vulkan_terrain_frag = b.addSystemCommand(&.{ "glslangValidator", "-V", "assets/shaders/vulkan/terrain.frag" });
     const validate_vulkan_shadow_vert = b.addSystemCommand(&.{ "glslangValidator", "-V", "assets/shaders/vulkan/shadow.vert" });

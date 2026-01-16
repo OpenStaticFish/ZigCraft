@@ -23,6 +23,10 @@ pub const SceneContext = struct {
     shadow_distance: f32,
     shadow_resolution: u32,
     ssao_enabled: bool,
+    disable_shadow_draw: bool,
+    disable_gpass_draw: bool,
+    disable_ssao: bool,
+    disable_clouds: bool,
 };
 
 pub const IRenderPass = struct {
@@ -128,6 +132,8 @@ pub const ShadowPass = struct {
             .shadow_texel_sizes = cascades.texel_sizes,
         });
 
+        if (ctx.disable_shadow_draw) return;
+
         rhi.beginShadowPass(cascade_idx, light_space_matrix);
         ctx.world.renderShadowPass(light_space_matrix, ctx.camera.position);
         rhi.endShadowPass();
@@ -148,7 +154,7 @@ pub const GPass = struct {
 
     fn execute(ptr: *anyopaque, ctx: SceneContext) void {
         _ = ptr;
-        if (!ctx.ssao_enabled) return;
+        if (!ctx.ssao_enabled or ctx.disable_gpass_draw) return;
 
         ctx.rhi.beginGPass();
         const atlas = ctx.material_system.getAtlasHandles(ctx.env_map_handle);
@@ -173,7 +179,7 @@ pub const SSAOPass = struct {
 
     fn execute(ptr: *anyopaque, ctx: SceneContext) void {
         _ = ptr;
-        if (!ctx.ssao_enabled) return;
+        if (!ctx.ssao_enabled or ctx.disable_ssao) return;
         ctx.rhi.computeSSAO();
     }
 };
@@ -232,6 +238,7 @@ pub const CloudPass = struct {
 
     fn execute(ptr: *anyopaque, ctx: SceneContext) void {
         _ = ptr;
+        if (ctx.disable_clouds) return;
         const view_proj = Mat4.perspectiveReverseZ(ctx.camera.fov, ctx.aspect, ctx.camera.near, ctx.camera.far).multiply(ctx.camera.getViewMatrixOriginCentered());
         ctx.atmosphere_system.renderClouds(ctx.cloud_params, view_proj);
     }

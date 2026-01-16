@@ -137,12 +137,22 @@ pub const VulkanSwapchain = struct {
         self.logical_width = @intCast(lw);
         self.logical_height = @intCast(lh);
 
+        // Protect against zero-size extents (can happen during fullscreen transitions on Wayland)
+        if (w <= 0 or h <= 0) {
+            return error.VulkanError;
+        }
+
         if (cap.currentExtent.width != 0xFFFFFFFF) {
             self.extent = cap.currentExtent;
         } else {
             self.extent = .{ .width = @intCast(w), .height = @intCast(h) };
             self.extent.width = std.math.clamp(self.extent.width, cap.minImageExtent.width, cap.maxImageExtent.width);
             self.extent.height = std.math.clamp(self.extent.height, cap.minImageExtent.height, cap.maxImageExtent.height);
+        }
+
+        // Final validation - extent must be non-zero
+        if (self.extent.width == 0 or self.extent.height == 0) {
+            return error.VulkanError;
         }
 
         var swapchain_info = std.mem.zeroes(c.VkSwapchainCreateInfoKHR);
@@ -157,7 +167,22 @@ pub const VulkanSwapchain = struct {
         swapchain_info.imageUsage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         swapchain_info.imageSharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
         swapchain_info.preTransform = cap.currentTransform;
-        swapchain_info.compositeAlpha = c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        // Select a supported composite alpha mode (prefer opaque, but fall back if unsupported)
+        swapchain_info.compositeAlpha = blk: {
+            const preferred = [_]c.VkCompositeAlphaFlagBitsKHR{
+                c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                c.VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+                c.VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+                c.VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+            };
+            for (preferred) |alpha| {
+                if ((cap.supportedCompositeAlpha & alpha) != 0) {
+                    break :blk alpha;
+                }
+            }
+            // Fallback (shouldn't happen, but be safe)
+            break :blk c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        };
         swapchain_info.presentMode = c.VK_PRESENT_MODE_FIFO_KHR; // Should be configurable
         swapchain_info.clipped = c.VK_TRUE;
         try checkVk(c.vkCreateSwapchainKHR(self.device.vk_device, &swapchain_info, null, &self.handle));
