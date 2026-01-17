@@ -374,7 +374,12 @@ fn checkVk(result: c.VkResult) !void {
         c.VK_ERROR_OUT_OF_HOST_MEMORY, c.VK_ERROR_OUT_OF_DEVICE_MEMORY => return error.OutOfMemory,
         c.VK_ERROR_SURFACE_LOST_KHR => return error.SurfaceLost,
         c.VK_ERROR_INITIALIZATION_FAILED => return error.InitializationFailed,
-        else => return error.VulkanError,
+        c.VK_ERROR_EXTENSION_NOT_PRESENT => return error.ExtensionNotPresent,
+        c.VK_ERROR_FEATURE_NOT_PRESENT => return error.FeatureNotPresent,
+        c.VK_ERROR_TOO_MANY_OBJECTS => return error.TooManyObjects,
+        c.VK_ERROR_FORMAT_NOT_SUPPORTED => return error.FormatNotSupported,
+        c.VK_ERROR_FRAGMENTED_POOL => return error.FragmentedPool,
+        else => return error.Unknown,
     }
 }
 
@@ -399,6 +404,11 @@ test "VulkanDevice checkVk mapping" {
     try testing.expectError(error.OutOfMemory, checkVk(c.VK_ERROR_OUT_OF_DEVICE_MEMORY));
     try testing.expectError(error.SurfaceLost, checkVk(c.VK_ERROR_SURFACE_LOST_KHR));
     try testing.expectError(error.InitializationFailed, checkVk(c.VK_ERROR_INITIALIZATION_FAILED));
-    try testing.expectError(error.VulkanError, checkVk(c.VK_ERROR_UNKNOWN));
+    try testing.expectError(error.ExtensionNotPresent, checkVk(c.VK_ERROR_EXTENSION_NOT_PRESENT));
+    try testing.expectError(error.FeatureNotPresent, checkVk(c.VK_ERROR_FEATURE_NOT_PRESENT));
+    try testing.expectError(error.TooManyObjects, checkVk(c.VK_ERROR_TOO_MANY_OBJECTS));
+    try testing.expectError(error.FormatNotSupported, checkVk(c.VK_ERROR_FORMAT_NOT_SUPPORTED));
+    try testing.expectError(error.FragmentedPool, checkVk(c.VK_ERROR_FRAGMENTED_POOL));
+    try testing.expectError(error.Unknown, checkVk(c.VK_ERROR_UNKNOWN));
     try checkVk(c.VK_SUCCESS);
 }

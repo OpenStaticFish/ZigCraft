@@ -13,6 +13,12 @@ pub const RhiError = error{
     GpuLost,
     SurfaceLost,
     InitializationFailed,
+    ExtensionNotPresent,
+    FeatureNotPresent,
+    TooManyObjects,
+    FormatNotSupported,
+    FragmentedPool,
+    Unknown,
 };
 
 pub const BufferHandle = u32;

@@ -23,7 +23,7 @@ test "VulkanDevice.submitGuarded error simulation" {
     const Helper = struct {
         fn mockSubmit(simulated_result: c.VkResult) !void {
             if (simulated_result == c.VK_ERROR_DEVICE_LOST) return error.GpuLost;
-            return error.VulkanError;
+            return error.Unknown;
         }
     };
 

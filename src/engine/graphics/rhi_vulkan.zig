@@ -258,7 +258,6 @@ const VulkanContext = struct {
     present_mode: c.VkPresentModeKHR,
     anisotropic_filtering: u8,
     msaa_samples: u8,
-    fault_count: u32 = 0,
     safe_mode: bool,
 
     // SSAO resources
@@ -498,7 +497,12 @@ fn checkVk(result: c.VkResult) !void {
         c.VK_ERROR_OUT_OF_HOST_MEMORY, c.VK_ERROR_OUT_OF_DEVICE_MEMORY => return error.OutOfMemory,
         c.VK_ERROR_SURFACE_LOST_KHR => return error.SurfaceLost,
         c.VK_ERROR_INITIALIZATION_FAILED => return error.InitializationFailed,
-        else => return error.VulkanError,
+        c.VK_ERROR_EXTENSION_NOT_PRESENT => return error.ExtensionNotPresent,
+        c.VK_ERROR_FEATURE_NOT_PRESENT => return error.FeatureNotPresent,
+        c.VK_ERROR_TOO_MANY_OBJECTS => return error.TooManyObjects,
+        c.VK_ERROR_FORMAT_NOT_SUPPORTED => return error.FormatNotSupported,
+        c.VK_ERROR_FRAGMENTED_POOL => return error.FragmentedPool,
+        else => return error.Unknown,
     }
 }
 
@@ -3468,8 +3472,7 @@ fn endFrame(ctx_ptr: *anyopaque) void {
     ctx.vulkan_device.submitGuarded(submit_info, ctx.in_flight_fences[ctx.current_sync_frame]) catch |err| {
         if (err == error.GpuLost) {
             ctx.gpu_fault_detected = true;
-            ctx.fault_count += 1;
-            std.log.err("GPU Fault Detected (Fault {d}). Attempting recovery...", .{ctx.fault_count});
+            std.log.err("GPU Fault Detected (Fault {d}). Attempting recovery...", .{ctx.vulkan_device.fault_count});
             return;
         }
         std.log.err("vkQueueSubmit failed with error: {}", .{err});
@@ -4169,7 +4172,6 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
             ctx.vulkan_device.submitGuarded(submit_info, ctx.transfer_fence) catch |err| {
                 if (err == error.GpuLost) {
                     ctx.gpu_fault_detected = true;
-                    ctx.fault_count += 1;
                     return 0;
                 }
                 std.log.err("Async layout transition submit failed: {}", .{err});
@@ -4396,7 +4398,6 @@ fn updateTexture(ctx_ptr: *anyopaque, handle: rhi.TextureHandle, data: []const u
         ctx.vulkan_device.submitGuarded(submit_info, ctx.transfer_fence) catch |err| {
             if (err == error.GpuLost) {
                 ctx.gpu_fault_detected = true;
-                ctx.fault_count += 1;
                 return;
             }
             std.log.err("One-time transfer submit failed: {}", .{err});
