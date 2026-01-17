@@ -93,18 +93,18 @@ pub fn build(b: *std.Build) void {
     test_integration_step.dependOn(&run_integration_tests.step);
 
     // Robust Vulkan demo executable
-    const robust_root_module = b.createModule(.{
-        .root_source_file = b.path("src/engine/graphics/vulkan_robust.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
     const robust_demo = b.addExecutable(.{
         .name = "robust-demo",
-        .root_module = robust_root_module,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/robust_demo.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     robust_demo.linkLibC();
+    robust_demo.linkSystemLibrary("sdl3");
     robust_demo.linkSystemLibrary("vulkan");
+    robust_demo.addIncludePath(b.path("libs/stb"));
 
     b.installArtifact(robust_demo);
 

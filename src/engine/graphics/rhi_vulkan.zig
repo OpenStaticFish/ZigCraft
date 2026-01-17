@@ -565,7 +565,7 @@ fn transitionImagesToShaderRead(ctx: *VulkanContext, images: []const c.VkImage, 
     submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &cmd;
-    try checkVk(c.vkQueueSubmit(ctx.vulkan_device.queue, 1, &submit_info, null));
+    try ctx.vulkan_device.submitGuarded(submit_info, null);
     try checkVk(c.vkQueueWaitIdle(ctx.vulkan_device.queue));
     c.vkFreeCommandBuffers(ctx.vulkan_device.vk_device, ctx.command_pool, 1, &cmd);
 }
@@ -1311,7 +1311,7 @@ fn createSSAOResources(ctx: *VulkanContext) !void {
         submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit_info.commandBufferCount = 1;
         submit_info.pCommandBuffers = &cmd;
-        try checkVk(c.vkQueueSubmit(ctx.vulkan_device.queue, 1, &submit_info, null));
+        try ctx.vulkan_device.submitGuarded(submit_info, null);
         try checkVk(c.vkQueueWaitIdle(ctx.vulkan_device.queue));
         c.vkFreeCommandBuffers(ctx.vulkan_device.vk_device, ctx.command_pool, 1, &cmd);
     }
@@ -2537,7 +2537,7 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
         submit_info.commandBufferCount = 1;
         submit_info.pCommandBuffers = &init_cmd;
 
-        try checkVk(c.vkQueueSubmit(ctx.vulkan_device.queue, 1, &submit_info, null));
+        try ctx.vulkan_device.submitGuarded(submit_info, null);
         try checkVk(c.vkQueueWaitIdle(ctx.vulkan_device.queue));
 
         c.vkFreeCommandBuffers(ctx.vulkan_device.vk_device, ctx.command_pool, 1, &init_cmd);
@@ -3451,19 +3451,19 @@ fn endFrame(ctx_ptr: *anyopaque) void {
     submit_info.signalSemaphoreCount = 1;
     submit_info.pSignalSemaphores = &signal_semaphores;
 
-    const submit_result = c.vkQueueSubmit(ctx.vulkan_device.queue, 1, &submit_info, ctx.in_flight_fences[ctx.current_sync_frame]);
-    if (submit_result == c.VK_ERROR_DEVICE_LOST) {
-        std.log.err("Vulkan device lost during vkQueueSubmit. Please restart the application.", .{});
-        return;
-    } else if (submit_result != c.VK_SUCCESS) {
-        std.log.err("vkQueueSubmit failed with result: {d}", .{submit_result});
+    ctx.vulkan_device.submitGuarded(submit_info, ctx.in_flight_fences[ctx.current_sync_frame]) catch |err| {
+        if (err == error.GpuLost) {
+            // Error already logged by submitGuarded
+            return;
+        }
+        std.log.err("vkQueueSubmit failed with error: {}", .{err});
         _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
         resetAcquireSemaphore(ctx);
         resetRenderFinishedSemaphore(ctx);
         ctx.transfer_ready = false;
         ctx.frame_in_progress = false;
         return;
-    }
+    };
 
     var present_info = std.mem.zeroes(c.VkPresentInfoKHR);
     present_info.sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -4150,7 +4150,7 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
             submit_info.commandBufferCount = 1;
             submit_info.pCommandBuffers = &temp_cb;
 
-            _ = c.vkQueueSubmit(ctx.vulkan_device.queue, 1, &submit_info, null);
+            _ = ctx.vulkan_device.submitGuarded(submit_info, null) catch {};
             _ = c.vkQueueWaitIdle(ctx.vulkan_device.queue);
 
             c.vkFreeCommandBuffers(ctx.vulkan_device.vk_device, ctx.transfer_command_pool, 1, &temp_cb);
@@ -4368,7 +4368,7 @@ fn updateTexture(ctx_ptr: *anyopaque, handle: rhi.TextureHandle, data: []const u
         submit_info.commandBufferCount = 1;
         submit_info.pCommandBuffers = &temp_cb;
 
-        _ = c.vkQueueSubmit(ctx.vulkan_device.queue, 1, &submit_info, null);
+        _ = ctx.vulkan_device.submitGuarded(submit_info, null) catch {};
         _ = c.vkQueueWaitIdle(ctx.vulkan_device.queue);
 
         c.vkFreeCommandBuffers(ctx.vulkan_device.vk_device, ctx.transfer_command_pool, 1, &temp_cb);
