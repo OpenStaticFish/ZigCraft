@@ -492,8 +492,14 @@ fn destroySSAOResources(ctx: *VulkanContext) void {
 
 /// Converts VkResult to Zig error for consistent error handling.
 fn checkVk(result: c.VkResult) !void {
-    if (result == c.VK_ERROR_DEVICE_LOST) return error.GpuLost;
-    if (result != c.VK_SUCCESS) return error.VulkanError;
+    switch (result) {
+        c.VK_SUCCESS => return,
+        c.VK_ERROR_DEVICE_LOST => return error.GpuLost,
+        c.VK_ERROR_OUT_OF_HOST_MEMORY, c.VK_ERROR_OUT_OF_DEVICE_MEMORY => return error.OutOfMemory,
+        c.VK_ERROR_SURFACE_LOST_KHR => return error.SurfaceLost,
+        c.VK_ERROR_INITIALIZATION_FAILED => return error.InitializationFailed,
+        else => return error.VulkanError,
+    }
 }
 
 /// Creates a shader module from SPIR-V bytecode. Caller must destroy after use.
@@ -4167,6 +4173,7 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
                     return 0;
                 }
                 std.log.err("Async layout transition submit failed: {}", .{err});
+                return 0;
             };
             _ = c.vkWaitForFences(ctx.vulkan_device.vk_device, 1, &ctx.transfer_fence, c.VK_TRUE, 2_000_000_000);
             _ = c.vkResetFences(ctx.vulkan_device.vk_device, 1, &ctx.transfer_fence);
@@ -4392,6 +4399,7 @@ fn updateTexture(ctx_ptr: *anyopaque, handle: rhi.TextureHandle, data: []const u
                 return;
             }
             std.log.err("One-time transfer submit failed: {}", .{err});
+            return;
         };
         _ = c.vkWaitForFences(ctx.vulkan_device.vk_device, 1, &ctx.transfer_fence, c.VK_TRUE, 2_000_000_000);
         _ = c.vkResetFences(ctx.vulkan_device.vk_device, 1, &ctx.transfer_fence);
