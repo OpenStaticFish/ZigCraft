@@ -100,7 +100,6 @@ pub const GraphicsScreen = struct {
                 presets.apply(settings, next_idx);
             }
             // Apply settings to RHI regardless of whether it's a preset or custom
-            // (though hitting the button only cycles to valid presets or back to low)
             apply_logic.applyToRHI(settings, ctx.rhi);
         }
         sy += row_height + 10.0 * ui_scale;
@@ -111,6 +110,7 @@ pub const GraphicsScreen = struct {
         Font.drawText(ui, "SHADOW RESOLUTION", lx, sy, label_scale, Color.white);
         if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, helpers.getShadowQualityLabel(settings.shadow_quality), btn_scale, mouse_x, mouse_y, mouse_clicked)) {
             settings.shadow_quality = (settings.shadow_quality + 1) % @as(u32, @intCast(settings_pkg.SHADOW_QUALITIES.len));
+            apply_logic.applyToRHI(settings, ctx.rhi);
         }
         sy += row_height;
 
@@ -122,12 +122,14 @@ pub const GraphicsScreen = struct {
                 12 => 16,
                 else => 4,
             };
+            apply_logic.applyToRHI(settings, ctx.rhi);
         }
         sy += row_height;
 
         Font.drawText(ui, "CASCADE BLENDING", lx, sy, label_scale, Color.white);
         if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, if (settings.shadow_cascade_blend) "ENABLED" else "DISABLED", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
             settings.shadow_cascade_blend = !settings.shadow_cascade_blend;
+            apply_logic.applyToRHI(settings, ctx.rhi);
         }
         sy += row_height + 10.0 * ui_scale;
 
@@ -135,12 +137,14 @@ pub const GraphicsScreen = struct {
         Font.drawText(ui, "PBR RENDERING", lx, sy, label_scale, Color.rgba(1.0, 0.8, 0.4, 1.0));
         if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, if (settings.pbr_enabled) "ENABLED" else "DISABLED", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
             settings.pbr_enabled = !settings.pbr_enabled;
+            apply_logic.applyToRHI(settings, ctx.rhi);
         }
         sy += row_height;
 
         Font.drawText(ui, "PBR QUALITY", lx, sy, label_scale, Color.white);
         if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, helpers.getPBRQualityLabel(settings.pbr_quality), btn_scale, mouse_x, mouse_y, mouse_clicked)) {
             settings.pbr_quality = (settings.pbr_quality + 1) % 3;
+            apply_logic.applyToRHI(settings, ctx.rhi);
         }
         sy += row_height + 10.0 * ui_scale;
 
@@ -155,6 +159,7 @@ pub const GraphicsScreen = struct {
                 256 => 512,
                 else => 16,
             };
+            apply_logic.applyToRHI(settings, ctx.rhi);
         }
         sy += row_height;
 
@@ -176,6 +181,7 @@ pub const GraphicsScreen = struct {
         Font.drawText(ui, "CLOUD SHADOWS", lx, sy, label_scale, Color.white);
         if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, if (settings.cloud_shadows_enabled) "ENABLED" else "DISABLED", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
             settings.cloud_shadows_enabled = !settings.cloud_shadows_enabled;
+            apply_logic.applyToRHI(settings, ctx.rhi);
         }
         sy += row_height;
 

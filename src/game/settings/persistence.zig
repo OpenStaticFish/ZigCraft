@@ -36,17 +36,36 @@ pub fn load(allocator: std.mem.Allocator) Settings {
     defer parsed.deinit();
 
     var settings = parsed.value;
+
     // Deep copy the texture pack string so it survives deinit
+    // We use errdefer to ensure we don't return a struct with dangling pointers if the second dup fails
+    // However, since we are returning a struct by value and 'settings' is a local var, errdefer is tricky.
+    // Instead we handle failures by reverting to defaults.
+
     if (std.mem.eql(u8, settings.texture_pack, "default")) {
         settings.texture_pack = "default";
     } else {
-        settings.texture_pack = allocator.dupe(u8, settings.texture_pack) catch "default";
+        const duped = allocator.dupe(u8, settings.texture_pack) catch {
+            settings.texture_pack = "default";
+            return settings; // Partial success (texture pack default)
+        };
+        settings.texture_pack = duped;
     }
 
     if (std.mem.eql(u8, settings.environment_map, "default")) {
         settings.environment_map = "default";
     } else {
-        settings.environment_map = allocator.dupe(u8, settings.environment_map) catch "default";
+        const duped = allocator.dupe(u8, settings.environment_map) catch {
+            settings.environment_map = "default";
+            // If we duped texture_pack successfully but failed here, we should ideally free texture_pack.
+            // But 'settings.texture_pack' is now owned by us (or is "default").
+            if (!std.mem.eql(u8, settings.texture_pack, "default")) {
+                allocator.free(settings.texture_pack);
+                settings.texture_pack = "default";
+            }
+            return settings;
+        };
+        settings.environment_map = duped;
     }
 
     std.log.info("Settings loaded from ~/{s}", .{config_path});
