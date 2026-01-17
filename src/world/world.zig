@@ -18,6 +18,7 @@ const LODManager = @import("lod_manager.zig").LODManager;
 const Vec3 = @import("../engine/math/vec3.zig").Vec3;
 const Mat4 = @import("../engine/math/mat4.zig").Mat4;
 const Frustum = @import("../engine/math/frustum.zig").Frustum;
+const shadow_scene = @import("../engine/graphics/shadow_scene.zig");
 const rhi_mod = @import("../engine/graphics/rhi.zig");
 const RHI = rhi_mod.RHI;
 const WorldStreamer = @import("world_streamer.zig").WorldStreamer;
@@ -244,6 +245,20 @@ pub const World = struct {
 
     pub fn renderShadowPass(self: *World, light_space_matrix: Mat4, camera_pos: Vec3) void {
         self.renderer.renderShadowPass(light_space_matrix, camera_pos, self.render_distance, self.lod_manager);
+    }
+
+    pub fn shadowScene(self: *World) shadow_scene.IShadowScene {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .renderShadowPass = renderShadowPassWrapper,
+            },
+        };
+    }
+
+    fn renderShadowPassWrapper(ptr: *anyopaque, light_space_matrix: Mat4, camera_pos: Vec3) void {
+        const self: *World = @ptrCast(@alignCast(ptr));
+        self.renderShadowPass(light_space_matrix, camera_pos);
     }
 
     pub fn getRenderStats(self: *const World) RenderStats {

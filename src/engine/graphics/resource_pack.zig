@@ -58,8 +58,8 @@ pub const BLOCK_TEXTURES = [_]TextureMapping{
     .{ .name = "glowstone", .files = &.{"glowstone.png"} },
     .{ .name = "mud", .files = &.{"mud.png"} },
     .{ .name = "snow_block", .files = &.{ "snow_block.png", "snow.png" } },
-    .{ .name = "cactus_side", .files = &.{"cactus_side.png"} },
-    .{ .name = "cactus_top", .files = &.{"cactus_top.png"} },
+    .{ .name = "cactus_side", .files = &.{ "cactus_side.png", "cactus.png" } },
+    .{ .name = "cactus_top", .files = &.{ "cactus_top.png", "cactus.png" } },
     .{ .name = "coal_ore", .files = &.{"coal_ore.png"} },
     .{ .name = "iron_ore", .files = &.{"iron_ore.png"} },
     .{ .name = "gold_ore", .files = &.{"gold_ore.png"} },
@@ -403,6 +403,11 @@ pub const ResourcePackManager = struct {
     pub fn loadImageFileFloat(self: *Self, path: []const u8) ?LoadedTextureFloat {
         // Auto-convert EXR to HDR using ImageMagick (since stb_image doesn't support EXR)
         if (std.mem.endsWith(u8, path, ".exr")) {
+            _ = std.fs.cwd().access(path, .{}) catch |err| {
+                log.log.warn("Environment map not found: {s} ({})", .{ path, err });
+                return null;
+            };
+
             const hdr_path = std.fmt.allocPrint(self.allocator, "{s}.hdr", .{path}) catch return null;
             defer self.allocator.free(hdr_path);
 

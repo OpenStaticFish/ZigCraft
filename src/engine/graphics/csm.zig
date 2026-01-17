@@ -11,6 +11,20 @@ pub const ShadowCascades = struct {
     texel_sizes: [CASCADE_COUNT]f32,
 };
 
+/// Computes stable cascaded shadow map matrices using texel snapping.
+///
+/// Parameters:
+/// - resolution: shadow map resolution per cascade.
+/// - camera_fov: vertical FOV in radians.
+/// - aspect: viewport aspect ratio.
+/// - near/far: camera depth range for cascade splitting.
+/// - sun_dir: normalized direction to the sun (world space).
+/// - cam_view: camera view matrix (origin-centered).
+/// - z_range_01: map depth to [0,1] for reverse-Z when true.
+///
+/// Notes:
+/// - lambda=0.92 biases the split scheme toward logarithmic distribution.
+/// - min/max Z offsets are tuned to avoid clipping during camera motion.
 pub fn computeCascades(resolution: u32, camera_fov: f32, aspect: f32, near: f32, far: f32, sun_dir: Vec3, cam_view: Mat4, z_range_01: bool) ShadowCascades {
     const lambda = 0.92;
     const shadow_dist = far;
@@ -78,6 +92,7 @@ pub fn computeCascades(resolution: u32, camera_fov: f32, aspect: f32, near: f32,
         const minY = center_snapped.y - radius;
         const maxY = center_snapped.y + radius;
 
+        // Expand depth bounds to reduce clipping on steep angles and during movement.
         const maxZ = center_snapped.z + radius + 300.0;
         const minZ = center_snapped.z - radius - 100.0;
 
@@ -106,4 +121,24 @@ pub fn computeCascades(resolution: u32, camera_fov: f32, aspect: f32, near: f32,
     }
 
     return cascades;
+}
+
+test "computeCascades splits and texel sizes" {
+    const cascades = computeCascades(
+        1024,
+        std.math.degreesToRadians(60.0),
+        16.0 / 9.0,
+        0.1,
+        200.0,
+        Vec3.init(0.3, -1.0, 0.2).normalize(),
+        Mat4.identity,
+        true,
+    );
+
+    var last_split: f32 = 0.0;
+    for (0..CASCADE_COUNT) |i| {
+        try std.testing.expect(cascades.cascade_splits[i] > last_split);
+        try std.testing.expect(cascades.texel_sizes[i] > 0.0);
+        last_split = cascades.cascade_splits[i];
+    }
 }

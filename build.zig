@@ -4,6 +4,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const options = b.addOptions();
+    const enable_debug_shadows = b.option(bool, "debug_shadows", "Enable debug shadow visualization resources") orelse false;
+    options.addOption(bool, "debug_shadows", enable_debug_shadows);
+
     const zig_math = b.createModule(.{
         .root_source_file = b.path("libs/zig-math/math.zig"),
         .target = target,
@@ -23,6 +27,7 @@ pub fn build(b: *std.Build) void {
     });
     root_module.addImport("zig-math", zig_math);
     root_module.addImport("zig-noise", zig_noise);
+    root_module.addOptions("build_options", options);
     root_module.addIncludePath(b.path("libs/stb"));
 
     const exe = b.addExecutable(.{
@@ -41,8 +46,11 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    const shader_cmd = b.addSystemCommand(&.{ "sh", "-c", "for f in assets/shaders/vulkan/*.vert assets/shaders/vulkan/*.frag; do glslangValidator -V \"$f\" -o \"$f.spv\"; done" });
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
+    run_cmd.step.dependOn(&shader_cmd.step);
 
     if (b.args) |args| {
         run_cmd.addArgs(args);
@@ -58,6 +66,7 @@ pub fn build(b: *std.Build) void {
     });
     test_root_module.addImport("zig-math", zig_math);
     test_root_module.addImport("zig-noise", zig_noise);
+    test_root_module.addOptions("build_options", options);
 
     const exe_tests = b.addTest(.{
         .root_module = test_root_module,
@@ -69,6 +78,7 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     const run_exe_tests = b.addRunArtifact(exe_tests);
+    run_exe_tests.step.dependOn(&shader_cmd.step);
     test_step.dependOn(&run_exe_tests.step);
 
     const integration_root_module = b.createModule(.{
@@ -78,6 +88,7 @@ pub fn build(b: *std.Build) void {
     });
     integration_root_module.addImport("zig-math", zig_math);
     integration_root_module.addImport("zig-noise", zig_noise);
+    integration_root_module.addOptions("build_options", options);
     integration_root_module.addIncludePath(b.path("libs/stb"));
 
     const exe_integration_tests = b.addTest(.{
@@ -93,6 +104,7 @@ pub fn build(b: *std.Build) void {
 
     const test_integration_step = b.step("test-integration", "Run integration smoke test");
     const run_integration_tests = b.addRunArtifact(exe_integration_tests);
+    run_integration_tests.step.dependOn(&shader_cmd.step);
     test_integration_step.dependOn(&run_integration_tests.step);
 
     // Robust Vulkan demo executable
@@ -104,6 +116,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    robust_demo.root_module.addOptions("build_options", options);
+
     robust_demo.linkLibC();
     robust_demo.linkSystemLibrary("sdl3");
     robust_demo.linkSystemLibrary("vulkan");
@@ -119,6 +133,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    integration_robustness.root_module.addOptions("build_options", options);
     integration_robustness.linkLibC();
     integration_robustness.linkSystemLibrary("sdl3"); // Needed for C imports if any
 

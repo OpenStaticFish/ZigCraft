@@ -1,6 +1,7 @@
 const std = @import("std");
 const Camera = @import("camera.zig").Camera;
 const World = @import("../../world/world.zig").World;
+const shadow_scene = @import("shadow_scene.zig");
 const RHI = @import("rhi.zig").RHI;
 const rhi_pkg = @import("rhi.zig");
 const Mat4 = @import("../math/mat4.zig").Mat4;
@@ -12,6 +13,7 @@ const MaterialSystem = @import("material_system.zig").MaterialSystem;
 pub const SceneContext = struct {
     rhi: RHI,
     world: *World,
+    shadow_scene: shadow_scene.IShadowScene,
     camera: *Camera,
     atmosphere_system: *AtmosphereSystem,
     material_system: *MaterialSystem,
@@ -20,8 +22,7 @@ pub const SceneContext = struct {
     cloud_params: rhi_pkg.CloudParams,
     main_shader: rhi_pkg.ShaderHandle,
     env_map_handle: rhi_pkg.TextureHandle,
-    shadow_distance: f32,
-    shadow_resolution: u32,
+    shadow: rhi_pkg.ShadowConfig,
     ssao_enabled: bool,
     disable_shadow_draw: bool,
     disable_gpass_draw: bool,
@@ -115,11 +116,11 @@ pub const ShadowPass = struct {
         const rhi = ctx.rhi;
 
         const cascades = CSM.computeCascades(
-            ctx.shadow_resolution,
+            ctx.shadow.resolution,
             ctx.camera.fov,
             ctx.aspect,
             0.1,
-            ctx.shadow_distance,
+            ctx.shadow.distance,
             ctx.sky_params.sun_dir,
             ctx.camera.getViewMatrixOriginCentered(),
             true,
@@ -135,7 +136,7 @@ pub const ShadowPass = struct {
         if (ctx.disable_shadow_draw) return;
 
         rhi.beginShadowPass(cascade_idx, light_space_matrix);
-        ctx.world.renderShadowPass(light_space_matrix, ctx.camera.position);
+        ctx.shadow_scene.renderShadowPass(light_space_matrix, ctx.camera.position);
         rhi.endShadowPass();
     }
 };

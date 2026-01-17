@@ -153,6 +153,13 @@ pub const CloudPushConstants = extern struct {
     fog_params: [4]f32, // xyz = fog_color, w = fog_density
 };
 
+pub const ShadowConfig = struct {
+    distance: f32 = 250.0,
+    resolution: u32 = 4096,
+    pcf_samples: u8 = 12,
+    cascade_blend: bool = true,
+};
+
 pub const ShadowParams = struct {
     light_space_matrices: [SHADOW_CASCADE_COUNT]Mat4,
     cascade_splits: [SHADOW_CASCADE_COUNT]f32,
@@ -173,8 +180,7 @@ pub const CloudParams = struct {
     wind_offset_z: f32 = 0.0,
     base_color: Vec3 = Vec3.init(1.0, 1.0, 1.0),
     pbr_enabled: bool = true,
-    shadow_samples: u8 = 12,
-    shadow_blend: bool = true,
+    shadow: ShadowConfig = .{},
     cloud_shadows: bool = true,
     pbr_quality: u8 = 2,
     volumetric_enabled: bool = true,
@@ -269,6 +275,56 @@ pub const IResourceFactory = struct {
     }
 };
 
+pub const IShadowContext = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        beginPass: *const fn (ptr: *anyopaque, cascade_index: u32, light_space_matrix: Mat4) void,
+        endPass: *const fn (ptr: *anyopaque) void,
+        updateUniforms: *const fn (ptr: *anyopaque, params: ShadowParams) void,
+    };
+
+    pub fn beginPass(self: IShadowContext, cascade_index: u32, light_space_matrix: Mat4) void {
+        self.vtable.beginPass(self.ptr, cascade_index, light_space_matrix);
+    }
+    pub fn endPass(self: IShadowContext) void {
+        self.vtable.endPass(self.ptr);
+    }
+    pub fn updateUniforms(self: IShadowContext, params: ShadowParams) void {
+        self.vtable.updateUniforms(self.ptr, params);
+    }
+};
+
+pub const IUIContext = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        beginPass: *const fn (ptr: *anyopaque, width: f32, height: f32) void,
+        endPass: *const fn (ptr: *anyopaque) void,
+        drawRect: *const fn (ptr: *anyopaque, rect: Rect, color: Color) void,
+        drawTexture: *const fn (ptr: *anyopaque, texture: TextureHandle, rect: Rect) void,
+        bindPipeline: *const fn (ptr: *anyopaque, textured: bool) void,
+    };
+
+    pub fn beginPass(self: IUIContext, width: f32, height: f32) void {
+        self.vtable.beginPass(self.ptr, width, height);
+    }
+    pub fn endPass(self: IUIContext) void {
+        self.vtable.endPass(self.ptr);
+    }
+    pub fn drawRect(self: IUIContext, rect: Rect, color: Color) void {
+        self.vtable.drawRect(self.ptr, rect, color);
+    }
+    pub fn drawTexture(self: IUIContext, texture: TextureHandle, rect: Rect) void {
+        self.vtable.drawTexture(self.ptr, texture, rect);
+    }
+    pub fn bindPipeline(self: IUIContext, textured: bool) void {
+        self.vtable.bindPipeline(self.ptr, textured);
+    }
+};
+
 pub const IRenderContext = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -279,8 +335,6 @@ pub const IRenderContext = struct {
         abortFrame: *const fn (ptr: *anyopaque) void,
         beginMainPass: *const fn (ptr: *anyopaque) void,
         endMainPass: *const fn (ptr: *anyopaque) void,
-        beginShadowPass: *const fn (ptr: *anyopaque, cascade_index: u32, light_space_matrix: Mat4) void,
-        endShadowPass: *const fn (ptr: *anyopaque) void,
         beginGPass: *const fn (ptr: *anyopaque) void,
         endGPass: *const fn (ptr: *anyopaque) void,
         computeSSAO: *const fn (ptr: *anyopaque) void,
@@ -290,7 +344,6 @@ pub const IRenderContext = struct {
         setInstanceBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
         setLODInstanceBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
         updateGlobalUniforms: *const fn (ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, sun_color: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void,
-        updateShadowUniforms: *const fn (ptr: *anyopaque, params: ShadowParams) void,
         setTextureUniforms: *const fn (ptr: *anyopaque, texture_enabled: bool, shadow_map_handles: [SHADOW_CASCADE_COUNT]TextureHandle) void,
         draw: *const fn (ptr: *anyopaque, handle: BufferHandle, count: u32, mode: DrawMode) void,
         drawOffset: *const fn (ptr: *anyopaque, handle: BufferHandle, count: u32, mode: DrawMode, offset: usize) void,
@@ -305,18 +358,9 @@ pub const IRenderContext = struct {
 
         setClearColor: *const fn (ptr: *anyopaque, color: Vec3) void,
 
-        // 2D / UI primitives
-        begin2DPass: *const fn (ptr: *anyopaque, screen_width: f32, screen_height: f32) void,
-        end2DPass: *const fn (ptr: *anyopaque) void,
-        drawRect2D: *const fn (ptr: *anyopaque, rect: Rect, color: Color) void,
-        drawTexture2D: *const fn (ptr: *anyopaque, texture: TextureHandle, rect: Rect) void,
-
         drawSky: *const fn (ptr: *anyopaque, params: SkyParams) void,
         beginCloudPass: *const fn (ptr: *anyopaque, params: CloudParams) void,
         drawDebugShadowMap: *const fn (ptr: *anyopaque, cascade_index: usize, depth_map_handle: TextureHandle) void,
-
-        // Bind UI Pipeline (replaces beginUI/drawUIQuad internal logic)
-        bindUIPipeline: *const fn (ptr: *anyopaque, textured: bool) void,
     };
 
     pub fn beginFrame(self: IRenderContext) void {
@@ -388,6 +432,8 @@ pub const RHI = struct {
         // Composition of all vtables (temp)
         resources: IResourceFactory.VTable,
         render: IRenderContext.VTable,
+        shadow: IShadowContext.VTable,
+        ui: IUIContext.VTable,
         query: IDeviceQuery.VTable,
 
         // Options
@@ -404,6 +450,12 @@ pub const RHI = struct {
     }
     pub fn context(self: RHI) IRenderContext {
         return .{ .ptr = self.ptr, .vtable = &self.vtable.render };
+    }
+    pub fn shadow(self: RHI) IShadowContext {
+        return .{ .ptr = self.ptr, .vtable = &self.vtable.shadow };
+    }
+    pub fn ui(self: RHI) IUIContext {
+        return .{ .ptr = self.ptr, .vtable = &self.vtable.ui };
     }
     pub fn query(self: RHI) IDeviceQuery {
         return .{ .ptr = self.ptr, .vtable = &self.vtable.query };
@@ -508,16 +560,16 @@ pub const RHI = struct {
 
     // Pass-throughs
     pub fn begin2DPass(self: RHI, width: f32, height: f32) void {
-        self.vtable.render.begin2DPass(self.ptr, width, height);
+        self.vtable.ui.beginPass(self.ptr, width, height);
     }
     pub fn end2DPass(self: RHI) void {
-        self.vtable.render.end2DPass(self.ptr);
+        self.vtable.ui.endPass(self.ptr);
     }
     pub fn drawRect2D(self: RHI, rect: Rect, color: Color) void {
-        self.vtable.render.drawRect2D(self.ptr, rect, color);
+        self.vtable.ui.drawRect(self.ptr, rect, color);
     }
     pub fn drawTexture2D(self: RHI, handle: TextureHandle, rect: Rect) void {
-        self.vtable.render.drawTexture2D(self.ptr, handle, rect);
+        self.vtable.ui.drawTexture(self.ptr, handle, rect);
     }
     pub fn drawSky(self: RHI, params: SkyParams) void {
         self.vtable.render.drawSky(self.ptr, params);
@@ -526,10 +578,10 @@ pub const RHI = struct {
         self.vtable.render.beginCloudPass(self.ptr, params);
     }
     pub fn beginShadowPass(self: RHI, cascade: u32, matrix: Mat4) void {
-        self.vtable.render.beginShadowPass(self.ptr, cascade, matrix);
+        self.vtable.shadow.beginPass(self.ptr, cascade, matrix);
     }
     pub fn endShadowPass(self: RHI) void {
-        self.vtable.render.endShadowPass(self.ptr);
+        self.vtable.shadow.endPass(self.ptr);
     }
     pub fn beginGPass(self: RHI) void {
         self.vtable.render.beginGPass(self.ptr);
@@ -541,7 +593,7 @@ pub const RHI = struct {
         self.vtable.render.computeSSAO(self.ptr);
     }
     pub fn updateShadowUniforms(self: RHI, params: ShadowParams) void {
-        self.vtable.render.updateShadowUniforms(self.ptr, params);
+        self.vtable.shadow.updateUniforms(self.ptr, params);
     }
     pub fn setTextureUniforms(self: RHI, enabled: bool, handles: [SHADOW_CASCADE_COUNT]TextureHandle) void {
         self.vtable.render.setTextureUniforms(self.ptr, enabled, handles);
@@ -569,6 +621,6 @@ pub const RHI = struct {
         return self.vtable.recover(self.ptr);
     }
     pub fn bindUIPipeline(self: RHI, textured: bool) void {
-        self.vtable.render.bindUIPipeline(self.ptr, textured);
+        self.vtable.ui.bindPipeline(self.ptr, textured);
     }
 };
