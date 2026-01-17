@@ -31,7 +31,7 @@ jobs:
           use-gha-cache: true
 
       - name: Run opencode
-        uses: sst/opencode/github@dev
+        uses: sst/opencode/github@v1.1.25
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         with:
