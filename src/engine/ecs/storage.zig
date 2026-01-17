@@ -72,7 +72,9 @@ pub fn ComponentStorage(comptime T: type) type {
                 self.entities.items[index] = last_entity;
 
                 // Update map for the moved entity
-                self.map.put(last_entity, index) catch unreachable; // Should not fail as it exists
+                if (self.map.getPtr(last_entity)) |last_index_ptr| {
+                    last_index_ptr.* = index;
+                }
 
                 // Pop back
                 _ = self.components.pop(self.allocator);

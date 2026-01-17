@@ -2784,6 +2784,14 @@ fn deinit(ctx_ptr: *anyopaque) void {
                 if (zombie.memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, zombie.memory, null);
             }
             ctx.buffer_deletion_queue[i].deinit(ctx.allocator);
+
+            for (ctx.image_deletion_queue[i].items) |zombie| {
+                if (zombie.sampler != null) c.vkDestroySampler(ctx.vulkan_device.vk_device, zombie.sampler, null);
+                if (zombie.view != null) c.vkDestroyImageView(ctx.vulkan_device.vk_device, zombie.view, null);
+                if (zombie.image != null) c.vkDestroyImage(ctx.vulkan_device.vk_device, zombie.image, null);
+                if (zombie.memory != null) c.vkFreeMemory(ctx.vulkan_device.vk_device, zombie.memory, null);
+            }
+            ctx.image_deletion_queue[i].deinit(ctx.allocator);
         }
 
         var buf_iter = ctx.buffers.iterator();

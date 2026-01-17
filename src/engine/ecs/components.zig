@@ -6,6 +6,7 @@ const Vec3 = math.Vec3;
 const AABB = math.AABB;
 
 pub const Transform = struct {
+    /// World-space position; rendering converts to camera-relative for floating origin.
     position: Vec3,
     rotation: Vec3 = Vec3.zero, // Euler angles (pitch, yaw, roll)
     scale: Vec3 = Vec3.one,
@@ -23,17 +24,4 @@ pub const Mesh = struct {
     /// For now, just a color for debug rendering
     color: Vec3 = Vec3.init(1.0, 0.0, 1.0), // Magenta by default
     visible: bool = true,
-};
-
-pub const AI = struct {
-    state: AIState = .idle,
-    target_pos: ?Vec3 = null,
-    move_speed: f32 = 2.0,
-};
-
-pub const AIState = enum {
-    idle,
-    wandering,
-    chasing,
-    fleeing,
 };

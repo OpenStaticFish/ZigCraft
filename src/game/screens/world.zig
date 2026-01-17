@@ -57,15 +57,15 @@ pub const WorldScreen = struct {
         }
         if (ctx.input_mapper.isActionPressed(ctx.input, .toggle_wireframe)) {
             ctx.settings.wireframe_enabled = !ctx.settings.wireframe_enabled;
-            ctx.rhi.setWireframe(ctx.settings.wireframe_enabled);
+            ctx.rhi.*.setWireframe(ctx.settings.wireframe_enabled);
         }
         if (ctx.input_mapper.isActionPressed(ctx.input, .toggle_textures)) {
             ctx.settings.textures_enabled = !ctx.settings.textures_enabled;
-            ctx.rhi.setTexturesEnabled(ctx.settings.textures_enabled);
+            ctx.rhi.*.setTexturesEnabled(ctx.settings.textures_enabled);
         }
         if (ctx.input_mapper.isActionPressed(ctx.input, .toggle_vsync)) {
             ctx.settings.vsync = !ctx.settings.vsync;
-            ctx.rhi.setVSync(ctx.settings.vsync);
+            ctx.rhi.*.setVSync(ctx.settings.vsync);
         }
 
         // Update Audio Listener
@@ -136,13 +136,13 @@ pub const WorldScreen = struct {
         };
 
         if (!ctx.skip_world_render) {
-            ctx.rhi.updateGlobalUniforms(view_proj_render, camera.position, self.session.atmosphere.sun_dir, self.session.atmosphere.sun_color, self.session.atmosphere.time_of_day, self.session.atmosphere.fog_color, self.session.atmosphere.fog_density, self.session.atmosphere.fog_enabled, self.session.atmosphere.sun_intensity, self.session.atmosphere.ambient_intensity, ctx.settings.textures_enabled, cloud_params);
+            ctx.rhi.*.updateGlobalUniforms(view_proj_render, camera.position, self.session.atmosphere.sun_dir, self.session.atmosphere.sun_color, self.session.atmosphere.time_of_day, self.session.atmosphere.fog_color, self.session.atmosphere.fog_density, self.session.atmosphere.fog_enabled, self.session.atmosphere.sun_intensity, self.session.atmosphere.ambient_intensity, ctx.settings.textures_enabled, cloud_params);
 
             const env_map_handle = if (ctx.env_map_ptr) |e_ptr| (if (e_ptr.*) |t| t.handle else 0) else 0;
 
             const ssao_enabled = ctx.settings.ssao_enabled and !ctx.disable_ssao and !ctx.disable_gpass_draw;
             const render_ctx = render_graph_pkg.SceneContext{
-                .rhi = ctx.rhi,
+                .rhi = ctx.rhi.*, // SceneContext expects value for now
                 .world = self.session.world,
                 .camera = camera,
                 .atmosphere_system = ctx.atmosphere_system,

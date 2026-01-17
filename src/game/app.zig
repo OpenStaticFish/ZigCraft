@@ -229,6 +229,8 @@ pub const App = struct {
             .disable_clouds = disable_clouds,
         };
 
+        // EngineContext uses rhi as a pointer; App owns the instance.
+
         app.material_system = try MaterialSystem.init(allocator, rhi, &app.atlas);
 
         // Build RenderGraph (OCP: We can easily modify this list based on quality)
@@ -278,7 +280,7 @@ pub const App = struct {
         return .{
             .allocator = self.allocator,
             .window_manager = &self.window_manager,
-            .rhi = self.rhi,
+            .rhi = &self.rhi,
             .resource_pack_manager = &self.resource_pack_manager,
             .atlas = &self.atlas,
             .render_graph = &self.render_graph,

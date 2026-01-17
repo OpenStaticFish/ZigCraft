@@ -13,7 +13,6 @@ pub const Registry = struct {
     transforms: ComponentStorage(components.Transform),
     physics: ComponentStorage(components.Physics),
     meshes: ComponentStorage(components.Mesh),
-    ais: ComponentStorage(components.AI),
 
     pub fn init(allocator: std.mem.Allocator) Registry {
         return .{
@@ -21,7 +20,6 @@ pub const Registry = struct {
             .transforms = ComponentStorage(components.Transform).init(allocator),
             .physics = ComponentStorage(components.Physics).init(allocator),
             .meshes = ComponentStorage(components.Mesh).init(allocator),
-            .ais = ComponentStorage(components.AI).init(allocator),
         };
     }
 
@@ -29,11 +27,14 @@ pub const Registry = struct {
         self.transforms.deinit();
         self.physics.deinit();
         self.meshes.deinit();
-        self.ais.deinit();
     }
 
     pub fn create(self: *Registry) EntityId {
         const id = self.next_entity_id;
+        // Check for overflow (extremely unlikely but good practice)
+        if (self.next_entity_id == std.math.maxInt(EntityId)) {
+            @panic("Entity ID overflow");
+        }
         self.next_entity_id += 1;
         return id;
     }
@@ -42,14 +43,12 @@ pub const Registry = struct {
         _ = self.transforms.remove(entity);
         _ = self.physics.remove(entity);
         _ = self.meshes.remove(entity);
-        _ = self.ais.remove(entity);
     }
 
     pub fn clear(self: *Registry) void {
         self.transforms.clear();
         self.physics.clear();
         self.meshes.clear();
-        self.ais.clear();
         self.next_entity_id = 1;
     }
 };

@@ -260,7 +260,7 @@ pub const GameSession = struct {
     debug_shadows: bool = false,
     debug_cascade_idx: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator, rhi: RHI, seed: u64, render_distance: i32, lod_enabled: bool) !*GameSession {
+    pub fn init(allocator: std.mem.Allocator, rhi: *RHI, seed: u64, render_distance: i32, lod_enabled: bool) !*GameSession {
         const session = try allocator.create(GameSession);
 
         const safe_mode_env = std.posix.getenv("ZIGCRAFT_SAFE_MODE");
@@ -291,11 +291,11 @@ pub const GameSession = struct {
             };
 
         const world = if (effective_lod_enabled)
-            try World.initWithLOD(allocator, effective_render_distance, seed, rhi, lod_config)
+            try World.initWithLOD(allocator, effective_render_distance, seed, rhi.*, lod_config)
         else
-            try World.init(allocator, effective_render_distance, seed, rhi);
+            try World.init(allocator, effective_render_distance, seed, rhi.*);
 
-        const world_map = WorldMap.init(rhi, 256, 256);
+        const world_map = WorldMap.init(rhi.*, 256, 256);
 
         // ecs_registry and ecs_render_system are initialized directly in the struct
 
@@ -312,8 +312,8 @@ pub const GameSession = struct {
             .player = player,
             .inventory = Inventory.init(),
             .inventory_ui_state = .{},
-            .block_outline = BlockOutline.init(rhi),
-            .hand_renderer = HandRenderer.init(rhi),
+            .block_outline = BlockOutline.init(rhi.*),
+            .hand_renderer = HandRenderer.init(rhi.*),
             .camera = player.camera,
             .ecs_registry = ECSRegistry.init(allocator),
             .ecs_render_system = ECSRenderSystem.init(rhi),
@@ -325,21 +325,21 @@ pub const GameSession = struct {
         // Force map update initially
         session.map_controller.map_needs_update = true;
 
-        // Spawn a test entity (Uncomment to test ECS)
-        // const test_entity = session.ecs_registry.create();
-        // try session.ecs_registry.transforms.set(test_entity, .{
-        //     .position = Vec3.init(10, 120, 10), // Start high up
-        //     .scale = Vec3.one,
-        // });
-        // try session.ecs_registry.physics.set(test_entity, .{
-        //     .velocity = Vec3.zero,
-        //     .aabb_size = Vec3.init(1.0, 1.0, 1.0),
-        //     .use_gravity = true,
-        // });
-        // try session.ecs_registry.meshes.set(test_entity, .{
-        //     .visible = true,
-        //     .color = Vec3.init(1.0, 0.0, 0.0), // Red
-        // });
+        // Spawn a test entity
+        const test_entity = session.ecs_registry.create();
+        try session.ecs_registry.transforms.set(test_entity, .{
+            .position = Vec3.init(10, 120, 10), // Start high up
+            .scale = Vec3.one,
+        });
+        try session.ecs_registry.physics.set(test_entity, .{
+            .velocity = Vec3.zero,
+            .aabb_size = Vec3.init(1.0, 1.0, 1.0),
+            .use_gravity = true,
+        });
+        try session.ecs_registry.meshes.set(test_entity, .{
+            .visible = true,
+            .color = Vec3.init(1.0, 0.0, 0.0), // Red
+        });
 
         return session;
     }

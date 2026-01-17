@@ -136,7 +136,7 @@ pub const SettingsScreen = struct {
         Font.drawText(ui, "VSYNC", lx, sy, label_scale, Color.white);
         if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, if (settings.vsync) "ENABLED" else "DISABLED", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
             settings.vsync = !settings.vsync;
-            ctx.rhi.setVSync(settings.vsync);
+            ctx.rhi.*.setVSync(settings.vsync);
         }
         sy += row_height + 15.0 * ui_scale;
 
@@ -167,7 +167,7 @@ pub const SettingsScreen = struct {
         Font.drawText(ui, "TEXTURES", lx, sy, label_scale, Color.white);
         if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, if (settings.textures_enabled) "ENABLED" else "DISABLED", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
             settings.textures_enabled = !settings.textures_enabled;
-            ctx.rhi.setTexturesEnabled(settings.textures_enabled);
+            ctx.rhi.*.setTexturesEnabled(settings.textures_enabled);
         }
         sy += row_height;
 
@@ -175,7 +175,7 @@ pub const SettingsScreen = struct {
         Font.drawText(ui, "WIREFRAME", lx, sy, label_scale, Color.rgba(0.7, 0.7, 0.8, 1.0));
         if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, if (settings.wireframe_enabled) "ENABLED" else "DISABLED", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
             settings.wireframe_enabled = !settings.wireframe_enabled;
-            ctx.rhi.setWireframe(settings.wireframe_enabled);
+            ctx.rhi.*.setWireframe(settings.wireframe_enabled);
         }
         Font.drawText(ui, "(DEBUG)", vx + toggle_width + 10.0, sy, 1.5 * ui_scale, Color.rgba(0.5, 0.5, 0.6, 1.0));
 

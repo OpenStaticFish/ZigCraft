@@ -143,13 +143,13 @@ pub const EnvironmentScreen = struct {
         const ctx = self.context;
         const env_ptr = ctx.env_map_ptr orelse return;
 
-        ctx.rhi.waitIdle();
+        ctx.rhi.*.waitIdle();
         if (env_ptr.*) |*t| t.deinit();
         env_ptr.* = null;
 
         if (!std.mem.eql(u8, ctx.settings.environment_map, "default")) {
             if (ctx.resource_pack_manager.loadImageFileFloat(ctx.settings.environment_map)) |tex_data| {
-                env_ptr.* = Texture.initFloat(ctx.rhi, tex_data.width, tex_data.height, tex_data.pixels);
+                env_ptr.* = Texture.initFloat(ctx.rhi.*, tex_data.width, tex_data.height, tex_data.pixels);
                 env_ptr.*.?.bind(9);
                 log.log.info("Loaded Environment Map: {s}", .{ctx.settings.environment_map});
                 var td = tex_data;
@@ -157,12 +157,12 @@ pub const EnvironmentScreen = struct {
             } else {
                 log.log.warn("Could not load environment map: {s}", .{ctx.settings.environment_map});
                 const white_pixel = [_]f32{ 1.0, 1.0, 1.0, 1.0 };
-                env_ptr.* = Texture.initFloat(ctx.rhi, 1, 1, &white_pixel);
+                env_ptr.* = Texture.initFloat(ctx.rhi.*, 1, 1, &white_pixel);
                 env_ptr.*.?.bind(9);
             }
         } else {
             const white_pixel = [_]f32{ 1.0, 1.0, 1.0, 1.0 };
-            env_ptr.* = Texture.initFloat(ctx.rhi, 1, 1, &white_pixel);
+            env_ptr.* = Texture.initFloat(ctx.rhi.*, 1, 1, &white_pixel);
             env_ptr.*.?.bind(9);
         }
     }

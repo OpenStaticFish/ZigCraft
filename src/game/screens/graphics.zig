@@ -94,9 +94,9 @@ pub const GraphicsScreen = struct {
             const next_idx = (preset_idx + 1) % (Settings.GRAPHICS_PRESETS.len + 1);
             if (next_idx < Settings.GRAPHICS_PRESETS.len) {
                 settings.applyPreset(next_idx);
-                ctx.rhi.setAnisotropicFiltering(settings.anisotropic_filtering);
-                ctx.rhi.setMSAA(settings.msaa_samples);
-                ctx.rhi.setTexturesEnabled(settings.textures_enabled);
+                ctx.rhi.*.setAnisotropicFiltering(settings.anisotropic_filtering);
+                ctx.rhi.*.setMSAA(settings.msaa_samples);
+                ctx.rhi.*.setTexturesEnabled(settings.textures_enabled);
             }
         }
         sy += row_height + 10.0 * ui_scale;
@@ -157,7 +157,7 @@ pub const GraphicsScreen = struct {
         Font.drawText(ui, "ANISOTROPIC FILTER", lx, sy, label_scale, Color.white);
         if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, getAnisotropyLabel(settings.anisotropic_filtering), btn_scale, mouse_x, mouse_y, mouse_clicked)) {
             settings.anisotropic_filtering = cycleAnisotropy(settings.anisotropic_filtering);
-            ctx.rhi.setAnisotropicFiltering(settings.anisotropic_filtering);
+            ctx.rhi.*.setAnisotropicFiltering(settings.anisotropic_filtering);
         }
         sy += row_height;
 
@@ -165,7 +165,7 @@ pub const GraphicsScreen = struct {
         Font.drawText(ui, "ANTI-ALIASING (MSAA)", lx, sy, label_scale, Color.white);
         if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, getMSAALabel(settings.msaa_samples), btn_scale, mouse_x, mouse_y, mouse_clicked)) {
             settings.msaa_samples = cycleMSAA(settings.msaa_samples);
-            ctx.rhi.setMSAA(settings.msaa_samples);
+            ctx.rhi.*.setMSAA(settings.msaa_samples);
         }
         sy += row_height;
 

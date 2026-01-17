@@ -18,7 +18,7 @@ const rhi_pkg = @import("../engine/graphics/rhi.zig");
 pub const EngineContext = struct {
     allocator: std.mem.Allocator,
     window_manager: *WindowManager,
-    rhi: RHI,
+    rhi: *RHI,
     resource_pack_manager: *ResourcePackManager,
     atlas: *TextureAtlas,
     render_graph: *RenderGraph,
