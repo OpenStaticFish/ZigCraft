@@ -369,7 +369,7 @@ pub const VulkanDevice = struct {
     }
 };
 
-fn checkVk(result: c.VkResult) !void {
+pub fn checkVk(result: c.VkResult) !void {
     switch (result) {
         c.VK_SUCCESS => return,
         c.VK_ERROR_DEVICE_LOST => return error.GpuLost,
