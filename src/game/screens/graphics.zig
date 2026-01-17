@@ -156,43 +156,47 @@ pub const GraphicsScreen = struct {
                 },
                 .slider => |slider| {
                     const val_str = std.fmt.bufPrint(&buf, "{d:.1}", .{val_ptr.*}) catch "ERR";
-                    const rect = .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height };
-                    const is_hovered = (mouse_x >= rect.x and mouse_x <= rect.x + rect.width and mouse_y >= rect.y and mouse_y <= rect.y + rect.height);
 
-                    if (Widgets.drawButton(ui, rect, val_str, btn_scale, mouse_x, mouse_y, mouse_clicked)) {
+                    if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, val_str, btn_scale, mouse_x, mouse_y, mouse_clicked)) {
                         // Left-click: increment with wrap to min
                         if (val_ptr.* + slider.step > slider.max + 0.001) {
                             val_ptr.* = slider.min;
                         } else {
                             val_ptr.* += slider.step;
                         }
-                    } else if (is_hovered and mouse_clicked_right) {
-                        // Right-click: decrement with wrap to max
-                        if (val_ptr.* - slider.step < slider.min - 0.001) {
-                            val_ptr.* = slider.max;
-                        } else {
-                            val_ptr.* -= slider.step;
+                    } else {
+                        const button_rect = .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height };
+                        const is_hovered = (mouse_x >= button_rect.x and mouse_x <= button_rect.x + button_rect.width and mouse_y >= button_rect.y and mouse_y <= button_rect.y + button_rect.height);
+                        if (is_hovered and mouse_clicked_right) {
+                            // Right-click: decrement with wrap to max
+                            if (val_ptr.* - slider.step < slider.min - 0.001) {
+                                val_ptr.* = slider.max;
+                            } else {
+                                val_ptr.* -= slider.step;
+                            }
                         }
                     }
                 },
                 .int_range => |range| {
                     const val_str = std.fmt.bufPrint(&buf, "{d}", .{val_ptr.*}) catch "ERR";
-                    const rect = .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height };
-                    const is_hovered = (mouse_x >= rect.x and mouse_x <= rect.x + rect.width and mouse_y >= rect.y and mouse_y <= rect.y + rect.height);
 
-                    if (Widgets.drawButton(ui, rect, val_str, btn_scale, mouse_x, mouse_y, mouse_clicked)) {
+                    if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, val_str, btn_scale, mouse_x, mouse_y, mouse_clicked)) {
                         // Left-click: increment with wrap to min
                         if (val_ptr.* + range.step > range.max) {
                             val_ptr.* = range.min;
                         } else {
                             val_ptr.* += range.step;
                         }
-                    } else if (is_hovered and mouse_clicked_right) {
-                        // Right-click: decrement with wrap to max
-                        if (val_ptr.* - range.step < range.min) {
-                            val_ptr.* = range.max;
-                        } else {
-                            val_ptr.* -= range.step;
+                    } else {
+                        const button_rect = .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height };
+                        const is_hovered = (mouse_x >= button_rect.x and mouse_x <= button_rect.x + button_rect.width and mouse_y >= button_rect.y and mouse_y <= button_rect.y + button_rect.height);
+                        if (is_hovered and mouse_clicked_right) {
+                            // Right-click: decrement with wrap to max
+                            if (val_ptr.* - range.step < range.min) {
+                                val_ptr.* = range.max;
+                            } else {
+                                val_ptr.* -= range.step;
+                            }
                         }
                     }
                 },

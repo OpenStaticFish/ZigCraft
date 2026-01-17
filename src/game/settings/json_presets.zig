@@ -41,6 +41,16 @@ pub fn initPresets(allocator: std.mem.Allocator) !void {
 
     for (parsed.value) |preset| {
         var p = preset;
+        // Validate preset values against metadata constraints
+        if (p.volumetric_density < 0.0 or p.volumetric_density > 0.5) {
+            return error.InvalidVolumetricDensity;
+        }
+        if (p.volumetric_steps < 4 or p.volumetric_steps > 32) {
+            return error.InvalidVolumetricSteps;
+        }
+        if (p.volumetric_scattering < 0.0 or p.volumetric_scattering > 1.0) {
+            return error.InvalidVolumetricScattering;
+        }
         // Duplicate name because parsed.deinit() will free strings
         p.name = try allocator.dupe(u8, preset.name);
         try graphics_presets.append(allocator, p);
