@@ -72,6 +72,9 @@ pub const App = struct {
         settings_pkg.initPresets(allocator) catch |err| {
             log.log.warn("Failed to initialize presets: {}, proceeding with defaults", .{err});
         };
+        // Clean up presets if init fails after this point
+        errdefer settings_pkg.deinitPresets(allocator);
+
         const settings = settings_pkg.persistence.load(allocator);
 
         const wm = try WindowManager.init(allocator, true, settings.window_width, settings.window_height);
