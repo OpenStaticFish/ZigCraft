@@ -220,7 +220,7 @@ pub const HandRenderer = struct {
         const swing_rot = Mat4.rotateZ(swing_rot_z);
         m = m.multiply(swing_rot);
 
-        self.rhi.setModelMatrix(m, 0);
+        self.rhi.setModelMatrix(m, Vec3.one, 0);
 
         // Use solid draw mode (triangles)
         // Pass DrawMode.triangles

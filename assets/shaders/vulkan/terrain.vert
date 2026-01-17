@@ -39,10 +39,8 @@ layout(set = 0, binding = 0) uniform GlobalUniforms {
 
 layout(push_constant) uniform ModelUniforms {
     mat4 model;
+    vec3 color_override;
     float mask_radius;
-    float _pad0;
-    float _pad1;
-    float _pad2;
 } model_data;
 
 void main() {
@@ -53,7 +51,7 @@ void main() {
     gl_Position = clipPos;
     gl_Position.y = -gl_Position.y; 
 
-    vColor = aColor;
+    vColor = aColor * model_data.color_override;
     vNormal = aNormal;
     vTexCoord = aTexCoord;
     vTileID = int(aTileID);

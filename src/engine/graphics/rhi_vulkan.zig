@@ -69,8 +69,8 @@ const ShadowUniforms = extern struct {
 /// Per-draw model matrix, passed via push constants for efficiency.
 const ModelUniforms = extern struct {
     model: Mat4,
+    color: [3]f32,
     mask_radius: f32,
-    padding: [3]f32,
 };
 
 /// Per-draw shadow matrix and model, passed via push constants.
@@ -327,6 +327,7 @@ const VulkanContext = struct {
     shadow_pass_matrix: Mat4,
     current_view_proj: Mat4,
     current_model: Mat4,
+    current_color: [3]f32,
     current_mask_radius: f32,
     mutex: std.Thread.Mutex,
     clear_color: [4]f32,
@@ -3653,9 +3654,10 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
     }
 }
 
-fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4, mask_radius: f32) void {
+fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4, color: Vec3, mask_radius: f32) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.current_model = model;
+    ctx.current_color = .{ color.x, color.y, color.z };
     ctx.current_mask_radius = mask_radius;
 }
 
@@ -4622,8 +4624,8 @@ fn drawIndirect(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, command_buffer: r
             } else {
                 const uniforms = ModelUniforms{
                     .model = Mat4.identity,
+                    .color = .{ 1.0, 1.0, 1.0 },
                     .mask_radius = 0,
-                    .padding = .{ 0, 0, 0 },
                 };
                 c.vkCmdPushConstants(cb, ctx.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(ModelUniforms), &uniforms);
             }
@@ -4722,8 +4724,8 @@ fn drawInstance(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, insta
         } else {
             const uniforms = ModelUniforms{
                 .model = Mat4.identity,
+                .color = .{ 1.0, 1.0, 1.0 },
                 .mask_radius = 0,
-                .padding = .{ 0, 0, 0 },
             };
             c.vkCmdPushConstants(command_buffer, ctx.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(ModelUniforms), &uniforms);
         }
@@ -4811,8 +4813,8 @@ fn drawOffset(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: r
         } else {
             const uniforms = ModelUniforms{
                 .model = ctx.current_model,
+                .color = ctx.current_color,
                 .mask_radius = ctx.current_mask_radius,
-                .padding = .{ 0, 0, 0 },
             };
             c.vkCmdPushConstants(command_buffer, ctx.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(ModelUniforms), &uniforms);
         }
@@ -5476,6 +5478,9 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_dev
     ctx.dummy_shadow_image = null;
     ctx.dummy_shadow_memory = null;
     ctx.dummy_shadow_view = null;
+    ctx.current_model = Mat4.identity;
+    ctx.current_color = .{ 1.0, 1.0, 1.0 };
+    ctx.current_mask_radius = 0;
 
     return rhi.RHI{
         .ptr = ctx,

@@ -165,7 +165,7 @@ pub const BlockOutline = struct {
         const rel_z = @as(f32, @floatFromInt(block_z)) - camera_pos.z;
 
         const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
-        self.rhi.setModelMatrix(model, 0);
+        self.rhi.setModelMatrix(model, Vec3.one, 0);
         self.rhi.draw(self.buffer_handle, 288, .triangles);
     }
 };

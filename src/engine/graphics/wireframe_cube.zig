@@ -3,11 +3,11 @@
 const rhi_pkg = @import("rhi.zig");
 const Vertex = rhi_pkg.Vertex;
 
-/// Create a vertex with the given position (color is overwritten at draw time).
+/// Create a vertex with the given position.
 fn makeVertex(x: f32, y: f32, z: f32) Vertex {
     return .{
         .pos = .{ x, y, z },
-        .color = .{ 0, 0, 0 },
+        .color = .{ 1.0, 1.0, 1.0 },
         .normal = .{ 0, 1, 0 },
         .uv = .{ 0, 0 },
         .tile_id = 0,

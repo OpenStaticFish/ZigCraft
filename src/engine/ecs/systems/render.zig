@@ -11,48 +11,18 @@ const Vec3 = @import("../../math/vec3.zig").Vec3;
 const Vertex = rhi_pkg.Vertex;
 const wireframe = @import("../../graphics/wireframe_cube.zig");
 
-const OutlineVertexCount = wireframe.line_vertices.len;
-const outline_vertices = wireframe.line_vertices;
-const outline_vertex_count: u32 = wireframe.line_vertex_count;
-
-/// Create a vertex with the given position (color is overwritten at draw time).
-fn makeVertex(x: f32, y: f32, z: f32) Vertex {
-    return .{
-        .pos = .{ x, y, z },
-        .color = .{ 0, 0, 0 },
-        .normal = .{ 0, 1, 0 },
-        .uv = .{ 0, 0 },
-        .tile_id = 0,
-        .skylight = 15,
-        .blocklight = .{ 15, 15, 15 },
-        .ao = 1.0,
-    };
-}
-
-fn colorEquals(a: Vec3, b: Vec3) bool {
-    const epsilon: f32 = 0.0001;
-    return @abs(a.x - b.x) <= epsilon and @abs(a.y - b.y) <= epsilon and @abs(a.z - b.z) <= epsilon;
-}
-
 pub const RenderSystem = struct {
     buffer_handle: rhi_pkg.BufferHandle,
     rhi: *RHI,
-    scratch_vertices: [OutlineVertexCount]Vertex,
-    last_color: Vec3,
-    has_last_color: bool,
     missing_transform_logged: bool,
 
     pub fn init(rhi: *RHI) RenderSystem {
-        var scratch_vertices = outline_vertices;
-        const buffer = rhi.*.createBuffer(@sizeOf(@TypeOf(outline_vertices)), .vertex);
-        rhi.*.uploadBuffer(buffer, std.mem.asBytes(&scratch_vertices));
+        const buffer = rhi.*.createBuffer(@sizeOf(@TypeOf(wireframe.line_vertices)), .vertex);
+        rhi.*.uploadBuffer(buffer, std.mem.asBytes(&wireframe.line_vertices));
 
         return .{
             .buffer_handle = buffer,
             .rhi = rhi,
-            .scratch_vertices = scratch_vertices,
-            .last_color = Vec3.init(-1.0, -1.0, -1.0),
-            .has_last_color = false,
             .missing_transform_logged = false,
         };
     }
@@ -106,20 +76,10 @@ pub const RenderSystem = struct {
             // Create model matrix: Translate * Scale
             const model = Mat4.translate(rel_pos).multiply(Mat4.scale(size));
 
-            if (!self.has_last_color or !colorEquals(mesh.color, self.last_color)) {
-                self.scratch_vertices = outline_vertices;
-                for (self.scratch_vertices[0..]) |*vertex| {
-                    vertex.color = .{ mesh.color.x, mesh.color.y, mesh.color.z };
-                }
-                self.rhi.*.updateBuffer(self.buffer_handle, 0, std.mem.asBytes(&self.scratch_vertices));
-                self.last_color = mesh.color;
-                self.has_last_color = true;
-            }
-
             if (self.buffer_handle != rhi_pkg.InvalidBufferHandle) {
-                self.rhi.*.setModelMatrix(model, 0); // Mesh ID 0
+                self.rhi.*.setModelMatrix(model, mesh.color, 0);
                 // Draw line list (24 vertices = 12 edges)
-                self.rhi.*.draw(self.buffer_handle, outline_vertex_count, .lines);
+                self.rhi.*.draw(self.buffer_handle, wireframe.line_vertex_count, .lines);
             }
         }
     }

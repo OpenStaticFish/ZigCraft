@@ -146,7 +146,7 @@ pub const WorldRenderer = struct {
             const rel_y = -camera_pos.y;
             const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
 
-            self.rhi.setModelMatrix(model, 0);
+            self.rhi.setModelMatrix(model, Vec3.one, 0);
 
             if (data.mesh.solid_allocation) |alloc| {
                 self.last_render_stats.vertices_rendered += alloc.count;
@@ -191,7 +191,8 @@ pub const WorldRenderer = struct {
                         const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
 
                         if (data.mesh.solid_allocation) |alloc| {
-                            self.rhi.setModelMatrix(model, 0);
+                            self.rhi.setModelMatrix(model, Vec3.one, 0);
+
                             self.rhi.drawOffset(self.vertex_allocator.buffer, alloc.count, .triangles, alloc.offset);
                         }
                     }

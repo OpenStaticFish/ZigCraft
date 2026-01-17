@@ -277,7 +277,7 @@ pub const IRenderContext = struct {
         computeSSAO: *const fn (ptr: *anyopaque) void,
         bindShader: *const fn (ptr: *anyopaque, handle: ShaderHandle) void,
         bindTexture: *const fn (ptr: *anyopaque, handle: TextureHandle, slot: u32) void,
-        setModelMatrix: *const fn (ptr: *anyopaque, model: Mat4, mask_radius: f32) void,
+        setModelMatrix: *const fn (ptr: *anyopaque, model: Mat4, color: Vec3, mask_radius: f32) void,
         setInstanceBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
         setLODInstanceBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
         updateGlobalUniforms: *const fn (ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, sun_color: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void,
@@ -457,8 +457,8 @@ pub const RHI = struct {
     pub fn bindShader(self: RHI, handle: ShaderHandle) void {
         self.vtable.render.bindShader(self.ptr, handle);
     }
-    pub fn setModelMatrix(self: RHI, model: Mat4, mask_radius: f32) void {
-        self.vtable.render.setModelMatrix(self.ptr, model, mask_radius);
+    pub fn setModelMatrix(self: RHI, model: Mat4, color: Vec3, mask_radius: f32) void {
+        self.vtable.render.setModelMatrix(self.ptr, model, color, mask_radius);
     }
     pub fn pushConstants(self: RHI, stages: ShaderStageFlags, offset: u32, size: u32, data: *const anyopaque) void {
         self.vtable.render.pushConstants(self.ptr, stages, offset, size, data);

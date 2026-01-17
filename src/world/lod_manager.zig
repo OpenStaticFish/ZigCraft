@@ -836,7 +836,7 @@ pub const LODManager = struct {
 
         for (self.draw_list.items, 0..) |mesh, i| {
             const instance = self.instance_data.items[i];
-            self.rhi.setModelMatrix(instance.model, instance.mask_radius);
+            self.rhi.setModelMatrix(instance.model, Vec3.one, instance.mask_radius);
             self.rhi.draw(mesh.buffer_handle, mesh.vertex_count, .triangles);
         }
     }
