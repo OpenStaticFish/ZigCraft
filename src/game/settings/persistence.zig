@@ -5,6 +5,22 @@ const Settings = data.Settings;
 const CONFIG_DIR = ".config/zigcraft";
 const CONFIG_FILE = "settings.json";
 
+/// Duplicates a string field, or returns the static "default" sentinel if source equals "default".
+/// Returns error.OutOfMemory if allocation fails for non-default strings.
+fn dupStringField(allocator: std.mem.Allocator, source: []const u8) error{OutOfMemory}![]const u8 {
+    if (std.mem.eql(u8, source, "default")) {
+        return "default";
+    }
+    return allocator.dupe(u8, source);
+}
+
+/// Frees a string field if it was heap-allocated (not the static "default" sentinel).
+fn freeStringField(allocator: std.mem.Allocator, field: []const u8) void {
+    if (!std.mem.eql(u8, field, "default")) {
+        allocator.free(field);
+    }
+}
+
 /// Load settings from ~/.config/zigcraft/settings.json
 /// Returns default settings if file doesn't exist or is invalid
 pub fn load(allocator: std.mem.Allocator) Settings {
@@ -37,68 +53,46 @@ pub fn load(allocator: std.mem.Allocator) Settings {
 
     var settings = parsed.value;
 
-    // Deep copy the texture pack string so it survives deinit
-    // We use errdefer to ensure we don't return a struct with dangling pointers if the second dup fails
-    // However, since we are returning a struct by value and 'settings' is a local var, errdefer is tricky.
-    // Instead we handle failures by reverting to defaults.
-
-    if (std.mem.eql(u8, settings.texture_pack, "default")) {
+    // Deep copy string fields so they survive parsed.deinit()
+    const texture_pack = dupStringField(allocator, settings.texture_pack) catch {
+        std.log.warn("Failed to allocate texture_pack string, using default", .{});
         settings.texture_pack = "default";
-    } else {
-        const duped = allocator.dupe(u8, settings.texture_pack) catch {
-            settings.texture_pack = "default";
-            return settings; // Partial success (texture pack default)
-        };
-        settings.texture_pack = duped;
-    }
-
-    if (std.mem.eql(u8, settings.environment_map, "default")) {
         settings.environment_map = "default";
-    } else {
-        const duped = allocator.dupe(u8, settings.environment_map) catch {
-            settings.environment_map = "default";
-            // If we duped texture_pack successfully but failed here, we should ideally free texture_pack.
-            // But 'settings.texture_pack' is now owned by us (or is "default").
-            if (!std.mem.eql(u8, settings.texture_pack, "default")) {
-                allocator.free(settings.texture_pack);
-                settings.texture_pack = "default";
-            }
-            return settings;
-        };
-        settings.environment_map = duped;
-    }
+        return settings;
+    };
+
+    const environment_map = dupStringField(allocator, settings.environment_map) catch {
+        std.log.warn("Failed to allocate environment_map string, using default", .{});
+        freeStringField(allocator, texture_pack); // Clean up successful first allocation
+        settings.texture_pack = "default";
+        settings.environment_map = "default";
+        return settings;
+    };
+
+    settings.texture_pack = texture_pack;
+    settings.environment_map = environment_map;
 
     std.log.info("Settings loaded from ~/{s}", .{config_path});
     return settings;
 }
 
 pub fn deinit(settings: *Settings, allocator: std.mem.Allocator) void {
-    if (!std.mem.eql(u8, settings.texture_pack, "default")) {
-        allocator.free(settings.texture_pack);
-    }
-    if (!std.mem.eql(u8, settings.environment_map, "default")) {
-        allocator.free(settings.environment_map);
-    }
+    freeStringField(allocator, settings.texture_pack);
+    freeStringField(allocator, settings.environment_map);
 }
 
 pub fn setTexturePack(settings: *Settings, allocator: std.mem.Allocator, name: []const u8) !void {
     if (std.mem.eql(u8, settings.texture_pack, name)) return;
-    if (!std.mem.eql(u8, settings.texture_pack, "default")) allocator.free(settings.texture_pack);
-    if (std.mem.eql(u8, name, "default")) {
-        settings.texture_pack = "default";
-    } else {
-        settings.texture_pack = try allocator.dupe(u8, name);
-    }
+    const new_value = try dupStringField(allocator, name);
+    freeStringField(allocator, settings.texture_pack);
+    settings.texture_pack = new_value;
 }
 
 pub fn setEnvironmentMap(settings: *Settings, allocator: std.mem.Allocator, name: []const u8) !void {
     if (std.mem.eql(u8, settings.environment_map, name)) return;
-    if (!std.mem.eql(u8, settings.environment_map, "default")) allocator.free(settings.environment_map);
-    if (std.mem.eql(u8, name, "default")) {
-        settings.environment_map = "default";
-    } else {
-        settings.environment_map = try allocator.dupe(u8, name);
-    }
+    const new_value = try dupStringField(allocator, name);
+    freeStringField(allocator, settings.environment_map);
+    settings.environment_map = new_value;
 }
 
 /// Save settings to ~/.config/zigcraft/settings.json
