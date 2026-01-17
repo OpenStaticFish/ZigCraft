@@ -1,4 +1,8 @@
-//! Decoration types and data structures
+//! Decoration types and data structures for world generation.
+//! Defines SimpleDecoration, Schematic, SchematicBlock, and Decoration union.
+//!
+//! This module separates type definitions from data (schematics) and configuration (registry)
+//! to adhere to the Single Responsibility Principle.
 
 const std = @import("std");
 const BlockType = @import("../block.zig").BlockType;

@@ -1,4 +1,6 @@
-//! Registry of all available decorations and their placement rules
+//! Registry of all available decorations and their placement rules.
+//! Configures the specific decorations (both simple and schematic) that populate the world.
+//! Re-exports decoration types for consumers like the generator.
 
 const BlockType = @import("../block.zig").BlockType;
 const BiomeId = @import("biome.zig").BiomeId;

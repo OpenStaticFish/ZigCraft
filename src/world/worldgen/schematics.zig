@@ -1,4 +1,6 @@
-//! Tree and feature schematics
+//! Tree and feature schematics.
+//! Contains static definitions for multi-block structures like trees.
+//! These schematics are referenced by the decoration registry.
 
 const BlockType = @import("../block.zig").BlockType;
 const decoration_types = @import("decoration_types.zig");
@@ -49,4 +51,13 @@ test "OAK_TREE properties" {
     try std.testing.expectEqual(@as(i32, 6), OAK_TREE.size_y);
     try std.testing.expectEqual(@as(i32, 5), OAK_TREE.size_z);
     try std.testing.expect(OAK_TREE.blocks.len == 21); // 4 logs + 17 leaves
+
+    var log_count: usize = 0;
+    var leaf_count: usize = 0;
+    for (OAK_TREE.blocks) |b| {
+        if (b.block == LOG) log_count += 1;
+        if (b.block == LEAVES) leaf_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 4), log_count);
+    try std.testing.expectEqual(@as(usize, 17), leaf_count);
 }
