@@ -19,10 +19,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    strategy:
-      matrix:
-        os: [ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
     - uses: actions/checkout@v4
@@ -52,7 +49,7 @@ jobs:
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: zigcraft-${{ matrix.os }}
+        name: zigcraft
         path: dist/
         retention-days: 7
 
@@ -60,10 +57,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    strategy:
-      matrix:
-        os: [ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
     - uses: actions/checkout@v4
