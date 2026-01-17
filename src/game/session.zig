@@ -249,6 +249,7 @@ pub const GameSession = struct {
 
     ecs_registry: ECSRegistry,
     ecs_render_system: ECSRenderSystem,
+    rhi: *RHI,
 
     atmosphere: AtmosphereState,
     clouds: CloudState,
@@ -317,6 +318,7 @@ pub const GameSession = struct {
             .camera = player.camera,
             .ecs_registry = ECSRegistry.init(allocator),
             .ecs_render_system = ECSRenderSystem.init(rhi),
+            .rhi = rhi,
             .atmosphere = atmosphere,
             .clouds = CloudState{},
             .creative_mode = true,
@@ -450,7 +452,9 @@ pub const GameSession = struct {
         const rs = self.world.getRenderStats();
         const pc = worldToChunk(@intFromFloat(self.camera.position.x), @intFromFloat(self.camera.position.z));
         const hy: f32 = 50.0;
-        ui.drawRect(.{ .x = 10, .y = hy, .width = 220, .height = 170 }, Color.rgba(0, 0, 0, 0.6));
+        const fault_count = self.rhi.getFaultCount();
+        const hud_h: f32 = if (fault_count > 0) 210 else 190;
+        ui.drawRect(.{ .x = 10, .y = hy, .width = 220, .height = hud_h }, Color.rgba(0, 0, 0, 0.6));
         Font.drawText(ui, "POS:", 15, hy + 5, 1.5, Color.white);
         Font.drawNumber(ui, pc.chunk_x, 120, hy + 5, Color.white);
         Font.drawNumber(ui, pc.chunk_z, 170, hy + 5, Color.white);
@@ -482,6 +486,12 @@ pub const GameSession = struct {
         var buf: [32]u8 = undefined;
         const label = std.fmt.bufPrint(&buf, "{s}", .{@tagName(region.role)}) catch "???";
         Font.drawText(ui, label, 100, hy + 165, 1.5, Color.white);
+
+        if (fault_count > 0) {
+            var buf_f: [32]u8 = undefined;
+            const fault_text = std.fmt.bufPrint(&buf_f, "GPU FAULTS: {d}", .{fault_count}) catch "GPU FAULTS: ???";
+            Font.drawText(ui, fault_text, 15, hy + 185, 1.5, Color.red);
+        }
 
         if (self.debug_show_block_info) {
             if (self.player.target_block) |target| {

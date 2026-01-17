@@ -324,6 +324,12 @@ pub const App = struct {
         // Update current screen. Transitions happen here.
         try self.screen_manager.update(self.time.delta_time);
 
+        // Check for GPU faults and attempt recovery
+        self.rhi.recover() catch |err| {
+            log.log.err("GPU recovery failed: {}. Shutting down.", .{err});
+            self.input.should_quit = true;
+        };
+
         // Early out if no screen is active (e.g. during transition or shutdown)
         if (self.screen_manager.stack.items.len == 0) return;
 

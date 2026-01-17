@@ -1,26 +1,25 @@
 //! Vulkan Rendering Hardware Interface (RHI) Backend
 //!
 //! This module implements the RHI interface for Vulkan, providing GPU abstraction.
-//! Key features:
-//! - Vulkan instance, device, and swapchain management
-//! - Multiple pipelines: terrain, shadow (CSM), sky, UI
-//! - Resource management (buffers, textures, descriptors)
-//! - Synchronization (semaphores, fences for frame pacing)
 //!
-//! ## Frame Lifecycle
-//! 1. `beginFrame()` - Acquires swapchain image, begins command buffer
-//! 2. `beginMainPass()` / `beginShadowPass()` - Starts render passes
-//! 3. `draw()` / `drawSky()` / `drawUIQuad()` - Records draw commands
-//! 4. `endMainPass()` / `endShadowPass()` - Ends render passes
-//! 5. `endFrame()` - Submits command buffer, presents to swapchain
+//! ## Robustness & Safety
+//! The backend implements a Guarded Submission model to handle GPU hangs gracefully.
+//! Every queue submission is wrapped in `submitGuarded()`, which detects `VK_ERROR_DEVICE_LOST`
+//! and initiates a safe teardown or recovery path.
 //!
-//! ## Memory Model
-//! Uses host-visible coherent memory for simplicity. Future improvement:
-//! staging buffers with device-local memory for better GPU performance.
+//! Out-of-bounds GPU memory accesses are handled via `VK_EXT_robustness2`, which
+//! ensures that such operations return safe values (zeros) rather than crashing
+//! the system. Detailed fault information is logged using `VK_EXT_device_fault`.
+//!
+//! ## Recovery
+//! When a GPU fault is detected, the `gpu_fault_detected` flag is set. The engine
+//! attempts to stop further submissions and should ideally trigger a device recreation.
+//! Currently, the engine logs the fault and requires an application restart for full recovery.
 //!
 //! ## Thread Safety
 //! A mutex protects buffer/texture maps. Vulkan commands are NOT thread-safe
-//! - all rendering must occur on the main thread.
+//! - all rendering must occur on the main thread. Queue submissions are synchronized
+//! via an internal mutex in `VulkanDevice`.
 //!
 const std = @import("std");
 const c = @import("../../c.zig").c;
@@ -215,6 +214,7 @@ const VulkanContext = struct {
     descriptor_set_layout: c.VkDescriptorSetLayout,
     descriptor_sets: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorSet,
     lod_descriptor_sets: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorSet,
+    transfer_fence: c.VkFence = null,
 
     // Pipeline
     pipeline_layout: c.VkPipelineLayout,
@@ -298,6 +298,7 @@ const VulkanContext = struct {
     g_pipeline: c.VkPipeline = null,
     g_pipeline_layout: c.VkPipelineLayout = null,
     ssao_pipeline: c.VkPipeline = null,
+    gpu_fault_detected: bool = false,
     ssao_pipeline_layout: c.VkPipelineLayout = null,
     ssao_blur_pipeline: c.VkPipeline = null,
     ssao_blur_pipeline_layout: c.VkPipelineLayout = null,
@@ -490,7 +491,19 @@ fn destroySSAOResources(ctx: *VulkanContext) void {
 
 /// Converts VkResult to Zig error for consistent error handling.
 fn checkVk(result: c.VkResult) !void {
-    if (result != c.VK_SUCCESS) return error.VulkanError;
+    switch (result) {
+        c.VK_SUCCESS => return,
+        c.VK_ERROR_DEVICE_LOST => return error.GpuLost,
+        c.VK_ERROR_OUT_OF_HOST_MEMORY, c.VK_ERROR_OUT_OF_DEVICE_MEMORY => return error.OutOfMemory,
+        c.VK_ERROR_SURFACE_LOST_KHR => return error.SurfaceLost,
+        c.VK_ERROR_INITIALIZATION_FAILED => return error.InitializationFailed,
+        c.VK_ERROR_EXTENSION_NOT_PRESENT => return error.ExtensionNotPresent,
+        c.VK_ERROR_FEATURE_NOT_PRESENT => return error.FeatureNotPresent,
+        c.VK_ERROR_TOO_MANY_OBJECTS => return error.TooManyObjects,
+        c.VK_ERROR_FORMAT_NOT_SUPPORTED => return error.FormatNotSupported,
+        c.VK_ERROR_FRAGMENTED_POOL => return error.FragmentedPool,
+        else => return error.Unknown,
+    }
 }
 
 /// Creates a shader module from SPIR-V bytecode. Caller must destroy after use.
@@ -565,7 +578,7 @@ fn transitionImagesToShaderRead(ctx: *VulkanContext, images: []const c.VkImage, 
     submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &cmd;
-    try checkVk(c.vkQueueSubmit(ctx.vulkan_device.queue, 1, &submit_info, null));
+    try ctx.vulkan_device.submitGuarded(submit_info, null);
     try checkVk(c.vkQueueWaitIdle(ctx.vulkan_device.queue));
     c.vkFreeCommandBuffers(ctx.vulkan_device.vk_device, ctx.command_pool, 1, &cmd);
 }
@@ -1311,7 +1324,7 @@ fn createSSAOResources(ctx: *VulkanContext) !void {
         submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit_info.commandBufferCount = 1;
         submit_info.pCommandBuffers = &cmd;
-        try checkVk(c.vkQueueSubmit(ctx.vulkan_device.queue, 1, &submit_info, null));
+        try ctx.vulkan_device.submitGuarded(submit_info, null);
         try checkVk(c.vkQueueWaitIdle(ctx.vulkan_device.queue));
         c.vkFreeCommandBuffers(ctx.vulkan_device.vk_device, ctx.command_pool, 1, &cmd);
     }
@@ -2480,6 +2493,10 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
     // 15b. Transition shadow images to SHADER_READ_ONLY_OPTIMAL so they're valid for sampling
     // before any shadow passes have rendered. This prevents GPU hangs from sampling UNDEFINED layout.
     {
+        var fence_info = std.mem.zeroes(c.VkFenceCreateInfo);
+        fence_info.sType = c.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        try checkVk(c.vkCreateFence(ctx.vulkan_device.vk_device, &fence_info, null, &ctx.transfer_fence));
+
         var cmd_alloc_info = std.mem.zeroes(c.VkCommandBufferAllocateInfo);
         cmd_alloc_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         cmd_alloc_info.commandPool = ctx.command_pool;
@@ -2537,8 +2554,9 @@ fn init(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*Rend
         submit_info.commandBufferCount = 1;
         submit_info.pCommandBuffers = &init_cmd;
 
-        try checkVk(c.vkQueueSubmit(ctx.vulkan_device.queue, 1, &submit_info, null));
-        try checkVk(c.vkQueueWaitIdle(ctx.vulkan_device.queue));
+        try ctx.vulkan_device.submitGuarded(submit_info, ctx.transfer_fence);
+        try checkVk(c.vkWaitForFences(ctx.vulkan_device.vk_device, 1, &ctx.transfer_fence, c.VK_TRUE, 2_000_000_000));
+        try checkVk(c.vkResetFences(ctx.vulkan_device.vk_device, 1, &ctx.transfer_fence));
 
         c.vkFreeCommandBuffers(ctx.vulkan_device.vk_device, ctx.command_pool, 1, &init_cmd);
 
@@ -3041,6 +3059,7 @@ fn resetRenderFinishedSemaphore(ctx: *VulkanContext) void {
 
 fn beginFrame(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    if (ctx.gpu_fault_detected) return;
 
     if (ctx.frame_in_progress) return;
 
@@ -3451,19 +3470,20 @@ fn endFrame(ctx_ptr: *anyopaque) void {
     submit_info.signalSemaphoreCount = 1;
     submit_info.pSignalSemaphores = &signal_semaphores;
 
-    const submit_result = c.vkQueueSubmit(ctx.vulkan_device.queue, 1, &submit_info, ctx.in_flight_fences[ctx.current_sync_frame]);
-    if (submit_result == c.VK_ERROR_DEVICE_LOST) {
-        std.log.err("Vulkan device lost during vkQueueSubmit. Please restart the application.", .{});
-        return;
-    } else if (submit_result != c.VK_SUCCESS) {
-        std.log.err("vkQueueSubmit failed with result: {d}", .{submit_result});
+    ctx.vulkan_device.submitGuarded(submit_info, ctx.in_flight_fences[ctx.current_sync_frame]) catch |err| {
+        if (err == error.GpuLost) {
+            ctx.gpu_fault_detected = true;
+            std.log.err("GPU Fault Detected (Fault {d}). Attempting recovery...", .{ctx.vulkan_device.fault_count});
+            return;
+        }
+        std.log.err("vkQueueSubmit failed with error: {}", .{err});
         _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
         resetAcquireSemaphore(ctx);
         resetRenderFinishedSemaphore(ctx);
         ctx.transfer_ready = false;
         ctx.frame_in_progress = false;
         return;
-    }
+    };
 
     var present_info = std.mem.zeroes(c.VkPresentInfoKHR);
     present_info.sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -4150,8 +4170,19 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
             submit_info.commandBufferCount = 1;
             submit_info.pCommandBuffers = &temp_cb;
 
-            _ = c.vkQueueSubmit(ctx.vulkan_device.queue, 1, &submit_info, null);
-            _ = c.vkQueueWaitIdle(ctx.vulkan_device.queue);
+            ctx.vulkan_device.submitGuarded(submit_info, ctx.transfer_fence) catch |err| {
+                if (err == error.GpuLost) {
+                    ctx.gpu_fault_detected = true;
+                    // Resource leak note: The vkImage/vkImageView/vkDeviceMemory created above are not destroyed here.
+                    // This is acceptable because GpuLost implies the device is in a fatal state where specific resource cleanup is moot
+                    // or will be handled by device destruction/recovery.
+                    return 0;
+                }
+                std.log.err("Async layout transition submit failed: {}", .{err});
+                return 0;
+            };
+            _ = c.vkWaitForFences(ctx.vulkan_device.vk_device, 1, &ctx.transfer_fence, c.VK_TRUE, 2_000_000_000);
+            _ = c.vkResetFences(ctx.vulkan_device.vk_device, 1, &ctx.transfer_fence);
 
             c.vkFreeCommandBuffers(ctx.vulkan_device.vk_device, ctx.transfer_command_pool, 1, &temp_cb);
         }
@@ -4368,8 +4399,16 @@ fn updateTexture(ctx_ptr: *anyopaque, handle: rhi.TextureHandle, data: []const u
         submit_info.commandBufferCount = 1;
         submit_info.pCommandBuffers = &temp_cb;
 
-        _ = c.vkQueueSubmit(ctx.vulkan_device.queue, 1, &submit_info, null);
-        _ = c.vkQueueWaitIdle(ctx.vulkan_device.queue);
+        ctx.vulkan_device.submitGuarded(submit_info, ctx.transfer_fence) catch |err| {
+            if (err == error.GpuLost) {
+                ctx.gpu_fault_detected = true;
+                return;
+            }
+            std.log.err("One-time transfer submit failed: {}", .{err});
+            return;
+        };
+        _ = c.vkWaitForFences(ctx.vulkan_device.vk_device, 1, &ctx.transfer_fence, c.VK_TRUE, 2_000_000_000);
+        _ = c.vkResetFences(ctx.vulkan_device.vk_device, 1, &ctx.transfer_fence);
 
         c.vkFreeCommandBuffers(ctx.vulkan_device.vk_device, ctx.transfer_command_pool, 1, &temp_cb);
     }
@@ -4416,6 +4455,47 @@ fn getFrameIndex(ctx_ptr: *anyopaque) usize {
 fn supportsIndirectFirstInstance(ctx_ptr: *anyopaque) bool {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     return ctx.vulkan_device.draw_indirect_first_instance;
+}
+
+fn recover(ctx_ptr: *anyopaque) anyerror!void {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    if (!ctx.gpu_fault_detected) return;
+
+    if (ctx.vulkan_device.recovery_count >= ctx.vulkan_device.max_recovery_attempts) {
+        std.log.err("RHI: Max recovery attempts ({d}) exceeded. GPU is unstable.", .{ctx.vulkan_device.max_recovery_attempts});
+        return error.GpuLost;
+    }
+
+    ctx.vulkan_device.recovery_count += 1;
+    std.log.info("RHI: Attempting GPU recovery (Attempt {d}/{d})...", .{ ctx.vulkan_device.recovery_count, ctx.vulkan_device.max_recovery_attempts });
+
+    // Best effort: wait for idle
+    _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
+
+    // If robustness2 is working, the device might not be "lost" in the Vulkan sense,
+    // but we might have hit a corner case.
+    // Full recovery requires recreating the logical device and all resources.
+    // For now, we reset the flag and recreate the swapchain.
+    // Limitation: If the device is truly lost (VK_ERROR_DEVICE_LOST returned everywhere),
+    // this soft recovery will likely fail or loop. Full engine restart is recommended for true TDRs.
+    // TODO: Implement hard recovery (recreateDevice) which would:
+    // 1. Destroy logical device and all resources
+    // 2. Re-initialize device via VulkanDevice.init
+    // 3. Re-create all RHI resources (buffers, textures, pipelines)
+    // 4. Restore application state
+    ctx.gpu_fault_detected = false;
+    recreateSwapchain(ctx);
+
+    // Basic verification: Check if device is responsive
+    if (c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device) != c.VK_SUCCESS) {
+        std.log.err("RHI: Device unresponsive after recovery. Recovery failed.", .{});
+        ctx.vulkan_device.recovery_fail_count += 1;
+        ctx.gpu_fault_detected = true; // Re-flag to prevent further submissions
+        return error.GpuLost;
+    }
+
+    ctx.vulkan_device.recovery_success_count += 1;
+    std.log.info("RHI: Recovery step complete. If issues persist, please restart.", .{});
 }
 
 fn setWireframe(ctx_ptr: *anyopaque, enabled: bool) void {
@@ -4521,6 +4601,11 @@ fn getMaxAnisotropy(ctx_ptr: *anyopaque) u8 {
 fn getMaxMSAASamples(ctx_ptr: *anyopaque) u8 {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     return ctx.vulkan_device.max_msaa_samples;
+}
+
+fn getFaultCount(ctx_ptr: *anyopaque) u32 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return ctx.vulkan_device.fault_count;
 }
 
 fn drawIndexed(ctx_ptr: *anyopaque, vbo_handle: rhi.BufferHandle, ebo_handle: rhi.BufferHandle, count: u32) void {
@@ -5309,6 +5394,7 @@ const vtable = rhi.RHI.VTable{
         .supportsIndirectFirstInstance = supportsIndirectFirstInstance,
         .getMaxAnisotropy = getMaxAnisotropy,
         .getMaxMSAASamples = getMaxMSAASamples,
+        .getFaultCount = getFaultCount,
         .waitIdle = waitIdle,
     },
     .setWireframe = setWireframe,
@@ -5316,6 +5402,7 @@ const vtable = rhi.RHI.VTable{
     .setVSync = setVSync,
     .setAnisotropicFiltering = setAnisotropicFiltering,
     .setMSAA = setMSAA,
+    .recover = recover,
 };
 
 pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_device: ?*RenderDevice, shadow_resolution: u32, msaa_samples: u8, anisotropic_filtering: u8) !rhi.RHI {

@@ -1,3 +1,21 @@
+//! Vulkan Logical Device and Queue Management
+//!
+//! This module handles:
+//! - Physical device selection and feature discovery
+//! - Logical device creation with robustness extensions
+//! - Guarded command submission with device loss detection
+//! - Device fault reporting via VK_EXT_device_fault
+//!
+//! ## Robustness Layer
+//! The engine enables `VK_EXT_robustness2` to prevent GPU hangs from out-of-bounds
+//! buffer or image accesses. Shader accesses are clamped or return zero instead
+//! of triggering a TDR or system freeze.
+//!
+//! ## Thread Safety
+//! `VulkanDevice` uses an internal mutex for `submitGuarded` to ensure queue
+//! submissions are synchronized. However, most RHI operations are still restricted
+//! to the main thread by engine convention.
+
 const std = @import("std");
 const c = @import("../../c.zig").c;
 const rhi = @import("rhi.zig");
@@ -10,6 +28,20 @@ pub const VulkanDevice = struct {
     vk_device: c.VkDevice = null,
     queue: c.VkQueue = null,
     graphics_family: u32 = 0,
+    supports_device_fault: bool = false,
+    mutex: std.Thread.Mutex = .{},
+
+    // Extension function pointers
+    vkGetDeviceFaultInfoEXT: ?*const fn (
+        device: c.VkDevice,
+        pFaultInfo: *c.VkDeviceFaultInfoEXT,
+    ) callconv(.c) c.VkResult = null,
+
+    fault_count: u32 = 0,
+    recovery_count: u32 = 0,
+    recovery_success_count: u32 = 0,
+    recovery_fail_count: u32 = 0,
+    max_recovery_attempts: u32 = 5,
 
     // Limits and capabilities
     max_anisotropy: f32 = 0.0,
@@ -196,6 +228,7 @@ pub const VulkanDevice = struct {
 
         if (supports_robustness2) std.log.info("VK_EXT_robustness2 supported", .{});
         if (supports_device_fault) std.log.info("VK_EXT_device_fault supported", .{});
+        self.supports_device_fault = supports_device_fault;
 
         const allow_robustness2 = supports_robustness2 and props2_enabled;
         const allow_device_fault = supports_device_fault and props2_enabled;
@@ -264,6 +297,15 @@ pub const VulkanDevice = struct {
         try checkVk(create_result);
         c.vkGetDeviceQueue(self.vk_device, self.graphics_family, 0, &self.queue);
 
+        if (self.supports_device_fault) {
+            const proc = c.vkGetDeviceProcAddr(self.vk_device, "vkGetDeviceFaultInfoEXT");
+            if (proc != null) {
+                self.vkGetDeviceFaultInfoEXT = @ptrCast(proc);
+            } else {
+                self.supports_device_fault = false;
+            }
+        }
+
         return self;
     }
 
@@ -287,8 +329,90 @@ pub const VulkanDevice = struct {
         }
         return error.NoMatchingMemoryType;
     }
+
+    /// Submits command buffers to the graphics queue with device loss protection.
+    /// Thread-safe via internal mutex.
+    pub fn submitGuarded(self: *VulkanDevice, submit_info: c.VkSubmitInfo, fence: c.VkFence) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const result = c.vkQueueSubmit(self.queue, 1, &submit_info, fence);
+
+        if (result == c.VK_ERROR_DEVICE_LOST) {
+            self.fault_count += 1;
+            std.log.err("GPU reset triggered voluntarily (VK_ERROR_DEVICE_LOST). Total faults: {d}", .{self.fault_count});
+            self.logDeviceFaults();
+            return error.GpuLost;
+        }
+
+        try checkVk(result);
+    }
+
+    /// Logs detailed fault information if VK_EXT_device_fault is enabled and supported.
+    pub fn logDeviceFaults(self: VulkanDevice) void {
+        const func = self.vkGetDeviceFaultInfoEXT orelse {
+            std.log.warn("VK_EXT_device_fault not available; review system logs (dmesg) for GPU errors.", .{});
+            return;
+        };
+
+        std.log.info("Querying VK_EXT_device_fault for detailed hang info...", .{});
+
+        var fault_info = std.mem.zeroes(c.VkDeviceFaultInfoEXT);
+        fault_info.sType = c.VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT;
+
+        const result = func(self.vk_device, &fault_info);
+        if (result == c.VK_SUCCESS) {
+            const desc: [*:0]const u8 = @ptrCast(&fault_info.description);
+            std.log.err("GPU Fault Detected: {s}", .{desc});
+        } else {
+            std.log.warn("Failed to retrieve device fault info: {d}", .{result});
+        }
+        std.log.warn("Review system logs (dmesg/journalctl) for kernel-level GPU driver errors.", .{});
+    }
 };
 
-fn checkVk(result: c.VkResult) !void {
-    if (result != c.VK_SUCCESS) return error.VulkanError;
+pub fn checkVk(result: c.VkResult) !void {
+    switch (result) {
+        c.VK_SUCCESS => return,
+        c.VK_ERROR_DEVICE_LOST => return error.GpuLost,
+        c.VK_ERROR_OUT_OF_HOST_MEMORY, c.VK_ERROR_OUT_OF_DEVICE_MEMORY => return error.OutOfMemory,
+        c.VK_ERROR_SURFACE_LOST_KHR => return error.SurfaceLost,
+        c.VK_ERROR_INITIALIZATION_FAILED => return error.InitializationFailed,
+        c.VK_ERROR_EXTENSION_NOT_PRESENT => return error.ExtensionNotPresent,
+        c.VK_ERROR_FEATURE_NOT_PRESENT => return error.FeatureNotPresent,
+        c.VK_ERROR_TOO_MANY_OBJECTS => return error.TooManyObjects,
+        c.VK_ERROR_FORMAT_NOT_SUPPORTED => return error.FormatNotSupported,
+        c.VK_ERROR_FRAGMENTED_POOL => return error.FragmentedPool,
+        else => return error.Unknown,
+    }
+}
+
+test "VulkanDevice.submitGuarded initialization state" {
+    const testing = @import("std").testing;
+
+    const device = VulkanDevice{
+        .allocator = testing.allocator,
+        .vk_device = null,
+        .queue = null,
+    };
+
+    try testing.expectEqual(@as(u32, 0), device.fault_count);
+    try testing.expect(!device.supports_device_fault);
+}
+
+test "VulkanDevice checkVk mapping" {
+    const testing = @import("std").testing;
+
+    try testing.expectError(error.GpuLost, checkVk(c.VK_ERROR_DEVICE_LOST));
+    try testing.expectError(error.OutOfMemory, checkVk(c.VK_ERROR_OUT_OF_HOST_MEMORY));
+    try testing.expectError(error.OutOfMemory, checkVk(c.VK_ERROR_OUT_OF_DEVICE_MEMORY));
+    try testing.expectError(error.SurfaceLost, checkVk(c.VK_ERROR_SURFACE_LOST_KHR));
+    try testing.expectError(error.InitializationFailed, checkVk(c.VK_ERROR_INITIALIZATION_FAILED));
+    try testing.expectError(error.ExtensionNotPresent, checkVk(c.VK_ERROR_EXTENSION_NOT_PRESENT));
+    try testing.expectError(error.FeatureNotPresent, checkVk(c.VK_ERROR_FEATURE_NOT_PRESENT));
+    try testing.expectError(error.TooManyObjects, checkVk(c.VK_ERROR_TOO_MANY_OBJECTS));
+    try testing.expectError(error.FormatNotSupported, checkVk(c.VK_ERROR_FORMAT_NOT_SUPPORTED));
+    try testing.expectError(error.FragmentedPool, checkVk(c.VK_ERROR_FRAGMENTED_POOL));
+    try testing.expectError(error.Unknown, checkVk(c.VK_ERROR_UNKNOWN));
+    try checkVk(c.VK_SUCCESS);
 }

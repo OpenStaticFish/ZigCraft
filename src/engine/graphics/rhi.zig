@@ -10,6 +10,15 @@ pub const RhiError = error{
     OutOfMemory,
     ResourceNotFound,
     InvalidState,
+    GpuLost,
+    SurfaceLost,
+    InitializationFailed,
+    ExtensionNotPresent,
+    FeatureNotPresent,
+    TooManyObjects,
+    FormatNotSupported,
+    FragmentedPool,
+    Unknown,
 };
 
 pub const BufferHandle = u32;
@@ -351,6 +360,7 @@ pub const IDeviceQuery = struct {
         supportsIndirectFirstInstance: *const fn (ptr: *anyopaque) bool,
         getMaxAnisotropy: *const fn (ptr: *anyopaque) u8,
         getMaxMSAASamples: *const fn (ptr: *anyopaque) u8,
+        getFaultCount: *const fn (ptr: *anyopaque) u32,
         waitIdle: *const fn (ptr: *anyopaque) void,
     };
 
@@ -359,6 +369,9 @@ pub const IDeviceQuery = struct {
     }
     pub fn supportsIndirectFirstInstance(self: IDeviceQuery) bool {
         return self.vtable.supportsIndirectFirstInstance(self.ptr);
+    }
+    pub fn getFaultCount(self: IDeviceQuery) u32 {
+        return self.vtable.getFaultCount(self.ptr);
     }
 };
 
@@ -383,6 +396,7 @@ pub const RHI = struct {
         setVSync: *const fn (ctx: *anyopaque, enabled: bool) void,
         setAnisotropicFiltering: *const fn (ctx: *anyopaque, level: u8) void,
         setMSAA: *const fn (ctx: *anyopaque, samples: u8) void,
+        recover: *const fn (ctx: *anyopaque) anyerror!void,
     };
 
     pub fn factory(self: RHI) IResourceFactory {
@@ -477,6 +491,9 @@ pub const RHI = struct {
     pub fn supportsIndirectFirstInstance(self: RHI) bool {
         return self.vtable.query.supportsIndirectFirstInstance(self.ptr);
     }
+    pub fn getFaultCount(self: RHI) u32 {
+        return self.vtable.query.getFaultCount(self.ptr);
+    }
 
     // Lifecycle
     pub fn init(self: RHI, allocator: Allocator, device: ?*RenderDevice) !void {
@@ -547,6 +564,9 @@ pub const RHI = struct {
     }
     pub fn setMSAA(self: RHI, samples: u8) void {
         self.vtable.setMSAA(self.ptr, samples);
+    }
+    pub fn recover(self: RHI) !void {
+        return self.vtable.recover(self.ptr);
     }
     pub fn bindUIPipeline(self: RHI, textured: bool) void {
         self.vtable.render.bindUIPipeline(self.ptr, textured);

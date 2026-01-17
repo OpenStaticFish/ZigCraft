@@ -63,6 +63,9 @@ pub fn build(b: *std.Build) void {
         .root_module = test_root_module,
     });
     exe_tests.linkLibC();
+    exe_tests.linkSystemLibrary("sdl3");
+    exe_tests.linkSystemLibrary("vulkan");
+    exe_tests.addIncludePath(b.path("libs/stb"));
 
     const test_step = b.step("test", "Run unit tests");
     const run_exe_tests = b.addRunArtifact(exe_tests);
@@ -93,20 +96,38 @@ pub fn build(b: *std.Build) void {
     test_integration_step.dependOn(&run_integration_tests.step);
 
     // Robust Vulkan demo executable
-    const robust_root_module = b.createModule(.{
-        .root_source_file = b.path("src/engine/graphics/vulkan_robust.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
     const robust_demo = b.addExecutable(.{
         .name = "robust-demo",
-        .root_module = robust_root_module,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/robust_demo.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     robust_demo.linkLibC();
+    robust_demo.linkSystemLibrary("sdl3");
     robust_demo.linkSystemLibrary("vulkan");
+    robust_demo.addIncludePath(b.path("libs/stb"));
 
     b.installArtifact(robust_demo);
+
+    const integration_robustness = b.addExecutable(.{
+        .name = "test-robustness",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/integration_test_robustness.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    integration_robustness.linkLibC();
+    integration_robustness.linkSystemLibrary("sdl3"); // Needed for C imports if any
+
+    const test_robustness_run = b.addRunArtifact(integration_robustness);
+    // Ensure robust-demo is built first
+    test_robustness_run.step.dependOn(&b.addInstallArtifact(robust_demo, .{}).step);
+
+    const test_robustness_step = b.step("test-robustness", "Run robustness integration test");
+    test_robustness_step.dependOn(&test_robustness_run.step);
 
     const run_robust_cmd = b.addRunArtifact(robust_demo);
     run_robust_cmd.step.dependOn(b.getInstallStep());

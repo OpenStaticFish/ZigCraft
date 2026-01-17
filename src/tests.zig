@@ -42,8 +42,9 @@ const BiomeSource = @import("world/worldgen/biome.zig").BiomeSource;
 // ECS tests
 test {
     _ = @import("ecs_tests.zig");
+    _ = @import("engine/graphics/vulkan_device.zig");
+    _ = @import("vulkan_tests.zig");
 }
-// ============================================================================
 
 test "Vec3 addition" {
     const a = Vec3.init(1, 2, 3);
