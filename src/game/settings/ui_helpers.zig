@@ -1,6 +1,6 @@
 const std = @import("std");
 const data = @import("data.zig");
-const presets = @import("presets.zig");
+const json_presets = @import("json_presets.zig");
 const Settings = data.Settings;
 
 pub fn getAnisotropyLabel(level: u8) []const u8 {
@@ -86,12 +86,6 @@ pub fn cycleUIScale(current: f32) f32 {
 }
 
 pub fn getPresetLabel(idx: usize) []const u8 {
-    if (idx >= presets.GRAPHICS_PRESETS.len) return "CUSTOM";
-    return switch (presets.GRAPHICS_PRESETS[idx].preset) {
-        .low => "LOW",
-        .medium => "MEDIUM",
-        .high => "HIGH",
-        .ultra => "ULTRA",
-        .custom => "CUSTOM",
-    };
+    if (idx >= json_presets.graphics_presets.items.len) return "CUSTOM";
+    return json_presets.graphics_presets.items[idx].name;
 }

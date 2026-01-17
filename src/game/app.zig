@@ -69,6 +69,12 @@ pub const App = struct {
     pub fn init(allocator: std.mem.Allocator) !*App {
         // Load settings first to get window resolution
         log.log.info("Initializing engine systems...", .{});
+        settings_pkg.initPresets(allocator) catch |err| {
+            log.log.warn("Failed to initialize presets: {}, proceeding with defaults", .{err});
+        };
+        // Clean up presets if init fails after this point
+        errdefer settings_pkg.deinitPresets(allocator);
+
         const settings = settings_pkg.persistence.load(allocator);
 
         const wm = try WindowManager.init(allocator, true, settings.window_width, settings.window_height);
@@ -268,6 +274,7 @@ pub const App = struct {
         if (self.env_map) |*t| t.deinit();
         self.resource_pack_manager.deinit();
         settings_pkg.persistence.deinit(&self.settings, self.allocator);
+        settings_pkg.deinitPresets(self.allocator);
         if (self.shader != rhi_pkg.InvalidShaderHandle) self.rhi.destroyShader(self.shader);
         self.rhi.deinit();
 

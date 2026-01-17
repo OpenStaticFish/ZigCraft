@@ -51,9 +51,6 @@ pub const GraphicsScreen = struct {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         const ctx = self.context;
         const settings = ctx.settings;
-        const helpers = settings_pkg.ui_helpers;
-        const presets = settings_pkg.presets;
-        const apply_logic = settings_pkg.apply_logic;
 
         // Draw background screen if it exists
         try ctx.screen_manager.drawParentScreen(ptr, ui);
@@ -65,6 +62,7 @@ pub const GraphicsScreen = struct {
         const mouse_x: f32 = @floatFromInt(mouse_pos.x);
         const mouse_y: f32 = @floatFromInt(mouse_pos.y);
         const mouse_clicked = ctx.input.isMouseButtonPressed(.left);
+        const mouse_clicked_right = ctx.input.isMouseButtonPressed(.right);
 
         const screen_w: f32 = @floatFromInt(ctx.input.window_width);
         const screen_h: f32 = @floatFromInt(ctx.input.window_height);
@@ -93,104 +91,134 @@ pub const GraphicsScreen = struct {
 
         // Quality Preset
         Font.drawText(ui, "OVERALL QUALITY", lx, sy, label_scale, Color.rgba(0.4, 0.8, 1.0, 1.0));
-        const preset_idx = presets.getIndex(settings);
-        if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, helpers.getPresetLabel(preset_idx), btn_scale, mouse_x, mouse_y, mouse_clicked)) {
-            // Cycle presets: Low -> Medium -> High -> Ultra -> Custom -> Low (5-state)
-            // preset_idx == GRAPHICS_PRESETS.len means "Custom" (no preset matches)
-            const total_states = settings_pkg.GRAPHICS_PRESETS.len + 1; // 4 presets + 1 custom
-            const next_idx = (preset_idx + 1) % total_states;
 
-            // Only apply preset if not cycling to Custom (Custom means "keep current settings")
-            if (next_idx < settings_pkg.GRAPHICS_PRESETS.len) {
-                presets.apply(settings, next_idx);
+        if (settings_pkg.json_presets.graphics_presets.items.len > 0) {
+            const preset_idx = settings_pkg.json_presets.getIndex(settings);
+            if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, getPresetLabel(preset_idx), btn_scale, mouse_x, mouse_y, mouse_clicked)) {
+                const next_idx = (preset_idx + 1) % (settings_pkg.json_presets.graphics_presets.items.len + 1);
+                if (next_idx < settings_pkg.json_presets.graphics_presets.items.len) {
+                    settings_pkg.json_presets.apply(settings, next_idx);
+                    ctx.rhi.*.setAnisotropicFiltering(settings.anisotropic_filtering);
+                    ctx.rhi.*.setMSAA(settings.msaa_samples);
+                    ctx.rhi.*.setTexturesEnabled(settings.textures_enabled);
+                } else {
+                    // Custom selected, nothing changes in values but UI label updates to CUSTOM (via getPresetIndex next frame)
+                }
+            }
+        } else {
+            _ = Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, "ERROR", btn_scale, mouse_x, mouse_y, false);
+        }
+        sy += row_height + 10.0 * ui_scale;
+
+        var buf: [64]u8 = undefined;
+
+        // Auto-generated UI from metadata
+        inline for (comptime std.meta.declarations(Settings.metadata)) |decl| {
+            const meta = @field(Settings.metadata, decl.name);
+            const val_ptr = &@field(settings, decl.name);
+            const val_type = @TypeOf(val_ptr.*);
+            const old_val = val_ptr.*;
+
+            Font.drawText(ui, meta.label, lx, sy, label_scale, Color.white);
+
+            switch (meta.kind) {
+                .toggle => {
+                    const label = if (val_ptr.*) "ENABLED" else "DISABLED";
+                    if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, label, btn_scale, mouse_x, mouse_y, mouse_clicked)) {
+                        val_ptr.* = !val_ptr.*;
+                    }
+                },
+                .choice => |choice| {
+                    var current_label: []const u8 = "UNKNOWN";
+                    if (choice.values) |values| {
+                        for (values, 0..) |v, i| {
+                            if (v == val_ptr.*) {
+                                if (i < choice.labels.len) current_label = choice.labels[i];
+                                break;
+                            }
+                        }
+                    }
+                    if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, current_label, btn_scale, mouse_x, mouse_y, mouse_clicked)) {
+                        if (choice.values) |values| {
+                            var current_idx: usize = 0;
+                            for (values, 0..) |v, i| {
+                                if (v == val_ptr.*) {
+                                    current_idx = i;
+                                    break;
+                                }
+                            }
+                            // Cycle: Left click forward, Right click backward (if we had right click)
+                            // For now, standard cycle
+                            const next_idx = (current_idx + 1) % values.len;
+                            val_ptr.* = @as(val_type, @intCast(values[next_idx]));
+                        }
+                    }
+                },
+                .slider => |slider| {
+                    const val_str = std.fmt.bufPrint(&buf, "{d:.1}", .{val_ptr.*}) catch "ERR";
+
+                    if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, val_str, btn_scale, mouse_x, mouse_y, mouse_clicked)) {
+                        // Left-click: increment with wrap to max-step for step alignment
+                        if (val_ptr.* + slider.step > slider.max + 0.001) {
+                            val_ptr.* = slider.max - slider.step;
+                        } else {
+                            val_ptr.* += slider.step;
+                        }
+                    } else {
+                        const button_rect = .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height };
+                        const is_hovered = (mouse_x >= button_rect.x and mouse_x <= button_rect.x + button_rect.width and mouse_y >= button_rect.y and mouse_y <= button_rect.y + button_rect.height);
+                        if (is_hovered and mouse_clicked_right) {
+                            // Right-click: decrement with wrap to max-step for step alignment
+                            if (val_ptr.* - slider.step < slider.min - 0.001) {
+                                val_ptr.* = slider.max - slider.step;
+                            } else {
+                                val_ptr.* -= slider.step;
+                            }
+                        }
+                    }
+                },
+                .int_range => |range| {
+                    const val_str = std.fmt.bufPrint(&buf, "{d}", .{val_ptr.*}) catch "ERR";
+
+                    if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, val_str, btn_scale, mouse_x, mouse_y, mouse_clicked)) {
+                        // Left-click: increment with wrap to max-step for step alignment
+                        if (val_ptr.* + range.step > range.max) {
+                            val_ptr.* = range.max - range.step;
+                        } else {
+                            val_ptr.* += range.step;
+                        }
+                    } else {
+                        const button_rect = .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height };
+                        const is_hovered = (mouse_x >= button_rect.x and mouse_x <= button_rect.x + button_rect.width and mouse_y >= button_rect.y and mouse_y <= button_rect.y + button_rect.height);
+                        if (is_hovered and mouse_clicked_right) {
+                            // Right-click: decrement with wrap to max-step for step alignment
+                            if (val_ptr.* - range.step < range.min) {
+                                val_ptr.* = range.max - range.step;
+                            } else {
+                                val_ptr.* -= range.step;
+                            }
+                        }
+                    }
+                },
             }
 
-            // Apply settings to RHI regardless of whether it's a preset or custom
+            // Handle side effects
+            if (val_ptr.* != old_val) {
+                if (std.mem.eql(u8, decl.name, "anisotropic_filtering")) {
+                    ctx.rhi.*.setAnisotropicFiltering(settings.anisotropic_filtering);
+                } else if (std.mem.eql(u8, decl.name, "msaa_samples")) {
+                    ctx.rhi.*.setMSAA(settings.msaa_samples);
+                } else if (std.mem.eql(u8, decl.name, "textures_enabled")) {
+                    ctx.rhi.*.setTexturesEnabled(settings.textures_enabled);
+                } else if (std.mem.eql(u8, decl.name, "vsync")) {
+                    ctx.rhi.*.setVSync(settings.vsync);
+                } else if (std.mem.eql(u8, decl.name, "volumetric_density")) {
+                    ctx.rhi.*.setVolumetricDensity(settings.volumetric_density);
+                }
+            }
 
-            apply_logic.applyToRHI(settings, ctx.rhi);
+            sy += row_height;
         }
-        sy += row_height + 10.0 * ui_scale;
-
-        var buf: [32]u8 = undefined;
-
-        // Shadows
-        Font.drawText(ui, "SHADOW RESOLUTION", lx, sy, label_scale, Color.white);
-        if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, helpers.getShadowQualityLabel(settings.shadow_quality), btn_scale, mouse_x, mouse_y, mouse_clicked)) {
-            settings.shadow_quality = (settings.shadow_quality + 1) % @as(u32, @intCast(settings_pkg.SHADOW_QUALITIES.len));
-            apply_logic.applyToRHI(settings, ctx.rhi);
-        }
-        sy += row_height;
-
-        Font.drawText(ui, "SHADOW SOFTNESS", lx, sy, label_scale, Color.white);
-        if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, helpers.getShadowSamplesLabel(settings.shadow_pcf_samples, &buf), btn_scale, mouse_x, mouse_y, mouse_clicked)) {
-            settings.shadow_pcf_samples = switch (settings.shadow_pcf_samples) {
-                4 => 8,
-                8 => 12,
-                12 => 16,
-                else => 4,
-            };
-            apply_logic.applyToRHI(settings, ctx.rhi);
-        }
-        sy += row_height;
-
-        Font.drawText(ui, "CASCADE BLENDING", lx, sy, label_scale, Color.white);
-        if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, if (settings.shadow_cascade_blend) "ENABLED" else "DISABLED", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
-            settings.shadow_cascade_blend = !settings.shadow_cascade_blend;
-            apply_logic.applyToRHI(settings, ctx.rhi);
-        }
-        sy += row_height + 10.0 * ui_scale;
-
-        // PBR
-        Font.drawText(ui, "PBR RENDERING", lx, sy, label_scale, Color.rgba(1.0, 0.8, 0.4, 1.0));
-        if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, if (settings.pbr_enabled) "ENABLED" else "DISABLED", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
-            settings.pbr_enabled = !settings.pbr_enabled;
-            apply_logic.applyToRHI(settings, ctx.rhi);
-        }
-        sy += row_height;
-
-        Font.drawText(ui, "PBR QUALITY", lx, sy, label_scale, Color.white);
-        if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, helpers.getPBRQualityLabel(settings.pbr_quality), btn_scale, mouse_x, mouse_y, mouse_clicked)) {
-            settings.pbr_quality = (settings.pbr_quality + 1) % 3;
-            apply_logic.applyToRHI(settings, ctx.rhi);
-        }
-        sy += row_height + 10.0 * ui_scale;
-
-        // Textures
-        Font.drawText(ui, "MAX TEXTURE RES", lx, sy, label_scale, Color.white);
-        if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, helpers.getTextureResLabel(settings.max_texture_resolution, &buf), btn_scale, mouse_x, mouse_y, mouse_clicked)) {
-            settings.max_texture_resolution = switch (settings.max_texture_resolution) {
-                16 => 32,
-                32 => 64,
-                64 => 128,
-                128 => 256,
-                256 => 512,
-                else => 16,
-            };
-            apply_logic.applyToRHI(settings, ctx.rhi);
-        }
-        sy += row_height;
-
-        Font.drawText(ui, "ANISOTROPIC FILTER", lx, sy, label_scale, Color.white);
-        if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, helpers.getAnisotropyLabel(settings.anisotropic_filtering), btn_scale, mouse_x, mouse_y, mouse_clicked)) {
-            settings.anisotropic_filtering = helpers.cycleAnisotropy(settings.anisotropic_filtering);
-            apply_logic.applyToRHI(settings, ctx.rhi);
-        }
-        sy += row_height;
-
-        // Misc
-        Font.drawText(ui, "ANTI-ALIASING (MSAA)", lx, sy, label_scale, Color.white);
-        if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, helpers.getMSAALabel(settings.msaa_samples), btn_scale, mouse_x, mouse_y, mouse_clicked)) {
-            settings.msaa_samples = helpers.cycleMSAA(settings.msaa_samples);
-            apply_logic.applyToRHI(settings, ctx.rhi);
-        }
-        sy += row_height;
-
-        Font.drawText(ui, "CLOUD SHADOWS", lx, sy, label_scale, Color.white);
-        if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, if (settings.cloud_shadows_enabled) "ENABLED" else "DISABLED", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
-            settings.cloud_shadows_enabled = !settings.cloud_shadows_enabled;
-            apply_logic.applyToRHI(settings, ctx.rhi);
-        }
-        sy += row_height;
 
         // Back button
         if (Widgets.drawButton(ui, .{ .x = px + (pw - 150.0 * ui_scale) * 0.5, .y = py + ph - 60.0 * ui_scale, .width = 150.0 * ui_scale, .height = 45.0 * ui_scale }, "BACK", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
@@ -208,3 +236,8 @@ pub const GraphicsScreen = struct {
         return Screen.makeScreen(@This(), self);
     }
 };
+
+fn getPresetLabel(idx: usize) []const u8 {
+    if (idx >= settings_pkg.json_presets.graphics_presets.items.len) return "CUSTOM";
+    return settings_pkg.json_presets.graphics_presets.items[idx].name;
+}

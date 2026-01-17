@@ -395,6 +395,7 @@ pub const RHI = struct {
         setTexturesEnabled: *const fn (ctx: *anyopaque, enabled: bool) void,
         setVSync: *const fn (ctx: *anyopaque, enabled: bool) void,
         setAnisotropicFiltering: *const fn (ctx: *anyopaque, level: u8) void,
+        setVolumetricDensity: *const fn (ctx: *anyopaque, density: f32) void,
         setMSAA: *const fn (ctx: *anyopaque, samples: u8) void,
         recover: *const fn (ctx: *anyopaque) anyerror!void,
     };
@@ -561,6 +562,9 @@ pub const RHI = struct {
     }
     pub fn setAnisotropicFiltering(self: RHI, level: u8) void {
         self.vtable.setAnisotropicFiltering(self.ptr, level);
+    }
+    pub fn setVolumetricDensity(self: RHI, density: f32) void {
+        self.vtable.setVolumetricDensity(self.ptr, density);
     }
     pub fn setMSAA(self: RHI, samples: u8) void {
         self.vtable.setMSAA(self.ptr, samples);

@@ -2,16 +2,9 @@ const std = @import("std");
 const data = @import("data.zig");
 const Settings = data.Settings;
 
-pub const GraphicsPreset = enum {
-    low,
-    medium,
-    high,
-    ultra,
-    custom,
-};
-
+// Preset config compatible with static presets but with dynamic string name
 pub const PresetConfig = struct {
-    preset: GraphicsPreset,
+    name: []u8,
     shadow_quality: u32,
     shadow_pcf_samples: u8,
     shadow_cascade_blend: bool,
@@ -31,23 +24,50 @@ pub const PresetConfig = struct {
     render_distance: i32,
 };
 
-pub const GRAPHICS_PRESETS = [_]PresetConfig{
-    // LOW: Prioritize performance
-    .{ .preset = .low, .shadow_quality = 0, .shadow_pcf_samples = 4, .shadow_cascade_blend = false, .pbr_enabled = false, .pbr_quality = 0, .msaa_samples = 1, .anisotropic_filtering = 1, .max_texture_resolution = 64, .cloud_shadows_enabled = false, .exposure = 0.9, .saturation = 1.3, .volumetric_lighting_enabled = false, .volumetric_density = 0.0, .volumetric_steps = 4, .volumetric_scattering = 0.5, .ssao_enabled = false, .render_distance = 6 },
+pub var graphics_presets: std.ArrayListUnmanaged(PresetConfig) = .empty;
 
-    // MEDIUM: Balanced
-    .{ .preset = .medium, .shadow_quality = 1, .shadow_pcf_samples = 8, .shadow_cascade_blend = false, .pbr_enabled = true, .pbr_quality = 1, .msaa_samples = 2, .anisotropic_filtering = 4, .max_texture_resolution = 128, .cloud_shadows_enabled = true, .exposure = 0.9, .saturation = 1.3, .volumetric_lighting_enabled = true, .volumetric_density = 0.00005, .volumetric_steps = 8, .volumetric_scattering = 0.7, .ssao_enabled = true, .render_distance = 12 },
+pub fn initPresets(allocator: std.mem.Allocator) !void {
+    graphics_presets = std.ArrayListUnmanaged(PresetConfig){};
 
-    // HIGH: Quality focus
-    .{ .preset = .high, .shadow_quality = 2, .shadow_pcf_samples = 12, .shadow_cascade_blend = true, .pbr_enabled = true, .pbr_quality = 2, .msaa_samples = 4, .anisotropic_filtering = 8, .max_texture_resolution = 256, .cloud_shadows_enabled = true, .exposure = 0.9, .saturation = 1.3, .volumetric_lighting_enabled = true, .volumetric_density = 0.0001, .volumetric_steps = 12, .volumetric_scattering = 0.75, .ssao_enabled = true, .render_distance = 18 },
+    // Load from assets/config/presets.json
+    const content = std.fs.cwd().readFileAlloc("assets/config/presets.json", allocator, @enumFromInt(1024 * 1024)) catch |err| {
+        std.log.warn("Failed to open presets.json: {}", .{err});
+        return err;
+    };
+    defer allocator.free(content);
 
-    // ULTRA: Maximum quality
-    .{ .preset = .ultra, .shadow_quality = 3, .shadow_pcf_samples = 16, .shadow_cascade_blend = true, .pbr_enabled = true, .pbr_quality = 2, .msaa_samples = 4, .anisotropic_filtering = 16, .max_texture_resolution = 512, .cloud_shadows_enabled = true, .exposure = 0.9, .saturation = 1.3, .volumetric_lighting_enabled = true, .volumetric_density = 0.0002, .volumetric_steps = 16, .volumetric_scattering = 0.8, .ssao_enabled = true, .render_distance = 28 },
-};
+    const parsed = try std.json.parseFromSlice([]PresetConfig, allocator, content, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    for (parsed.value) |preset| {
+        var p = preset;
+        // Validate preset values against metadata constraints
+        if (p.volumetric_density < 0.0 or p.volumetric_density > 0.5) {
+            return error.InvalidVolumetricDensity;
+        }
+        if (p.volumetric_steps < 4 or p.volumetric_steps > 32) {
+            return error.InvalidVolumetricSteps;
+        }
+        if (p.volumetric_scattering < 0.0 or p.volumetric_scattering > 1.0) {
+            return error.InvalidVolumetricScattering;
+        }
+        // Duplicate name because parsed.deinit() will free strings
+        p.name = try allocator.dupe(u8, preset.name);
+        try graphics_presets.append(allocator, p);
+    }
+    std.log.info("Loaded {} graphics presets", .{graphics_presets.items.len});
+}
+
+pub fn deinitPresets(allocator: std.mem.Allocator) void {
+    for (graphics_presets.items) |preset| {
+        allocator.free(preset.name);
+    }
+    graphics_presets.deinit(allocator);
+}
 
 pub fn apply(settings: *Settings, preset_idx: usize) void {
-    if (preset_idx >= GRAPHICS_PRESETS.len) return;
-    const config = GRAPHICS_PRESETS[preset_idx];
+    if (preset_idx >= graphics_presets.items.len) return;
+    const config = graphics_presets.items[preset_idx];
     settings.shadow_quality = config.shadow_quality;
     settings.shadow_pcf_samples = config.shadow_pcf_samples;
     settings.shadow_cascade_blend = config.shadow_cascade_blend;
@@ -68,10 +88,10 @@ pub fn apply(settings: *Settings, preset_idx: usize) void {
 }
 
 pub fn getIndex(settings: *const Settings) usize {
-    for (GRAPHICS_PRESETS, 0..) |preset, i| {
+    for (graphics_presets.items, 0..) |preset, i| {
         if (matches(settings, preset)) return i;
     }
-    return GRAPHICS_PRESETS.len; // Custom
+    return graphics_presets.items.len; // Custom
 }
 
 fn matches(settings: *const Settings, preset: PresetConfig) bool {
@@ -93,4 +113,9 @@ fn matches(settings: *const Settings, preset: PresetConfig) bool {
         settings.volumetric_steps == preset.volumetric_steps and
         std.math.approxEqAbs(f32, settings.volumetric_scattering, preset.volumetric_scattering, epsilon) and
         settings.ssao_enabled == preset.ssao_enabled;
+}
+
+pub fn getPresetName(idx: usize) []const u8 {
+    if (idx >= graphics_presets.items.len) return "CUSTOM";
+    return graphics_presets.items[idx].name;
 }
