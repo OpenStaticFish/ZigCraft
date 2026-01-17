@@ -26,11 +26,9 @@ jobs:
 
     - name: Install Nix
       uses: DeterminateSystems/nix-installer-action@v16
-      description: Install Nix package manager with DeterminateSystems action
 
     - name: Cache Nix Store
       uses: nix-community/cache-nix-action@v6
-      description: Cache Nix store for faster subsequent builds
       with:
         primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
         restore-prefixes-first-match: nix-${{ runner.os }}-
@@ -64,11 +62,9 @@ jobs:
 
     - name: Install Nix
       uses: DeterminateSystems/nix-installer-action@v16
-      description: Install Nix package manager with DeterminateSystems action
 
     - name: Cache Nix Store
       uses: nix-community/cache-nix-action@v6
-      description: Cache Nix store for faster subsequent builds
       with:
         primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock') }}
         restore-prefixes-first-match: nix-${{ runner.os }}-
