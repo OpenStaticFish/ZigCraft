@@ -116,6 +116,13 @@ const ZombieBuffer = struct {
     memory: c.VkDeviceMemory,
 };
 
+const ZombieImage = struct {
+    image: c.VkImage,
+    memory: c.VkDeviceMemory,
+    view: c.VkImageView,
+    sampler: c.VkSampler,
+};
+
 /// Per-frame linear staging buffer for async uploads.
 const StagingBuffer = struct {
     buffer: c.VkBuffer,
@@ -184,6 +191,7 @@ const VulkanContext = struct {
     transfer_ready: bool, // True if current frame's transfer buffer is begun and ready for recording
 
     buffer_deletion_queue: [MAX_FRAMES_IN_FLIGHT]std.ArrayListUnmanaged(ZombieBuffer),
+    image_deletion_queue: [MAX_FRAMES_IN_FLIGHT]std.ArrayListUnmanaged(ZombieImage),
 
     // Sync
     image_available_semaphores: [MAX_FRAMES_IN_FLIGHT]c.VkSemaphore,
@@ -2838,7 +2846,7 @@ fn updateBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, dst_offset: usize
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     if (data.len == 0 or handle == 0) return;
 
-    ensureFrameReady(ctx);
+    if (!ensureFrameReady(ctx)) return;
 
     ctx.mutex.lock();
     const buf_opt = ctx.buffers.get(handle);
@@ -2947,8 +2955,8 @@ fn recreateSwapchain(ctx: *VulkanContext) void {
     std.log.info("Vulkan swapchain recreated: {}x{} (SDL pixels: {}x{}, MSAA {}x)", .{ ctx.vulkan_swapchain.extent.width, ctx.vulkan_swapchain.extent.height, w, h, ctx.msaa_samples });
 }
 
-fn ensureFrameReady(ctx: *VulkanContext) void {
-    if (ctx.transfer_ready) return;
+fn ensureFrameReady(ctx: *VulkanContext) bool {
+    if (ctx.transfer_ready) return true;
 
     const fence = ctx.in_flight_fences[ctx.current_sync_frame];
 
@@ -2959,8 +2967,8 @@ fn ensureFrameReady(ctx: *VulkanContext) void {
         std.log.err("Vulkan GPU timeout! Possible GPU hang detected. System lockup prevented.", .{});
         // CRITICAL: Do NOT proceed to reset fences or command buffers.
         // The GPU is stuck. We cannot recover safely without device loss.
-        // Crashing the application is safer than crashing the OS/Driver by race conditions.
-        @panic("GPU Timeout / Hang Detected");
+        // Returning false allows the caller to skip the frame or operation.
+        return false;
     }
 
     // Reset fence
@@ -2975,6 +2983,14 @@ fn ensureFrameReady(ctx: *VulkanContext) void {
     }
     ctx.buffer_deletion_queue[ctx.current_sync_frame].clearRetainingCapacity();
 
+    for (ctx.image_deletion_queue[ctx.current_sync_frame].items) |zombie| {
+        c.vkDestroySampler(ctx.vulkan_device.vk_device, zombie.sampler, null);
+        c.vkDestroyImageView(ctx.vulkan_device.vk_device, zombie.view, null);
+        c.vkDestroyImage(ctx.vulkan_device.vk_device, zombie.image, null);
+        c.vkFreeMemory(ctx.vulkan_device.vk_device, zombie.memory, null);
+    }
+    ctx.image_deletion_queue[ctx.current_sync_frame].clearRetainingCapacity();
+
     // Reset staging buffer
     ctx.staging_buffers[ctx.current_sync_frame].reset();
 
@@ -2988,6 +3004,7 @@ fn ensureFrameReady(ctx: *VulkanContext) void {
     _ = c.vkBeginCommandBuffer(transfer_cb, &begin_info);
 
     ctx.transfer_ready = true;
+    return true;
 }
 
 /// Recreates the image_available semaphore for the current sync frame.
@@ -3016,14 +3033,16 @@ fn resetRenderFinishedSemaphore(ctx: *VulkanContext) void {
 fn beginFrame(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
 
-    // Check if an explicit resize was requested (e.g. by setViewport detecting a mismatch)
+    if (ctx.frame_in_progress) return;
+
+    // Optimization: Skip swapchain recreation check if already resized
     if (ctx.framebuffer_resized) {
         recreateSwapchain(ctx);
         // Note: recreateSwapchain resets framebuffer_resized to false.
         // We continue execution to acquire the image from the NEW swapchain.
     }
 
-    ensureFrameReady(ctx);
+    if (!ensureFrameReady(ctx)) return;
 
     applyPendingDescriptorUpdates(ctx, ctx.current_sync_frame);
 
@@ -3897,7 +3916,7 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
     }
 
     if (data_opt) |data| {
-        ensureFrameReady(ctx);
+        if (!ensureFrameReady(ctx)) return 0;
         const staging = &ctx.staging_buffers[ctx.current_sync_frame];
         const offset = staging.allocate(data.len);
 
@@ -4132,7 +4151,7 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
         // Actually this block uses a temporary command buffer too in the old code.
         // We should use the async transfer buffer if possible.
 
-        ensureFrameReady(ctx);
+        if (!ensureFrameReady(ctx)) return 0;
         const transfer_cb = ctx.transfer_command_buffers[ctx.current_sync_frame];
 
         var barrier = std.mem.zeroes(c.VkImageMemoryBarrier);
@@ -4180,15 +4199,26 @@ fn createTexture(ctx_ptr: *anyopaque, width: u32, height: u32, format: rhi.Textu
 
 fn destroyTexture(ctx_ptr: *anyopaque, handle: rhi.TextureHandle) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    if (handle == 0) return;
+
+    if (!ensureFrameReady(ctx)) return;
+
     ctx.mutex.lock();
     const entry_opt = ctx.textures.fetchRemove(handle);
     ctx.mutex.unlock();
 
     if (entry_opt) |entry| {
-        c.vkDestroySampler(ctx.vulkan_device.vk_device, entry.value.sampler, null);
-        c.vkDestroyImageView(ctx.vulkan_device.vk_device, entry.value.view, null);
-        c.vkFreeMemory(ctx.vulkan_device.vk_device, entry.value.memory, null);
-        c.vkDestroyImage(ctx.vulkan_device.vk_device, entry.value.image, null);
+        // Queue to the CURRENT frame slot so deletion happens after this slot's fence is signaled
+        // (i.e., after MAX_FRAMES_IN_FLIGHT frames have elapsed).
+        const delete_frame = ctx.current_sync_frame;
+        ctx.image_deletion_queue[delete_frame].append(ctx.allocator, .{ .image = entry.value.image, .memory = entry.value.memory, .view = entry.value.view, .sampler = entry.value.sampler }) catch {
+            std.log.warn("Failed to queue texture deletion (OOM). Reverting to synchronous cleanup.", .{});
+            _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
+            c.vkDestroySampler(ctx.vulkan_device.vk_device, entry.value.sampler, null);
+            c.vkDestroyImageView(ctx.vulkan_device.vk_device, entry.value.view, null);
+            c.vkDestroyImage(ctx.vulkan_device.vk_device, entry.value.image, null);
+            c.vkFreeMemory(ctx.vulkan_device.vk_device, entry.value.memory, null);
+        };
     }
 }
 
@@ -4223,7 +4253,7 @@ fn updateTexture(ctx_ptr: *anyopaque, handle: rhi.TextureHandle, data: []const u
 
     const tex = tex_opt orelse return;
 
-    ensureFrameReady(ctx);
+    if (!ensureFrameReady(ctx)) return;
     const staging = &ctx.staging_buffers[ctx.current_sync_frame];
 
     if (staging.allocate(data.len)) |offset| {
@@ -5356,9 +5386,19 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_dev
     }
 
     for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-        ctx.command_buffers[i] = null;
-        ctx.transfer_command_buffers[i] = null;
-        ctx.staging_buffers[i] = .{ .buffer = null, .memory = null, .size = 0, .current_offset = 0, .mapped_ptr = null };
+        for (ctx.buffer_deletion_queue[i].items) |zombie| {
+            c.vkDestroyBuffer(ctx.vulkan_device.vk_device, zombie.buffer, null);
+            c.vkFreeMemory(ctx.vulkan_device.vk_device, zombie.memory, null);
+        }
+        ctx.buffer_deletion_queue[i].deinit(ctx.allocator);
+
+        for (ctx.image_deletion_queue[i].items) |zombie| {
+            c.vkDestroySampler(ctx.vulkan_device.vk_device, zombie.sampler, null);
+            c.vkDestroyImageView(ctx.vulkan_device.vk_device, zombie.view, null);
+            c.vkDestroyImage(ctx.vulkan_device.vk_device, zombie.image, null);
+            c.vkFreeMemory(ctx.vulkan_device.vk_device, zombie.memory, null);
+        }
+        ctx.image_deletion_queue[i].deinit(ctx.allocator);
     }
     ctx.command_pool = null;
     ctx.transfer_command_pool = null;
