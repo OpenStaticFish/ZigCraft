@@ -23,6 +23,7 @@ pub const GlobalVertexAllocator = struct {
     allocator: std.mem.Allocator,
 
     free_blocks: std.ArrayListUnmanaged(FreeBlock),
+    deferred_frees: [rhi_mod.MAX_FRAMES_IN_FLIGHT]std.ArrayListUnmanaged(VertexAllocation),
     mutex: std.Thread.Mutex,
 
     pub fn init(allocator: std.mem.Allocator, rhi: RHI, capacity_mb: usize) !GlobalVertexAllocator {
@@ -39,12 +40,18 @@ pub const GlobalVertexAllocator = struct {
 
         std.log.info("Initialized GlobalVertexAllocator with {}MB, buffer handle={}", .{ capacity_mb, buffer });
 
+        var deferred_frees: [rhi_mod.MAX_FRAMES_IN_FLIGHT]std.ArrayListUnmanaged(VertexAllocation) = undefined;
+        for (0..rhi_mod.MAX_FRAMES_IN_FLIGHT) |i| {
+            deferred_frees[i] = .empty;
+        }
+
         return .{
             .rhi = rhi,
             .buffer = buffer,
             .capacity = capacity,
             .allocator = allocator,
             .free_blocks = free_blocks,
+            .deferred_frees = deferred_frees,
             .mutex = .{},
         };
     }
@@ -52,6 +59,22 @@ pub const GlobalVertexAllocator = struct {
     pub fn deinit(self: *GlobalVertexAllocator) void {
         self.rhi.destroyBuffer(self.buffer);
         self.free_blocks.deinit(self.allocator);
+        for (0..rhi_mod.MAX_FRAMES_IN_FLIGHT) |i| {
+            self.deferred_frees[i].deinit(self.allocator);
+        }
+    }
+
+    /// Processes deferred frees for the given frame slot.
+    /// Should be called once per frame when the GPU is guaranteed to be done with that slot.
+    pub fn tick(self: *GlobalVertexAllocator, frame_index: usize) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const frees = &self.deferred_frees[frame_index];
+        for (frees.items) |alloc| {
+            self.freeImmediateUnlocked(alloc);
+        }
+        frees.clearRetainingCapacity();
     }
 
     /// Allocates space for vertices and uploads them.
@@ -116,12 +139,30 @@ pub const GlobalVertexAllocator = struct {
         return error.OutOfMemory;
     }
 
+    /// Queues an allocation to be freed later.
     pub fn free(self: *GlobalVertexAllocator, allocation: VertexAllocation) void {
         if (allocation.count == 0) return;
-        const size = allocation.count * @sizeOf(Vertex);
 
         self.mutex.lock();
         defer self.mutex.unlock();
+
+        // Queue for the CURRENT frame slot.
+        // It will be reclaimed in the NEXT frame when we tick(current_frame).
+        // Since current_frame slot won't be reused by the GPU until we submit this frame
+        // and finish waiting for its fence, it's safe to free things from it.
+        // HOWEVER, we must be careful with reuse.
+        // A safer way is to queue for (frame_index + 1) % MAX_FRAMES_IN_FLIGHT.
+
+        const frame_idx = self.rhi.getFrameIndex();
+        self.deferred_frees[frame_idx].append(self.allocator, allocation) catch {
+            // Fallback to immediate free if queue is full (better than leak, though slightly risky)
+            std.log.warn("Deferred free queue full, falling back to immediate free", .{});
+            self.freeImmediateUnlocked(allocation);
+        };
+    }
+
+    fn freeImmediateUnlocked(self: *GlobalVertexAllocator, allocation: VertexAllocation) void {
+        const size = allocation.count * @sizeOf(Vertex);
 
         // Safety check: ensure we're not double-freeing or freeing an overlapping region
         for (self.free_blocks.items) |block| {
@@ -151,7 +192,6 @@ pub const GlobalVertexAllocator = struct {
         };
 
         // Coalesce blocks - check both directions iteratively
-        var coalesce_count: usize = 0;
         while (true) {
             var coalesced: bool = false;
 
@@ -162,7 +202,6 @@ pub const GlobalVertexAllocator = struct {
                     self.free_blocks.items[insert_idx].size += next.size;
                     _ = self.free_blocks.orderedRemove(insert_idx + 1);
                     coalesced = true;
-                    coalesce_count += 1;
                 } else {
                     break;
                 }
@@ -176,7 +215,6 @@ pub const GlobalVertexAllocator = struct {
                     _ = self.free_blocks.orderedRemove(insert_idx);
                     insert_idx -= 1;
                     coalesced = true;
-                    coalesce_count += 1;
                 }
             }
 

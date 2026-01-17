@@ -137,12 +137,22 @@ pub const VulkanSwapchain = struct {
         self.logical_width = @intCast(lw);
         self.logical_height = @intCast(lh);
 
+        // Protect against zero-size extents (can happen during fullscreen transitions on Wayland)
+        if (w <= 0 or h <= 0) {
+            return error.VulkanError;
+        }
+
         if (cap.currentExtent.width != 0xFFFFFFFF) {
             self.extent = cap.currentExtent;
         } else {
             self.extent = .{ .width = @intCast(w), .height = @intCast(h) };
             self.extent.width = std.math.clamp(self.extent.width, cap.minImageExtent.width, cap.maxImageExtent.width);
             self.extent.height = std.math.clamp(self.extent.height, cap.minImageExtent.height, cap.maxImageExtent.height);
+        }
+
+        // Final validation - extent must be non-zero
+        if (self.extent.width == 0 or self.extent.height == 0) {
+            return error.VulkanError;
         }
 
         var swapchain_info = std.mem.zeroes(c.VkSwapchainCreateInfoKHR);
@@ -157,7 +167,22 @@ pub const VulkanSwapchain = struct {
         swapchain_info.imageUsage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         swapchain_info.imageSharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
         swapchain_info.preTransform = cap.currentTransform;
-        swapchain_info.compositeAlpha = c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        // Select a supported composite alpha mode (prefer opaque, but fall back if unsupported)
+        swapchain_info.compositeAlpha = blk: {
+            const preferred = [_]c.VkCompositeAlphaFlagBitsKHR{
+                c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                c.VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+                c.VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+                c.VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+            };
+            for (preferred) |alpha| {
+                if ((cap.supportedCompositeAlpha & alpha) != 0) {
+                    break :blk alpha;
+                }
+            }
+            // Fallback (shouldn't happen, but be safe)
+            break :blk c.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        };
         swapchain_info.presentMode = c.VK_PRESENT_MODE_FIFO_KHR; // Should be configurable
         swapchain_info.clipped = c.VK_TRUE;
         try checkVk(c.vkCreateSwapchainKHR(self.device.vk_device, &swapchain_info, null, &self.handle));
@@ -201,7 +226,7 @@ pub const VulkanSwapchain = struct {
         var depth_alloc_info = std.mem.zeroes(c.VkMemoryAllocateInfo);
         depth_alloc_info.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         depth_alloc_info.allocationSize = depth_mem_reqs.size;
-        depth_alloc_info.memoryTypeIndex = self.device.findMemoryType(depth_mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        depth_alloc_info.memoryTypeIndex = try self.device.findMemoryType(depth_mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         try checkVk(c.vkAllocateMemory(self.device.vk_device, &depth_alloc_info, null, &self.depth_image_memory));
         try checkVk(c.vkBindImageMemory(self.device.vk_device, self.depth_image, self.depth_image_memory, 0));
 
@@ -242,12 +267,8 @@ pub const VulkanSwapchain = struct {
         var alloc_info = std.mem.zeroes(c.VkMemoryAllocateInfo);
         alloc_info.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         alloc_info.allocationSize = mem_reqs.size;
-        const lazy_mem_type = self.device.findMemoryType(mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT | c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (lazy_mem_type != 0) {
-            alloc_info.memoryTypeIndex = lazy_mem_type;
-        } else {
-            alloc_info.memoryTypeIndex = self.device.findMemoryType(mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        }
+        alloc_info.memoryTypeIndex = self.device.findMemoryType(mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT | c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) catch
+            try self.device.findMemoryType(mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
         try checkVk(c.vkAllocateMemory(self.device.vk_device, &alloc_info, null, &self.msaa_color_memory));
         try checkVk(c.vkBindImageMemory(self.device.vk_device, self.msaa_color_image, self.msaa_color_memory, 0));

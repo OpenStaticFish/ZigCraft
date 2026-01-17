@@ -254,17 +254,37 @@ pub const GameSession = struct {
     pub fn init(allocator: std.mem.Allocator, rhi: RHI, seed: u64, render_distance: i32, lod_enabled: bool) !*GameSession {
         const session = try allocator.create(GameSession);
 
-        const lod_config = LODConfig{
-            .lod0_radius = @min(render_distance, 16),
-            .lod1_radius = 40,
-            .lod2_radius = 80,
-            .lod3_radius = 160,
-        };
-
-        const world = if (lod_enabled)
-            try World.initWithLOD(allocator, render_distance, seed, rhi, lod_config)
+        const safe_mode_env = std.posix.getenv("ZIGCRAFT_SAFE_MODE");
+        const safe_mode = if (safe_mode_env) |val|
+            !(std.mem.eql(u8, val, "0") or std.mem.eql(u8, val, "false"))
         else
-            try World.init(allocator, render_distance, seed, rhi);
+            false;
+        const effective_render_distance: i32 = if (safe_mode) @min(render_distance, 8) else render_distance;
+        const effective_lod_enabled = if (safe_mode) false else lod_enabled;
+
+        if (safe_mode) {
+            std.log.warn("ZIGCRAFT_SAFE_MODE enabled: render distance capped to {} and LOD disabled", .{effective_render_distance});
+        }
+
+        const lod_config = if (safe_mode)
+            LODConfig{
+                .lod0_radius = @min(effective_render_distance, 8),
+                .lod1_radius = 12,
+                .lod2_radius = 24,
+                .lod3_radius = 40,
+            }
+        else
+            LODConfig{
+                .lod0_radius = @min(effective_render_distance, 16),
+                .lod1_radius = 40,
+                .lod2_radius = 80,
+                .lod3_radius = 160,
+            };
+
+        const world = if (effective_lod_enabled)
+            try World.initWithLOD(allocator, effective_render_distance, seed, rhi, lod_config)
+        else
+            try World.init(allocator, effective_render_distance, seed, rhi);
 
         const world_map = WorldMap.init(rhi, 256, 256);
 
@@ -303,7 +323,7 @@ pub const GameSession = struct {
         self.allocator.destroy(self);
     }
 
-    pub fn update(self: *GameSession, dt: f32, total_time: f32, input: *Input, mapper: *const InputMapper, atlas: *TextureAtlas, window: anytype, paused: bool) !void {
+    pub fn update(self: *GameSession, dt: f32, total_time: f32, input: *Input, mapper: *const InputMapper, atlas: *TextureAtlas, window: anytype, paused: bool, skip_world: bool) !void {
         self.atmosphere.update(dt);
         self.clouds.update(dt);
 
@@ -348,7 +368,7 @@ pub const GameSession = struct {
 
             if (self.map_controller.show_map) {
                 self.map_controller.update(input, mapper, &self.camera, dt, window, screen_w, screen_h, self.world_map.width);
-            } else {
+            } else if (!skip_world) {
                 if (!self.inventory_ui_state.visible) {
                     self.player.update(input, mapper, self.world, dt, total_time);
 
@@ -367,9 +387,13 @@ pub const GameSession = struct {
 
                 self.hand_renderer.update(dt);
                 self.hand_renderer.updateMesh(self.inventory, atlas);
+            } else if (!self.world.paused) {
+                self.world.pauseGeneration();
             }
 
-            try self.world.update(self.player.camera.position, dt);
+            if (!skip_world) {
+                try self.world.update(self.player.camera.position, dt);
+            }
         }
     }
 

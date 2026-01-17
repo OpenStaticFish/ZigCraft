@@ -45,8 +45,19 @@ pub const WorldRenderer = struct {
     pub fn init(allocator: std.mem.Allocator, rhi: RHI, storage: *ChunkStorage) !*WorldRenderer {
         const renderer = try allocator.create(WorldRenderer);
 
+        const safe_mode_env = std.posix.getenv("ZIGCRAFT_SAFE_MODE");
+        const safe_mode = if (safe_mode_env) |val|
+            !(std.mem.eql(u8, val, "0") or std.mem.eql(u8, val, "false"))
+        else
+            false;
+        const vertex_capacity_mb: usize = if (safe_mode) 1024 else 6144;
+
+        if (safe_mode) {
+            std.log.warn("ZIGCRAFT_SAFE_MODE enabled: GlobalVertexAllocator reduced to {}MB", .{vertex_capacity_mb});
+        }
+
         const vertex_allocator = try allocator.create(GlobalVertexAllocator);
-        vertex_allocator.* = try GlobalVertexAllocator.init(allocator, rhi, 6144);
+        vertex_allocator.* = try GlobalVertexAllocator.init(allocator, rhi, vertex_capacity_mb);
 
         const max_chunks = 16384;
         var instance_buffers: [rhi_mod.MAX_FRAMES_IN_FLIGHT]rhi_mod.BufferHandle = undefined;

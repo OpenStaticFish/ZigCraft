@@ -18,13 +18,56 @@ pub const VulkanDevice = struct {
     draw_indirect_first_instance: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, window: *c.SDL_Window) !VulkanDevice {
-        var self: VulkanDevice = undefined;
-        self.allocator = allocator;
+        var self = VulkanDevice{ .allocator = allocator };
 
         // 1. Create Instance
         var count: u32 = 0;
         const extensions_ptr = c.SDL_Vulkan_GetInstanceExtensions(&count);
         if (extensions_ptr == null) return error.VulkanExtensionsFailed;
+
+        const props2_name: [*:0]const u8 = @ptrCast(c.VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+        const props2_name_slice = std.mem.span(props2_name);
+
+        var instance_ext_count: u32 = 0;
+        _ = c.vkEnumerateInstanceExtensionProperties(null, &instance_ext_count, null);
+        const instance_ext_props = try allocator.alloc(c.VkExtensionProperties, instance_ext_count);
+        defer allocator.free(instance_ext_props);
+        _ = c.vkEnumerateInstanceExtensionProperties(null, &instance_ext_count, instance_ext_props.ptr);
+
+        var props2_supported = false;
+        for (instance_ext_props) |prop| {
+            const name: [*:0]const u8 = @ptrCast(&prop.extensionName);
+            if (std.mem.eql(u8, std.mem.span(name), props2_name_slice)) {
+                props2_supported = true;
+                break;
+            }
+        }
+
+        const sdl_extension_count: usize = @intCast(count);
+        const sdl_extensions = extensions_ptr[0..sdl_extension_count];
+        var props2_in_sdl = false;
+        for (sdl_extensions) |ext| {
+            if (std.mem.eql(u8, std.mem.span(ext), props2_name_slice)) {
+                props2_in_sdl = true;
+                break;
+            }
+        }
+
+        const enable_props2 = props2_supported and !props2_in_sdl;
+        const instance_extension_count: usize = sdl_extension_count + @intFromBool(enable_props2);
+        const instance_extensions = try allocator.alloc([*c]const u8, instance_extension_count);
+        defer allocator.free(instance_extensions);
+        for (sdl_extensions, 0..) |ext, i| instance_extensions[i] = ext;
+        if (enable_props2) {
+            instance_extensions[sdl_extension_count] = c.VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME;
+        }
+
+        const props2_enabled = props2_supported and (props2_in_sdl or enable_props2);
+        if (props2_supported and enable_props2) {
+            std.log.info("Enabling VK_KHR_get_physical_device_properties2", .{});
+        } else if (!props2_supported) {
+            std.log.warn("VK_KHR_get_physical_device_properties2 not supported by instance", .{});
+        }
 
         var app_info = std.mem.zeroes(c.VkApplicationInfo);
         app_info.sType = c.VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -37,8 +80,8 @@ pub const VulkanDevice = struct {
         var create_info = std.mem.zeroes(c.VkInstanceCreateInfo);
         create_info.sType = c.VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
         create_info.pApplicationInfo = &app_info;
-        create_info.enabledExtensionCount = count;
-        create_info.ppEnabledExtensionNames = extensions_ptr;
+        create_info.enabledExtensionCount = @intCast(instance_extensions.len);
+        create_info.ppEnabledExtensionNames = instance_extensions.ptr;
 
         if (enable_validation) {
             var layer_count: u32 = 0;
@@ -104,6 +147,7 @@ pub const VulkanDevice = struct {
         if (supported_features.samplerAnisotropy == c.VK_TRUE) device_features.samplerAnisotropy = c.VK_TRUE;
         if (supported_features.multiDrawIndirect == c.VK_TRUE) device_features.multiDrawIndirect = c.VK_TRUE;
         if (supported_features.drawIndirectFirstInstance == c.VK_TRUE) device_features.drawIndirectFirstInstance = c.VK_TRUE;
+        if (supported_features.robustBufferAccess == c.VK_TRUE) device_features.robustBufferAccess = c.VK_TRUE;
         self.multi_draw_indirect = supported_features.multiDrawIndirect == c.VK_TRUE;
         self.draw_indirect_first_instance = supported_features.drawIndirectFirstInstance == c.VK_TRUE;
 
@@ -130,16 +174,94 @@ pub const VulkanDevice = struct {
         queue_create_info.queueCount = 1;
         queue_create_info.pQueuePriorities = &queue_priority;
 
-        const device_extensions = [_][*c]const u8{c.VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+        var ext_count: u32 = 0;
+        _ = c.vkEnumerateDeviceExtensionProperties(self.physical_device, null, &ext_count, null);
+        const ext_props = try allocator.alloc(c.VkExtensionProperties, ext_count);
+        defer allocator.free(ext_props);
+        _ = c.vkEnumerateDeviceExtensionProperties(self.physical_device, null, &ext_count, ext_props.ptr);
+
+        const robustness2_name: [*:0]const u8 = @ptrCast(c.VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+        const device_fault_name: [*:0]const u8 = @ptrCast(c.VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+        const robustness2_name_slice = std.mem.span(robustness2_name);
+        const device_fault_name_slice = std.mem.span(device_fault_name);
+
+        var supports_robustness2 = false;
+        var supports_device_fault = false;
+        for (ext_props) |prop| {
+            const name: [*:0]const u8 = @ptrCast(&prop.extensionName);
+            const name_slice = std.mem.span(name);
+            if (std.mem.eql(u8, name_slice, robustness2_name_slice)) supports_robustness2 = true;
+            if (std.mem.eql(u8, name_slice, device_fault_name_slice)) supports_device_fault = true;
+        }
+
+        if (supports_robustness2) std.log.info("VK_EXT_robustness2 supported", .{});
+        if (supports_device_fault) std.log.info("VK_EXT_device_fault supported", .{});
+
+        const allow_robustness2 = supports_robustness2 and props2_enabled;
+        const allow_device_fault = supports_device_fault and props2_enabled;
+        if (!props2_enabled and (supports_robustness2 or supports_device_fault)) {
+            std.log.warn("VK_KHR_get_physical_device_properties2 not enabled; skipping robustness/device fault", .{});
+        }
+
+        var robustness2_features = std.mem.zeroes(c.VkPhysicalDeviceRobustness2FeaturesEXT);
+        robustness2_features.sType = c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT;
+        if (allow_robustness2) {
+            robustness2_features.robustBufferAccess2 = c.VK_TRUE;
+            robustness2_features.robustImageAccess2 = c.VK_TRUE;
+            robustness2_features.nullDescriptor = c.VK_TRUE;
+        }
+
+        var fault_features = std.mem.zeroes(c.VkPhysicalDeviceFaultFeaturesEXT);
+        fault_features.sType = c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
+        if (allow_device_fault) {
+            fault_features.deviceFault = c.VK_TRUE;
+            fault_features.deviceFaultVendorBinary = c.VK_FALSE;
+        }
+
+        if (allow_robustness2) {
+            robustness2_features.pNext = if (allow_device_fault) @ptrCast(&fault_features) else null;
+        }
+
+        var enabled_extensions: [3][*c]const u8 = undefined;
+        var enabled_extension_count: u32 = 0;
+        enabled_extensions[enabled_extension_count] = c.VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+        enabled_extension_count += 1;
+        if (allow_robustness2) {
+            enabled_extensions[enabled_extension_count] = c.VK_EXT_ROBUSTNESS_2_EXTENSION_NAME;
+            enabled_extension_count += 1;
+        }
+        if (allow_device_fault) {
+            enabled_extensions[enabled_extension_count] = c.VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
+            enabled_extension_count += 1;
+        }
+
         var device_create_info = std.mem.zeroes(c.VkDeviceCreateInfo);
         device_create_info.sType = c.VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         device_create_info.queueCreateInfoCount = 1;
         device_create_info.pQueueCreateInfos = &queue_create_info;
         device_create_info.pEnabledFeatures = &device_features;
-        device_create_info.enabledExtensionCount = 1;
-        device_create_info.ppEnabledExtensionNames = &device_extensions;
+        if (allow_robustness2) {
+            device_create_info.pNext = @ptrCast(&robustness2_features);
+        } else if (allow_device_fault) {
+            device_create_info.pNext = @ptrCast(&fault_features);
+        }
+        device_create_info.enabledExtensionCount = enabled_extension_count;
+        device_create_info.ppEnabledExtensionNames = &enabled_extensions;
 
-        try checkVk(c.vkCreateDevice(self.physical_device, &device_create_info, null, &self.vk_device));
+        var create_result = c.vkCreateDevice(self.physical_device, &device_create_info, null, &self.vk_device);
+        if ((allow_robustness2 or allow_device_fault) and
+            (create_result == c.VK_ERROR_FEATURE_NOT_PRESENT or create_result == c.VK_ERROR_EXTENSION_NOT_PRESENT))
+        {
+            std.log.warn("Robustness/device fault features not available, falling back to basic device", .{});
+            device_create_info.pNext = null;
+            enabled_extensions[0] = c.VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+            enabled_extension_count = 1;
+            device_create_info.enabledExtensionCount = enabled_extension_count;
+            device_create_info.ppEnabledExtensionNames = &enabled_extensions;
+            create_result = c.vkCreateDevice(self.physical_device, &device_create_info, null, &self.vk_device);
+        }
+
+        try checkVk(create_result);
         c.vkGetDeviceQueue(self.vk_device, self.graphics_family, 0, &self.queue);
 
         return self;
@@ -151,7 +273,7 @@ pub const VulkanDevice = struct {
         c.vkDestroyInstance(self.instance, null);
     }
 
-    pub fn findMemoryType(self: VulkanDevice, type_filter: u32, properties: c.VkMemoryPropertyFlags) u32 {
+    pub fn findMemoryType(self: VulkanDevice, type_filter: u32, properties: c.VkMemoryPropertyFlags) !u32 {
         var mem_properties: c.VkPhysicalDeviceMemoryProperties = undefined;
         c.vkGetPhysicalDeviceMemoryProperties(self.physical_device, &mem_properties);
 
@@ -163,7 +285,7 @@ pub const VulkanDevice = struct {
                 return i;
             }
         }
-        return 0;
+        return error.NoMatchingMemoryType;
     }
 };
 

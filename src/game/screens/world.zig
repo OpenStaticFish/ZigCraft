@@ -72,7 +72,7 @@ pub const WorldScreen = struct {
         const cam = &self.session.player.camera;
         ctx.audio_system.setListener(cam.position, cam.forward, cam.up);
 
-        try self.session.update(dt, ctx.time.elapsed, ctx.input, ctx.input_mapper, ctx.atlas, ctx.window_manager.window, false);
+        try self.session.update(dt, ctx.time.elapsed, ctx.input, ctx.input_mapper, ctx.atlas, ctx.window_manager.window, false, ctx.skip_world_update);
 
         if (self.session.world.render_distance != ctx.settings.render_distance) {
             self.session.world.setRenderDistance(ctx.settings.render_distance);
@@ -135,29 +135,38 @@ pub const WorldScreen = struct {
             };
         };
 
-        ctx.rhi.updateGlobalUniforms(view_proj_render, camera.position, self.session.atmosphere.sun_dir, self.session.atmosphere.sun_color, self.session.atmosphere.time_of_day, self.session.atmosphere.fog_color, self.session.atmosphere.fog_density, self.session.atmosphere.fog_enabled, self.session.atmosphere.sun_intensity, self.session.atmosphere.ambient_intensity, ctx.settings.textures_enabled, cloud_params);
+        if (!ctx.skip_world_render) {
+            ctx.rhi.updateGlobalUniforms(view_proj_render, camera.position, self.session.atmosphere.sun_dir, self.session.atmosphere.sun_color, self.session.atmosphere.time_of_day, self.session.atmosphere.fog_color, self.session.atmosphere.fog_density, self.session.atmosphere.fog_enabled, self.session.atmosphere.sun_intensity, self.session.atmosphere.ambient_intensity, ctx.settings.textures_enabled, cloud_params);
 
-        const env_map_handle = if (ctx.env_map_ptr) |e_ptr| (if (e_ptr.*) |t| t.handle else 0) else 0;
+            const env_map_handle = if (ctx.env_map_ptr) |e_ptr| (if (e_ptr.*) |t| t.handle else 0) else 0;
 
-        const render_ctx = render_graph_pkg.SceneContext{
-            .rhi = ctx.rhi,
-            .world = self.session.world,
-            .camera = camera,
-            .atmosphere_system = ctx.atmosphere_system,
-            .material_system = ctx.material_system,
-            .aspect = aspect,
-            .sky_params = sky_params,
-            .cloud_params = cloud_params,
-            .main_shader = ctx.shader,
-            .env_map_handle = env_map_handle,
-            .shadow_distance = ctx.settings.shadow_distance,
-            .shadow_resolution = ctx.settings.getShadowResolution(),
-            .ssao_enabled = ctx.settings.ssao_enabled,
-        };
-        ctx.render_graph.execute(render_ctx);
+            const ssao_enabled = ctx.settings.ssao_enabled and !ctx.disable_ssao and !ctx.disable_gpass_draw;
+            const render_ctx = render_graph_pkg.SceneContext{
+                .rhi = ctx.rhi,
+                .world = self.session.world,
+                .camera = camera,
+                .atmosphere_system = ctx.atmosphere_system,
+                .material_system = ctx.material_system,
+                .aspect = aspect,
+                .sky_params = sky_params,
+                .cloud_params = cloud_params,
+                .main_shader = ctx.shader,
+                .env_map_handle = env_map_handle,
+                .shadow_distance = ctx.settings.shadow_distance,
+                .shadow_resolution = ctx.settings.getShadowResolution(),
+                .ssao_enabled = ssao_enabled,
+                .disable_shadow_draw = ctx.disable_shadow_draw,
+                .disable_gpass_draw = ctx.disable_gpass_draw,
+                .disable_ssao = ctx.disable_ssao,
+                .disable_clouds = ctx.disable_clouds,
+            };
+            ctx.render_graph.execute(render_ctx);
 
-        if (self.session.player.target_block) |target| self.session.block_outline.draw(target.x, target.y, target.z, camera.position);
-        self.session.hand_renderer.draw(camera.position, camera.yaw, camera.pitch);
+            if (!ctx.safe_render_mode) {
+                if (self.session.player.target_block) |target| self.session.block_outline.draw(target.x, target.y, target.z, camera.position);
+                self.session.hand_renderer.draw(camera.position, camera.yaw, camera.pitch);
+            }
+        }
 
         ui.begin();
         defer ui.end();

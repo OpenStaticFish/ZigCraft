@@ -21,6 +21,7 @@ pub const SettingsScreen = struct {
         .deinit = deinit,
         .update = update,
         .draw = draw,
+        .onEnter = onEnter,
     };
 
     pub fn init(allocator: std.mem.Allocator, context: EngineContext) !*SettingsScreen {
@@ -52,9 +53,7 @@ pub const SettingsScreen = struct {
         const settings = ctx.settings;
 
         // Draw background screen if it exists
-        if (ctx.screen_manager.stack.items.len > 1) {
-            try ctx.screen_manager.stack.items[ctx.screen_manager.stack.items.len - 2].draw(ui);
-        }
+        try ctx.screen_manager.drawParentScreen(ptr, ui);
 
         ui.begin();
         defer ui.end();
@@ -185,6 +184,11 @@ pub const SettingsScreen = struct {
             ctx.saveSettings();
             ctx.screen_manager.popScreen();
         }
+    }
+
+    pub fn onEnter(ptr: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        self.context.input.setMouseCapture(self.context.window_manager.window, false);
     }
 
     pub fn screen(self: *@This()) IScreen {

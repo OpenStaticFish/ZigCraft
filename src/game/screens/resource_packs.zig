@@ -21,6 +21,7 @@ pub const ResourcePacksScreen = struct {
         .deinit = deinit,
         .update = update,
         .draw = draw,
+        .onEnter = onEnter,
     };
 
     pub fn init(allocator: std.mem.Allocator, context: EngineContext) !*ResourcePacksScreen {
@@ -53,9 +54,7 @@ pub const ResourcePacksScreen = struct {
         const manager = ctx.resource_pack_manager;
 
         // Draw background screen if it exists
-        if (ctx.screen_manager.stack.items.len > 1) {
-            try ctx.screen_manager.stack.items[ctx.screen_manager.stack.items.len - 2].draw(ui);
-        }
+        try ctx.screen_manager.drawParentScreen(ptr, ui);
 
         ui.begin();
         defer ui.end();
@@ -123,6 +122,11 @@ pub const ResourcePacksScreen = struct {
             ctx.saveSettings();
             ctx.screen_manager.popScreen();
         }
+    }
+
+    pub fn onEnter(ptr: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        self.context.input.setMouseCapture(self.context.window_manager.window, false);
     }
 
     fn reloadAtlas(self: *@This()) !void {

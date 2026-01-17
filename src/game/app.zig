@@ -57,6 +57,13 @@ pub const App = struct {
     ui: ?UISystem,
 
     screen_manager: ScreenManager,
+    safe_render_mode: bool,
+    skip_world_update: bool,
+    skip_world_render: bool,
+    disable_shadow_draw: bool,
+    disable_gpass_draw: bool,
+    disable_ssao: bool,
+    disable_clouds: bool,
 
     pub fn init(allocator: std.mem.Allocator) !*App {
         // Load settings first to get window resolution
@@ -80,6 +87,70 @@ pub const App = struct {
             try resource_pack_manager.setActivePack(settings.texture_pack);
         } else if (resource_pack_manager.packExists("default")) {
             try resource_pack_manager.setActivePack("default");
+        }
+
+        const safe_render_env = std.posix.getenv("ZIGCRAFT_SAFE_RENDER");
+        const safe_render_mode = if (safe_render_env) |val|
+            !(std.mem.eql(u8, val, "0") or std.mem.eql(u8, val, "false"))
+        else
+            false;
+
+        const skip_world_update_env = std.posix.getenv("ZIGCRAFT_SKIP_WORLD_UPDATE");
+        const skip_world_update = safe_render_mode or if (skip_world_update_env) |val|
+            !(std.mem.eql(u8, val, "0") or std.mem.eql(u8, val, "false"))
+        else
+            false;
+
+        const skip_world_render_env = std.posix.getenv("ZIGCRAFT_SKIP_WORLD_RENDER");
+        const skip_world_render = safe_render_mode or if (skip_world_render_env) |val|
+            !(std.mem.eql(u8, val, "0") or std.mem.eql(u8, val, "false"))
+        else
+            false;
+
+        const disable_shadow_env = std.posix.getenv("ZIGCRAFT_DISABLE_SHADOWS");
+        const disable_shadow_draw = if (disable_shadow_env) |val|
+            !(std.mem.eql(u8, val, "0") or std.mem.eql(u8, val, "false"))
+        else
+            false;
+
+        const disable_gpass_env = std.posix.getenv("ZIGCRAFT_DISABLE_GPASS");
+        const disable_gpass_draw = if (disable_gpass_env) |val|
+            !(std.mem.eql(u8, val, "0") or std.mem.eql(u8, val, "false"))
+        else
+            false;
+
+        const disable_ssao_env = std.posix.getenv("ZIGCRAFT_DISABLE_SSAO");
+        const disable_ssao = if (disable_ssao_env) |val|
+            !(std.mem.eql(u8, val, "0") or std.mem.eql(u8, val, "false"))
+        else
+            false;
+
+        const disable_clouds_env = std.posix.getenv("ZIGCRAFT_DISABLE_CLOUDS");
+        const disable_clouds = if (disable_clouds_env) |val|
+            !(std.mem.eql(u8, val, "0") or std.mem.eql(u8, val, "false"))
+        else
+            false;
+
+        if (safe_render_mode) {
+            log.log.warn("ZIGCRAFT_SAFE_RENDER enabled: skipping world rendering passes", .{});
+        }
+        if (skip_world_update and !safe_render_mode) {
+            log.log.warn("ZIGCRAFT_SKIP_WORLD_UPDATE enabled", .{});
+        }
+        if (skip_world_render and !safe_render_mode) {
+            log.log.warn("ZIGCRAFT_SKIP_WORLD_RENDER enabled", .{});
+        }
+        if (disable_shadow_draw) {
+            log.log.warn("ZIGCRAFT_DISABLE_SHADOWS enabled", .{});
+        }
+        if (disable_gpass_draw) {
+            log.log.warn("ZIGCRAFT_DISABLE_GPASS enabled", .{});
+        }
+        if (disable_ssao) {
+            log.log.warn("ZIGCRAFT_DISABLE_SSAO enabled", .{});
+        }
+        if (disable_clouds) {
+            log.log.warn("ZIGCRAFT_DISABLE_CLOUDS enabled", .{});
         }
 
         const atlas = try TextureAtlas.init(allocator, rhi, &resource_pack_manager, settings.max_texture_resolution);
@@ -149,19 +220,30 @@ pub const App = struct {
             .time = time,
             .ui = ui,
             .screen_manager = ScreenManager.init(allocator),
+            .safe_render_mode = safe_render_mode,
+            .skip_world_update = skip_world_update,
+            .skip_world_render = skip_world_render,
+            .disable_shadow_draw = disable_shadow_draw,
+            .disable_gpass_draw = disable_gpass_draw,
+            .disable_ssao = disable_ssao,
+            .disable_clouds = disable_clouds,
         };
 
         app.material_system = try MaterialSystem.init(allocator, rhi, &app.atlas);
 
         // Build RenderGraph (OCP: We can easily modify this list based on quality)
-        try app.render_graph.addPass(app.shadow_passes[0].pass());
-        try app.render_graph.addPass(app.shadow_passes[1].pass());
-        try app.render_graph.addPass(app.shadow_passes[2].pass());
-        try app.render_graph.addPass(app.g_pass.pass());
-        try app.render_graph.addPass(app.ssao_pass.pass());
-        try app.render_graph.addPass(app.sky_pass.pass());
-        try app.render_graph.addPass(app.opaque_pass.pass());
-        try app.render_graph.addPass(app.cloud_pass.pass());
+        if (!safe_render_mode) {
+            try app.render_graph.addPass(app.shadow_passes[0].pass());
+            try app.render_graph.addPass(app.shadow_passes[1].pass());
+            try app.render_graph.addPass(app.shadow_passes[2].pass());
+            try app.render_graph.addPass(app.g_pass.pass());
+            try app.render_graph.addPass(app.ssao_pass.pass());
+            try app.render_graph.addPass(app.sky_pass.pass());
+            try app.render_graph.addPass(app.opaque_pass.pass());
+            try app.render_graph.addPass(app.cloud_pass.pass());
+        } else {
+            log.log.warn("ZIGCRAFT_SAFE_RENDER: render graph disabled (UI only)", .{});
+        }
 
         const engine_ctx = app.engineContext();
         const home_screen = try HomeScreen.init(allocator, engine_ctx);
@@ -210,6 +292,13 @@ pub const App = struct {
             .input_mapper = &self.input_mapper,
             .time = &self.time,
             .screen_manager = &self.screen_manager,
+            .safe_render_mode = self.safe_render_mode,
+            .skip_world_update = self.skip_world_update,
+            .skip_world_render = self.skip_world_render,
+            .disable_shadow_draw = self.disable_shadow_draw,
+            .disable_gpass_draw = self.disable_gpass_draw,
+            .disable_ssao = self.disable_ssao,
+            .disable_clouds = self.disable_clouds,
         };
     }
 
