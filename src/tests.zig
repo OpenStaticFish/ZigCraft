@@ -44,6 +44,7 @@ test {
     _ = @import("ecs_tests.zig");
     _ = @import("engine/graphics/vulkan_device.zig");
     _ = @import("vulkan_tests.zig");
+    _ = @import("world/worldgen/schematics.zig");
 }
 
 test "Vec3 addition" {
