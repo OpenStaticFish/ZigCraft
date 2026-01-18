@@ -222,7 +222,172 @@ pub const Rect = struct {
     }
 };
 
-// --- Segregated Interfaces ---
+// --- Subsystem: ResourceManager ---
+// Dedicated to buffer, texture, and shader lifecycle management
+
+pub const ResourceManager = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        createBuffer: *const fn (ptr: *anyopaque, size: usize, usage: BufferUsage) BufferHandle,
+        uploadBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle, data: []const u8) void,
+        updateBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle, offset: usize, data: []const u8) void,
+        destroyBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
+        createTexture: *const fn (ptr: *anyopaque, width: u32, height: u32, format: TextureFormat, config: TextureConfig, data: ?[]const u8) TextureHandle,
+        destroyTexture: *const fn (ptr: *anyopaque, handle: TextureHandle) void,
+        updateTexture: *const fn (ptr: *anyopaque, handle: TextureHandle, data: []const u8) void,
+        createShader: *const fn (ptr: *anyopaque, vertex_src: [*c]const u8, fragment_src: [*c]const u8) RhiError!ShaderHandle,
+        destroyShader: *const fn (ptr: *anyopaque, handle: ShaderHandle) void,
+        mapBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) ?*anyopaque,
+        unmapBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
+    };
+
+    pub fn createBuffer(self: ResourceManager, size: usize, usage: BufferUsage) BufferHandle {
+        return self.vtable.createBuffer(self.ptr, size, usage);
+    }
+    pub fn uploadBuffer(self: ResourceManager, handle: BufferHandle, data: []const u8) void {
+        self.vtable.uploadBuffer(self.ptr, handle, data);
+    }
+    pub fn updateBuffer(self: ResourceManager, handle: BufferHandle, offset: usize, data: []const u8) void {
+        self.vtable.updateBuffer(self.ptr, handle, offset, data);
+    }
+    pub fn destroyBuffer(self: ResourceManager, handle: BufferHandle) void {
+        self.vtable.destroyBuffer(self.ptr, handle);
+    }
+    pub fn createTexture(self: ResourceManager, width: u32, height: u32, format: TextureFormat, config: TextureConfig, data: ?[]const u8) TextureHandle {
+        return self.vtable.createTexture(self.ptr, width, height, format, config, data);
+    }
+    pub fn destroyTexture(self: ResourceManager, handle: TextureHandle) void {
+        self.vtable.destroyTexture(self.ptr, handle);
+    }
+    pub fn updateTexture(self: ResourceManager, handle: TextureHandle, data: []const u8) void {
+        self.vtable.updateTexture(self.ptr, handle, data);
+    }
+    pub fn createShader(self: ResourceManager, vertex_src: [*c]const u8, fragment_src: [*c]const u8) RhiError!ShaderHandle {
+        return self.vtable.createShader(self.ptr, vertex_src, fragment_src);
+    }
+    pub fn destroyShader(self: ResourceManager, handle: ShaderHandle) void {
+        self.vtable.destroyShader(self.ptr, handle);
+    }
+    pub fn mapBuffer(self: ResourceManager, handle: BufferHandle) ?*anyopaque {
+        return self.vtable.mapBuffer(self.ptr, handle);
+    }
+    pub fn unmapBuffer(self: ResourceManager, handle: BufferHandle) void {
+        self.vtable.unmapBuffer(self.ptr, handle);
+    }
+};
+
+// --- Subsystem: RenderCommandQueue ---
+// Handles frame management, command recording, and submission
+
+pub const RenderCommandQueue = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        beginFrame: *const fn (ptr: *anyopaque) void,
+        endFrame: *const fn (ptr: *anyopaque) void,
+        abortFrame: *const fn (ptr: *anyopaque) void,
+        beginMainPass: *const fn (ptr: *anyopaque) void,
+        endMainPass: *const fn (ptr: *anyopaque) void,
+        beginGPass: *const fn (ptr: *anyopaque) void,
+        endGPass: *const fn (ptr: *anyopaque) void,
+        computeSSAO: *const fn (ptr: *anyopaque) void,
+        bindShader: *const fn (ptr: *anyopaque, handle: ShaderHandle) void,
+        bindTexture: *const fn (ptr: *anyopaque, handle: TextureHandle, slot: u32) void,
+        setModelMatrix: *const fn (ptr: *anyopaque, model: Mat4, color: Vec3, mask_radius: f32) void,
+        setInstanceBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
+        setLODInstanceBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
+        updateGlobalUniforms: *const fn (ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, sun_color: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void,
+        setTextureUniforms: *const fn (ptr: *anyopaque, texture_enabled: bool, shadow_map_handles: [SHADOW_CASCADE_COUNT]TextureHandle) void,
+        draw: *const fn (ptr: *anyopaque, handle: BufferHandle, count: u32, mode: DrawMode) void,
+        drawOffset: *const fn (ptr: *anyopaque, handle: BufferHandle, count: u32, mode: DrawMode, offset: usize) void,
+        drawIndexed: *const fn (ptr: *anyopaque, vbo: BufferHandle, ebo: BufferHandle, count: u32) void,
+        drawIndirect: *const fn (ptr: *anyopaque, handle: BufferHandle, command_buffer: BufferHandle, offset: usize, draw_count: u32, stride: u32) void,
+        drawInstance: *const fn (ptr: *anyopaque, handle: BufferHandle, count: u32, instance_index: u32) void,
+        setViewport: *const fn (ptr: *anyopaque, width: u32, height: u32) void,
+        bindBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle, usage: BufferUsage) void,
+        pushConstants: *const fn (ptr: *anyopaque, stages: ShaderStageFlags, offset: u32, size: u32, data: *const anyopaque) void,
+        setClearColor: *const fn (ptr: *anyopaque, color: Vec3) void,
+        drawSky: *const fn (ptr: *anyopaque, params: SkyParams) void,
+        beginCloudPass: *const fn (ptr: *anyopaque, params: CloudParams) void,
+        drawDebugShadowMap: *const fn (ptr: *anyopaque, cascade_index: usize, depth_map_handle: TextureHandle) void,
+    };
+
+    pub fn beginFrame(self: RenderCommandQueue) void {
+        self.vtable.beginFrame(self.ptr);
+    }
+    pub fn endFrame(self: RenderCommandQueue) void {
+        self.vtable.endFrame(self.ptr);
+    }
+    pub fn abortFrame(self: RenderCommandQueue) void {
+        self.vtable.abortFrame(self.ptr);
+    }
+    pub fn beginMainPass(self: RenderCommandQueue) void {
+        self.vtable.beginMainPass(self.ptr);
+    }
+    pub fn endMainPass(self: RenderCommandQueue) void {
+        self.vtable.endMainPass(self.ptr);
+    }
+    pub fn beginGPass(self: RenderCommandQueue) void {
+        self.vtable.beginGPass(self.ptr);
+    }
+    pub fn endGPass(self: RenderCommandQueue) void {
+        self.vtable.endGPass(self.ptr);
+    }
+    pub fn computeSSAO(self: RenderCommandQueue) void {
+        self.vtable.computeSSAO(self.ptr);
+    }
+    pub fn bindShader(self: RenderCommandQueue, handle: ShaderHandle) void {
+        self.vtable.bindShader(self.ptr, handle);
+    }
+    pub fn bindTexture(self: RenderCommandQueue, handle: TextureHandle, slot: u32) void {
+        self.vtable.bindTexture(self.ptr, handle, slot);
+    }
+    pub fn draw(self: RenderCommandQueue, handle: BufferHandle, count: u32, mode: DrawMode) void {
+        self.vtable.draw(self.ptr, handle, count, mode);
+    }
+    pub fn drawOffset(self: RenderCommandQueue, handle: BufferHandle, count: u32, mode: DrawMode, offset: usize) void {
+        self.vtable.drawOffset(self.ptr, handle, count, mode, offset);
+    }
+    pub fn drawIndexed(self: RenderCommandQueue, vbo: BufferHandle, ebo: BufferHandle, count: u32) void {
+        self.vtable.drawIndexed(self.ptr, vbo, ebo, count);
+    }
+    pub fn pushConstants(self: RenderCommandQueue, stages: ShaderStageFlags, offset: u32, size: u32, data: *const anyopaque) void {
+        self.vtable.pushConstants(self.ptr, stages, offset, size, data);
+    }
+};
+
+// --- Subsystem: SwapchainPresenter ---
+// Handles surface, VSync, and presentation
+
+pub const SwapchainPresenter = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        setVSync: *const fn (ptr: *anyopaque, enabled: bool) void,
+        getFrameIndex: *const fn (ptr: *anyopaque) usize,
+        waitIdle: *const fn (ptr: *anyopaque) void,
+        recover: *const fn (ptr: *anyopaque) anyerror!void,
+    };
+
+    pub fn setVSync(self: SwapchainPresenter, enabled: bool) void {
+        self.vtable.setVSync(self.ptr, enabled);
+    }
+    pub fn getFrameIndex(self: SwapchainPresenter) usize {
+        return self.vtable.getFrameIndex(self.ptr);
+    }
+    pub fn waitIdle(self: SwapchainPresenter) void {
+        self.vtable.waitIdle(self.ptr);
+    }
+    pub fn recover(self: SwapchainPresenter) anyerror!void {
+        return self.vtable.recover(self.ptr);
+    }
+};
+
+// --- Legacy Interfaces (for backward compatibility during transition) ---
 
 pub const IResourceFactory = struct {
     ptr: *anyopaque,
@@ -421,7 +586,8 @@ pub const IDeviceQuery = struct {
     }
 };
 
-/// Composite RHI structure for backward compatibility during refactoring
+/// Composite RHI structure that composes distinct subsystems.
+/// Acts as a composition root rather than a monolithic "God Object".
 pub const RHI = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -431,28 +597,37 @@ pub const RHI = struct {
         init: *const fn (ctx: *anyopaque, allocator: Allocator, device: ?*RenderDevice) anyerror!void,
         deinit: *const fn (ctx: *anyopaque) void,
 
-        // Composition of all vtables (temp)
-        resources: IResourceFactory.VTable,
-        render: IRenderContext.VTable,
+        // Subsystem vtables
+        resources: ResourceManager.VTable,
+        commands: RenderCommandQueue.VTable,
+        present: SwapchainPresenter.VTable,
+
+        // Shadow and UI subsystems
         shadow: IShadowContext.VTable,
         ui: IUIContext.VTable,
-        query: IDeviceQuery.VTable,
+
+        // Additional device query methods (merged into SwapchainPresenter for now)
+        supportsIndirectFirstInstance: *const fn (ptr: *anyopaque) bool,
+        getMaxAnisotropy: *const fn (ptr: *anyopaque) u8,
+        getMaxMSAASamples: *const fn (ptr: *anyopaque) u8,
+        getFaultCount: *const fn (ptr: *anyopaque) u32,
 
         // Options
         setWireframe: *const fn (ctx: *anyopaque, enabled: bool) void,
         setTexturesEnabled: *const fn (ctx: *anyopaque, enabled: bool) void,
-        setVSync: *const fn (ctx: *anyopaque, enabled: bool) void,
         setAnisotropicFiltering: *const fn (ctx: *anyopaque, level: u8) void,
         setVolumetricDensity: *const fn (ctx: *anyopaque, density: f32) void,
         setMSAA: *const fn (ctx: *anyopaque, samples: u8) void,
-        recover: *const fn (ctx: *anyopaque) anyerror!void,
     };
 
-    pub fn factory(self: RHI) IResourceFactory {
+    pub fn resources(self: RHI) ResourceManager {
         return .{ .ptr = self.ptr, .vtable = &self.vtable.resources };
     }
-    pub fn context(self: RHI) IRenderContext {
-        return .{ .ptr = self.ptr, .vtable = &self.vtable.render };
+    pub fn commands(self: RHI) RenderCommandQueue {
+        return .{ .ptr = self.ptr, .vtable = &self.vtable.commands };
+    }
+    pub fn present(self: RHI) SwapchainPresenter {
+        return .{ .ptr = self.ptr, .vtable = &self.vtable.present };
     }
     pub fn shadow(self: RHI) IShadowContext {
         return .{ .ptr = self.ptr, .vtable = &self.vtable.shadow };
@@ -460,11 +635,8 @@ pub const RHI = struct {
     pub fn ui(self: RHI) IUIContext {
         return .{ .ptr = self.ptr, .vtable = &self.vtable.ui };
     }
-    pub fn query(self: RHI) IDeviceQuery {
-        return .{ .ptr = self.ptr, .vtable = &self.vtable.query };
-    }
 
-    // Legacy wrappers (redirecting to sub-interfaces)
+    // Legacy wrapper methods (redirecting to subsystems)
     pub fn createBuffer(self: RHI, size: usize, usage: BufferUsage) BufferHandle {
         return self.vtable.resources.createBuffer(self.ptr, size, usage);
     }
@@ -497,57 +669,57 @@ pub const RHI = struct {
     }
 
     pub fn beginFrame(self: RHI) void {
-        self.vtable.render.beginFrame(self.ptr);
+        self.vtable.commands.beginFrame(self.ptr);
     }
     pub fn endFrame(self: RHI) void {
-        self.vtable.render.endFrame(self.ptr);
+        self.vtable.commands.endFrame(self.ptr);
     }
     pub fn setClearColor(self: RHI, color: Vec3) void {
-        self.vtable.render.setClearColor(self.ptr, color);
+        self.vtable.commands.setClearColor(self.ptr, color);
     }
     pub fn beginMainPass(self: RHI) void {
-        self.vtable.render.beginMainPass(self.ptr);
+        self.vtable.commands.beginMainPass(self.ptr);
     }
     pub fn endMainPass(self: RHI) void {
-        self.vtable.render.endMainPass(self.ptr);
+        self.vtable.commands.endMainPass(self.ptr);
     }
     pub fn draw(self: RHI, handle: BufferHandle, count: u32, mode: DrawMode) void {
-        self.vtable.render.draw(self.ptr, handle, count, mode);
+        self.vtable.commands.draw(self.ptr, handle, count, mode);
     }
     pub fn drawOffset(self: RHI, handle: BufferHandle, count: u32, mode: DrawMode, offset: usize) void {
-        self.vtable.render.drawOffset(self.ptr, handle, count, mode, offset);
+        self.vtable.commands.drawOffset(self.ptr, handle, count, mode, offset);
     }
     pub fn drawIndexed(self: RHI, vbo: BufferHandle, ebo: BufferHandle, count: u32) void {
-        self.vtable.render.drawIndexed(self.ptr, vbo, ebo, count);
+        self.vtable.commands.drawIndexed(self.ptr, vbo, ebo, count);
     }
     pub fn bindTexture(self: RHI, handle: TextureHandle, slot: u32) void {
-        self.vtable.render.bindTexture(self.ptr, handle, slot);
+        self.vtable.commands.bindTexture(self.ptr, handle, slot);
     }
     pub fn bindShader(self: RHI, handle: ShaderHandle) void {
-        self.vtable.render.bindShader(self.ptr, handle);
+        self.vtable.commands.bindShader(self.ptr, handle);
     }
     pub fn setModelMatrix(self: RHI, model: Mat4, color: Vec3, mask_radius: f32) void {
-        self.vtable.render.setModelMatrix(self.ptr, model, color, mask_radius);
+        self.vtable.commands.setModelMatrix(self.ptr, model, color, mask_radius);
     }
     pub fn pushConstants(self: RHI, stages: ShaderStageFlags, offset: u32, size: u32, data: *const anyopaque) void {
-        self.vtable.render.pushConstants(self.ptr, stages, offset, size, data);
+        self.vtable.commands.pushConstants(self.ptr, stages, offset, size, data);
     }
     pub fn updateGlobalUniforms(self: RHI, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, sun_color: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void {
-        self.vtable.render.updateGlobalUniforms(self.ptr, view_proj, cam_pos, sun_dir, sun_color, time, fog_color, fog_density, fog_enabled, sun_intensity, ambient, use_texture, cloud_params);
+        self.vtable.commands.updateGlobalUniforms(self.ptr, view_proj, cam_pos, sun_dir, sun_color, time, fog_color, fog_density, fog_enabled, sun_intensity, ambient, use_texture, cloud_params);
     }
 
     pub fn bindBuffer(self: RHI, handle: BufferHandle, usage: BufferUsage) void {
-        self.vtable.render.bindBuffer(self.ptr, handle, usage);
+        self.vtable.commands.bindBuffer(self.ptr, handle, usage);
     }
 
     pub fn getFrameIndex(self: RHI) usize {
-        return self.vtable.query.getFrameIndex(self.ptr);
+        return self.vtable.present.getFrameIndex(self.ptr);
     }
     pub fn supportsIndirectFirstInstance(self: RHI) bool {
-        return self.vtable.query.supportsIndirectFirstInstance(self.ptr);
+        return self.vtable.supportsIndirectFirstInstance(self.ptr);
     }
     pub fn getFaultCount(self: RHI) u32 {
-        return self.vtable.query.getFaultCount(self.ptr);
+        return self.vtable.getFaultCount(self.ptr);
     }
 
     // Lifecycle
@@ -558,7 +730,7 @@ pub const RHI = struct {
         self.vtable.deinit(self.ptr);
     }
     pub fn waitIdle(self: RHI) void {
-        self.vtable.query.waitIdle(self.ptr);
+        self.vtable.present.waitIdle(self.ptr);
     }
 
     // Pass-throughs
@@ -575,10 +747,10 @@ pub const RHI = struct {
         self.vtable.ui.drawTexture(self.ptr, handle, rect);
     }
     pub fn drawSky(self: RHI, params: SkyParams) void {
-        self.vtable.render.drawSky(self.ptr, params);
+        self.vtable.commands.drawSky(self.ptr, params);
     }
     pub fn beginCloudPass(self: RHI, params: CloudParams) void {
-        self.vtable.render.beginCloudPass(self.ptr, params);
+        self.vtable.commands.beginCloudPass(self.ptr, params);
     }
     pub fn beginShadowPass(self: RHI, cascade: u32, matrix: Mat4) void {
         self.vtable.shadow.beginPass(self.ptr, cascade, matrix);
@@ -587,22 +759,22 @@ pub const RHI = struct {
         self.vtable.shadow.endPass(self.ptr);
     }
     pub fn beginGPass(self: RHI) void {
-        self.vtable.render.beginGPass(self.ptr);
+        self.vtable.commands.beginGPass(self.ptr);
     }
     pub fn endGPass(self: RHI) void {
-        self.vtable.render.endGPass(self.ptr);
+        self.vtable.commands.endGPass(self.ptr);
     }
     pub fn computeSSAO(self: RHI) void {
-        self.vtable.render.computeSSAO(self.ptr);
+        self.vtable.commands.computeSSAO(self.ptr);
     }
     pub fn updateShadowUniforms(self: RHI, params: ShadowParams) void {
         self.vtable.shadow.updateUniforms(self.ptr, params);
     }
     pub fn setTextureUniforms(self: RHI, enabled: bool, handles: [SHADOW_CASCADE_COUNT]TextureHandle) void {
-        self.vtable.render.setTextureUniforms(self.ptr, enabled, handles);
+        self.vtable.commands.setTextureUniforms(self.ptr, enabled, handles);
     }
     pub fn setViewport(self: RHI, width: u32, height: u32) void {
-        self.vtable.render.setViewport(self.ptr, width, height);
+        self.vtable.commands.setViewport(self.ptr, width, height);
     }
 
     pub fn setWireframe(self: RHI, enabled: bool) void {
@@ -612,7 +784,7 @@ pub const RHI = struct {
         self.vtable.setTexturesEnabled(self.ptr, enabled);
     }
     pub fn setVSync(self: RHI, enabled: bool) void {
-        self.vtable.setVSync(self.ptr, enabled);
+        self.vtable.present.setVSync(self.ptr, enabled);
     }
     pub fn setAnisotropicFiltering(self: RHI, level: u8) void {
         self.vtable.setAnisotropicFiltering(self.ptr, level);
@@ -624,7 +796,7 @@ pub const RHI = struct {
         self.vtable.setMSAA(self.ptr, samples);
     }
     pub fn recover(self: RHI) !void {
-        return self.vtable.recover(self.ptr);
+        return self.vtable.present.recover(self.ptr);
     }
     pub fn bindUIPipeline(self: RHI, textured: bool) void {
         self.vtable.ui.bindPipeline(self.ptr, textured);

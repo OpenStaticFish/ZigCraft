@@ -5289,7 +5289,7 @@ const VULKAN_RHI_VTABLE = rhi.RHI.VTable{
         .mapBuffer = mapBuffer,
         .unmapBuffer = unmapBuffer,
     },
-    .render = .{
+    .commands = .{
         .beginFrame = beginFrame,
         .endFrame = endFrame,
         .abortFrame = abortFrame,
@@ -5318,6 +5318,12 @@ const VULKAN_RHI_VTABLE = rhi.RHI.VTable{
         .beginCloudPass = beginCloudPass,
         .drawDebugShadowMap = drawDebugShadowMap,
     },
+    .present = .{
+        .setVSync = setVSync,
+        .getFrameIndex = getFrameIndex,
+        .waitIdle = waitIdle,
+        .recover = recover,
+    },
     .shadow = .{
         .beginPass = beginShadowPass,
         .endPass = endShadowPass,
@@ -5330,21 +5336,15 @@ const VULKAN_RHI_VTABLE = rhi.RHI.VTable{
         .drawTexture = drawTexture2D,
         .bindPipeline = bindUIPipeline,
     },
-    .query = .{
-        .getFrameIndex = getFrameIndex,
-        .supportsIndirectFirstInstance = supportsIndirectFirstInstance,
-        .getMaxAnisotropy = getMaxAnisotropy,
-        .getMaxMSAASamples = getMaxMSAASamples,
-        .getFaultCount = getFaultCount,
-        .waitIdle = waitIdle,
-    },
+    .supportsIndirectFirstInstance = supportsIndirectFirstInstance,
+    .getMaxAnisotropy = getMaxAnisotropy,
+    .getMaxMSAASamples = getMaxMSAASamples,
+    .getFaultCount = getFaultCount,
     .setWireframe = setWireframe,
     .setTexturesEnabled = setTexturesEnabled,
-    .setVSync = setVSync,
     .setAnisotropicFiltering = setAnisotropicFiltering,
     .setVolumetricDensity = setVolumetricDensity,
     .setMSAA = setMSAA,
-    .recover = recover,
 };
 
 pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_device: ?*RenderDevice, shadow_resolution: u32, msaa_samples: u8, anisotropic_filtering: u8) !rhi.RHI {
