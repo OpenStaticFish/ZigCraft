@@ -7,6 +7,11 @@
 const std = @import("std");
 const BlockType = @import("../block.zig").BlockType;
 const BiomeId = @import("biome.zig").BiomeId;
+const chunk_mod = @import("../chunk.zig");
+const Chunk = chunk_mod.Chunk;
+const CHUNK_SIZE_X = chunk_mod.CHUNK_SIZE_X;
+const CHUNK_SIZE_Y = chunk_mod.CHUNK_SIZE_Y;
+const CHUNK_SIZE_Z = chunk_mod.CHUNK_SIZE_Z;
 
 pub const Rotation = enum {
     none,
@@ -25,6 +30,12 @@ pub const SimpleDecoration = struct {
     // Range -1.0 to 1.0. Decoration only spawns if variant noise is within range.
     variant_min: f32 = -1.0,
     variant_max: f32 = 1.0,
+
+    pub fn isAllowed(self: SimpleDecoration, biome: BiomeId, surface_block: BlockType) bool {
+        if (!isBiomeAllowed(self.biomes, biome)) return false;
+        if (!isBlockAllowed(self.place_on, surface_block)) return false;
+        return true;
+    }
 };
 
 pub const SchematicBlock = struct {
@@ -40,6 +51,27 @@ pub const Schematic = struct {
     size_z: i32,
     center_x: i32 = 0, // Offset to center
     center_z: i32 = 0,
+
+    pub fn place(self: Schematic, chunk: *Chunk, x: u32, y: u32, z: u32, random: std.Random) void {
+        _ = random;
+        const center_x = @as(i32, @intCast(x));
+        const center_y = @as(i32, @intCast(y));
+        const center_z = @as(i32, @intCast(z));
+
+        for (self.blocks) |sb| {
+            const bx = center_x + sb.offset[0] - self.center_x;
+            const by = center_y + sb.offset[1];
+            const bz = center_z + sb.offset[2] - self.center_z;
+
+            if (bx >= 0 and bx < CHUNK_SIZE_X and bz >= 0 and bz < CHUNK_SIZE_Z and by >= 0 and by < CHUNK_SIZE_Y) {
+                // Don't overwrite existing solid blocks to avoid trees deleting ground
+                const existing = chunk.getBlock(@intCast(bx), @intCast(by), @intCast(bz));
+                if (existing == .air or existing.isTransparent()) {
+                    chunk.setBlock(@intCast(bx), @intCast(by), @intCast(bz), sb.block);
+                }
+            }
+        }
+    }
 };
 
 pub const SchematicDecoration = struct {
@@ -55,9 +87,30 @@ pub const SchematicDecoration = struct {
     // Variant noise constraints (Issue #110)
     variant_min: f32 = -1.0,
     variant_max: f32 = 1.0,
+
+    pub fn isAllowed(self: SchematicDecoration, biome: BiomeId, surface_block: BlockType) bool {
+        if (!isBiomeAllowed(self.biomes, biome)) return false;
+        if (!isBlockAllowed(self.place_on, surface_block)) return false;
+        return true;
+    }
 };
 
 pub const Decoration = union(enum) {
     simple: SimpleDecoration,
     schematic: SchematicDecoration,
 };
+
+fn isBiomeAllowed(allowed: []const BiomeId, current: BiomeId) bool {
+    if (allowed.len == 0) return true;
+    for (allowed) |b| {
+        if (b == current) return true;
+    }
+    return false;
+}
+
+fn isBlockAllowed(allowed: []const BlockType, current: BlockType) bool {
+    for (allowed) |b| {
+        if (b == current) return true;
+    }
+    return false;
+}

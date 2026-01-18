@@ -2,6 +2,7 @@
 //! Configures the specific decorations (both simple and schematic) that populate the world.
 //! Re-exports decoration types for consumers like the generator.
 
+const std = @import("std");
 const BlockType = @import("../block.zig").BlockType;
 const BiomeId = @import("biome.zig").BiomeId;
 
@@ -16,6 +17,7 @@ pub const SchematicBlock = types.SchematicBlock;
 pub const Schematic = types.Schematic;
 pub const SchematicDecoration = types.SchematicDecoration;
 pub const Decoration = types.Decoration;
+pub const DecorationProvider = @import("decoration_provider.zig").DecorationProvider;
 
 pub const DECORATIONS = [_]Decoration{
     // === Grass ===
@@ -110,4 +112,69 @@ pub const DECORATIONS = [_]Decoration{
     },
 
     // Note: Forest with variant < -0.4 has NO trees (Clearing)
+};
+
+const Chunk = @import("../chunk.zig").Chunk;
+
+pub const StandardDecorationProvider = struct {
+    pub fn provider() DecorationProvider {
+        return .{
+            .ptr = undefined, // No state needed
+            .vtable = &VTABLE,
+        };
+    }
+
+    const VTABLE = DecorationProvider.VTable{
+        .decorate = decorate,
+    };
+
+    fn decorate(
+        ptr: *anyopaque,
+        chunk: *Chunk,
+        local_x: u32,
+        local_z: u32,
+        surface_y: i32,
+        surface_block: BlockType,
+        biome: BiomeId,
+        variant: f32,
+        allow_subbiomes: bool,
+        veg_mult: f32,
+        random: std.Random,
+    ) void {
+        _ = ptr;
+        for (DECORATIONS) |deco| {
+            switch (deco) {
+                .simple => |s| {
+                    if (!s.isAllowed(biome, surface_block)) continue;
+
+                    if (!allow_subbiomes) {
+                        if (s.variant_min != -1.0 or s.variant_max != 1.0) continue;
+                    } else {
+                        if (variant < s.variant_min or variant > s.variant_max) continue;
+                    }
+
+                    const prob = s.probability * veg_mult;
+                    if (random.float(f32) >= prob) continue;
+
+                    chunk.setBlock(local_x, @intCast(surface_y + 1), local_z, s.block);
+                    break;
+                },
+                .schematic => |s| {
+                    if (!s.isAllowed(biome, surface_block)) continue;
+
+                    if (!allow_subbiomes) {
+                        if (s.variant_min != -1.0 or s.variant_max != 1.0) continue;
+                    } else {
+                        if (variant < s.variant_min or variant > s.variant_max) continue;
+                    }
+
+                    const prob = s.probability * veg_mult;
+                    if (random.float(f32) >= prob) continue;
+
+                    s.schematic.place(chunk, local_x, @intCast(surface_y + 1), local_z, random);
+                    break;
+                },
+            }
+        }
+    }
 };

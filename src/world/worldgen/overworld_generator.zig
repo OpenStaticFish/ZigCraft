@@ -27,7 +27,7 @@ const ConfiguredNoise = noise_mod.ConfiguredNoise;
 const NoiseParams = noise_mod.NoiseParams;
 const Vec3f = noise_mod.Vec3f;
 const CaveSystem = @import("caves.zig").CaveSystem;
-const deco_mod = @import("decoration_registry.zig");
+const DecorationProvider = @import("decoration_provider.zig").DecorationProvider;
 const biome_mod = @import("biome.zig");
 const BiomeId = biome_mod.BiomeId;
 const BiomeSource = biome_mod.BiomeSource;
@@ -216,6 +216,7 @@ pub const OverworldGenerator = struct {
     height_sampler: HeightSampler,
     surface_builder: SurfaceBuilder,
     biome_source: BiomeSource,
+    decoration_provider: DecorationProvider,
 
     /// Distance threshold for cache recentering (blocks).
     /// When player is this far from cache center, recenter the cache.
@@ -223,7 +224,7 @@ pub const OverworldGenerator = struct {
     /// before reaching the cache edge.
     pub const CACHE_RECENTER_THRESHOLD: i32 = 512;
 
-    pub fn init(seed: u64, allocator: std.mem.Allocator) OverworldGenerator {
+    pub fn init(seed: u64, allocator: std.mem.Allocator, decoration_provider: DecorationProvider) OverworldGenerator {
         const p = Params{};
         return .{
             .warp_noise_x = ConfiguredNoise.init(makeNoiseParams(seed, 10, 200, p.warp_amplitude, 0, 3, 0.5)),
@@ -276,6 +277,7 @@ pub const OverworldGenerator = struct {
             .height_sampler = HeightSampler.init(),
             .surface_builder = SurfaceBuilder.init(),
             .biome_source = BiomeSource.init(),
+            .decoration_provider = decoration_provider,
         };
     }
 
@@ -1463,94 +1465,18 @@ pub const OverworldGenerator = struct {
                 const surface_block = chunk.getBlock(local_x, @intCast(surface_y), local_z);
 
                 // Try decorations
-                for (deco_mod.DECORATIONS) |deco| {
-                    switch (deco) {
-                        .simple => |s| {
-                            if (!self.isBiomeAllowed(s.biomes, biome)) continue;
-
-                            // Sub-biome suppression: if region doesn't allow sub-biomes,
-                            // only spawn decorations in the middle variant range
-                            if (!allow_subbiomes) {
-                                if (s.variant_min != -1.0 or s.variant_max != 1.0) {
-                                    continue; // Skip variant-specific decorations
-                                }
-                            } else {
-                                if (variant_val < s.variant_min or variant_val > s.variant_max) continue;
-                            }
-
-                            if (!self.isBlockAllowed(s.place_on, surface_block)) continue;
-
-                            // Apply region vegetation multiplier
-                            const prob = s.probability * veg_mult;
-                            if (random.float(f32) >= prob) continue;
-
-                            // Place simple decoration
-                            chunk.setBlock(local_x, @intCast(surface_y + 1), local_z, s.block);
-                            break; // Only one decoration per column
-                        },
-                        .schematic => |s| {
-                            if (!self.isBiomeAllowed(s.biomes, biome)) continue;
-
-                            // Sub-biome suppression
-                            if (!allow_subbiomes) {
-                                if (s.variant_min != -1.0 or s.variant_max != 1.0) {
-                                    continue;
-                                }
-                            } else {
-                                if (variant_val < s.variant_min or variant_val > s.variant_max) continue;
-                            }
-
-                            if (!self.isBlockAllowed(s.place_on, surface_block)) continue;
-
-                            // Apply region vegetation multiplier
-                            const prob = s.probability * veg_mult;
-                            if (random.float(f32) >= prob) continue;
-
-                            // Place schematic
-                            self.placeSchematic(chunk, local_x, @intCast(surface_y + 1), local_z, s.schematic, random);
-                            break;
-                        },
-                    }
-                }
-            }
-        }
-    }
-
-    fn isBiomeAllowed(self: *const OverworldGenerator, allowed: []const BiomeId, current: BiomeId) bool {
-        _ = self;
-        if (allowed.len == 0) return true;
-        for (allowed) |b| {
-            if (b == current) return true;
-        }
-        return false;
-    }
-
-    fn isBlockAllowed(self: *const OverworldGenerator, allowed: []const BlockType, current: BlockType) bool {
-        _ = self;
-        for (allowed) |b| {
-            if (b == current) return true;
-        }
-        return false;
-    }
-
-    fn placeSchematic(self: *const OverworldGenerator, chunk: *Chunk, x: u32, y: u32, z: u32, schematic: deco_mod.Schematic, random: std.Random) void {
-        _ = self;
-        _ = random;
-        const center_x = @as(i32, @intCast(x));
-        const center_y = @as(i32, @intCast(y));
-        const center_z = @as(i32, @intCast(z));
-
-        for (schematic.blocks) |sb| {
-            const bx = center_x + sb.offset[0] - schematic.center_x;
-            const by = center_y + sb.offset[1];
-            const bz = center_z + sb.offset[2] - schematic.center_z;
-
-            if (bx >= 0 and bx < CHUNK_SIZE_X and bz >= 0 and bz < CHUNK_SIZE_Z and by >= 0 and by < CHUNK_SIZE_Y) {
-                // Don't overwrite existing solid blocks to avoid trees deleting ground
-                const existing = chunk.getBlock(@intCast(bx), @intCast(by), @intCast(bz));
-                if (existing == .air or existing.isTransparent()) {
-                    chunk.setBlock(@intCast(bx), @intCast(by), @intCast(bz), sb.block);
-                }
+                self.decoration_provider.decorate(
+                    chunk,
+                    local_x,
+                    local_z,
+                    @intCast(surface_y),
+                    surface_block,
+                    biome,
+                    variant_val,
+                    allow_subbiomes,
+                    veg_mult,
+                    random,
+                );
             }
         }
     }

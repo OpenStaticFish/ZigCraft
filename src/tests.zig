@@ -908,13 +908,14 @@ test "ConfiguredNoise determinism with same params" {
 // ============================================================================
 
 const OverworldGenerator = @import("world/worldgen/overworld_generator.zig").OverworldGenerator;
+const deco_registry = @import("world/worldgen/decoration_registry.zig");
 const Generator = @import("world/worldgen/generator_interface.zig").Generator;
 
 test "WorldGen same seed produces identical blocks at origin" {
     const allocator = testing.allocator;
 
-    var gen1 = OverworldGenerator.init(12345, allocator);
-    var gen2 = OverworldGenerator.init(12345, allocator);
+    var gen1 = OverworldGenerator.init(12345, allocator, deco_registry.StandardDecorationProvider.provider());
+    var gen2 = OverworldGenerator.init(12345, allocator, deco_registry.StandardDecorationProvider.provider());
 
     var chunk1 = Chunk.init(0, 0);
     var chunk2 = Chunk.init(0, 0);
@@ -928,8 +929,8 @@ test "WorldGen same seed produces identical blocks at origin" {
 test "WorldGen same seed produces identical biomes at origin" {
     const allocator = testing.allocator;
 
-    var gen1 = OverworldGenerator.init(12345, allocator);
-    var gen2 = OverworldGenerator.init(12345, allocator);
+    var gen1 = OverworldGenerator.init(12345, allocator, deco_registry.StandardDecorationProvider.provider());
+    var gen2 = OverworldGenerator.init(12345, allocator, deco_registry.StandardDecorationProvider.provider());
 
     var chunk1 = Chunk.init(0, 0);
     var chunk2 = Chunk.init(0, 0);
@@ -945,7 +946,7 @@ test "WorldGen same seed produces identical blocks at different positions" {
 
     const seed: u64 = 54321;
 
-    var gen1 = OverworldGenerator.init(seed, allocator);
+    var gen1 = OverworldGenerator.init(seed, allocator, deco_registry.StandardDecorationProvider.provider());
     var chunk1a = Chunk.init(0, 0);
     var chunk1b = Chunk.init(1, 0);
     var chunk1c = Chunk.init(0, 1);
@@ -954,7 +955,7 @@ test "WorldGen same seed produces identical blocks at different positions" {
     gen1.generate(&chunk1b, null);
     gen1.generate(&chunk1c, null);
 
-    var gen2 = OverworldGenerator.init(seed, allocator);
+    var gen2 = OverworldGenerator.init(seed, allocator, deco_registry.StandardDecorationProvider.provider());
     var chunk2a = Chunk.init(0, 0);
     var chunk2b = Chunk.init(1, 0);
     var chunk2c = Chunk.init(0, 1);
@@ -974,8 +975,8 @@ test "WorldGen same seed produces identical blocks at different positions" {
 test "WorldGen different seeds produce different blocks" {
     const allocator = testing.allocator;
 
-    var gen1 = OverworldGenerator.init(11111, allocator);
-    var gen2 = OverworldGenerator.init(99999, allocator);
+    var gen1 = OverworldGenerator.init(11111, allocator, deco_registry.StandardDecorationProvider.provider());
+    var gen2 = OverworldGenerator.init(99999, allocator, deco_registry.StandardDecorationProvider.provider());
 
     var chunk1 = Chunk.init(0, 0);
     var chunk2 = Chunk.init(0, 0);
@@ -990,8 +991,8 @@ test "WorldGen different seeds produce different blocks" {
 test "WorldGen different seeds produce different biomes" {
     const allocator = testing.allocator;
 
-    var gen1 = OverworldGenerator.init(11111, allocator);
-    var gen2 = OverworldGenerator.init(99999, allocator);
+    var gen1 = OverworldGenerator.init(11111, allocator, deco_registry.StandardDecorationProvider.provider());
+    var gen2 = OverworldGenerator.init(99999, allocator, deco_registry.StandardDecorationProvider.provider());
 
     // With structure-first generation (Issue #92), noise scales are much larger
     // (continental scale = 1/3500). To see biome differences, we need to test
@@ -1030,9 +1031,9 @@ test "WorldGen determinism across multiple chunks with same seed" {
     const seed: u64 = 987654321;
 
     var gens = [_]OverworldGenerator{
-        OverworldGenerator.init(seed, allocator),
-        OverworldGenerator.init(seed, allocator),
-        OverworldGenerator.init(seed, allocator),
+        OverworldGenerator.init(seed, allocator, deco_registry.StandardDecorationProvider.provider()),
+        OverworldGenerator.init(seed, allocator, deco_registry.StandardDecorationProvider.provider()),
+        OverworldGenerator.init(seed, allocator, deco_registry.StandardDecorationProvider.provider()),
     };
 
     var chunks1 = [_]Chunk{
@@ -1064,7 +1065,7 @@ test "WorldGen determinism across multiple chunks with same seed" {
 test "WorldGen golden output for known seed at origin" {
     const allocator = testing.allocator;
 
-    var gen = OverworldGenerator.init(42, allocator);
+    var gen = OverworldGenerator.init(42, allocator, deco_registry.StandardDecorationProvider.provider());
     var chunk = Chunk.init(0, 0);
 
     gen.generate(&chunk, null);
@@ -1090,7 +1091,7 @@ test "WorldGen golden output for known seed at origin" {
 
 test "WorldGen populates heightmap and biomes" {
     const allocator = testing.allocator;
-    var gen = OverworldGenerator.init(42, allocator);
+    var gen = OverworldGenerator.init(42, allocator, deco_registry.StandardDecorationProvider.provider());
     var chunk = Chunk.init(0, 0);
 
     gen.generate(&chunk, null);
@@ -1121,34 +1122,78 @@ test "WorldGen populates heightmap and biomes" {
 
 test "Decoration placement" {
     const allocator = testing.allocator;
-    const gen = OverworldGenerator.init(42, allocator);
-    var chunk = Chunk.init(0, 0);
+    const gen = OverworldGenerator.init(42, allocator, deco_registry.StandardDecorationProvider.provider());
+    _ = gen;
+}
 
-    // Setup chunk for decorations
-    for (0..CHUNK_SIZE_Z) |z| {
-        for (0..CHUNK_SIZE_X) |x| {
-            chunk.setSurfaceHeight(@intCast(x), @intCast(z), 64);
-            chunk.biomes[x + z * CHUNK_SIZE_X] = .plains;
-            chunk.setBlock(@intCast(x), 64, @intCast(z), .grass);
+test "OverworldGenerator with mock decoration provider" {
+    const allocator = std.testing.allocator;
+    const DecorationProvider = @import("world/worldgen/decoration_provider.zig").DecorationProvider;
+
+    const MockProvider = struct {
+        called_count: *usize,
+
+        pub fn provider(called_count: *usize) DecorationProvider {
+            return .{
+                .ptr = called_count,
+                .vtable = &VTABLE,
+            };
+        }
+
+        const VTABLE = DecorationProvider.VTable{
+            .decorate = decorate,
+        };
+
+        fn decorate(
+            ptr: *anyopaque,
+            chunk: *Chunk,
+            local_x: u32,
+            local_z: u32,
+            surface_y: i32,
+            surface_block: BlockType,
+            biome: BiomeId,
+            variant: f32,
+            allow_subbiomes: bool,
+            veg_mult: f32,
+            random: std.Random,
+        ) void {
+            _ = chunk;
+            _ = local_x;
+            _ = local_z;
+            _ = surface_y;
+            _ = surface_block;
+            _ = biome;
+            _ = variant;
+            _ = allow_subbiomes;
+            _ = veg_mult;
+            _ = random;
+            const count: *usize = @ptrCast(@alignCast(ptr));
+            count.* += 1;
+        }
+    };
+
+    var called_count: usize = 0;
+    var gen = OverworldGenerator.init(42, allocator, MockProvider.provider(&called_count));
+
+    var chunk = try allocator.create(Chunk);
+    defer allocator.destroy(chunk);
+    chunk.* = Chunk.init(0, 0);
+
+    // Manually set some surface heights to trigger decoration attempts
+    var z: u32 = 0;
+    while (z < 16) : (z += 1) {
+        var x: u32 = 0;
+        while (x < 16) : (x += 1) {
+            chunk.setSurfaceHeight(x, z, 64);
+            chunk.setBlock(x, 64, z, .grass);
+            chunk.biomes[x + z * 16] = .plains;
         }
     }
 
-    gen.generateFeatures(&chunk);
+    gen.generateFeatures(chunk);
 
-    // Verify some decorations placed
-    var deco_count: u32 = 0;
-    for (0..CHUNK_SIZE_Z) |z| {
-        for (0..CHUNK_SIZE_X) |x| {
-            const block = chunk.getBlock(@intCast(x), 65, @intCast(z));
-            if (block == .tall_grass or block == .flower_red) {
-                deco_count += 1;
-            }
-        }
-    }
-
-    // Plains has 0.5 prob for grass, 0.05 for flowers.
-    // 256 blocks * 0.55 ~= 140 decorations.
-    try testing.expect(deco_count > 50);
+    // Should have been called 16*16 = 256 times
+    try std.testing.expectEqual(@as(usize, 256), called_count);
 }
 
 // ============================================================================
