@@ -9,10 +9,21 @@ const Face = @import("block.zig").Face;
 
 /// Rendering pass for the block
 pub const RenderPass = enum {
-    solid, // Opaque blocks (stone, dirt)
-    cutout, // Transparent with alpha test (leaves, grass, flowers)
-    fluid, // Translucent, special fluid handling (water)
-    translucent, // Translucent, sorted (glass)
+    /// Opaque blocks (e.g., stone, dirt).
+    /// These are drawn first and obscure everything behind them.
+    solid,
+
+    /// Transparent blocks with alpha testing (e.g., leaves, grass, flowers).
+    /// Pixels are either fully opaque or fully transparent.
+    cutout,
+
+    /// Translucent fluid blocks (e.g., water).
+    /// Special handling for face culling between same-fluid blocks.
+    fluid,
+
+    /// Translucent blocks with alpha blending (e.g., glass).
+    /// Drawn last, back-to-front sorted ideally.
+    translucent,
 };
 
 pub const BlockDefinition = struct {
@@ -69,6 +80,14 @@ pub const BLOCK_REGISTRY = blk: {
     if (@typeInfo(BlockType).@"enum".tag_type != u8) {
         @compileError("BlockType must be backed by u8 for BLOCK_REGISTRY safety");
     }
+
+    // Validate that all enum fields are covered by the registry size
+    if (@typeInfo(BlockType).@"enum".fields.len > 256) {
+        @compileError("BlockType has more fields than BLOCK_REGISTRY size (256)");
+    }
+
+    // Ensure we cover all fields (length check is a proxy, but good sanity check)
+    // The iteration below covers them all by name.
 
     var definitions = [_]BlockDefinition{undefined} ** 256; // Max u8 blocks
 
@@ -189,7 +208,7 @@ pub const BLOCK_REGISTRY = blk: {
         // 6. Render Pass
         def.render_pass = switch (id) {
             .water => .fluid,
-            .glass => .fluid, // Or translucent, using fluid for now as per original grouping
+            .glass => .translucent,
             .leaves, .mangrove_leaves, .jungle_leaves, .acacia_leaves, .birch_leaves, .spruce_leaves, .mangrove_roots, .bamboo, .acacia_sapling, .vine, .tall_grass, .flower_red, .flower_yellow, .dead_bush, .cactus, .melon => .cutout,
             else => .solid,
         };
@@ -210,5 +229,7 @@ pub const BLOCK_REGISTRY = blk: {
 /// Get the block definition for a given block type
 pub fn getBlockDefinition(block: BlockType) *const BlockDefinition {
     const idx = @intFromEnum(block);
+    // Bounds check is implicit for u8 indexing into [256] array,
+    // and we validated BlockType is u8 backed at comptime.
     return &BLOCK_REGISTRY[idx];
 }

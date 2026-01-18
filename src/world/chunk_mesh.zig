@@ -240,11 +240,11 @@ pub const ChunkMesh = struct {
 
                 if (isEmittingSubchunk(axis, s - 1, u, v, y_min, y_max) and b1_emits and !b2_def.occludes(b1_def.*, axis)) {
                     const light = getLightAtBoundary(chunk, neighbors, axis, s, u, v, si);
-                    const color = getBlockColor(chunk, neighbors, axis, s - 1, u, v, si, b1);
+                    const color = getBlockColor(chunk, neighbors, axis, s - 1, u, v, b1);
                     mask[u + v * du] = .{ .block = b1, .side = true, .light = light, .color = color };
                 } else if (isEmittingSubchunk(axis, s, u, v, y_min, y_max) and b2_emits and !b1_def.occludes(b2_def.*, axis)) {
                     const light = getLightAtBoundary(chunk, neighbors, axis, s, u, v, si);
-                    const color = getBlockColor(chunk, neighbors, axis, s, u, v, si, b2);
+                    const color = getBlockColor(chunk, neighbors, axis, s, u, v, b2);
                     mask[u + v * du] = .{ .block = b2, .side = false, .light = light, .color = color };
                 }
             }
@@ -641,7 +641,7 @@ fn getBiomeAt(chunk: *const Chunk, neighbors: NeighborChunks, x: i32, z: i32) bi
     return chunk.getBiome(@intCast(x), @intCast(z));
 }
 
-fn getBlockColor(chunk: *const Chunk, neighbors: NeighborChunks, axis: Face, s: i32, u: u32, v: u32, si: u32, block: BlockType) [3]f32 {
+fn getBlockColor(chunk: *const Chunk, neighbors: NeighborChunks, axis: Face, s: i32, u: u32, v: u32, block: BlockType) [3]f32 {
     // Only apply biome tint to top face of grass, and all faces of leaves/water
     if (block == .grass) {
         // Grass: only tint the top face, sides and bottom get no tint
@@ -652,7 +652,6 @@ fn getBlockColor(chunk: *const Chunk, neighbors: NeighborChunks, axis: Face, s: 
 
     var x: i32 = 0;
     var z: i32 = 0;
-    _ = si;
 
     switch (axis) {
         .top => {
