@@ -3,6 +3,8 @@
 
 const std = @import("std");
 const BlockType = @import("../block.zig").BlockType;
+const tree_registry = @import("tree_registry.zig");
+pub const TreeType = tree_registry.TreeType;
 
 /// Minimum sum threshold for biome blend calculation to avoid division by near-zero values
 const BLEND_EPSILON: f32 = 0.0001;
@@ -36,20 +38,6 @@ pub const ColorTints = struct {
     grass: [3]f32 = .{ 0.3, 0.65, 0.2 }, // Default green
     foliage: [3]f32 = .{ 0.2, 0.5, 0.15 },
     water: [3]f32 = .{ 0.2, 0.4, 0.8 },
-};
-
-/// Tree types that can spawn in biomes
-pub const TreeType = enum {
-    oak,
-    birch,
-    spruce,
-    swamp_oak, // Swamp trees with vines
-    mangrove, // Prop roots
-    jungle, // Tall with vines
-    acacia, // Diagonal trunk
-    huge_red_mushroom,
-    huge_brown_mushroom,
-    none,
 };
 
 /// Vegetation profile for biome-driven placement
@@ -431,7 +419,7 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .ruggedness = Range.any(),
         .priority = 0, // Fallback
         .surface = .{ .top = .grass, .filler = .dirt, .depth_range = 3 },
-        .vegetation = .{ .tree_types = &.{.oak}, .tree_density = 0.02, .grass_density = 0.3 },
+        .vegetation = .{ .tree_types = &.{.sparse_oak}, .tree_density = 0.02, .grass_density = 0.3 },
         .terrain = .{ .height_amplitude = 0.7, .smoothing = 0.2 },
     },
     .{
@@ -444,7 +432,7 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .ruggedness = .{ .min = 0.0, .max = 0.60 },
         .priority = 5,
         .surface = .{ .top = .grass, .filler = .dirt, .depth_range = 3 },
-        .vegetation = .{ .tree_types = &.{ .oak, .birch }, .tree_density = 0.12, .bush_density = 0.05, .grass_density = 0.4 },
+        .vegetation = .{ .tree_types = &.{ .oak, .birch, .dense_oak }, .tree_density = 0.12, .bush_density = 0.05, .grass_density = 0.4 },
         .colors = .{ .grass = .{ 0.25, 0.55, 0.18 }, .foliage = .{ 0.18, 0.45, 0.12 } },
     },
     .{
@@ -522,7 +510,7 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .min_ridge_mask = 0.1,
         .priority = 2,
         .surface = .{ .top = .stone, .filler = .stone, .depth_range = 1 },
-        .vegetation = .{ .tree_types = &.{}, .tree_density = 0 },
+        .vegetation = .{ .tree_types = &.{.sparse_oak}, .tree_density = 0 },
         .terrain = .{ .height_amplitude = 1.5 },
     },
     .{
@@ -632,7 +620,7 @@ pub const BIOME_REGISTRY: []const BiomeDefinition = &.{
         .ruggedness = .{ .min = 0.30, .max = 0.80 },
         .priority = 0, // Lowest priority
         .surface = .{ .top = .grass, .filler = .dirt, .depth_range = 3 },
-        .vegetation = .{ .tree_types = &.{ .oak, .spruce }, .tree_density = 0.08, .grass_density = 0.4 },
+        .vegetation = .{ .tree_types = &.{ .sparse_oak, .spruce }, .tree_density = 0.08, .grass_density = 0.4 },
         .terrain = .{ .height_amplitude = 1.1, .smoothing = 0.1 },
         .colors = .{ .grass = .{ 0.35, 0.60, 0.25 } },
     },
@@ -694,7 +682,7 @@ pub fn selectBiome(params: ClimateParams) BiomeId {
     var best_biome: BiomeId = .plains; // Default fallback
 
     for (BIOME_REGISTRY) |biome| {
-        const s = biome.score(params);
+        const s = biome.scoreClimate(params);
         if (s > best_score) {
             best_score = s;
             best_biome = biome.id;
@@ -709,8 +697,8 @@ pub fn getBiomeDefinition(id: BiomeId) *const BiomeDefinition {
     for (BIOME_REGISTRY) |*biome| {
         if (biome.id == id) return biome;
     }
-    // Fallback to plains
-    return &BIOME_REGISTRY[3]; // plains index
+    // All biomes in BiomeId enum must have a corresponding definition in BIOME_REGISTRY
+    unreachable;
 }
 
 /// Select biome with river override
@@ -773,7 +761,7 @@ pub fn selectBiomeBlended(params: ClimateParams) BiomeSelection {
     var second_biome: ?BiomeId = null;
 
     for (BIOME_REGISTRY) |biome| {
-        const s = biome.score(params);
+        const s = biome.scoreClimate(params);
         if (s > best_score) {
             second_score = best_score;
             second_biome = best_biome;

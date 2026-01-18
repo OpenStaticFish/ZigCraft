@@ -6,13 +6,11 @@
 
 const std = @import("std");
 const BlockType = @import("../block.zig").BlockType;
-const block_registry = @import("../block_registry.zig");
 const BiomeId = @import("biome.zig").BiomeId;
-const chunk_mod = @import("../chunk.zig");
-const Chunk = chunk_mod.Chunk;
-const CHUNK_SIZE_X = chunk_mod.CHUNK_SIZE_X;
-const CHUNK_SIZE_Y = chunk_mod.CHUNK_SIZE_Y;
-const CHUNK_SIZE_Z = chunk_mod.CHUNK_SIZE_Z;
+// Import schematics to get the Schematic type definition
+pub const schematics = @import("schematics.zig");
+pub const Schematic = schematics.Schematic;
+pub const SchematicBlock = schematics.SchematicBlock;
 
 pub const Rotation = enum {
     none,
@@ -36,45 +34,6 @@ pub const SimpleDecoration = struct {
         if (!isBiomeAllowed(self.biomes, biome)) return false;
         if (!isBlockAllowed(self.place_on, surface_block)) return false;
         return true;
-    }
-};
-
-pub const SchematicBlock = struct {
-    offset: [3]i32,
-    block: BlockType,
-    probability: f32 = 1.0, // Chance for this specific block to spawn
-};
-
-pub const Schematic = struct {
-    blocks: []const SchematicBlock,
-    size_x: i32,
-    size_y: i32,
-    size_z: i32,
-    center_x: i32 = 0, // Offset to center
-    center_z: i32 = 0,
-
-    pub fn place(self: Schematic, chunk: *Chunk, x: u32, y: u32, z: u32, random: std.Random) void {
-        const center_x = @as(i32, @intCast(x));
-        const center_y = @as(i32, @intCast(y));
-        const center_z = @as(i32, @intCast(z));
-
-        for (self.blocks) |sb| {
-            // Skip random check for blocks with 100% probability (optimization)
-            if (sb.probability < 1.0) {
-                if (random.float(f32) >= sb.probability) continue;
-            }
-            const bx = center_x + sb.offset[0] - self.center_x;
-            const by = center_y + sb.offset[1];
-            const bz = center_z + sb.offset[2] - self.center_z;
-
-            if (bx >= 0 and bx < CHUNK_SIZE_X and bz >= 0 and bz < CHUNK_SIZE_Z and by >= 0 and by < CHUNK_SIZE_Y) {
-                // Don't overwrite existing solid blocks to avoid trees deleting ground
-                const existing = chunk.getBlock(@intCast(bx), @intCast(by), @intCast(bz));
-                if (existing == .air or block_registry.getBlockDefinition(existing).is_transparent) {
-                    chunk.setBlock(@intCast(bx), @intCast(by), @intCast(bz), sb.block);
-                }
-            }
-        }
     }
 };
 
