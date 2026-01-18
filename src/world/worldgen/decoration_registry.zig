@@ -77,18 +77,18 @@ pub const DECORATIONS = [_]Decoration{
         },
     },
 
-    // === Trees: Sparse (Plains, Swamp, Mountains) ===
+    // === Trees: Sparse (Plains, Mountains) ===
     .{
         .schematic = .{
             .schematic = schematics.OAK_TREE,
             .place_on = &.{ .grass, .dirt },
-            .biomes = &.{ .plains, .swamp, .mountains },
+            .biomes = &.{ .plains, .mountains },
             .probability = 0.002, // Very sparse
             .spacing_radius = 4,
         },
     },
 
-    // === Trees: Standard Forest (Variant -0.4 to 0.4) ===
+    // === Forest: Oak Trees (Standard) ===
     .{ .schematic = .{
         .schematic = schematics.OAK_TREE,
         .place_on = &.{ .grass, .dirt },
@@ -99,19 +99,103 @@ pub const DECORATIONS = [_]Decoration{
         .variant_max = 0.4,
     } },
 
-    // === Trees: Dense Forest (Variant > 0.4) ===
+    // === Forest: Birch Trees (Standard) ===
+    .{ .schematic = .{
+        .schematic = schematics.BIRCH_TREE,
+        .place_on = &.{ .grass, .dirt },
+        .biomes = &.{.forest},
+        .probability = 0.015,
+        .spacing_radius = 3,
+        .variant_min = 0.0,
+        .variant_max = 0.6,
+    } },
+
+    // === Forest: Dense Oak (Variant > 0.4) ===
     .{
         .schematic = .{
             .schematic = schematics.OAK_TREE,
             .place_on = &.{ .grass, .dirt },
             .biomes = &.{.forest},
-            .probability = 0.15, // Dense!
+            .probability = 0.1,
             .spacing_radius = 2,
             .variant_min = 0.4,
         },
     },
 
-    // Note: Forest with variant < -0.4 has NO trees (Clearing)
+    // === Taiga: Spruce Trees ===
+    .{
+        .schematic = .{
+            .schematic = schematics.SPRUCE_TREE,
+            .place_on = &.{ .grass, .dirt, .snow_block },
+            .biomes = &.{ .taiga, .snow_tundra },
+            .probability = 0.08,
+            .spacing_radius = 3,
+        },
+    },
+
+    // === Swamp: Swamp Oak ===
+    .{
+        .schematic = .{
+            .schematic = schematics.SWAMP_OAK,
+            .place_on = &.{ .grass, .dirt },
+            .biomes = &.{.swamp},
+            .probability = 0.05,
+            .spacing_radius = 4,
+        },
+    },
+
+    // === Mangrove Swamp: Mangrove Trees ===
+    .{
+        .schematic = .{
+            .schematic = schematics.MANGROVE_TREE,
+            .place_on = &.{ .mud, .grass },
+            .biomes = &.{.mangrove_swamp},
+            .probability = 0.12,
+            .spacing_radius = 3,
+        },
+    },
+
+    // === Jungle: Jungle Trees ===
+    .{
+        .schematic = .{
+            .schematic = schematics.JUNGLE_TREE,
+            .place_on = &.{ .grass, .dirt },
+            .biomes = &.{.jungle},
+            .probability = 0.15,
+            .spacing_radius = 2,
+        },
+    },
+
+    // === Savanna: Acacia Trees ===
+    .{
+        .schematic = .{
+            .schematic = schematics.ACACIA_TREE,
+            .place_on = &.{ .grass, .dirt },
+            .biomes = &.{.savanna},
+            .probability = 0.015,
+            .spacing_radius = 5,
+        },
+    },
+
+    // === Mushroom Fields: Huge Mushrooms ===
+    .{
+        .schematic = .{
+            .schematic = schematics.HUGE_RED_MUSHROOM,
+            .place_on = &.{.mycelium},
+            .biomes = &.{.mushroom_fields},
+            .probability = 0.03,
+            .spacing_radius = 4,
+        },
+    },
+    .{
+        .schematic = .{
+            .schematic = schematics.HUGE_BROWN_MUSHROOM,
+            .place_on = &.{.mycelium},
+            .biomes = &.{.mushroom_fields},
+            .probability = 0.03,
+            .spacing_radius = 4,
+        },
+    },
 };
 
 const Chunk = @import("../chunk.zig").Chunk;
