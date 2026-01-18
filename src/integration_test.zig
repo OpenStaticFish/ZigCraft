@@ -25,7 +25,7 @@ test "smoke test: launch, generate, render, exit" {
     };
     defer app.deinit();
 
-    const world_screen = try WorldScreen.init(test_allocator, app.engineContext(), 12345);
+    const world_screen = try WorldScreen.init(test_allocator, app.engineContext(), 12345, 0);
     app.screen_manager.setScreen(world_screen.screen());
 
     try app.runSingleFrame();

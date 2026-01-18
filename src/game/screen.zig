@@ -127,14 +127,35 @@ pub const ScreenManager = struct {
     }
 
     pub fn pushScreen(self: *ScreenManager, screen: IScreen) void {
+        if (self.next_screen) |next| {
+            switch (next) {
+                .push => |s| s.deinit(),
+                .replace => |s| s.deinit(),
+                .pop => {},
+            }
+        }
         self.next_screen = .{ .push = screen };
     }
 
     pub fn popScreen(self: *ScreenManager) void {
+        if (self.next_screen) |next| {
+            switch (next) {
+                .push => |s| s.deinit(),
+                .replace => |s| s.deinit(),
+                .pop => {},
+            }
+        }
         self.next_screen = .pop;
     }
 
     pub fn setScreen(self: *ScreenManager, screen: IScreen) void {
+        if (self.next_screen) |next| {
+            switch (next) {
+                .push => |s| s.deinit(),
+                .replace => |s| s.deinit(),
+                .pop => {},
+            }
+        }
         self.next_screen = .{ .replace = screen };
     }
 
