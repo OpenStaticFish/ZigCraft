@@ -643,6 +643,8 @@ fn getBiomeAt(chunk: *const Chunk, neighbors: NeighborChunks, x: i32, z: i32) bi
 }
 
 fn getBlockColor(chunk: *const Chunk, neighbors: NeighborChunks, axis: Face, s: i32, u: u32, v: u32, block: BlockType) [3]f32 {
+    // Note: subchunk index (si) is not needed here as biome colors rely on column/world coordinates (x, z) derived from s, u, v.
+
     // Only apply biome tint to top face of grass, and all faces of leaves/water
     if (block == .grass) {
         // Grass: only tint the top face, sides and bottom get no tint
