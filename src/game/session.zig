@@ -35,169 +35,7 @@ const ECSComponents = @import("../engine/ecs/components.zig");
 const ECSPhysicsSystem = @import("../engine/ecs/systems/physics.zig").PhysicsSystem;
 const ECSRenderSystem = @import("../engine/ecs/systems/render.zig").RenderSystem;
 
-pub const AtmosphereState = struct {
-    world_ticks: u64 = 0,
-    tick_accumulator: f32 = 0.0,
-    time_scale: f32 = 1.0,
-    time_of_day: f32 = 0.25,
-    sun_intensity: f32 = 1.0,
-    moon_intensity: f32 = 0.0,
-    sun_dir: Vec3 = Vec3.init(0, 1, 0),
-    moon_dir: Vec3 = Vec3.init(0, -1, 0),
-    sky_color: Vec3 = Vec3.init(0.5, 0.7, 1.0),
-    horizon_color: Vec3 = Vec3.init(0.8, 0.85, 0.95),
-    sun_color: Vec3 = Vec3.init(1.0, 1.0, 1.0),
-    fog_color: Vec3 = Vec3.init(0.6, 0.75, 0.95),
-    ambient_intensity: f32 = 0.3,
-    fog_density: f32 = 0.0015,
-    fog_enabled: bool = true,
-    orbit_tilt: f32 = 0.35,
-
-    fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
-        const t = std.math.clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
-        return t * t * (3.0 - 2.0 * t);
-    }
-
-    fn lerpVec3(a: Vec3, b: Vec3, t: f32) Vec3 {
-        return Vec3.init(
-            std.math.lerp(a.x, b.x, t),
-            std.math.lerp(a.y, b.y, t),
-            std.math.lerp(a.z, b.z, t),
-        );
-    }
-
-    pub fn update(self: *AtmosphereState, delta_time: f32) void {
-        self.tick_accumulator += delta_time * 20.0 * self.time_scale;
-        if (self.tick_accumulator >= 1.0) {
-            const ticks_delta: u64 = @intFromFloat(self.tick_accumulator);
-            self.world_ticks +%= ticks_delta;
-            self.tick_accumulator -= @floatFromInt(ticks_delta);
-        }
-
-        const day_ticks = self.world_ticks % 24000;
-        self.time_of_day = @as(f32, @floatFromInt(day_ticks)) / 24000.0;
-
-        self.updateCelestialBodies();
-        self.updateIntensities();
-        self.updateColors();
-    }
-
-    fn updateCelestialBodies(self: *AtmosphereState) void {
-        const sun_angle = self.time_of_day * std.math.tau;
-        const cos_angle = @cos(sun_angle);
-        const sin_angle = @sin(sun_angle);
-        const cos_tilt = @cos(self.orbit_tilt);
-        const sin_tilt = @sin(self.orbit_tilt);
-
-        self.sun_dir = Vec3.init(
-            sin_angle,
-            -cos_angle * cos_tilt,
-            -cos_angle * sin_tilt,
-        ).normalize();
-        self.moon_dir = self.sun_dir.scale(-1);
-    }
-
-    fn updateIntensities(self: *AtmosphereState) void {
-        const t = self.time_of_day;
-        const DAWN_START: f32 = 0.20;
-        const DAWN_END: f32 = 0.30;
-        const DUSK_START: f32 = 0.70;
-        const DUSK_END: f32 = 0.80;
-
-        if (t < DAWN_START) {
-            self.sun_intensity = 0;
-        } else if (t < DAWN_END) {
-            self.sun_intensity = smoothstep(DAWN_START, DAWN_END, t);
-        } else if (t < DUSK_START) {
-            self.sun_intensity = 1.0;
-        } else if (t < DUSK_END) {
-            self.sun_intensity = 1.0 - smoothstep(DUSK_START, DUSK_END, t);
-        } else {
-            self.sun_intensity = 0;
-        }
-
-        self.moon_intensity = (1.0 - self.sun_intensity) * 0.15;
-        const day_ambient: f32 = 0.45;
-        const night_ambient: f32 = 0.15;
-        self.ambient_intensity = std.math.lerp(night_ambient, day_ambient, self.sun_intensity);
-    }
-
-    fn updateColors(self: *AtmosphereState) void {
-        const t = self.time_of_day;
-        const DAWN_START: f32 = 0.20;
-        const DAWN_END: f32 = 0.30;
-        const DUSK_START: f32 = 0.70;
-        const DUSK_END: f32 = 0.80;
-
-        const day_sky = Vec3.init(0.4, 0.65, 1.0).toLinear();
-        const day_horizon = Vec3.init(0.7, 0.8, 0.95).toLinear();
-        const night_sky = Vec3.init(0.02, 0.02, 0.08).toLinear();
-        const night_horizon = Vec3.init(0.05, 0.05, 0.12).toLinear();
-        const dawn_sky = Vec3.init(0.25, 0.3, 0.5).toLinear();
-        const dawn_horizon = Vec3.init(0.95, 0.55, 0.2).toLinear();
-        const dusk_sky = Vec3.init(0.25, 0.3, 0.5).toLinear();
-        const dusk_horizon = Vec3.init(0.95, 0.55, 0.2).toLinear();
-
-        const day_sun = Vec3.init(1.0, 0.95, 0.9).toLinear();
-        const dawn_sun = Vec3.init(1.0, 0.85, 0.6).toLinear();
-        const dusk_sun = Vec3.init(1.0, 0.85, 0.6).toLinear();
-        const night_sun = Vec3.init(0.04, 0.04, 0.1).toLinear();
-
-        if (t < DAWN_START) {
-            self.sky_color = night_sky;
-            self.horizon_color = night_horizon;
-            self.sun_color = night_sun;
-        } else if (t < DAWN_END) {
-            const blend = smoothstep(DAWN_START, DAWN_END, t);
-            self.sky_color = lerpVec3(night_sky, dawn_sky, blend);
-            self.horizon_color = lerpVec3(night_horizon, dawn_horizon, blend);
-            self.sun_color = lerpVec3(night_sun, dawn_sun, blend);
-        } else if (t < 0.35) {
-            const blend = smoothstep(DAWN_END, 0.35, t);
-            self.sky_color = lerpVec3(dawn_sky, day_sky, blend);
-            self.horizon_color = lerpVec3(dawn_horizon, day_horizon, blend);
-            self.sun_color = lerpVec3(dawn_sun, day_sun, blend);
-        } else if (t < DUSK_START) {
-            self.sky_color = day_sky;
-            self.horizon_color = day_horizon;
-            self.sun_color = day_sun;
-        } else if (t < 0.75) {
-            const blend = smoothstep(DUSK_START, 0.75, t);
-            self.sky_color = lerpVec3(day_sky, dusk_sky, blend);
-            self.horizon_color = lerpVec3(day_horizon, dusk_horizon, blend);
-            self.sun_color = lerpVec3(day_sun, dusk_sun, blend);
-        } else if (t < DUSK_END) {
-            const blend = smoothstep(0.75, DUSK_END, t);
-            self.sky_color = lerpVec3(dusk_sky, night_sky, blend);
-            self.horizon_color = lerpVec3(dusk_horizon, night_horizon, blend);
-            self.sun_color = lerpVec3(dusk_sun, night_sun, blend);
-        } else {
-            self.sky_color = night_sky;
-            self.horizon_color = night_horizon;
-            self.sun_color = night_sun;
-        }
-
-        self.fog_color = self.horizon_color;
-        self.fog_density = std.math.lerp(0.0015, 0.0008, self.sun_intensity);
-    }
-
-    pub fn setTimeOfDay(self: *AtmosphereState, time: f32) void {
-        self.world_ticks = @intFromFloat(time * 24000.0);
-        self.time_of_day = time;
-        self.tick_accumulator = 0;
-        self.updateCelestialBodies();
-        self.updateIntensities();
-        self.updateColors();
-    }
-
-    pub fn getHours(self: *const AtmosphereState) f32 {
-        return self.time_of_day * 24.0;
-    }
-
-    pub fn getSkyLightFactor(self: *const AtmosphereState) f32 {
-        return @max(self.sun_intensity, self.moon_intensity);
-    }
-};
+const Atmosphere = @import("../engine/atmosphere/atmosphere.zig").Atmosphere;
 
 pub const CloudState = struct {
     wind_offset_x: f32 = 0.0,
@@ -250,7 +88,7 @@ pub const GameSession = struct {
     ecs_render_system: ECSRenderSystem,
     rhi: *RHI,
 
-    atmosphere: AtmosphereState,
+    atmosphere: Atmosphere,
     clouds: CloudState,
 
     creative_mode: bool,
@@ -301,7 +139,7 @@ pub const GameSession = struct {
 
         const player = Player.init(Vec3.init(8, 100, 8), true); // Default creative for now
 
-        var atmosphere = AtmosphereState{};
+        var atmosphere = Atmosphere.init();
         atmosphere.setTimeOfDay(0.25);
 
         session.* = .{
@@ -371,7 +209,7 @@ pub const GameSession = struct {
             if (mapper.isActionPressed(input, .toggle_shadows)) self.debug_shadows = !self.debug_shadows;
             if (self.debug_shadows and mapper.isActionPressed(input, .cycle_cascade)) self.debug_cascade_idx = (self.debug_cascade_idx + 1) % 3;
             if (mapper.isActionPressed(input, .toggle_time_scale)) {
-                self.atmosphere.time_scale = if (self.atmosphere.time_scale > 0) @as(f32, 0.0) else @as(f32, 1.0);
+                self.atmosphere.time.time_scale = if (self.atmosphere.time.time_scale > 0) @as(f32, 0.0) else @as(f32, 1.0);
             }
             if (mapper.isActionPressed(input, .toggle_creative)) {
                 self.creative_mode = !self.creative_mode;

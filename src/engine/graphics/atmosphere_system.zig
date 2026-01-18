@@ -10,7 +10,7 @@ pub const AtmosphereSystem = struct {
 
     cloud_vbo: rhi.BufferHandle = 0,
     cloud_ebo: rhi.BufferHandle = 0,
-    cloud_mesh_size: f32 = 10000.0,
+    cloud_mesh_size: f32 = 2000.0,
 
     pub fn init(allocator: std.mem.Allocator, rhi_instance: RHI) !*AtmosphereSystem {
         const self = try allocator.create(AtmosphereSystem);
@@ -41,11 +41,6 @@ pub const AtmosphereSystem = struct {
         if (self.cloud_vbo != 0) self.rhi.destroyBuffer(self.cloud_vbo);
         if (self.cloud_ebo != 0) self.rhi.destroyBuffer(self.cloud_ebo);
         self.allocator.destroy(self);
-    }
-
-    pub fn renderSky(self: *AtmosphereSystem, params: rhi.SkyParams) void {
-        // This still uses rhi.drawSky for now until we move the pipeline out of RHI
-        self.rhi.drawSky(params);
     }
 
     pub fn renderClouds(self: *AtmosphereSystem, params: rhi.CloudParams, view_proj: Mat4) void {

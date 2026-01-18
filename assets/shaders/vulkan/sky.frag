@@ -73,9 +73,9 @@ float getVolShadow(vec3 p, float viewDepth) {
 vec4 calculateVolumetric(vec3 rayStart, vec3 rayDir, float dither) {
     if (global.volumetric_params.x < 0.5) return vec4(0.0, 0.0, 0.0, 1.0);
     
-    // Removed sun-angle culling to fix sky banding
     float cosSun = dot(rayDir, normalize(global.sun_dir.xyz));
-    // if (cosSun < 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
+    // Optimization: Skip volumetric if looking away from sun (conservative threshold)
+    if (cosSun < -0.3) return vec4(0.0, 0.0, 0.0, 1.0);
     
     float maxDist = 180.0; 
     int steps = 16; 
@@ -97,7 +97,7 @@ vec4 calculateVolumetric(vec3 rayStart, vec3 rayDir, float dither) {
         float heightFalloff = exp(-height * 0.02);
         float density = baseDensity * heightFalloff;
         
-        if (density > 0.0) {
+        if (density > 1e-4) {
             float shadow = getVolShadow(p, d);
             vec3 stepScattering = sunColor * shadow * phase * density * stepSize;
             

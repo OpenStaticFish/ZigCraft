@@ -97,12 +97,12 @@ pub const WorldScreen = struct {
             .cam_up = camera.up,
             .aspect = aspect,
             .tan_half_fov = @tan(camera.fov / 2.0),
-            .sun_dir = self.session.atmosphere.sun_dir,
+            .sun_dir = self.session.atmosphere.celestial.sun_dir,
             .sky_color = self.session.atmosphere.sky_color,
             .horizon_color = self.session.atmosphere.horizon_color,
             .sun_intensity = self.session.atmosphere.sun_intensity,
             .moon_intensity = self.session.atmosphere.moon_intensity,
-            .time = self.session.atmosphere.time_of_day,
+            .time = self.session.atmosphere.time.time_of_day,
         };
 
         const cloud_params: rhi_pkg.CloudParams = blk: {
@@ -110,7 +110,7 @@ pub const WorldScreen = struct {
             break :blk .{
                 .cam_pos = camera.position,
                 .view_proj = view_proj_render,
-                .sun_dir = self.session.atmosphere.sun_dir,
+                .sun_dir = self.session.atmosphere.celestial.sun_dir,
                 .sun_intensity = self.session.atmosphere.sun_intensity,
                 .fog_color = self.session.atmosphere.fog_color,
                 .fog_density = self.session.atmosphere.fog_density,
@@ -140,7 +140,7 @@ pub const WorldScreen = struct {
         };
 
         if (!ctx.skip_world_render) {
-            ctx.rhi.*.updateGlobalUniforms(view_proj_render, camera.position, self.session.atmosphere.sun_dir, self.session.atmosphere.sun_color, self.session.atmosphere.time_of_day, self.session.atmosphere.fog_color, self.session.atmosphere.fog_density, self.session.atmosphere.fog_enabled, self.session.atmosphere.sun_intensity, self.session.atmosphere.ambient_intensity, ctx.settings.textures_enabled, cloud_params);
+            ctx.rhi.*.updateGlobalUniforms(view_proj_render, camera.position, self.session.atmosphere.celestial.sun_dir, self.session.atmosphere.sun_color, self.session.atmosphere.time.time_of_day, self.session.atmosphere.fog_color, self.session.atmosphere.fog_density, self.session.atmosphere.fog_enabled, self.session.atmosphere.sun_intensity, self.session.atmosphere.ambient_intensity, ctx.settings.textures_enabled, cloud_params);
 
             const env_map_handle = if (ctx.env_map_ptr) |e_ptr| (if (e_ptr.*) |t| t.handle else 0) else 0;
 

@@ -199,7 +199,7 @@ pub const SkyPass = struct {
 
     fn execute(ptr: *anyopaque, ctx: SceneContext) void {
         _ = ptr;
-        ctx.atmosphere_system.renderSky(ctx.sky_params);
+        ctx.rhi.drawSky(ctx.sky_params);
     }
 };
 
