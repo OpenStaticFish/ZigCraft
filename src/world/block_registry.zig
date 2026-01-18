@@ -38,7 +38,7 @@ pub const BlockDefinition = struct {
     default_color: [3]f32,
 
     /// Check if this block occludes another block on a given face
-    pub fn occludes(self: BlockDefinition, other_def: BlockDefinition, face: Face) bool {
+    pub fn occludes(self: *const BlockDefinition, other_def: *const BlockDefinition, face: Face) bool {
         _ = face;
         if (self.id == .air) return false;
 
@@ -77,6 +77,7 @@ pub const BlockDefinition = struct {
 /// Global static registry of block definitions
 pub const BLOCK_REGISTRY = blk: {
     // Validate that BlockType is backed by u8 to ensure registry fits
+    // See validation at the end of the block
     if (@typeInfo(BlockType).@"enum".tag_type != u8) {
         @compileError("BlockType must be backed by u8 for BLOCK_REGISTRY safety");
     }
@@ -211,10 +212,7 @@ pub const BLOCK_REGISTRY = blk: {
         };
 
         // 7. Light Emission
-        def.light_emission = switch (id) {
-            .glowstone => .{ 15, 14, 10 },
-            else => .{ 0, 0, 0 },
-        };
+        def.light_emission = if (id == .glowstone) .{ 15, 14, 10 } else .{ 0, 0, 0 };
 
         definitions[int_id] = def;
     }

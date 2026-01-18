@@ -238,11 +238,11 @@ pub const ChunkMesh = struct {
                 const b1_emits = b1_def.is_solid or (b1_def.is_fluid and !b2_def.is_fluid);
                 const b2_emits = b2_def.is_solid or (b2_def.is_fluid and !b1_def.is_fluid);
 
-                if (isEmittingSubchunk(axis, s - 1, u, v, y_min, y_max) and b1_emits and !b2_def.occludes(b1_def.*, axis)) {
+                if (isEmittingSubchunk(axis, s - 1, u, v, y_min, y_max) and b1_emits and !b2_def.occludes(b1_def, axis)) {
                     const light = getLightAtBoundary(chunk, neighbors, axis, s, u, v, si);
                     const color = getBlockColor(chunk, neighbors, axis, s - 1, u, v, b1);
                     mask[u + v * du] = .{ .block = b1, .side = true, .light = light, .color = color };
-                } else if (isEmittingSubchunk(axis, s, u, v, y_min, y_max) and b2_emits and !b1_def.occludes(b2_def.*, axis)) {
+                } else if (isEmittingSubchunk(axis, s, u, v, y_min, y_max) and b2_emits and !b1_def.occludes(b2_def, axis)) {
                     const light = getLightAtBoundary(chunk, neighbors, axis, s, u, v, si);
                     const color = getBlockColor(chunk, neighbors, axis, s, u, v, b2);
                     mask[u + v * du] = .{ .block = b2, .side = false, .light = light, .color = color };
