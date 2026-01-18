@@ -23,8 +23,8 @@ pub const WorldScreen = struct {
         .onExit = onExit,
     };
 
-    pub fn init(allocator: std.mem.Allocator, context: EngineContext, seed: u64) !*WorldScreen {
-        const session = try GameSession.init(allocator, context.rhi, seed, context.settings.render_distance, context.settings.lod_enabled);
+    pub fn init(allocator: std.mem.Allocator, context: EngineContext, seed: u64, generator_index: usize) !*WorldScreen {
+        const session = try GameSession.init(allocator, context.rhi, seed, context.settings.render_distance, context.settings.lod_enabled, generator_index);
         errdefer session.deinit();
 
         const self = try allocator.create(WorldScreen);

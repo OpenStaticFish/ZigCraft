@@ -3,7 +3,7 @@ const c = @import("../c.zig").c;
 const Input = @import("../engine/input/input.zig").Input;
 const WorldMap = @import("../world/worldgen/world_map.zig").WorldMap;
 const Camera = @import("../engine/graphics/camera.zig").Camera;
-const TerrainGenerator = @import("../world/worldgen/generator.zig").TerrainGenerator;
+const Generator = @import("../world/worldgen/generator_interface.zig").Generator;
 const UISystem = @import("../engine/ui/ui_system.zig").UISystem;
 const Color = @import("../engine/ui/ui_system.zig").Color;
 const Font = @import("../engine/ui/font.zig");
@@ -98,11 +98,11 @@ pub const MapController = struct {
         }
     }
 
-    pub fn draw(self: *MapController, u: *UISystem, screen_w: f32, screen_h: f32, world_map: *WorldMap, generator: *const TerrainGenerator, camera_pos: Vec3) !void {
+    pub fn draw(self: *MapController, u: *UISystem, screen_w: f32, screen_h: f32, world_map: *WorldMap, generator: Generator, camera_pos: Vec3, allocator: std.mem.Allocator) !void {
         if (!self.show_map) return;
 
         if (self.map_needs_update) {
-            try world_map.update(generator, self.map_pos_x, self.map_pos_z, self.map_zoom);
+            try world_map.update(generator, self.map_pos_x, self.map_pos_z, self.map_zoom, allocator);
             self.map_needs_update = false;
         }
 

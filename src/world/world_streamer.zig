@@ -10,7 +10,7 @@ const JobQueue = @import("../engine/core/job_system.zig").JobQueue;
 const WorkerPool = @import("../engine/core/job_system.zig").WorkerPool;
 const Job = @import("../engine/core/job_system.zig").Job;
 const RingBuffer = @import("../engine/core/ring_buffer.zig").RingBuffer;
-const TerrainGenerator = @import("worldgen/generator.zig").TerrainGenerator;
+const Generator = @import("worldgen/generator_interface.zig").Generator;
 const LODManager = @import("lod_manager.zig").LODManager;
 const worldToChunk = @import("chunk.zig").worldToChunk;
 const CHUNK_UNLOAD_BUFFER = @import("chunk.zig").CHUNK_UNLOAD_BUFFER;
@@ -83,7 +83,7 @@ pub const PlayerMovement = struct {
 pub const WorldStreamer = struct {
     allocator: std.mem.Allocator,
     storage: *ChunkStorage,
-    generator: *TerrainGenerator,
+    generator: Generator,
 
     gen_queue: *JobQueue,
     mesh_queue: *JobQueue,
@@ -100,7 +100,7 @@ pub const WorldStreamer = struct {
     const GEN_WORKERS = 4;
     const MESH_WORKERS = 3;
 
-    pub fn init(allocator: std.mem.Allocator, storage: *ChunkStorage, generator: *TerrainGenerator, render_distance: i32) !*WorldStreamer {
+    pub fn init(allocator: std.mem.Allocator, storage: *ChunkStorage, generator: Generator, render_distance: i32) !*WorldStreamer {
         const streamer = try allocator.create(WorldStreamer);
 
         const gen_queue = try allocator.create(JobQueue);

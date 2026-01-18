@@ -28,7 +28,6 @@ const Widgets = @import("../engine/ui/widgets.zig");
 const region_pkg = @import("../world/worldgen/region.zig");
 const hotbar = @import("ui/hotbar.zig");
 const worldToChunk = @import("../world/chunk.zig").worldToChunk;
-const TerrainGenerator = @import("../world/worldgen/generator.zig").TerrainGenerator;
 
 const ECSManager = @import("../engine/ecs/manager.zig");
 const ECSRegistry = ECSManager.Registry;
@@ -99,7 +98,7 @@ pub const GameSession = struct {
     debug_shadows: bool = false,
     debug_cascade_idx: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator, rhi: *RHI, seed: u64, render_distance: i32, lod_enabled: bool) !*GameSession {
+    pub fn init(allocator: std.mem.Allocator, rhi: *RHI, seed: u64, render_distance: i32, lod_enabled: bool, generator_index: usize) !*GameSession {
         const session = try allocator.create(GameSession);
 
         const safe_mode_env = std.posix.getenv("ZIGCRAFT_SAFE_MODE");
@@ -130,9 +129,9 @@ pub const GameSession = struct {
             };
 
         const world = if (effective_lod_enabled)
-            try World.initWithLOD(allocator, effective_render_distance, seed, rhi.*, lod_config)
+            try World.initGenWithLOD(generator_index, allocator, effective_render_distance, seed, rhi.*, lod_config)
         else
-            try World.init(allocator, effective_render_distance, seed, rhi.*);
+            try World.initGen(generator_index, allocator, effective_render_distance, seed, rhi.*);
 
         const world_map = WorldMap.init(rhi.*, 256, 256);
 
@@ -277,7 +276,7 @@ pub const GameSession = struct {
 
     pub fn drawHUD(self: *GameSession, ui: *UISystem, active_pack: ?[]const u8, fps: f32, screen_w: f32, screen_h: f32, mouse_x: f32, mouse_y: f32, mouse_clicked: bool) !void {
         if (self.map_controller.show_map) {
-            try self.map_controller.draw(ui, screen_w, screen_h, &self.world_map, &self.world.generator, self.camera.position);
+            try self.map_controller.draw(ui, screen_w, screen_h, &self.world_map, self.world.generator, self.camera.position, self.allocator);
             return;
         }
 

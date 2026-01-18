@@ -41,7 +41,7 @@ const Job = JobSystem.Job;
 
 const RingBuffer = @import("../engine/core/ring_buffer.zig").RingBuffer;
 
-const TerrainGenerator = @import("worldgen/generator.zig").TerrainGenerator;
+const Generator = @import("worldgen/generator_interface.zig").Generator;
 const LODMesh = @import("lod_mesh.zig").LODMesh;
 
 /// Statistics for LOD system monitoring
@@ -132,7 +132,7 @@ pub const LODManager = struct {
     rhi: RHI,
 
     // Terrain generator for LOD generation (mutable for cache recentering)
-    generator: *TerrainGenerator,
+    generator: Generator,
 
     // Paused state
     paused: bool,
@@ -153,7 +153,7 @@ pub const LODManager = struct {
     instance_buffers: [rhi_mod.MAX_FRAMES_IN_FLIGHT]rhi_mod.BufferHandle,
     frame_index: usize,
 
-    pub fn init(allocator: std.mem.Allocator, config: LODConfig, rhi: RHI, generator: *TerrainGenerator) !*LODManager {
+    pub fn init(allocator: std.mem.Allocator, config: LODConfig, rhi: RHI, generator: Generator) !*LODManager {
         const mgr = try allocator.create(LODManager);
 
         // Create job queues for each LOD level

@@ -12,7 +12,9 @@ const worldToChunk = @import("chunk.zig").worldToChunk;
 const worldToLocal = @import("chunk.zig").worldToLocal;
 const CHUNK_SIZE_X = @import("chunk.zig").CHUNK_SIZE_X;
 const CHUNK_SIZE_Z = @import("chunk.zig").CHUNK_SIZE_Z;
-const TerrainGenerator = @import("worldgen/generator.zig").TerrainGenerator;
+const gen_interface = @import("worldgen/generator_interface.zig");
+const Generator = gen_interface.Generator;
+const registry = @import("worldgen/registry.zig");
 const GlobalVertexAllocator = @import("chunk_allocator.zig").GlobalVertexAllocator;
 const LODManager = @import("lod_manager.zig").LODManager;
 const Vec3 = @import("../engine/math/vec3.zig").Vec3;
@@ -44,7 +46,7 @@ pub const World = struct {
     streamer: *WorldStreamer,
     renderer: *WorldRenderer,
     allocator: std.mem.Allocator,
-    generator: TerrainGenerator,
+    generator: Generator,
     render_distance: i32,
     rhi: RHI,
     paused: bool = false,
@@ -57,6 +59,10 @@ pub const World = struct {
     lod_enabled: bool,
 
     pub fn init(allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI) !*World {
+        return initGen(0, allocator, render_distance, seed, rhi);
+    }
+
+    pub fn initGen(generator_index: usize, allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI) !*World {
         const world = try allocator.create(World);
 
         const storage = ChunkStorage.init(allocator);
@@ -80,7 +86,7 @@ pub const World = struct {
             .renderer = undefined,
             .allocator = allocator,
             .render_distance = safe_render_distance,
-            .generator = TerrainGenerator.init(seed, allocator),
+            .generator = try registry.createGenerator(generator_index, seed, allocator),
             .rhi = rhi,
             .paused = false,
             .max_uploads_per_frame = max_uploads,
@@ -90,7 +96,7 @@ pub const World = struct {
             .lod_enabled = false,
         };
 
-        world.streamer = try WorldStreamer.init(allocator, &world.storage, &world.generator, render_distance);
+        world.streamer = try WorldStreamer.init(allocator, &world.storage, world.generator, render_distance);
         world.renderer = try WorldRenderer.init(allocator, rhi, &world.storage);
 
         return world;
@@ -98,10 +104,14 @@ pub const World = struct {
 
     /// Initialize with LOD system enabled for extended render distances
     pub fn initWithLOD(allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI, lod_config: LODConfig) !*World {
-        const world = try init(allocator, render_distance, seed, rhi);
+        return initGenWithLOD(0, allocator, render_distance, seed, rhi, lod_config);
+    }
+
+    pub fn initGenWithLOD(generator_index: usize, allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI, lod_config: LODConfig) !*World {
+        const world = try initGen(generator_index, allocator, render_distance, seed, rhi);
 
         // Initialize LOD manager with generator reference
-        world.lod_manager = try LODManager.init(allocator, lod_config, rhi, &world.generator);
+        world.lod_manager = try LODManager.init(allocator, lod_config, rhi, world.generator);
         world.lod_enabled = true;
 
         log.log.info("World initialized with LOD system enabled (LOD3 radius: {} chunks)", .{lod_config.lod3_radius});
@@ -123,6 +133,8 @@ pub const World = struct {
         if (self.lod_manager) |lod_mgr| {
             lod_mgr.deinit();
         }
+
+        self.generator.deinit(self.allocator);
 
         self.allocator.destroy(self);
     }

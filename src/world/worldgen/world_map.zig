@@ -1,6 +1,8 @@
 const std = @import("std");
 const c = @import("../../c.zig").c;
-const TerrainGenerator = @import("generator.zig").TerrainGenerator;
+const gen_interface = @import("generator_interface.zig");
+const Generator = gen_interface.Generator;
+const ColumnInfo = gen_interface.ColumnInfo;
 const BiomeId = @import("biome.zig").BiomeId;
 const Texture = @import("../../engine/graphics/texture.zig").Texture;
 
@@ -35,10 +37,10 @@ pub const WorldMap = struct {
         self.texture.deinit();
     }
 
-    pub fn update(self: *WorldMap, generator: *const TerrainGenerator, center_x: f32, center_z: f32, scale: f32) !void {
+    pub fn update(self: *WorldMap, generator: Generator, center_x: f32, center_z: f32, scale: f32, allocator: std.mem.Allocator) !void {
         const pixel_count = self.width * self.height;
-        var pixels = try generator.allocator.alloc(u8, pixel_count * 4);
-        defer generator.allocator.free(pixels);
+        var pixels = try allocator.alloc(u8, pixel_count * 4);
+        defer allocator.free(pixels);
 
         const hw = @as(f32, @floatFromInt(self.width)) * 0.5;
         const hh = @as(f32, @floatFromInt(self.height)) * 0.5;
@@ -66,7 +68,7 @@ pub const WorldMap = struct {
         self.texture.update(pixels);
     }
 
-    fn getBiomeColor(info: TerrainGenerator.ColumnInfo) [3]f32 {
+    fn getBiomeColor(info: ColumnInfo) [3]f32 {
         if (info.is_ocean) {
             const depth = @as(f32, @floatFromInt(64 - info.height));
             const t = std.math.clamp(depth / 40.0, 0.0, 1.0);

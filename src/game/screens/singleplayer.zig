@@ -12,9 +12,11 @@ const log = @import("../../engine/core/log.zig");
 const Key = @import("../../engine/core/interfaces.zig").Key;
 const Input = @import("../../engine/input/input.zig").Input;
 const WorldScreen = @import("world.zig").WorldScreen;
+const registry = @import("../../world/worldgen/registry.zig");
+const gen_interface = @import("../../world/worldgen/generator_interface.zig");
 
 const PANEL_WIDTH_MAX = 650.0;
-const PANEL_HEIGHT_BASE = 320.0;
+const PANEL_HEIGHT_BASE = 400.0;
 const BG_COLOR = Color.rgba(0.12, 0.14, 0.18, 0.92);
 const BORDER_COLOR = Color.rgba(0.28, 0.33, 0.42, 1.0);
 const TITLE_COLOR = Color.rgba(0.92, 0.94, 0.97, 1.0);
@@ -24,6 +26,7 @@ pub const SingleplayerScreen = struct {
     context: EngineContext,
     seed_input: std.ArrayListUnmanaged(u8),
     seed_focused: bool,
+    selected_generator_index: usize,
 
     pub const vtable = IScreen.VTable{
         .deinit = deinit,
@@ -37,6 +40,7 @@ pub const SingleplayerScreen = struct {
             .context = context,
             .seed_input = std.ArrayListUnmanaged(u8).empty,
             .seed_focused = true,
+            .selected_generator_index = 0,
         };
         return self;
     }
@@ -111,6 +115,17 @@ pub const SingleplayerScreen = struct {
             self.seed_focused = true;
         }
 
+        const gy: f32 = iy + ih + 20.0 * ui_scale;
+        Font.drawText(ui, "WORLD TYPE", px + 30.0 * ui_scale, gy, label_scale, LABEL_COLOR);
+        const g_rect = Rect{ .x = px + 30.0 * ui_scale, .y = gy + 28.0 * ui_scale, .width = pw - 60.0 * ui_scale, .height = ih };
+        const g_info = registry.getGeneratorInfo(self.selected_generator_index);
+        var g_label_buf: [128]u8 = undefined;
+        const g_label = try std.fmt.bufPrint(&g_label_buf, "{s} ({}/{})", .{ g_info.name, self.selected_generator_index + 1, registry.getGeneratorCount() });
+        if (Widgets.drawButton(ui, g_rect, g_label, btn_scale, mouse_x, mouse_y, mouse_clicked)) {
+            self.selected_generator_index = (self.selected_generator_index + 1) % registry.getGeneratorCount();
+        }
+        Font.drawText(ui, g_info.description, px + 30.0 * ui_scale, g_rect.y + g_rect.height + 10.0 * ui_scale, label_scale * 0.7, LABEL_COLOR);
+
         const byy: f32 = py + ph - 80.0 * ui_scale;
         const hw: f32 = (pw - 30.0 * ui_scale - 15.0 * ui_scale - 30.0 * ui_scale) / 2.0;
         const btn_h: f32 = 50.0 * ui_scale;
@@ -120,8 +135,8 @@ pub const SingleplayerScreen = struct {
         if (Widgets.drawButton(ui, .{ .x = px + 30.0 * ui_scale + hw + 15.0 * ui_scale, .y = byy, .width = hw, .height = btn_h }, "CREATE", btn_scale, mouse_x, mouse_y, mouse_clicked) or ctx.input_mapper.isActionPressed(ctx.input, .ui_confirm)) {
             // Seed is a 64-bit unsigned integer. If left blank, a random one is generated.
             const seed = try seed_gen.resolveSeed(&self.seed_input, ctx.allocator);
-            log.log.info("World seed: {}", .{seed});
-            const world_screen = try WorldScreen.init(ctx.allocator, ctx, seed);
+            log.log.info("World seed: {} | Type: {s}", .{ seed, registry.getGeneratorInfo(self.selected_generator_index).name });
+            const world_screen = try WorldScreen.init(ctx.allocator, ctx, seed, self.selected_generator_index);
             errdefer world_screen.deinit(world_screen);
             ctx.screen_manager.setScreen(world_screen.screen());
         }

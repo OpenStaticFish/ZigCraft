@@ -67,82 +67,11 @@ const surface_builder_mod = @import("surface_builder.zig");
 pub const SurfaceBuilder = surface_builder_mod.SurfaceBuilder;
 pub const CoastalSurfaceType = surface_builder_mod.CoastalSurfaceType;
 
-// ============================================================================
-// LOD Generation Options (Issue #114)
-// ============================================================================
-
-/// Options for controlling generation detail level
-pub const GenerationOptions = struct {
-    /// LOD level - higher = more simplified
-    lod_level: LODLevel = .lod0,
-
-    /// Enable cave generation (worm + noise caves)
-    enable_caves: bool = true,
-
-    /// Enable worm caves specifically (expensive neighbor checks)
-    enable_worm_caves: bool = true,
-
-    /// Enable decorations (trees, flowers, grass)
-    enable_decorations: bool = true,
-
-    /// Enable ore generation
-    enable_ores: bool = true,
-
-    /// Enable lighting calculation
-    enable_lighting: bool = true,
-
-    /// Noise octave reduction (0 = full detail, higher = fewer octaves)
-    octave_reduction: u8 = 0,
-
-    /// Skip biome edge blending
-    skip_biome_blending: bool = false,
-
-    /// Create options from LOD level with sensible defaults
-    pub fn fromLOD(lod: LODLevel) GenerationOptions {
-        return switch (lod) {
-            .lod0 => .{
-                .lod_level = .lod0,
-                .enable_caves = true,
-                .enable_worm_caves = true,
-                .enable_decorations = true,
-                .enable_ores = true,
-                .enable_lighting = true,
-                .octave_reduction = 0,
-                .skip_biome_blending = false,
-            },
-            .lod1 => .{
-                .lod_level = .lod1,
-                .enable_caves = true,
-                .enable_worm_caves = false, // Skip expensive worm caves
-                .enable_decorations = true,
-                .enable_ores = false,
-                .enable_lighting = false,
-                .octave_reduction = 1,
-                .skip_biome_blending = true,
-            },
-            .lod2 => .{
-                .lod_level = .lod2,
-                .enable_caves = false, // Skip all caves
-                .enable_worm_caves = false,
-                .enable_decorations = false,
-                .enable_ores = false,
-                .enable_lighting = false,
-                .octave_reduction = 2,
-                .skip_biome_blending = true,
-            },
-            .lod3 => .{
-                .lod_level = .lod3,
-                .enable_caves = false,
-                .enable_worm_caves = false,
-                .enable_decorations = false,
-                .enable_ores = false,
-                .enable_lighting = false,
-                .octave_reduction = 3, // Maximum simplification
-                .skip_biome_blending = true,
-            },
-        };
-    }
-};
+const gen_interface = @import("generator_interface.zig");
+const Generator = gen_interface.Generator;
+const GeneratorInfo = gen_interface.GeneratorInfo;
+const GenerationOptions = gen_interface.GenerationOptions;
+const ColumnInfo = gen_interface.ColumnInfo;
 
 // ============================================================================
 // Luanti V7-Style Noise Parameters (Issue #105)
@@ -237,7 +166,12 @@ const Params = struct {
     ridge_sparsity: f32 = 0.50,
 };
 
-pub const TerrainGenerator = struct {
+pub const OverworldGenerator = struct {
+    pub const INFO = GeneratorInfo{
+        .name = "Overworld",
+        .description = "Standard terrain with diverse biomes and caves.",
+    };
+
     // DEPRECATED (Issue #147): These noise fields are retained for backward compatibility.
     // New code should use noise_sampler subsystem instead. These will be removed in a future version.
     // The noise_sampler contains identical noise generators initialized with the same seed.
@@ -289,7 +223,7 @@ pub const TerrainGenerator = struct {
     /// before reaching the cache edge.
     pub const CACHE_RECENTER_THRESHOLD: i32 = 512;
 
-    pub fn init(seed: u64, allocator: std.mem.Allocator) TerrainGenerator {
+    pub fn init(seed: u64, allocator: std.mem.Allocator) OverworldGenerator {
         const p = Params{};
         return .{
             .warp_noise_x = ConfiguredNoise.init(makeNoiseParams(seed, 10, 200, p.warp_amplitude, 0, 3, 0.5)),
@@ -352,51 +286,42 @@ pub const TerrainGenerator = struct {
     // =========================================================================
 
     /// Get the noise sampler subsystem for direct noise value access
-    pub fn getNoiseSampler(self: *const TerrainGenerator) *const NoiseSampler {
+    pub fn getNoiseSampler(self: *const OverworldGenerator) *const NoiseSampler {
         return &self.noise_sampler;
     }
 
     /// Get the height sampler subsystem for terrain height computation
-    pub fn getHeightSampler(self: *const TerrainGenerator) *const HeightSampler {
+    pub fn getHeightSampler(self: *const OverworldGenerator) *const HeightSampler {
         return &self.height_sampler;
     }
 
     /// Get the surface builder subsystem for surface block placement
-    pub fn getSurfaceBuilder(self: *const TerrainGenerator) *const SurfaceBuilder {
+    pub fn getSurfaceBuilder(self: *const OverworldGenerator) *const SurfaceBuilder {
         return &self.surface_builder;
     }
 
     /// Get the biome source subsystem for biome selection
-    pub fn getBiomeSource(self: *const TerrainGenerator) *const BiomeSource {
+    pub fn getBiomeSource(self: *const OverworldGenerator) *const BiomeSource {
         return &self.biome_source;
     }
 
     /// Get the world seed
-    pub fn getSeed(self: *const TerrainGenerator) u64 {
+    pub fn getSeed(self: *const OverworldGenerator) u64 {
         return self.noise_sampler.getSeed();
     }
 
     /// Get region info for a specific world position
-    pub fn getRegionInfo(self: *const TerrainGenerator, world_x: i32, world_z: i32) RegionInfo {
+    pub fn getRegionInfo(self: *const OverworldGenerator, world_x: i32, world_z: i32) RegionInfo {
         return region_pkg.getRegion(self.continentalness_noise.params.seed, world_x, world_z);
     }
 
     /// Get region mood for a specific world position (Issue #110)
-    pub fn getMood(self: *const TerrainGenerator, world_x: i32, world_z: i32) RegionMood {
+    pub fn getMood(self: *const OverworldGenerator, world_x: i32, world_z: i32) RegionMood {
         const region = region_pkg.getRegion(self.continentalness_noise.params.seed, world_x, world_z);
         return region.mood;
     }
 
-    pub const ColumnInfo = struct {
-        height: i32,
-        biome: BiomeId,
-        is_ocean: bool,
-        temperature: f32,
-        humidity: f32,
-        continentalness: f32,
-    };
-
-    pub fn getColumnInfo(self: *const TerrainGenerator, wx: f32, wz: f32) ColumnInfo {
+    pub fn getColumnInfo(self: *const OverworldGenerator, wx: f32, wz: f32) ColumnInfo {
         const p = self.params;
         const sea: f32 = @floatFromInt(p.sea_level);
         const warp = self.computeWarp(wx, wz, 0);
@@ -444,7 +369,7 @@ pub const TerrainGenerator = struct {
     /// full-detail computation until LOD0 populates the cache again.
     ///
     /// Returns true if recentering occurred.
-    pub fn maybeRecenterCache(self: *TerrainGenerator, player_x: i32, player_z: i32) bool {
+    pub fn maybeRecenterCache(self: *OverworldGenerator, player_x: i32, player_z: i32) bool {
         const dx = player_x - self.cache_center_x;
         const dz = player_z - self.cache_center_z;
 
@@ -458,7 +383,8 @@ pub const TerrainGenerator = struct {
         return false;
     }
 
-    pub fn generate(self: *TerrainGenerator, chunk: *Chunk, stop_flag: ?*const bool) void {
+    pub fn generate(self: *OverworldGenerator, chunk: *Chunk, stop_flag: ?*const bool) void {
+        chunk.generated = false;
         const world_x = chunk.getWorldX();
         const world_z = chunk.getWorldZ();
         const p = self.params;
@@ -701,7 +627,7 @@ pub const TerrainGenerator = struct {
         );
 
         var worm_carve_map = self.cave_system.generateWormCaves(chunk, &surface_heights, self.allocator) catch {
-            self.generateWithoutWormCavesInternal(chunk, &surface_heights, &biome_ids, &secondary_biome_ids, &biome_blends, &filler_depths, &is_underwater_flags, &is_ocean_water_flags, &cave_region_values, &coastal_types, &slopes, &exposure_values, sea);
+            self.generateWithoutWormCavesInternal(chunk, &surface_heights, &biome_ids, &secondary_biome_ids, &biome_blends, &filler_depths, &is_underwater_flags, &is_ocean_water_flags, &cave_region_values, &coastal_types, &slopes, &exposure_values, sea, stop_flag);
             return;
         };
         defer worm_carve_map.deinit();
@@ -771,7 +697,6 @@ pub const TerrainGenerator = struct {
                 }
             }
         }
-        chunk.generated = true;
         if (stop_flag) |sf| if (sf.*) return;
         self.generateOres(chunk);
         if (stop_flag) |sf| if (sf.*) return;
@@ -782,11 +707,12 @@ pub const TerrainGenerator = struct {
         self.computeBlockLight(chunk) catch |err| {
             std.debug.print("Failed to compute block light: {}\n", .{err});
         };
+        chunk.generated = true;
         chunk.dirty = true;
         self.printDebugStats(world_x, world_z, &debug_temperatures, &debug_humidities, &debug_continentalness, &biome_ids, debug_beach_count);
     }
 
-    fn generateWithoutWormCavesInternal(self: *const TerrainGenerator, chunk: *Chunk, surface_heights: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, biome_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId, secondary_biome_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId, biome_blends: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, filler_depths: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, is_underwater_flags: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]bool, is_ocean_water_flags: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]bool, cave_region_values: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, coastal_types: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]CoastalSurfaceType, slopes: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, exposure_values: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, sea: f32) void {
+    fn generateWithoutWormCavesInternal(self: *const OverworldGenerator, chunk: *Chunk, surface_heights: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, biome_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId, secondary_biome_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId, biome_blends: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, filler_depths: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, is_underwater_flags: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]bool, is_ocean_water_flags: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]bool, cave_region_values: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, coastal_types: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]CoastalSurfaceType, slopes: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32, exposure_values: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, sea: f32, stop_flag: ?*const bool) void {
         _ = exposure_values;
         _ = slopes;
         const world_x = chunk.getWorldX();
@@ -794,6 +720,7 @@ pub const TerrainGenerator = struct {
         const p = self.params;
         var local_z: u32 = 0;
         while (local_z < CHUNK_SIZE_Z) : (local_z += 1) {
+            if (stop_flag) |sf| if (sf.*) return;
             var local_x: u32 = 0;
             while (local_x < CHUNK_SIZE_X) : (local_x += 1) {
                 const idx = local_x + local_z * CHUNK_SIZE_X;
@@ -851,15 +778,19 @@ pub const TerrainGenerator = struct {
                 }
             }
         }
-        chunk.generated = true;
+        if (stop_flag) |sf| if (sf.*) return;
         self.generateOres(chunk);
+        if (stop_flag) |sf| if (sf.*) return;
         self.generateFeatures(chunk);
+        if (stop_flag) |sf| if (sf.*) return;
         self.computeSkylight(chunk);
+        if (stop_flag) |sf| if (sf.*) return;
         self.computeBlockLight(chunk) catch {};
+        chunk.generated = true;
         chunk.dirty = true;
     }
 
-    fn printDebugStats(self: *const TerrainGenerator, world_x: i32, world_z: i32, t_vals: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, h_vals: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, c_vals: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, b_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId, beach_count: u32) void {
+    fn printDebugStats(self: *const OverworldGenerator, world_x: i32, world_z: i32, t_vals: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, h_vals: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, c_vals: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]f32, b_ids: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]BiomeId, beach_count: u32) void {
         // Debug output disabled by default. Set to true to enable debugging.
         const debug_enabled = false;
         if (!debug_enabled) return;
@@ -925,7 +856,7 @@ pub const TerrainGenerator = struct {
 
     /// Generate heightmap data only (for LODSimplifiedData)
     /// Uses classification cache when available to ensure LOD matches LOD0.
-    pub fn generateHeightmapOnly(self: *const TerrainGenerator, data: *LODSimplifiedData, region_x: i32, region_z: i32, lod_level: LODLevel) void {
+    pub fn generateHeightmapOnly(self: *const OverworldGenerator, data: *LODSimplifiedData, region_x: i32, region_z: i32, lod_level: LODLevel) void {
         // Cell size now depends on both LOD level and grid size
         const block_step = LODSimplifiedData.getCellSizeBlocks(lod_level);
         const world_x = region_x * @as(i32, @intCast(lod_level.regionSizeBlocks()));
@@ -1024,7 +955,7 @@ pub const TerrainGenerator = struct {
     }
 
     /// Convert SurfaceType enum to BlockType for LOD rendering
-    fn surfaceTypeToBlock(self: *const TerrainGenerator, surface_type: SurfaceType) BlockType {
+    fn surfaceTypeToBlock(self: *const OverworldGenerator, surface_type: SurfaceType) BlockType {
         _ = self;
         return switch (surface_type) {
             .grass => .grass,
@@ -1037,7 +968,7 @@ pub const TerrainGenerator = struct {
         };
     }
 
-    fn getSurfaceBlock(self: *const TerrainGenerator, biome_id: BiomeId, is_ocean: bool) BlockType {
+    fn getSurfaceBlock(self: *const OverworldGenerator, biome_id: BiomeId, is_ocean: bool) BlockType {
         _ = self;
         if (is_ocean) return .sand;
 
@@ -1050,20 +981,20 @@ pub const TerrainGenerator = struct {
     }
 
     /// Generate chunk without worm caves (for LOD1 or when worms disabled)
-    fn generateWithoutWormCaves(self: *const TerrainGenerator, chunk: *Chunk, stop_flag: ?*const bool) void {
+    fn generateWithoutWormCaves(self: *const OverworldGenerator, chunk: *Chunk, stop_flag: ?*const bool) void {
         // Call the existing internal function with default/empty worm map
         // For now, just call the regular generate - in the future this would skip worm generation
         self.generate(chunk, stop_flag);
     }
 
-    fn computeWarp(self: *const TerrainGenerator, x: f32, z: f32, reduction: u8) struct { x: f32, z: f32 } {
+    fn computeWarp(self: *const OverworldGenerator, x: f32, z: f32, reduction: u8) struct { x: f32, z: f32 } {
         const octaves: u16 = if (3 > reduction) 3 - @as(u16, reduction) else 1;
         const offset_x = self.warp_noise_x.get2DOctaves(x, z, octaves);
         const offset_z = self.warp_noise_z.get2DOctaves(x, z, octaves);
         return .{ .x = offset_x, .z = offset_z };
     }
 
-    fn getContinentalness(self: *const TerrainGenerator, x: f32, z: f32, reduction: u8) f32 {
+    fn getContinentalness(self: *const OverworldGenerator, x: f32, z: f32, reduction: u8) f32 {
         // Slow octave reduction for structure
         const octaves: u16 = if (4 > (reduction / 2)) 4 - @as(u16, (reduction / 2)) else 2;
         const val = self.continentalness_noise.get2DOctaves(x, z, octaves);
@@ -1072,7 +1003,7 @@ pub const TerrainGenerator = struct {
 
     /// Map continentalness value (0-1) to explicit zone
     /// Updated to match STRUCTURE-FIRST thresholds
-    pub fn getContinentalZone(self: *const TerrainGenerator, c: f32) ContinentalZone {
+    pub fn getContinentalZone(self: *const OverworldGenerator, c: f32) ContinentalZone {
         const p = self.params;
         if (c < p.continental_deep_ocean_max) { // 0.20
             return .deep_ocean;
@@ -1089,13 +1020,13 @@ pub const TerrainGenerator = struct {
         }
     }
 
-    fn getErosion(self: *const TerrainGenerator, x: f32, z: f32, reduction: u8) f32 {
+    fn getErosion(self: *const OverworldGenerator, x: f32, z: f32, reduction: u8) f32 {
         const octaves: u16 = if (4 > (reduction / 2)) 4 - @as(u16, (reduction / 2)) else 2;
         const val = self.erosion_noise.get2DOctaves(x, z, octaves);
         return (val + 1.0) * 0.5;
     }
 
-    fn getPeaksValleys(self: *const TerrainGenerator, x: f32, z: f32, reduction: u8) f32 {
+    fn getPeaksValleys(self: *const OverworldGenerator, x: f32, z: f32, reduction: u8) f32 {
         // Ridged noise also needs reduction
         const octaves: u16 = if (5 > reduction) 5 - @as(u16, reduction) else 1;
         // Peaks noise is not configurednoise in original code? Wait, it is now.
@@ -1105,7 +1036,7 @@ pub const TerrainGenerator = struct {
         return self.peaks_noise.noise.ridged2D(x, z, octaves, 2.0, 0.5, self.params.peaks_scale);
     }
 
-    fn getTemperature(self: *const TerrainGenerator, x: f32, z: f32, reduction: u8) f32 {
+    fn getTemperature(self: *const OverworldGenerator, x: f32, z: f32, reduction: u8) f32 {
         const p = self.params;
         const macro_octaves: u16 = if (3 > (reduction / 2)) 3 - @as(u16, (reduction / 2)) else 2;
         const local_octaves: u16 = if (2 > reduction) 2 - @as(u16, reduction) else 1;
@@ -1116,7 +1047,7 @@ pub const TerrainGenerator = struct {
         return clamp01(t);
     }
 
-    fn getHumidity(self: *const TerrainGenerator, x: f32, z: f32, reduction: u8) f32 {
+    fn getHumidity(self: *const OverworldGenerator, x: f32, z: f32, reduction: u8) f32 {
         const p = self.params;
         const macro_octaves: u16 = if (3 > (reduction / 2)) 3 - @as(u16, (reduction / 2)) else 2;
         const local_octaves: u16 = if (2 > reduction) 2 - @as(u16, reduction) else 1;
@@ -1127,7 +1058,7 @@ pub const TerrainGenerator = struct {
         return clamp01(h);
     }
 
-    fn getMountainMask(self: *const TerrainGenerator, pv: f32, e: f32, c: f32) f32 {
+    fn getMountainMask(self: *const OverworldGenerator, pv: f32, e: f32, c: f32) f32 {
         const p = self.params;
         const inland = smoothstep(p.mount_inland_min, p.mount_inland_max, c);
         const peak_factor = smoothstep(p.mount_peak_min, p.mount_peak_max, pv);
@@ -1135,7 +1066,7 @@ pub const TerrainGenerator = struct {
         return inland * peak_factor * rugged_factor;
     }
 
-    fn getRidgeFactor(self: *const TerrainGenerator, x: f32, z: f32, c: f32, reduction: u8) f32 {
+    fn getRidgeFactor(self: *const OverworldGenerator, x: f32, z: f32, c: f32, reduction: u8) f32 {
         const p = self.params;
         const inland_factor = smoothstep(p.ridge_inland_min, p.ridge_inland_max, c);
         const octaves: u32 = if (5 > reduction) 5 - reduction else 1;
@@ -1145,7 +1076,7 @@ pub const TerrainGenerator = struct {
     }
 
     /// Base height from continentalness - only called for LAND (c >= ocean_threshold)
-    fn getBaseHeight(self: *const TerrainGenerator, c: f32) f32 {
+    fn getBaseHeight(self: *const OverworldGenerator, c: f32) f32 {
         const p = self.params;
         const sea: f32 = @floatFromInt(p.sea_level);
 
@@ -1179,7 +1110,7 @@ pub const TerrainGenerator = struct {
     /// The KEY change: Ocean is decided by continentalness ALONE.
     /// Land uses blended terrain layers for varied terrain character.
     /// Region constraints suppress/exaggerate features per role.
-    fn computeHeight(self: *const TerrainGenerator, c: f32, e: f32, pv: f32, x: f32, z: f32, river_mask: f32, region: RegionInfo, reduction: u8) f32 {
+    fn computeHeight(self: *const OverworldGenerator, c: f32, e: f32, pv: f32, x: f32, z: f32, river_mask: f32, region: RegionInfo, reduction: u8) f32 {
         const p = self.params;
         const sea: f32 = @floatFromInt(p.sea_level);
 
@@ -1318,7 +1249,7 @@ pub const TerrainGenerator = struct {
         return height;
     }
 
-    fn getRiverMask(self: *const TerrainGenerator, x: f32, z: f32, reduction: u8) f32 {
+    fn getRiverMask(self: *const OverworldGenerator, x: f32, z: f32, reduction: u8) f32 {
         const p = self.params;
         const octaves: u32 = if (4 > reduction) 4 - reduction else 1;
         const r = self.river_noise.noise.ridged2D(x, z, octaves, 2.0, 0.5, p.river_scale);
@@ -1341,7 +1272,7 @@ pub const TerrainGenerator = struct {
     /// 4. Slope is gentle
     ///
     /// Inland water (lakes/rivers) get grass/dirt banks, NOT sand.
-    pub fn getCoastalSurfaceType(self: *const TerrainGenerator, continentalness: f32, slope: i32, height: i32, erosion: f32) CoastalSurfaceType {
+    pub fn getCoastalSurfaceType(self: *const OverworldGenerator, continentalness: f32, slope: i32, height: i32, erosion: f32) CoastalSurfaceType {
         const p = self.params;
         const sea_level = p.sea_level;
 
@@ -1386,7 +1317,7 @@ pub const TerrainGenerator = struct {
 
     /// Check if a position is ocean water (used for beach adjacency checks)
     /// Ocean = continentalness < ocean_threshold (structure-first definition)
-    pub fn isOceanWater(self: *const TerrainGenerator, wx: f32, wz: f32) bool {
+    pub fn isOceanWater(self: *const OverworldGenerator, wx: f32, wz: f32) bool {
         const p = self.params;
         const warp = self.computeWarp(wx, wz, 0);
         const xw = wx + warp.x;
@@ -1399,7 +1330,7 @@ pub const TerrainGenerator = struct {
 
     /// Check if a position is inland water (lake/river)
     /// Inland water = underwater BUT continentalness >= ocean_threshold
-    pub fn isInlandWater(self: *const TerrainGenerator, wx: f32, wz: f32, height: i32) bool {
+    pub fn isInlandWater(self: *const OverworldGenerator, wx: f32, wz: f32, height: i32) bool {
         const p = self.params;
         const warp = self.computeWarp(wx, wz, 0);
         const xw = wx + warp.x;
@@ -1415,7 +1346,7 @@ pub const TerrainGenerator = struct {
     /// KEY FIX: Distinguish between ocean floor and inland water floor:
     /// - Ocean floor: sand in shallow water, gravel/clay in deep water
     /// - Inland water floor (lakes/rivers): dirt/gravel, NOT sand (no lake beaches)
-    fn getBlockAt(self: *const TerrainGenerator, y: i32, terrain_height: i32, biome: Biome, filler_depth: i32, is_ocean_water: bool, is_underwater: bool, sea: f32) BlockType {
+    fn getBlockAt(self: *const OverworldGenerator, y: i32, terrain_height: i32, biome: Biome, filler_depth: i32, is_ocean_water: bool, is_underwater: bool, sea: f32) BlockType {
         _ = self;
         const sea_level: i32 = @intFromFloat(sea);
         if (y == 0) return .bedrock;
@@ -1465,7 +1396,7 @@ pub const TerrainGenerator = struct {
         return .stone;
     }
 
-    fn generateOres(self: *const TerrainGenerator, chunk: *Chunk) void {
+    fn generateOres(self: *const OverworldGenerator, chunk: *Chunk) void {
         var prng = std.Random.DefaultPrng.init(self.erosion_noise.params.seed +% @as(u64, @bitCast(@as(i64, chunk.chunk_x))) *% 59381 +% @as(u64, @bitCast(@as(i64, chunk.chunk_z))) *% 28411);
         const random = prng.random();
         self.placeOreVeins(chunk, .coal_ore, 20, 6, 10, 128, random);
@@ -1474,7 +1405,7 @@ pub const TerrainGenerator = struct {
         self.placeOreVeins(chunk, .glowstone, 8, 4, 5, 40, random);
     }
 
-    fn placeOreVeins(self: *const TerrainGenerator, chunk: *Chunk, block: BlockType, count: u32, size: u32, min_y: i32, max_y: i32, random: std.Random) void {
+    fn placeOreVeins(self: *const OverworldGenerator, chunk: *Chunk, block: BlockType, count: u32, size: u32, min_y: i32, max_y: i32, random: std.Random) void {
         _ = self;
         for (0..count) |_| {
             const cx = random.uintLessThan(u32, CHUNK_SIZE_X);
@@ -1498,7 +1429,7 @@ pub const TerrainGenerator = struct {
         }
     }
 
-    pub fn generateFeatures(self: *const TerrainGenerator, chunk: *Chunk) void {
+    pub fn generateFeatures(self: *const OverworldGenerator, chunk: *Chunk) void {
         var prng = std.Random.DefaultPrng.init(self.continentalness_noise.params.seed ^ @as(u64, @bitCast(@as(i64, chunk.chunk_x))) ^ (@as(u64, @bitCast(@as(i64, chunk.chunk_z))) << 32));
         const random = prng.random();
 
@@ -1585,7 +1516,7 @@ pub const TerrainGenerator = struct {
         }
     }
 
-    fn isBiomeAllowed(self: *const TerrainGenerator, allowed: []const BiomeId, current: BiomeId) bool {
+    fn isBiomeAllowed(self: *const OverworldGenerator, allowed: []const BiomeId, current: BiomeId) bool {
         _ = self;
         if (allowed.len == 0) return true;
         for (allowed) |b| {
@@ -1594,7 +1525,7 @@ pub const TerrainGenerator = struct {
         return false;
     }
 
-    fn isBlockAllowed(self: *const TerrainGenerator, allowed: []const BlockType, current: BlockType) bool {
+    fn isBlockAllowed(self: *const OverworldGenerator, allowed: []const BlockType, current: BlockType) bool {
         _ = self;
         for (allowed) |b| {
             if (b == current) return true;
@@ -1602,7 +1533,7 @@ pub const TerrainGenerator = struct {
         return false;
     }
 
-    fn placeSchematic(self: *const TerrainGenerator, chunk: *Chunk, x: u32, y: u32, z: u32, schematic: deco_mod.Schematic, random: std.Random) void {
+    fn placeSchematic(self: *const OverworldGenerator, chunk: *Chunk, x: u32, y: u32, z: u32, schematic: deco_mod.Schematic, random: std.Random) void {
         _ = self;
         _ = random;
         const center_x = @as(i32, @intCast(x));
@@ -1624,7 +1555,7 @@ pub const TerrainGenerator = struct {
         }
     }
 
-    pub fn computeSkylight(self: *const TerrainGenerator, chunk: *Chunk) void {
+    pub fn computeSkylight(self: *const OverworldGenerator, chunk: *Chunk) void {
         _ = self;
         var local_z: u32 = 0;
         while (local_z < CHUNK_SIZE_Z) : (local_z += 1) {
@@ -1655,7 +1586,7 @@ pub const TerrainGenerator = struct {
         b: u4,
     };
 
-    pub fn computeBlockLight(self: *const TerrainGenerator, chunk: *Chunk) !void {
+    pub fn computeBlockLight(self: *const OverworldGenerator, chunk: *Chunk) !void {
         var queue = std.ArrayListUnmanaged(LightNode){};
         defer queue.deinit(self.allocator);
         var local_z: u32 = 0;
@@ -1729,7 +1660,7 @@ pub const TerrainGenerator = struct {
 
     /// Sample biome at arbitrary world coordinates (deterministic, no chunk dependency)
     /// This is a lightweight version of getColumnInfo for edge detection sampling
-    pub fn sampleBiomeAtWorld(self: *const TerrainGenerator, wx: i32, wz: i32) BiomeId {
+    pub fn sampleBiomeAtWorld(self: *const OverworldGenerator, wx: i32, wz: i32) BiomeId {
         const p = self.params;
         const wxf: f32 = @floatFromInt(wx);
         const wzf: f32 = @floatFromInt(wz);
@@ -1787,7 +1718,7 @@ pub const TerrainGenerator = struct {
     /// Detect if a position is near a biome boundary that needs a transition zone
     /// Returns edge info including the neighboring biome and proximity band
     pub fn detectBiomeEdge(
-        self: *const TerrainGenerator,
+        self: *const OverworldGenerator,
         wx: i32,
         wz: i32,
         center_biome: BiomeId,
@@ -1836,7 +1767,7 @@ pub const TerrainGenerator = struct {
     /// Populate classification cache with authoritative biome/surface/water data.
     /// Called during LOD0 generation so LOD1-3 can sample consistent values.
     fn populateClassificationCache(
-        self: *TerrainGenerator,
+        self: *OverworldGenerator,
         world_x: i32,
         world_z: i32,
         surface_heights: *const [CHUNK_SIZE_X * CHUNK_SIZE_Z]i32,
@@ -1895,7 +1826,7 @@ pub const TerrainGenerator = struct {
 
     /// Derive surface type from biome and terrain parameters (internal helper)
     fn deriveSurfaceTypeInternal(
-        self: *const TerrainGenerator,
+        self: *const OverworldGenerator,
         biome_id: BiomeId,
         height: i32,
         is_ocean: bool,
@@ -1923,5 +1854,58 @@ pub const TerrainGenerator = struct {
             .deep_ocean, .ocean => .sand,
             else => .grass,
         };
+    }
+
+    pub fn generator(self: *OverworldGenerator) Generator {
+        return .{
+            .ptr = self,
+            .vtable = &VTABLE,
+            .info = INFO,
+        };
+    }
+
+    const VTABLE = Generator.VTable{
+        .generate = generateWrapper,
+        .generateHeightmapOnly = generateHeightmapOnlyWrapper,
+        .maybeRecenterCache = maybeRecenterCacheWrapper,
+        .getSeed = getSeedWrapper,
+        .getRegionInfo = getRegionInfoWrapper,
+        .getColumnInfo = getColumnInfoWrapper,
+        .deinit = deinitWrapper,
+    };
+
+    fn generateWrapper(ptr: *anyopaque, chunk: *Chunk, stop_flag: ?*const bool) void {
+        const self: *OverworldGenerator = @ptrCast(@alignCast(ptr));
+        self.generate(chunk, stop_flag);
+    }
+
+    fn generateHeightmapOnlyWrapper(ptr: *anyopaque, data: *LODSimplifiedData, region_x: i32, region_z: i32, lod_level: LODLevel) void {
+        const self: *OverworldGenerator = @ptrCast(@alignCast(ptr));
+        self.generateHeightmapOnly(data, region_x, region_z, lod_level);
+    }
+
+    fn maybeRecenterCacheWrapper(ptr: *anyopaque, player_x: i32, player_z: i32) bool {
+        const self: *OverworldGenerator = @ptrCast(@alignCast(ptr));
+        return self.maybeRecenterCache(player_x, player_z);
+    }
+
+    fn getSeedWrapper(ptr: *anyopaque) u64 {
+        const self: *OverworldGenerator = @ptrCast(@alignCast(ptr));
+        return self.getSeed();
+    }
+
+    fn getRegionInfoWrapper(ptr: *anyopaque, world_x: i32, world_z: i32) RegionInfo {
+        const self: *OverworldGenerator = @ptrCast(@alignCast(ptr));
+        return self.getRegionInfo(world_x, world_z);
+    }
+
+    fn getColumnInfoWrapper(ptr: *anyopaque, wx: f32, wz: f32) ColumnInfo {
+        const self: *OverworldGenerator = @ptrCast(@alignCast(ptr));
+        return self.getColumnInfo(wx, wz);
+    }
+
+    fn deinitWrapper(ptr: *anyopaque, allocator: std.mem.Allocator) void {
+        const self: *OverworldGenerator = @ptrCast(@alignCast(ptr));
+        allocator.destroy(self);
     }
 };
