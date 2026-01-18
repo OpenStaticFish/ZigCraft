@@ -100,6 +100,13 @@ pub const TextureAtlas = struct {
     pub const TILE_FLOWER_RED: u8 = 44;
     pub const TILE_FLOWER_YELLOW: u8 = 45;
     pub const TILE_DEAD_BUSH: u8 = 46;
+    pub const TILE_BIRCH_LOG_SIDE: u8 = 47;
+    pub const TILE_BIRCH_LOG_TOP: u8 = 48;
+    pub const TILE_BIRCH_LEAVES: u8 = 49;
+    pub const TILE_SPRUCE_LOG_SIDE: u8 = 50;
+    pub const TILE_SPRUCE_LOG_TOP: u8 = 51;
+    pub const TILE_SPRUCE_LEAVES: u8 = 52;
+    pub const TILE_VINE: u8 = 53;
 
     /// Block type to tile mapping
     pub fn getTilesForBlock(block_id: u8) BlockTiles {
@@ -144,6 +151,11 @@ pub const TextureAtlas = struct {
             37 => BlockTiles.uniform(TILE_FLOWER_RED),
             38 => BlockTiles.uniform(TILE_FLOWER_YELLOW),
             39 => BlockTiles.uniform(TILE_DEAD_BUSH),
+            40 => .{ .top = TILE_BIRCH_LOG_TOP, .bottom = TILE_BIRCH_LOG_TOP, .side = TILE_BIRCH_LOG_SIDE },
+            41 => BlockTiles.uniform(TILE_BIRCH_LEAVES),
+            42 => .{ .top = TILE_SPRUCE_LOG_TOP, .bottom = TILE_SPRUCE_LOG_TOP, .side = TILE_SPRUCE_LOG_SIDE },
+            43 => BlockTiles.uniform(TILE_SPRUCE_LEAVES),
+            44 => BlockTiles.uniform(TILE_VINE),
             else => BlockTiles.uniform(0),
         };
     }
@@ -242,6 +254,13 @@ pub const TextureAtlas = struct {
         .{ .index = TILE_FLOWER_RED, .name = "flower_red", .block = .flower_red },
         .{ .index = TILE_FLOWER_YELLOW, .name = "flower_yellow", .block = .flower_yellow },
         .{ .index = TILE_DEAD_BUSH, .name = "dead_bush", .block = .dead_bush },
+        .{ .index = TILE_BIRCH_LOG_SIDE, .name = "birch_log_side", .block = .birch_log },
+        .{ .index = TILE_BIRCH_LOG_TOP, .name = "birch_log_top", .block = .birch_log },
+        .{ .index = TILE_BIRCH_LEAVES, .name = "birch_leaves", .block = .birch_leaves },
+        .{ .index = TILE_SPRUCE_LOG_SIDE, .name = "spruce_log_side", .block = .spruce_log },
+        .{ .index = TILE_SPRUCE_LOG_TOP, .name = "spruce_log_top", .block = .spruce_log },
+        .{ .index = TILE_SPRUCE_LEAVES, .name = "spruce_leaves", .block = .spruce_leaves },
+        .{ .index = TILE_VINE, .name = "vine", .block = .vine },
     };
 
     pub fn init(allocator: std.mem.Allocator, rhi_instance: rhi.RHI, pack_manager: ?*resource_pack.ResourcePackManager, max_resolution: u32) !TextureAtlas {

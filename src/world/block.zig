@@ -114,13 +114,18 @@ pub const BlockType = enum(u8) {
     flower_red = 37,
     flower_yellow = 38,
     dead_bush = 39,
+    birch_log = 40,
+    birch_leaves = 41,
+    spruce_log = 42,
+    spruce_leaves = 43,
+    vine = 44,
 
     _,
 
     /// Returns true if block color should be multiplied by biome tint
     pub fn isTintable(self: BlockType) bool {
         return switch (self) {
-            .leaves, .mangrove_leaves, .jungle_leaves, .acacia_leaves, .tall_grass, .water => true,
+            .leaves, .mangrove_leaves, .jungle_leaves, .acacia_leaves, .birch_leaves, .spruce_leaves, .vine, .tall_grass, .water => true,
             else => false,
         };
     }
@@ -138,7 +143,7 @@ pub const BlockType = enum(u8) {
 
     pub fn isTransparent(self: BlockType) bool {
         return switch (self) {
-            .air, .water, .glass, .leaves, .mangrove_leaves, .mangrove_roots, .jungle_leaves, .bamboo, .acacia_leaves, .acacia_sapling, .tall_grass, .flower_red, .flower_yellow, .dead_bush, .cactus, .melon => true,
+            .air, .water, .glass, .leaves, .mangrove_leaves, .mangrove_roots, .jungle_leaves, .bamboo, .acacia_leaves, .acacia_sapling, .birch_leaves, .spruce_leaves, .vine, .tall_grass, .flower_red, .flower_yellow, .dead_bush, .cactus, .melon => true,
             else => false,
         };
     }
@@ -146,7 +151,7 @@ pub const BlockType = enum(u8) {
     /// Returns true if block completely blocks light propagation
     pub fn isOpaque(self: BlockType) bool {
         return switch (self) {
-            .air, .water, .glass, .leaves, .mangrove_leaves, .mangrove_roots, .jungle_leaves, .bamboo, .acacia_leaves, .acacia_sapling, .tall_grass, .flower_red, .flower_yellow, .dead_bush, .cactus, .melon => false,
+            .air, .water, .glass, .leaves, .mangrove_leaves, .mangrove_roots, .jungle_leaves, .bamboo, .acacia_leaves, .acacia_sapling, .birch_leaves, .spruce_leaves, .vine, .tall_grass, .flower_red, .flower_yellow, .dead_bush, .cactus, .melon => false,
             else => true,
         };
     }
@@ -204,6 +209,11 @@ pub const BlockType = enum(u8) {
             .flower_red => .{ 0.9, 0.1, 0.1 },
             .flower_yellow => .{ 0.9, 0.9, 0.1 },
             .dead_bush => .{ 0.4, 0.3, 0.1 },
+            .birch_log => .{ 0.8, 0.8, 0.75 },
+            .birch_leaves => .{ 0.3, 0.7, 0.2 },
+            .spruce_log => .{ 0.35, 0.25, 0.15 },
+            .spruce_leaves => .{ 0.15, 0.4, 0.15 },
+            .vine => .{ 0.2, 0.5, 0.1 },
             _ => .{ 1, 0, 1 }, // Magenta for unknown
         };
     }
