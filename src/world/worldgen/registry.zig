@@ -1,8 +1,10 @@
 const std = @import("std");
 const gen_interface = @import("generator_interface.zig");
 const Generator = gen_interface.Generator;
-const OverworldGenerator = @import("overworld_generator.zig").OverworldGenerator;
+const overworld = @import("overworld_generator.zig");
+const OverworldGenerator = overworld.OverworldGenerator;
 const FlatWorldGenerator = @import("flat_world.zig").FlatWorldGenerator;
+const deco_registry = @import("decoration_registry.zig");
 
 pub const RegistryError = error{
     InvalidGeneratorIndex,
@@ -27,7 +29,7 @@ pub const GENERATORS = [_]GeneratorType{
 
 fn initOverworld(seed: u64, allocator: std.mem.Allocator) RegistryError!Generator {
     const gen = allocator.create(OverworldGenerator) catch return error.OutOfMemory;
-    gen.* = OverworldGenerator.init(seed, allocator);
+    gen.* = OverworldGenerator.init(seed, allocator, deco_registry.StandardDecorationProvider.provider());
     return gen.generator();
 }
 
