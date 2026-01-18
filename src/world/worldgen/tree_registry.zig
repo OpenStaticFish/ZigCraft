@@ -36,9 +36,11 @@ pub const TreeDefinition = struct {
     probability: f32 = 0.05,
     /// Minimum distance in blocks between trees of this type
     spacing_radius: i32 = 3,
-    /// Minimum variant noise value for this tree to spawn
+    /// Minimum variant noise value for this tree to spawn.
+    /// Used to constrain trees to specific regions of a biome based on the variant noise field.
     variant_min: f32 = -1.0,
-    /// Maximum variant noise value for this tree to spawn
+    /// Maximum variant noise value for this tree to spawn.
+    /// Used to constrain trees to specific regions of a biome based on the variant noise field.
     variant_max: f32 = 1.0,
 };
 

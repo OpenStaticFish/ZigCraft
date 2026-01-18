@@ -682,7 +682,7 @@ pub fn selectBiome(params: ClimateParams) BiomeId {
     var best_biome: BiomeId = .plains; // Default fallback
 
     for (BIOME_REGISTRY) |biome| {
-        const s = biome.score(params);
+        const s = biome.scoreClimate(params);
         if (s > best_score) {
             best_score = s;
             best_biome = biome.id;
@@ -697,8 +697,8 @@ pub fn getBiomeDefinition(id: BiomeId) *const BiomeDefinition {
     for (BIOME_REGISTRY) |*biome| {
         if (biome.id == id) return biome;
     }
-    // Fallback to plains
-    return &BIOME_REGISTRY[3]; // plains index
+    // All biomes in BiomeId enum must have a corresponding definition in BIOME_REGISTRY
+    unreachable;
 }
 
 /// Select biome with river override
@@ -761,7 +761,7 @@ pub fn selectBiomeBlended(params: ClimateParams) BiomeSelection {
     var second_biome: ?BiomeId = null;
 
     for (BIOME_REGISTRY) |biome| {
-        const s = biome.score(params);
+        const s = biome.scoreClimate(params);
         if (s > best_score) {
             second_score = best_score;
             second_biome = best_biome;
