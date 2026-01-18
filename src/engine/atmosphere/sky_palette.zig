@@ -27,6 +27,8 @@ pub const SkyColorPalette = struct {
             .night_horizon = Vec3.init(0.05, 0.05, 0.12).toLinear(),
             .dawn_sky = Vec3.init(0.25, 0.3, 0.5).toLinear(),
             .dawn_horizon = Vec3.init(0.95, 0.55, 0.2).toLinear(),
+            // Dawn and dusk colors are currently symmetric (identical)
+            // This is intentional for now but can be split later if needed
             .dusk_sky = Vec3.init(0.25, 0.3, 0.5).toLinear(),
             .dusk_horizon = Vec3.init(0.95, 0.55, 0.2).toLinear(),
 

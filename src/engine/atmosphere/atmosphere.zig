@@ -19,7 +19,7 @@ pub const Atmosphere = struct {
     horizon_color: Vec3 = Vec3.init(0, 0, 0),
     sun_color: Vec3 = Vec3.init(0, 0, 0),
     fog_color: Vec3 = Vec3.init(0, 0, 0),
-    fog_density: f32 = 0.0015,
+    fog_density: f32 = Config.FOG_DENSITY_MAX,
     fog_enabled: bool = true,
 
     pub fn init() Atmosphere {
@@ -49,10 +49,8 @@ pub const Atmosphere = struct {
             self.sun_intensity = 0;
         }
 
-        self.moon_intensity = (1.0 - self.sun_intensity) * 0.15;
-        const day_ambient: f32 = 0.45;
-        const night_ambient: f32 = 0.15;
-        self.ambient_intensity = std.math.lerp(night_ambient, day_ambient, self.sun_intensity);
+        self.moon_intensity = (1.0 - self.sun_intensity) * Config.MOON_INTENSITY_FACTOR;
+        self.ambient_intensity = std.math.lerp(Config.AMBIENT_NIGHT, Config.AMBIENT_DAY, self.sun_intensity);
 
         // Update colors
         const colors = self.palette.interpolate(t);
@@ -61,14 +59,18 @@ pub const Atmosphere = struct {
         self.sun_color = colors.sun;
 
         self.fog_color = self.horizon_color;
-        self.fog_density = std.math.lerp(0.0015, 0.0008, self.sun_intensity);
+        self.fog_density = std.math.lerp(Config.FOG_DENSITY_MAX, Config.FOG_DENSITY_MIN, self.sun_intensity);
     }
 
-    // API compatibility wrappers
+    // API compatibility wrappers - provided to maintain interface with legacy code
+    // while forwarding to the new subsystem components.
+
+    /// Returns the current time of day in hours (0.0 - 24.0)
     pub fn getHours(self: *const Atmosphere) f32 {
         return self.time.getHours();
     }
 
+    /// Sets the time of day and immediately updates atmosphere state
     pub fn setTimeOfDay(self: *Atmosphere, t: f32) void {
         self.time.setTimeOfDay(t);
         // Force update to refresh state immediately
@@ -76,6 +78,7 @@ pub const Atmosphere = struct {
         self.update(0);
     }
 
+    /// Returns the primary light factor (max of sun or moon intensity) for block lighting
     pub fn getSkyLightFactor(self: *const Atmosphere) f32 {
         return @max(self.sun_intensity, self.moon_intensity);
     }
