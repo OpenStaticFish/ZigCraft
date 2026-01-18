@@ -327,6 +327,55 @@ pub const IUIContext = struct {
     }
 };
 
+pub const IGraphicsCommandEncoder = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        bindBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle, usage: BufferUsage) void,
+        bindTexture: *const fn (ptr: *anyopaque, handle: TextureHandle, slot: u32) void,
+        bindShader: *const fn (ptr: *anyopaque, handle: ShaderHandle) void,
+        draw: *const fn (ptr: *anyopaque, handle: BufferHandle, count: u32, mode: DrawMode) void,
+        drawOffset: *const fn (ptr: *anyopaque, handle: BufferHandle, count: u32, mode: DrawMode, offset: usize) void,
+        drawIndexed: *const fn (ptr: *anyopaque, vbo: BufferHandle, ebo: BufferHandle, count: u32) void,
+        drawIndirect: *const fn (ptr: *anyopaque, handle: BufferHandle, command_buffer: BufferHandle, offset: usize, draw_count: u32, stride: u32) void,
+        drawInstance: *const fn (ptr: *anyopaque, handle: BufferHandle, count: u32, instance_index: u32) void,
+        setViewport: *const fn (ptr: *anyopaque, width: u32, height: u32) void,
+        pushConstants: *const fn (ptr: *anyopaque, stages: ShaderStageFlags, offset: u32, size: u32, data: *const anyopaque) void,
+    };
+
+    pub fn bindBuffer(self: IGraphicsCommandEncoder, handle: BufferHandle, usage: BufferUsage) void {
+        self.vtable.bindBuffer(self.ptr, handle, usage);
+    }
+    pub fn bindTexture(self: IGraphicsCommandEncoder, handle: TextureHandle, slot: u32) void {
+        self.vtable.bindTexture(self.ptr, handle, slot);
+    }
+    pub fn bindShader(self: IGraphicsCommandEncoder, handle: ShaderHandle) void {
+        self.vtable.bindShader(self.ptr, handle);
+    }
+    pub fn draw(self: IGraphicsCommandEncoder, handle: BufferHandle, count: u32, mode: DrawMode) void {
+        self.vtable.draw(self.ptr, handle, count, mode);
+    }
+    pub fn drawOffset(self: IGraphicsCommandEncoder, handle: BufferHandle, count: u32, mode: DrawMode, offset: usize) void {
+        self.vtable.drawOffset(self.ptr, handle, count, mode, offset);
+    }
+    pub fn drawIndexed(self: IGraphicsCommandEncoder, vbo: BufferHandle, ebo: BufferHandle, count: u32) void {
+        self.vtable.drawIndexed(self.ptr, vbo, ebo, count);
+    }
+    pub fn drawIndirect(self: IGraphicsCommandEncoder, handle: BufferHandle, command_buffer: BufferHandle, offset: usize, draw_count: u32, stride: u32) void {
+        self.vtable.drawIndirect(self.ptr, handle, command_buffer, offset, draw_count, stride);
+    }
+    pub fn drawInstance(self: IGraphicsCommandEncoder, handle: BufferHandle, count: u32, instance_index: u32) void {
+        self.vtable.drawInstance(self.ptr, handle, count, instance_index);
+    }
+    pub fn setViewport(self: IGraphicsCommandEncoder, width: u32, height: u32) void {
+        self.vtable.setViewport(self.ptr, width, height);
+    }
+    pub fn pushConstants(self: IGraphicsCommandEncoder, stages: ShaderStageFlags, offset: u32, size: u32, data: *const anyopaque) void {
+        self.vtable.pushConstants(self.ptr, stages, offset, size, data);
+    }
+};
+
 pub const IRenderContext = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -340,6 +389,8 @@ pub const IRenderContext = struct {
         beginGPass: *const fn (ptr: *anyopaque) void,
         endGPass: *const fn (ptr: *anyopaque) void,
         computeSSAO: *const fn (ptr: *anyopaque) void,
+        setClearColor: *const fn (ptr: *anyopaque, color: Vec3) void,
+
         bindShader: *const fn (ptr: *anyopaque, handle: ShaderHandle) void,
         bindTexture: *const fn (ptr: *anyopaque, handle: TextureHandle, slot: u32) void,
         setModelMatrix: *const fn (ptr: *anyopaque, model: Mat4, color: Vec3, mask_radius: f32) void,
@@ -354,11 +405,8 @@ pub const IRenderContext = struct {
         drawInstance: *const fn (ptr: *anyopaque, handle: BufferHandle, count: u32, instance_index: u32) void,
         setViewport: *const fn (ptr: *anyopaque, width: u32, height: u32) void,
 
-        // Low-level primitives for Systems
         bindBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle, usage: BufferUsage) void,
         pushConstants: *const fn (ptr: *anyopaque, stages: ShaderStageFlags, offset: u32, size: u32, data: *const anyopaque) void,
-
-        setClearColor: *const fn (ptr: *anyopaque, color: Vec3) void,
 
         drawSky: *const fn (ptr: *anyopaque, params: SkyParams) void,
         beginCloudPass: *const fn (ptr: *anyopaque, params: CloudParams) void,
@@ -431,8 +479,9 @@ pub const RHI = struct {
         init: *const fn (ctx: *anyopaque, allocator: Allocator, device: ?*RenderDevice) anyerror!void,
         deinit: *const fn (ctx: *anyopaque) void,
 
-        // Composition of all vtables (temp)
+        // Composition of all vtables
         resources: IResourceFactory.VTable,
+        encoder: IGraphicsCommandEncoder.VTable,
         render: IRenderContext.VTable,
         shadow: IShadowContext.VTable,
         ui: IUIContext.VTable,
@@ -450,6 +499,9 @@ pub const RHI = struct {
 
     pub fn factory(self: RHI) IResourceFactory {
         return .{ .ptr = self.ptr, .vtable = &self.vtable.resources };
+    }
+    pub fn encoder(self: RHI) IGraphicsCommandEncoder {
+        return .{ .ptr = self.ptr, .vtable = &self.vtable.encoder };
     }
     pub fn context(self: RHI) IRenderContext {
         return .{ .ptr = self.ptr, .vtable = &self.vtable.render };
@@ -520,6 +572,12 @@ pub const RHI = struct {
     pub fn drawIndexed(self: RHI, vbo: BufferHandle, ebo: BufferHandle, count: u32) void {
         self.vtable.render.drawIndexed(self.ptr, vbo, ebo, count);
     }
+    pub fn drawIndirect(self: RHI, handle: BufferHandle, command_buffer: BufferHandle, offset: usize, draw_count: u32, stride: u32) void {
+        self.vtable.encoder.drawIndirect(self.ptr, handle, command_buffer, offset, draw_count, stride);
+    }
+    pub fn drawInstance(self: RHI, handle: BufferHandle, count: u32, instance_index: u32) void {
+        self.vtable.encoder.drawInstance(self.ptr, handle, count, instance_index);
+    }
     pub fn bindTexture(self: RHI, handle: TextureHandle, slot: u32) void {
         self.vtable.render.bindTexture(self.ptr, handle, slot);
     }
@@ -537,7 +595,7 @@ pub const RHI = struct {
     }
 
     pub fn bindBuffer(self: RHI, handle: BufferHandle, usage: BufferUsage) void {
-        self.vtable.render.bindBuffer(self.ptr, handle, usage);
+        self.vtable.encoder.bindBuffer(self.ptr, handle, usage);
     }
 
     pub fn getFrameIndex(self: RHI) usize {

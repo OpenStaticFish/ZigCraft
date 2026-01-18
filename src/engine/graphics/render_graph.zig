@@ -241,6 +241,7 @@ pub const CloudPass = struct {
         _ = ptr;
         if (ctx.disable_clouds) return;
         const view_proj = Mat4.perspectiveReverseZ(ctx.camera.fov, ctx.aspect, ctx.camera.near, ctx.camera.far).multiply(ctx.camera.getViewMatrixOriginCentered());
-        ctx.atmosphere_system.renderClouds(ctx.cloud_params, view_proj);
+        const encoder = ctx.rhi.encoder();
+        ctx.atmosphere_system.renderClouds(encoder, ctx.cloud_params, view_proj);
     }
 };

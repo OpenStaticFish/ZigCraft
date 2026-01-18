@@ -5289,6 +5289,18 @@ const VULKAN_RHI_VTABLE = rhi.RHI.VTable{
         .mapBuffer = mapBuffer,
         .unmapBuffer = unmapBuffer,
     },
+    .encoder = .{
+        .bindBuffer = bindBuffer,
+        .bindTexture = bindTexture,
+        .bindShader = bindShader,
+        .draw = draw,
+        .drawOffset = drawOffset,
+        .drawIndexed = drawIndexed,
+        .drawIndirect = drawIndirect,
+        .drawInstance = drawInstance,
+        .setViewport = setViewport,
+        .pushConstants = pushConstants,
+    },
     .render = .{
         .beginFrame = beginFrame,
         .endFrame = endFrame,
