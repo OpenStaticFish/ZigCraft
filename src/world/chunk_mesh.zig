@@ -644,12 +644,10 @@ fn getBiomeAt(chunk: *const Chunk, neighbors: NeighborChunks, x: i32, z: i32) bi
 
 /// Calculates the average color of the block's biome at the given face coordinates.
 /// `s`, `u`, `v` are local coordinates on the slice plane (depending on `axis`).
-/// `si` parameter is not needed as x/z are derived from s/u/v relative to the chunk.
 fn getBlockColor(chunk: *const Chunk, neighbors: NeighborChunks, axis: Face, s: i32, u: u32, v: u32, block: BlockType) [3]f32 {
-    // Note: subchunk index (si) is not needed here as biome colors rely on column/world coordinates (x, z) derived from s, u, v.
-
     // Only apply biome tint to top face of grass, and all faces of leaves/water
     if (block == .grass) {
+
         // Grass: only tint the top face, sides and bottom get no tint
         if (axis != .top) return .{ 1.0, 1.0, 1.0 };
     } else if (block != .leaves and block != .water) {
