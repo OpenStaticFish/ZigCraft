@@ -58,6 +58,7 @@ pub const Schematic = struct {
         const center_z = @as(i32, @intCast(z));
 
         for (self.blocks) |sb| {
+            // Skip random check for blocks with 100% probability (optimization)
             if (sb.probability < 1.0) {
                 if (random.float(f32) >= sb.probability) continue;
             }

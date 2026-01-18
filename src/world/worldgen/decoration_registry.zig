@@ -237,7 +237,7 @@ pub const StandardDecorationProvider = struct {
                         if (variant < s.variant_min or variant > s.variant_max) continue;
                     }
 
-                    const prob = s.probability * veg_mult;
+                    const prob = @min(1.0, s.probability * veg_mult);
                     if (random.float(f32) >= prob) continue;
 
                     chunk.setBlock(local_x, @intCast(surface_y + 1), local_z, s.block);
@@ -252,7 +252,7 @@ pub const StandardDecorationProvider = struct {
                         if (variant < s.variant_min or variant > s.variant_max) continue;
                     }
 
-                    const prob = s.probability * veg_mult;
+                    const prob = @min(1.0, s.probability * veg_mult);
                     if (random.float(f32) >= prob) continue;
 
                     s.schematic.place(chunk, local_x, @intCast(surface_y + 1), local_z, random);
