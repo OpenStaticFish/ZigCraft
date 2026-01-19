@@ -277,7 +277,8 @@ pub const ResourceManager = struct {
 
         const properties = c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
-        const buf = Utils.createVulkanBuffer(self.vulkan_device, size, vk_usage, properties) catch {
+        const buf = Utils.createVulkanBuffer(self.vulkan_device, size, vk_usage, properties) catch |err| {
+            std.log.err("ResourceManager.createBuffer failed: size={}, usage={}, err={}", .{ size, usage, err });
             return rhi.InvalidBufferHandle;
         };
 
@@ -289,7 +290,10 @@ pub const ResourceManager = struct {
     }
 
     pub fn destroyBuffer(self: *ResourceManager, handle: rhi.BufferHandle) void {
-        const buf = self.buffers.get(handle) orelse return;
+        const buf = self.buffers.get(handle) orelse {
+            std.debug.assert(handle != rhi.InvalidBufferHandle);
+            return;
+        };
         _ = self.buffers.remove(handle);
         self.buffer_deletion_queue[self.current_frame_index].append(self.allocator, .{ .buffer = buf.buffer, .memory = buf.memory }) catch {};
     }
@@ -302,7 +306,10 @@ pub const ResourceManager = struct {
         const buf = self.buffers.get(handle) orelse return;
 
         const staging = &self.staging_buffers[self.current_frame_index];
-        const staging_offset = staging.allocate(data.len) orelse return; // Silently fail on overflow for now, but logged
+        const staging_offset = staging.allocate(data.len) orelse {
+            std.log.err("Staging buffer overflow in updateBuffer! Data dropped.", .{});
+            return;
+        };
 
         const dest = @as([*]u8, @ptrCast(staging.mapped_ptr.?)) + staging_offset;
         @memcpy(dest[0..data.len], data);
@@ -322,7 +329,10 @@ pub const ResourceManager = struct {
         if (!buf.is_host_visible) return null;
 
         var ptr: ?*anyopaque = null;
-        Utils.checkVk(c.vkMapMemory(self.vulkan_device.vk_device, buf.memory, 0, buf.size, 0, &ptr)) catch return null;
+        Utils.checkVk(c.vkMapMemory(self.vulkan_device.vk_device, buf.memory, 0, buf.size, 0, &ptr)) catch |err| {
+            std.log.err("vkMapMemory failed: {}", .{err});
+            return null;
+        };
         return ptr;
     }
 

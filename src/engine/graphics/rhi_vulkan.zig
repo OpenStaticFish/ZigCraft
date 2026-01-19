@@ -367,7 +367,11 @@ fn destroySSAOResources(ctx: *VulkanContext) void {
     ctx.ssao_sampler = null;
 }
 
-/// Converts VkResult to Zig error for consistent error handling.
+fn createShaderModule(device: c.VkDevice, code: []const u8) !c.VkShaderModule {
+    var create_info = std.mem.zeroes(c.VkShaderModuleCreateInfo);
+    create_info.sType = c.VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    create_info.codeSize = code.len;
+    create_info.pCode = @ptrCast(@alignCast(code.ptr));
 
     var shader_module: c.VkShaderModule = null;
     try Utils.checkVk(c.vkCreateShaderModule(device, &create_info, null, &shader_module));
@@ -397,8 +401,21 @@ fn transitionImagesToShaderRead(ctx: *VulkanContext, images: []const c.VkImage, 
     var cmd_info = std.mem.zeroes(c.VkCommandBufferAllocateInfo);
     cmd_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     cmd_info.commandPool = ctx.frames.command_pool;
-    const count = @min(images.len, 4);
+    cmd_info.level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmd_info.commandBufferCount = 1;
 
+    var cmd: c.VkCommandBuffer = null;
+    try Utils.checkVk(c.vkAllocateCommandBuffers(ctx.vulkan_device.vk_device, &cmd_info, &cmd));
+
+    var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
+    begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    try Utils.checkVk(c.vkBeginCommandBuffer(cmd, &begin_info));
+
+    const count = @min(images.len, 4);
+    const aspect_mask: c.VkImageAspectFlags = if (is_depth) c.VK_IMAGE_ASPECT_DEPTH_BIT else c.VK_IMAGE_ASPECT_COLOR_BIT;
+
+    var barriers: [4]c.VkImageMemoryBarrier = undefined;
     for (0..count) |i| {
         barriers[i] = std.mem.zeroes(c.VkImageMemoryBarrier);
         barriers[i].sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -467,6 +484,75 @@ fn createVulkanBuffer(ctx: *VulkanContext, size: usize, usage: c.VkBufferUsageFl
 }
 
 /// Helper to create a texture sampler based on config and global anisotropy.
+fn createMainRenderPass(ctx: *VulkanContext) !void {
+    const sample_count = getMSAASampleCountFlag(ctx.msaa_samples);
+    const use_msaa = ctx.msaa_samples > 1;
+    const depth_format = DEPTH_FORMAT;
+
+    if (use_msaa) {
+        // MSAA render pass: 3 attachments (MSAA color, MSAA depth, resolve)
+        var msaa_color_attachment = std.mem.zeroes(c.VkAttachmentDescription);
+        msaa_color_attachment.format = ctx.swapchain.swapchain.image_format;
+        msaa_color_attachment.samples = sample_count;
+        msaa_color_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR;
+        msaa_color_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE; // MSAA image not needed after resolve
+        msaa_color_attachment.stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        msaa_color_attachment.stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        msaa_color_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+        msaa_color_attachment.finalLayout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        var depth_attachment = std.mem.zeroes(c.VkAttachmentDescription);
+        depth_attachment.format = depth_format;
+        depth_attachment.samples = sample_count;
+        depth_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depth_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depth_attachment.stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        depth_attachment.stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depth_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+        depth_attachment.finalLayout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        var resolve_attachment = std.mem.zeroes(c.VkAttachmentDescription);
+        resolve_attachment.format = ctx.swapchain.swapchain.image_format;
+        resolve_attachment.samples = c.VK_SAMPLE_COUNT_1_BIT;
+        resolve_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        resolve_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_STORE;
+        resolve_attachment.stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        resolve_attachment.stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        resolve_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+        resolve_attachment.finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+        var color_ref = c.VkAttachmentReference{ .attachment = 0, .layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        var depth_ref = c.VkAttachmentReference{ .attachment = 1, .layout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+        var resolve_ref = c.VkAttachmentReference{ .attachment = 2, .layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+
+        var subpass = std.mem.zeroes(c.VkSubpassDescription);
+        subpass.pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &color_ref;
+        subpass.pDepthStencilAttachment = &depth_ref;
+        subpass.pResolveAttachments = &resolve_ref;
+
+        var dependency = std.mem.zeroes(c.VkSubpassDependency);
+        dependency.srcSubpass = c.VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        dependency.srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.srcAccessMask = 0;
+        dependency.dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+        var attachment_descs = [_]c.VkAttachmentDescription{ msaa_color_attachment, depth_attachment, resolve_attachment };
+        var render_pass_info = std.mem.zeroes(c.VkRenderPassCreateInfo);
+        render_pass_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        render_pass_info.attachmentCount = 3;
+        render_pass_info.pAttachments = &attachment_descs[0];
+        render_pass_info.subpassCount = 1;
+        render_pass_info.pSubpasses = &subpass;
+        render_pass_info.dependencyCount = 1;
+        render_pass_info.pDependencies = &dependency;
+
+        try Utils.checkVk(c.vkCreateRenderPass(ctx.vulkan_device.vk_device, &render_pass_info, null, &ctx.swapchain.swapchain.main_render_pass));
+        std.log.info("Created MSAA {}x render pass", .{ctx.msaa_samples});
+    } else {
         // Non-MSAA render pass: 2 attachments (color, depth)
         var color_attachment = std.mem.zeroes(c.VkAttachmentDescription);
         color_attachment.format = ctx.swapchain.swapchain.image_format;
@@ -626,6 +712,24 @@ fn createShadowResources(ctx: *VulkanContext) !void {
         fb_info.layers = 1;
         try Utils.checkVk(c.vkCreateFramebuffer(ctx.vulkan_device.vk_device, &fb_info, null, &ctx.shadow_system.shadow_framebuffers[si]));
         ctx.shadow_system.shadow_image_layouts[si] = c.VK_IMAGE_LAYOUT_UNDEFINED;
+    }
+
+    // Shadow Sampler
+    {
+        var sampler_info = std.mem.zeroes(c.VkSamplerCreateInfo);
+        sampler_info.sType = c.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        sampler_info.magFilter = c.VK_FILTER_LINEAR;
+        sampler_info.minFilter = c.VK_FILTER_LINEAR;
+        sampler_info.addressModeU = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        sampler_info.addressModeV = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        sampler_info.addressModeW = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        sampler_info.anisotropyEnable = c.VK_FALSE;
+        sampler_info.maxAnisotropy = 1.0;
+        sampler_info.borderColor = c.VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+        sampler_info.compareEnable = c.VK_TRUE;
+        sampler_info.compareOp = c.VK_COMPARE_OP_LESS;
+
+        try Utils.checkVk(c.vkCreateSampler(ctx.vulkan_device.vk_device, &sampler_info, null, &ctx.shadow_system.shadow_sampler));
     }
 
     // Shadow Pipeline
@@ -1159,7 +1263,7 @@ fn createSSAOResources(ctx: *VulkanContext) !void {
         try Utils.checkVk(c.vkCreateImageView(ctx.vulkan_device.vk_device, &view_info, null, &ctx.ssao_noise_view));
 
         // Upload noise data via staging buffer
-        const staging = try Utils.createVulkanBuffer(ctx, 16 * 4, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        const staging = try Utils.createVulkanBuffer(&ctx.vulkan_device, 16 * 4, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         defer {
             c.vkDestroyBuffer(ctx.vulkan_device.vk_device, staging.buffer, null);
             c.vkFreeMemory(ctx.vulkan_device.vk_device, staging.memory, null);
@@ -1225,7 +1329,7 @@ fn createSSAOResources(ctx: *VulkanContext) !void {
 
     // 5. Create SSAO kernel UBO with hemisphere samples
     {
-        ctx.ssao_kernel_ubo = try Utils.createVulkanBuffer(ctx, @sizeOf(SSAOParams), c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        ctx.ssao_kernel_ubo = try Utils.createVulkanBuffer(&ctx.vulkan_device, @sizeOf(SSAOParams), c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
         // Generate hemisphere samples
         var rng = std.Random.DefaultPrng.init(67890);
@@ -2098,10 +2202,23 @@ fn initContext(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device:
     ctx.current_env_texture = ctx.dummy_texture;
 
     // Create cloud resources
-    ctx.cloud_vbo = ctx.resources.buffers.get(ctx.resources.createBuffer(8 * @sizeOf(f32), .vertex)).?; // Placeholder?
-    // Actually cloud VBO creation was simple in original.
-    // Original line 5573: `ctx.cloud_vbo = ...`.
-    // I'll handle it.
+    const cloud_vbo_handle = ctx.resources.createBuffer(8 * @sizeOf(f32), .vertex);
+    std.log.info("Cloud VBO handle: {}, map count: {}", .{ cloud_vbo_handle, ctx.resources.buffers.count() });
+    if (cloud_vbo_handle == 0) {
+        std.log.err("Failed to create cloud VBO", .{});
+        return error.InitializationFailed;
+    }
+    const cloud_buf = ctx.resources.buffers.get(cloud_vbo_handle);
+    if (cloud_buf == null) {
+        std.log.err("Cloud VBO created but not found in map!", .{});
+        return error.InitializationFailed;
+    }
+    ctx.cloud_vbo = cloud_buf.?;
+
+    // Create UI VBOs
+    for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+        ctx.ui_vbos[i] = try Utils.createVulkanBuffer(&ctx.vulkan_device, 1024 * 1024, c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    }
 
     for (0..MAX_FRAMES_IN_FLIGHT) |i| {
         ctx.descriptors_dirty[i] = true;
@@ -2109,6 +2226,8 @@ fn initContext(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device:
         for (0..64) |j| ctx.ui_tex_descriptor_pool[i][j] = null;
         ctx.ui_tex_descriptor_next[i] = 0;
     }
+
+    ctx.resources.setCurrentFrame(0);
 }
 
 fn deinit(ctx_ptr: *anyopaque) void {
@@ -2294,13 +2413,10 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
     }
 
     if (ctx.descriptors_dirty[ctx.frames.current_frame]) {
-        // Delegate to DescriptorManager?
-        // We can create a struct/method in DescriptorManager to handle this massive update.
-        // For now, I'll keep the logic here but use ctx.descriptors...
-        // Note: DescriptorManager handles UBOs but textures are dynamic.
-        // I should add `updateTextures` to DescriptorManager.
-        // But for now, adapting existing code is faster.
-
+        if (ctx.descriptors.descriptor_sets[ctx.frames.current_frame] == null) {
+            std.log.err("CRITICAL: Descriptor set for frame {} is NULL!", .{ctx.frames.current_frame});
+            return;
+        }
         var writes: [10]c.VkWriteDescriptorSet = undefined;
         var write_count: u32 = 0;
         var image_infos: [10]c.VkDescriptorImageInfo = undefined;
@@ -2338,6 +2454,12 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
 
         // Shadows
         {
+            if (ctx.shadow_system.shadow_sampler == null) {
+                std.log.err("CRITICAL: Shadow sampler is NULL!", .{});
+            }
+            if (ctx.shadow_system.shadow_image_view == null) {
+                std.log.err("CRITICAL: Shadow image view is NULL!", .{});
+            }
             image_infos[info_count] = .{
                 .sampler = ctx.shadow_system.shadow_sampler,
                 .imageView = ctx.shadow_system.shadow_image_view,
