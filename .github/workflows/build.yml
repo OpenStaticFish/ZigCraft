@@ -85,4 +85,8 @@ jobs:
         restore-prefixes-first-match: nix-${{ runner.os }}-
 
     - name: Run integration smoke test
-      run: xvfb-run -a nix develop --command zig build test-integration
+      env:
+        XDG_RUNTIME_DIR: /tmp/runtime-runner
+      run: |
+        mkdir -p $XDG_RUNTIME_DIR
+        xvfb-run -a nix develop --command zig build test-integration
