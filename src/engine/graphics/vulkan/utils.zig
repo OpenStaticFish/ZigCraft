@@ -72,7 +72,7 @@ pub fn createVulkanBuffer(device: *const VulkanDevice, size: usize, usage: c.VkB
     };
 }
 
-pub fn createSampler(device: *const VulkanDevice, config: rhi.TextureConfig, mip_levels: u32, max_anisotropy: f32) c.VkSampler {
+pub fn createSampler(device: *const VulkanDevice, config: rhi.TextureConfig, mip_levels: u32, max_anisotropy: f32) !c.VkSampler {
     const vk_mag_filter: c.VkFilter = if (config.mag_filter == .nearest) c.VK_FILTER_NEAREST else c.VK_FILTER_LINEAR;
     const vk_min_filter: c.VkFilter = if (config.min_filter == .nearest or config.min_filter == .nearest_mipmap_nearest or config.min_filter == .nearest_mipmap_linear)
         c.VK_FILTER_NEAREST
@@ -104,6 +104,9 @@ pub fn createSampler(device: *const VulkanDevice, config: rhi.TextureConfig, mip
     sampler_info.addressModeU = vk_wrap_s;
     sampler_info.addressModeV = vk_wrap_t;
     sampler_info.addressModeW = vk_wrap_s;
+    // Anisotropy logic: enable if mip_levels > 1 and global setting > 1
+    // We don't have access to global 'anisotropic_filtering' level here,
+    // passing max_anisotropy as a proxy for "enabled if > 1".
     sampler_info.anisotropyEnable = if (max_anisotropy > 1.0 and mip_levels > 1) c.VK_TRUE else c.VK_FALSE;
     sampler_info.maxAnisotropy = max_anisotropy;
     sampler_info.borderColor = c.VK_BORDER_COLOR_INT_OPAQUE_BLACK;
@@ -116,6 +119,6 @@ pub fn createSampler(device: *const VulkanDevice, config: rhi.TextureConfig, mip
     sampler_info.maxLod = @floatFromInt(mip_levels);
 
     var sampler: c.VkSampler = null;
-    _ = c.vkCreateSampler(device.vk_device, &sampler_info, null, &sampler);
+    try checkVk(c.vkCreateSampler(device.vk_device, &sampler_info, null, &sampler));
     return sampler;
 }

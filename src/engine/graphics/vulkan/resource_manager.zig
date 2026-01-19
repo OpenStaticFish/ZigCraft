@@ -424,7 +424,12 @@ pub const ResourceManager = struct {
             return rhi.InvalidTextureHandle;
         }
 
-        const sampler = Utils.createSampler(self.vulkan_device, config, mip_levels, self.vulkan_device.max_anisotropy);
+        const sampler = Utils.createSampler(self.vulkan_device, config, mip_levels, self.vulkan_device.max_anisotropy) catch {
+            c.vkDestroyImageView(self.vulkan_device.vk_device, view, null);
+            c.vkFreeMemory(self.vulkan_device.vk_device, memory, null);
+            c.vkDestroyImage(self.vulkan_device.vk_device, image, null);
+            return rhi.InvalidTextureHandle;
+        };
 
         // Upload data if present
         if (data_opt) |data| {
@@ -643,10 +648,3 @@ pub const ResourceManager = struct {
         _ = handle;
     }
 };
-
-    sampler_info.maxLod = @floatFromInt(mip_levels);
-
-    var sampler: c.VkSampler = null;
-    _ = c.vkCreateSampler(device.vk_device, &sampler_info, null, &sampler);
-    return sampler;
-}
