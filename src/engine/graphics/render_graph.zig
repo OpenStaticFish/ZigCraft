@@ -1,4 +1,5 @@
 const std = @import("std");
+const c = @import("../../c.zig").c;
 const Camera = @import("camera.zig").Camera;
 const World = @import("../../world/world.zig").World;
 const shadow_scene = @import("shadow_scene.zig");
@@ -6,6 +7,7 @@ const RHI = @import("rhi.zig").RHI;
 const rhi_pkg = @import("rhi.zig");
 const Mat4 = @import("../math/mat4.zig").Mat4;
 const Vec3 = @import("../math/vec3.zig").Vec3;
+const log = @import("../core/log.zig");
 const CSM = @import("csm.zig");
 const AtmosphereSystem = @import("atmosphere_system.zig").AtmosphereSystem;
 const MaterialSystem = @import("material_system.zig").MaterialSystem;
@@ -181,7 +183,7 @@ pub const SSAOPass = struct {
     fn execute(ptr: *anyopaque, ctx: SceneContext) void {
         _ = ptr;
         if (!ctx.ssao_enabled or ctx.disable_ssao) return;
-        ctx.rhi.computeSSAO();
+        ctx.rhi.context().computeSSAO();
     }
 };
 
@@ -199,7 +201,15 @@ pub const SkyPass = struct {
 
     fn execute(ptr: *anyopaque, ctx: SceneContext) void {
         _ = ptr;
-        ctx.rhi.drawSky(ctx.sky_params);
+        ctx.atmosphere_system.renderSky(ctx.sky_params) catch |err| {
+            if (err != error.ResourceNotReady and
+                err != error.SkyPipelineNotReady and
+                err != error.SkyPipelineLayoutNotReady and
+                err != error.CommandBufferNotReady)
+            {
+                log.log.err("SkyPass: rendering failed: {}", .{err});
+            }
+        };
     }
 };
 
@@ -241,6 +251,14 @@ pub const CloudPass = struct {
         _ = ptr;
         if (ctx.disable_clouds) return;
         const view_proj = Mat4.perspectiveReverseZ(ctx.camera.fov, ctx.aspect, ctx.camera.near, ctx.camera.far).multiply(ctx.camera.getViewMatrixOriginCentered());
-        ctx.atmosphere_system.renderClouds(ctx.cloud_params, view_proj);
+        ctx.atmosphere_system.renderClouds(ctx.cloud_params, view_proj) catch |err| {
+            if (err != error.ResourceNotReady and
+                err != error.CloudPipelineNotReady and
+                err != error.CloudPipelineLayoutNotReady and
+                err != error.CommandBufferNotReady)
+            {
+                log.log.err("CloudPass: rendering failed: {}", .{err});
+            }
+        };
     }
 };

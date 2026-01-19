@@ -18,6 +18,12 @@ pub const RhiError = error{
     TooManyObjects,
     FormatNotSupported,
     FragmentedPool,
+    ResourceNotReady,
+    SkyPipelineNotReady,
+    SkyPipelineLayoutNotReady,
+    CloudPipelineNotReady,
+    CloudPipelineLayoutNotReady,
+    CommandBufferNotReady,
     Unknown,
 };
 
@@ -327,6 +333,81 @@ pub const IUIContext = struct {
     }
 };
 
+pub const IGraphicsCommandEncoder = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        bindShader: *const fn (ptr: *anyopaque, handle: ShaderHandle) void,
+        bindTexture: *const fn (ptr: *anyopaque, handle: TextureHandle, slot: u32) void,
+        bindBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle, usage: BufferUsage) void,
+        pushConstants: *const fn (ptr: *anyopaque, stages: ShaderStageFlags, offset: u32, size: u32, data: *const anyopaque) void,
+        draw: *const fn (ptr: *anyopaque, handle: BufferHandle, count: u32, mode: DrawMode) void,
+        drawOffset: *const fn (ptr: *anyopaque, handle: BufferHandle, count: u32, mode: DrawMode, offset: usize) void,
+        drawIndexed: *const fn (ptr: *anyopaque, vbo: BufferHandle, ebo: BufferHandle, count: u32) void,
+        drawIndirect: *const fn (ptr: *anyopaque, handle: BufferHandle, command_buffer: BufferHandle, offset: usize, draw_count: u32, stride: u32) void,
+        drawInstance: *const fn (ptr: *anyopaque, handle: BufferHandle, count: u32, instance_index: u32) void,
+        setViewport: *const fn (ptr: *anyopaque, width: u32, height: u32) void,
+    };
+
+    pub fn bindShader(self: IGraphicsCommandEncoder, handle: ShaderHandle) void {
+        self.vtable.bindShader(self.ptr, handle);
+    }
+    pub fn bindTexture(self: IGraphicsCommandEncoder, handle: TextureHandle, slot: u32) void {
+        self.vtable.bindTexture(self.ptr, handle, slot);
+    }
+    pub fn bindBuffer(self: IGraphicsCommandEncoder, handle: BufferHandle, usage: BufferUsage) void {
+        self.vtable.bindBuffer(self.ptr, handle, usage);
+    }
+    pub fn pushConstants(self: IGraphicsCommandEncoder, stages: ShaderStageFlags, offset: u32, size: u32, data: *const anyopaque) void {
+        self.vtable.pushConstants(self.ptr, stages, offset, size, data);
+    }
+    pub fn draw(self: IGraphicsCommandEncoder, handle: BufferHandle, count: u32, mode: DrawMode) void {
+        self.vtable.draw(self.ptr, handle, count, mode);
+    }
+    pub fn drawOffset(self: IGraphicsCommandEncoder, handle: BufferHandle, count: u32, mode: DrawMode, offset: usize) void {
+        self.vtable.drawOffset(self.ptr, handle, count, mode, offset);
+    }
+    pub fn drawIndexed(self: IGraphicsCommandEncoder, vbo: BufferHandle, ebo: BufferHandle, count: u32) void {
+        self.vtable.drawIndexed(self.ptr, vbo, ebo, count);
+    }
+    pub fn drawIndirect(self: IGraphicsCommandEncoder, handle: BufferHandle, command_buffer: BufferHandle, offset: usize, draw_count: u32, stride: u32) void {
+        self.vtable.drawIndirect(self.ptr, handle, command_buffer, offset, draw_count, stride);
+    }
+    pub fn drawInstance(self: IGraphicsCommandEncoder, handle: BufferHandle, count: u32, instance_index: u32) void {
+        self.vtable.drawInstance(self.ptr, handle, count, instance_index);
+    }
+    pub fn setViewport(self: IGraphicsCommandEncoder, width: u32, height: u32) void {
+        self.vtable.setViewport(self.ptr, width, height);
+    }
+};
+
+pub const IRenderStateContext = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        setModelMatrix: *const fn (ptr: *anyopaque, model: Mat4, color: Vec3, mask_radius: f32) void,
+        setInstanceBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
+        setLODInstanceBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
+        updateGlobalUniforms: *const fn (ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, sun_color: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void,
+        setTextureUniforms: *const fn (ptr: *anyopaque, texture_enabled: bool, shadow_map_handles: [SHADOW_CASCADE_COUNT]TextureHandle) void,
+    };
+
+    pub fn setModelMatrix(self: IRenderStateContext, model: Mat4, color: Vec3, mask_radius: f32) void {
+        self.vtable.setModelMatrix(self.ptr, model, color, mask_radius);
+    }
+    pub fn setInstanceBuffer(self: IRenderStateContext, handle: BufferHandle) void {
+        self.vtable.setInstanceBuffer(self.ptr, handle);
+    }
+    pub fn updateGlobalUniforms(self: IRenderStateContext, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, sun_color: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void {
+        self.vtable.updateGlobalUniforms(self.ptr, view_proj, cam_pos, sun_dir, sun_color, time, fog_color, fog_density, fog_enabled, sun_intensity, ambient, use_texture, cloud_params);
+    }
+    pub fn setTextureUniforms(self: IRenderStateContext, texture_enabled: bool, shadow_map_handles: [SHADOW_CASCADE_COUNT]TextureHandle) void {
+        self.vtable.setTextureUniforms(self.ptr, texture_enabled, shadow_map_handles);
+    }
+};
+
 pub const IRenderContext = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -339,29 +420,61 @@ pub const IRenderContext = struct {
         endMainPass: *const fn (ptr: *anyopaque) void,
         beginGPass: *const fn (ptr: *anyopaque) void,
         endGPass: *const fn (ptr: *anyopaque) void,
-        computeSSAO: *const fn (ptr: *anyopaque) void,
-        bindShader: *const fn (ptr: *anyopaque, handle: ShaderHandle) void,
-        bindTexture: *const fn (ptr: *anyopaque, handle: TextureHandle, slot: u32) void,
-        setModelMatrix: *const fn (ptr: *anyopaque, model: Mat4, color: Vec3, mask_radius: f32) void,
-        setInstanceBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
-        setLODInstanceBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
-        updateGlobalUniforms: *const fn (ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, sun_color: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void,
-        setTextureUniforms: *const fn (ptr: *anyopaque, texture_enabled: bool, shadow_map_handles: [SHADOW_CASCADE_COUNT]TextureHandle) void,
-        draw: *const fn (ptr: *anyopaque, handle: BufferHandle, count: u32, mode: DrawMode) void,
-        drawOffset: *const fn (ptr: *anyopaque, handle: BufferHandle, count: u32, mode: DrawMode, offset: usize) void,
-        drawIndexed: *const fn (ptr: *anyopaque, vbo: BufferHandle, ebo: BufferHandle, count: u32) void,
-        drawIndirect: *const fn (ptr: *anyopaque, handle: BufferHandle, command_buffer: BufferHandle, offset: usize, draw_count: u32, stride: u32) void,
-        drawInstance: *const fn (ptr: *anyopaque, handle: BufferHandle, count: u32, instance_index: u32) void,
-        setViewport: *const fn (ptr: *anyopaque, width: u32, height: u32) void,
+        getEncoder: *const fn (ptr: *anyopaque) IGraphicsCommandEncoder,
+        getStateContext: *const fn (ptr: *anyopaque) IRenderStateContext,
 
-        // Low-level primitives for Systems
-        bindBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle, usage: BufferUsage) void,
-        pushConstants: *const fn (ptr: *anyopaque, stages: ShaderStageFlags, offset: u32, size: u32, data: *const anyopaque) void,
-
+        // High-level context state
         setClearColor: *const fn (ptr: *anyopaque, color: Vec3) void,
 
-        drawSky: *const fn (ptr: *anyopaque, params: SkyParams) void,
-        beginCloudPass: *const fn (ptr: *anyopaque, params: CloudParams) void,
+        // Resource Accessors for Systems
+        // Note: All accessors return backend-specific handles (e.g., Vulkan handles as u64).
+        // If a resource is not initialized or unavailable, the accessor returns 0.
+
+        /// Returns the native sky pipeline handle (VkPipeline).
+        getNativeSkyPipeline: *const fn (ptr: *anyopaque) u64,
+        /// Returns the native sky pipeline layout handle (VkPipelineLayout).
+        getNativeSkyPipelineLayout: *const fn (ptr: *anyopaque) u64,
+        /// Returns the native cloud pipeline handle (VkPipeline).
+        getNativeCloudPipeline: *const fn (ptr: *anyopaque) u64,
+        /// Returns the native cloud pipeline layout handle (VkPipelineLayout).
+        getNativeCloudPipelineLayout: *const fn (ptr: *anyopaque) u64,
+        /// Returns the main native descriptor set handle (VkDescriptorSet).
+        getNativeMainDescriptorSet: *const fn (ptr: *anyopaque) u64,
+        /// Returns the native SSAO pipeline handle (VkPipeline).
+        getNativeSSAOPipeline: *const fn (ptr: *anyopaque) u64,
+        /// Returns the native SSAO pipeline layout handle (VkPipelineLayout).
+        getNativeSSAOPipelineLayout: *const fn (ptr: *anyopaque) u64,
+        /// Returns the native SSAO blur pipeline handle (VkPipeline).
+        getNativeSSAOBlurPipeline: *const fn (ptr: *anyopaque) u64,
+        /// Returns the native SSAO blur pipeline layout handle (VkPipelineLayout).
+        getNativeSSAOBlurPipelineLayout: *const fn (ptr: *anyopaque) u64,
+        /// Returns the native SSAO descriptor set handle (VkDescriptorSet).
+        getNativeSSAODescriptorSet: *const fn (ptr: *anyopaque) u64,
+        /// Returns the native SSAO blur descriptor set handle (VkDescriptorSet).
+        getNativeSSAOBlurDescriptorSet: *const fn (ptr: *anyopaque) u64,
+        /// Returns the native command buffer handle for the current frame (VkCommandBuffer).
+        getNativeCommandBuffer: *const fn (ptr: *anyopaque) u64,
+        /// Returns the current swapchain extent [width, height].
+        getNativeSwapchainExtent: *const fn (ptr: *anyopaque) [2]u32,
+        /// Returns the native SSAO framebuffer handle (VkFramebuffer).
+        getNativeSSAOFramebuffer: *const fn (ptr: *anyopaque) u64,
+        /// Returns the native SSAO blur framebuffer handle (VkFramebuffer).
+        getNativeSSAOBlurFramebuffer: *const fn (ptr: *anyopaque) u64,
+        /// Returns the native SSAO render pass handle (VkRenderPass).
+        getNativeSSAORenderPass: *const fn (ptr: *anyopaque) u64,
+        /// Returns the native SSAO blur render pass handle (VkRenderPass).
+        getNativeSSAOBlurRenderPass: *const fn (ptr: *anyopaque) u64,
+        /// Returns the native buffer handle for SSAO parameters (VkBuffer).
+        getNativeSSAOParamsBuffer: *const fn (ptr: *anyopaque) u64,
+        /// Returns the native memory handle for SSAO parameters (VkDeviceMemory).
+        getNativeSSAOParamsMemory: *const fn (ptr: *anyopaque) u64,
+        /// Returns the native device handle (VkDevice).
+        getNativeDevice: *const fn (ptr: *anyopaque) u64,
+
+        // Specific rendering passes/techniques
+        // TODO (#189): Relocate computeSSAO to a dedicated SSAOSystem and remove from RHI.
+        computeSSAO: *const fn (ptr: *anyopaque) void,
+        /// @deprecated TODO (#189): Relocate drawDebugShadowMap to a debug overlay system.
         drawDebugShadowMap: *const fn (ptr: *anyopaque, cascade_index: usize, depth_map_handle: TextureHandle) void,
     };
 
@@ -377,23 +490,44 @@ pub const IRenderContext = struct {
     pub fn endMainPass(self: IRenderContext) void {
         self.vtable.endMainPass(self.ptr);
     }
+    pub fn getEncoder(self: IRenderContext) IGraphicsCommandEncoder {
+        return self.vtable.getEncoder(self.ptr);
+    }
+    pub fn getState(self: IRenderContext) IRenderStateContext {
+        return self.vtable.getStateContext(self.ptr);
+    }
+
+    // Pass-throughs to encoder (convenience)
     pub fn bindShader(self: IRenderContext, handle: ShaderHandle) void {
-        self.vtable.bindShader(self.ptr, handle);
+        self.getEncoder().bindShader(handle);
     }
     pub fn bindTexture(self: IRenderContext, handle: TextureHandle, slot: u32) void {
-        self.vtable.bindTexture(self.ptr, handle, slot);
+        self.getEncoder().bindTexture(handle, slot);
     }
     pub fn draw(self: IRenderContext, handle: BufferHandle, count: u32, mode: DrawMode) void {
-        self.vtable.draw(self.ptr, handle, count, mode);
+        self.getEncoder().draw(handle, count, mode);
     }
     pub fn drawOffset(self: IRenderContext, handle: BufferHandle, count: u32, mode: DrawMode, offset: usize) void {
-        self.vtable.drawOffset(self.ptr, handle, count, mode, offset);
+        self.getEncoder().drawOffset(handle, count, mode, offset);
     }
     pub fn drawIndexed(self: IRenderContext, vbo: BufferHandle, ebo: BufferHandle, count: u32) void {
-        self.vtable.drawIndexed(self.ptr, vbo, ebo, count);
+        self.getEncoder().drawIndexed(vbo, ebo, count);
+    }
+    pub fn bindBuffer(self: IRenderContext, handle: BufferHandle, usage: BufferUsage) void {
+        self.getEncoder().bindBuffer(handle, usage);
     }
     pub fn pushConstants(self: IRenderContext, stages: ShaderStageFlags, offset: u32, size: u32, data: *const anyopaque) void {
-        self.vtable.pushConstants(self.ptr, stages, offset, size, data);
+        self.getEncoder().pushConstants(stages, offset, size, data);
+    }
+
+    // Pass-throughs to state (convenience)
+    pub fn setModelMatrix(self: IRenderContext, model: Mat4, color: Vec3, mask_radius: f32) void {
+        self.getState().setModelMatrix(model, color, mask_radius);
+    }
+
+    // Legacy/Techniques (to be removed once systems are updated)
+    pub fn computeSSAO(self: IRenderContext) void {
+        self.vtable.computeSSAO(self.ptr);
     }
 };
 
@@ -454,6 +588,12 @@ pub const RHI = struct {
     pub fn context(self: RHI) IRenderContext {
         return .{ .ptr = self.ptr, .vtable = &self.vtable.render };
     }
+    pub fn encoder(self: RHI) IGraphicsCommandEncoder {
+        return self.context().getEncoder();
+    }
+    pub fn state(self: RHI) IRenderStateContext {
+        return self.context().getState();
+    }
     pub fn shadow(self: RHI) IShadowContext {
         return .{ .ptr = self.ptr, .vtable = &self.vtable.shadow };
     }
@@ -512,32 +652,32 @@ pub const RHI = struct {
         self.vtable.render.endMainPass(self.ptr);
     }
     pub fn draw(self: RHI, handle: BufferHandle, count: u32, mode: DrawMode) void {
-        self.vtable.render.draw(self.ptr, handle, count, mode);
+        self.encoder().draw(handle, count, mode);
     }
     pub fn drawOffset(self: RHI, handle: BufferHandle, count: u32, mode: DrawMode, offset: usize) void {
-        self.vtable.render.drawOffset(self.ptr, handle, count, mode, offset);
+        self.encoder().drawOffset(handle, count, mode, offset);
     }
     pub fn drawIndexed(self: RHI, vbo: BufferHandle, ebo: BufferHandle, count: u32) void {
-        self.vtable.render.drawIndexed(self.ptr, vbo, ebo, count);
+        self.encoder().drawIndexed(vbo, ebo, count);
     }
     pub fn bindTexture(self: RHI, handle: TextureHandle, slot: u32) void {
-        self.vtable.render.bindTexture(self.ptr, handle, slot);
+        self.encoder().bindTexture(handle, slot);
     }
     pub fn bindShader(self: RHI, handle: ShaderHandle) void {
-        self.vtable.render.bindShader(self.ptr, handle);
+        self.encoder().bindShader(handle);
     }
     pub fn setModelMatrix(self: RHI, model: Mat4, color: Vec3, mask_radius: f32) void {
-        self.vtable.render.setModelMatrix(self.ptr, model, color, mask_radius);
+        self.state().setModelMatrix(model, color, mask_radius);
     }
     pub fn pushConstants(self: RHI, stages: ShaderStageFlags, offset: u32, size: u32, data: *const anyopaque) void {
-        self.vtable.render.pushConstants(self.ptr, stages, offset, size, data);
+        self.encoder().pushConstants(stages, offset, size, data);
     }
     pub fn updateGlobalUniforms(self: RHI, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, sun_color: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void {
-        self.vtable.render.updateGlobalUniforms(self.ptr, view_proj, cam_pos, sun_dir, sun_color, time, fog_color, fog_density, fog_enabled, sun_intensity, ambient, use_texture, cloud_params);
+        self.state().updateGlobalUniforms(view_proj, cam_pos, sun_dir, sun_color, time, fog_color, fog_density, fog_enabled, sun_intensity, ambient, use_texture, cloud_params);
     }
 
     pub fn bindBuffer(self: RHI, handle: BufferHandle, usage: BufferUsage) void {
-        self.vtable.render.bindBuffer(self.ptr, handle, usage);
+        self.encoder().bindBuffer(handle, usage);
     }
 
     pub fn getFrameIndex(self: RHI) usize {
@@ -574,12 +714,6 @@ pub const RHI = struct {
     pub fn drawTexture2D(self: RHI, handle: TextureHandle, rect: Rect) void {
         self.vtable.ui.drawTexture(self.ptr, handle, rect);
     }
-    pub fn drawSky(self: RHI, params: SkyParams) void {
-        self.vtable.render.drawSky(self.ptr, params);
-    }
-    pub fn beginCloudPass(self: RHI, params: CloudParams) void {
-        self.vtable.render.beginCloudPass(self.ptr, params);
-    }
     pub fn beginShadowPass(self: RHI, cascade: u32, matrix: Mat4) void {
         self.vtable.shadow.beginPass(self.ptr, cascade, matrix);
     }
@@ -602,7 +736,7 @@ pub const RHI = struct {
         self.vtable.render.setTextureUniforms(self.ptr, enabled, handles);
     }
     pub fn setViewport(self: RHI, width: u32, height: u32) void {
-        self.vtable.render.setViewport(self.ptr, width, height);
+        self.encoder().setViewport(width, height);
     }
 
     pub fn setWireframe(self: RHI, enabled: bool) void {

@@ -5273,6 +5273,116 @@ fn drawSky(ctx_ptr: *anyopaque, params: rhi.SkyParams) void {
     c.vkCmdDraw(command_buffer, 3, 1, 0, 0);
 }
 
+fn getNativeSkyPipeline(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.sky_pipeline);
+}
+fn getNativeSkyPipelineLayout(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.sky_pipeline_layout);
+}
+fn getNativeCloudPipeline(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.cloud_pipeline);
+}
+fn getNativeCloudPipelineLayout(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.cloud_pipeline_layout);
+}
+fn getNativeMainDescriptorSet(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.descriptor_sets[ctx.current_sync_frame]);
+}
+fn getNativeSSAOPipeline(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.ssao_pipeline);
+}
+fn getNativeSSAOPipelineLayout(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.ssao_pipeline_layout);
+}
+fn getNativeSSAOBlurPipeline(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.ssao_blur_pipeline);
+}
+fn getNativeSSAOBlurPipelineLayout(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.ssao_blur_pipeline_layout);
+}
+fn getNativeSSAODescriptorSet(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.ssao_descriptor_sets[ctx.current_sync_frame]);
+}
+fn getNativeSSAOBlurDescriptorSet(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.ssao_blur_descriptor_sets[ctx.current_sync_frame]);
+}
+fn getNativeCommandBuffer(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.command_buffers[ctx.current_sync_frame]);
+}
+fn getNativeSwapchainExtent(ctx_ptr: *anyopaque) [2]u32 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return .{ ctx.vulkan_swapchain.extent.width, ctx.vulkan_swapchain.extent.height };
+}
+fn getNativeSSAOFramebuffer(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.ssao_framebuffer);
+}
+fn getNativeSSAOBlurFramebuffer(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.ssao_blur_framebuffer);
+}
+fn getNativeSSAORenderPass(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.ssao_render_pass);
+}
+fn getNativeSSAOBlurRenderPass(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.ssao_blur_render_pass);
+}
+fn getNativeSSAOParamsBuffer(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.ssao_kernel_ubo.buffer);
+}
+fn getNativeSSAOParamsMemory(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.ssao_kernel_ubo.memory);
+}
+fn getNativeDevice(ctx_ptr: *anyopaque) u64 {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    return @intFromPtr(ctx.vulkan_device.vk_device);
+}
+
+fn getStateContext(ctx_ptr: *anyopaque) rhi.IRenderStateContext {
+    return .{ .ptr = ctx_ptr, .vtable = &VULKAN_STATE_CONTEXT_VTABLE };
+}
+
+const VULKAN_STATE_CONTEXT_VTABLE = rhi.IRenderStateContext.VTable{
+    .setModelMatrix = setModelMatrix,
+    .setInstanceBuffer = setInstanceBuffer,
+    .setLODInstanceBuffer = setLODInstanceBuffer,
+    .updateGlobalUniforms = updateGlobalUniforms,
+    .setTextureUniforms = setTextureUniforms,
+};
+
+fn getEncoder(ctx_ptr: *anyopaque) rhi.IGraphicsCommandEncoder {
+    return .{ .ptr = ctx_ptr, .vtable = &VULKAN_COMMAND_ENCODER_VTABLE };
+}
+
+const VULKAN_COMMAND_ENCODER_VTABLE = rhi.IGraphicsCommandEncoder.VTable{
+    .bindShader = bindShader,
+    .bindTexture = bindTexture,
+    .bindBuffer = bindBuffer,
+    .pushConstants = pushConstants,
+    .draw = draw,
+    .drawOffset = drawOffset,
+    .drawIndexed = drawIndexed,
+    .drawIndirect = drawIndirect,
+    .drawInstance = drawInstance,
+    .setViewport = setViewport,
+};
+
 const VULKAN_RHI_VTABLE = rhi.RHI.VTable{
     .init = initContext,
     .deinit = deinit,
@@ -5297,25 +5407,30 @@ const VULKAN_RHI_VTABLE = rhi.RHI.VTable{
         .endMainPass = endMainPass,
         .beginGPass = beginGPass,
         .endGPass = endGPass,
+        .getEncoder = getEncoder,
+        .getStateContext = getStateContext,
+        .getNativeSkyPipeline = getNativeSkyPipeline,
+        .getNativeSkyPipelineLayout = getNativeSkyPipelineLayout,
+        .getNativeCloudPipeline = getNativeCloudPipeline,
+        .getNativeCloudPipelineLayout = getNativeCloudPipelineLayout,
+        .getNativeMainDescriptorSet = getNativeMainDescriptorSet,
+        .getNativeSSAOPipeline = getNativeSSAOPipeline,
+        .getNativeSSAOPipelineLayout = getNativeSSAOPipelineLayout,
+        .getNativeSSAOBlurPipeline = getNativeSSAOBlurPipeline,
+        .getNativeSSAOBlurPipelineLayout = getNativeSSAOBlurPipelineLayout,
+        .getNativeSSAODescriptorSet = getNativeSSAODescriptorSet,
+        .getNativeSSAOBlurDescriptorSet = getNativeSSAOBlurDescriptorSet,
+        .getNativeCommandBuffer = getNativeCommandBuffer,
+        .getNativeSwapchainExtent = getNativeSwapchainExtent,
+        .getNativeSSAOFramebuffer = getNativeSSAOFramebuffer,
+        .getNativeSSAOBlurFramebuffer = getNativeSSAOBlurFramebuffer,
+        .getNativeSSAORenderPass = getNativeSSAORenderPass,
+        .getNativeSSAOBlurRenderPass = getNativeSSAOBlurRenderPass,
+        .getNativeSSAOParamsBuffer = getNativeSSAOParamsBuffer,
+        .getNativeSSAOParamsMemory = getNativeSSAOParamsMemory,
+        .getNativeDevice = getNativeDevice,
         .computeSSAO = computeSSAO,
-        .bindShader = bindShader,
-        .bindTexture = bindTexture,
-        .setModelMatrix = setModelMatrix,
-        .setInstanceBuffer = setInstanceBuffer,
-        .setLODInstanceBuffer = setLODInstanceBuffer,
-        .updateGlobalUniforms = updateGlobalUniforms,
-        .setTextureUniforms = setTextureUniforms,
-        .draw = draw,
-        .drawOffset = drawOffset,
-        .drawIndexed = drawIndexed,
-        .drawIndirect = drawIndirect,
-        .drawInstance = drawInstance,
-        .setViewport = setViewport,
-        .bindBuffer = bindBuffer,
-        .pushConstants = pushConstants,
         .setClearColor = setClearColor,
-        .drawSky = drawSky,
-        .beginCloudPass = beginCloudPass,
         .drawDebugShadowMap = drawDebugShadowMap,
     },
     .shadow = .{
