@@ -39,10 +39,8 @@ jobs:
         if: steps.check.outputs.result == 'true'
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           model: openrouter/minimax/minimax-m2.1
-          use_github_token: true
           prompt: |
             Review this issue. If there's a clear fix or relevant docs:
             - Provide documentation links

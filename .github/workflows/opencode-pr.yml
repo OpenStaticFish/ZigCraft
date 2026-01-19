@@ -39,10 +39,8 @@ jobs:
         uses: anomalyco/opencode/github@latest
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           model: openrouter/minimax/minimax-m2.1
-          use_github_token: true
           prompt: |
             Check previous code review and if they have been solved
             Check for code quality issues
