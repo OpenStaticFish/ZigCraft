@@ -168,7 +168,7 @@ pub const LODManager = struct {
 
         // Init MDI buffers (capacity for ~2048 LOD regions)
         const max_regions = 2048;
-        const instance_buffer = rhi.createBuffer(max_regions * @sizeOf(rhi_mod.InstanceData), .storage);
+        const instance_buffer = try rhi.createBuffer(max_regions * @sizeOf(rhi_mod.InstanceData), .storage);
         var instance_buffers: [rhi_mod.MAX_FRAMES_IN_FLIGHT]rhi_mod.BufferHandle = undefined;
         for (0..rhi_mod.MAX_FRAMES_IN_FLIGHT) |i| {
             instance_buffers[i] = instance_buffer;

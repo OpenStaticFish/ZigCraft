@@ -17,7 +17,7 @@ pub const RenderSystem = struct {
     missing_transform_logged: bool,
 
     pub fn init(rhi: *RHI) !RenderSystem {
-        const buffer = rhi.*.createBuffer(@sizeOf(@TypeOf(wireframe.line_vertices)), .vertex);
+        const buffer = try rhi.*.createBuffer(@sizeOf(@TypeOf(wireframe.line_vertices)), .vertex);
         try rhi.*.uploadBuffer(buffer, std.mem.asBytes(&wireframe.line_vertices));
 
         return .{

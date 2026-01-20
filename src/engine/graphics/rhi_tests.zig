@@ -214,7 +214,7 @@ const MockContext = struct {
         .unmapBuffer = unmapBuffer,
     };
 
-    fn createBuffer(ptr: *anyopaque, size: usize, usage: rhi.BufferUsage) rhi.BufferHandle {
+    fn createBuffer(ptr: *anyopaque, size: usize, usage: rhi.BufferUsage) rhi.RhiError!rhi.BufferHandle {
         _ = ptr;
         _ = size;
         _ = usage;

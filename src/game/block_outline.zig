@@ -142,7 +142,7 @@ pub const BlockOutline = struct {
     rhi: RHI,
 
     pub fn init(rhi: RHI) !BlockOutline {
-        const buffer = rhi.createBuffer(@sizeOf(@TypeOf(outline_vertices)), .vertex);
+        const buffer = try rhi.createBuffer(@sizeOf(@TypeOf(outline_vertices)), .vertex);
         try rhi.uploadBuffer(buffer, std.mem.asBytes(&outline_vertices));
 
         return .{

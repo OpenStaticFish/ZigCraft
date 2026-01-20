@@ -59,14 +59,15 @@ pub const DescriptorManager = struct {
             .descriptor_set_layout = null,
             .descriptor_sets = undefined,
             .lod_descriptor_sets = undefined,
-            .global_ubos = undefined,
-            .global_ubos_mapped = undefined,
-            .shadow_ubos = undefined,
-            .shadow_ubos_mapped = undefined,
+            .global_ubos = std.mem.zeroes([rhi.MAX_FRAMES_IN_FLIGHT]VulkanBuffer),
+            .global_ubos_mapped = std.mem.zeroes([rhi.MAX_FRAMES_IN_FLIGHT]?*anyopaque),
+            .shadow_ubos = std.mem.zeroes([rhi.MAX_FRAMES_IN_FLIGHT]VulkanBuffer),
+            .shadow_ubos_mapped = std.mem.zeroes([rhi.MAX_FRAMES_IN_FLIGHT]?*anyopaque),
             .dummy_texture = 0,
             .dummy_normal_texture = 0,
             .dummy_roughness_texture = 0,
         };
+        errdefer self.deinit();
 
         // Create UBOs
         for (0..rhi.MAX_FRAMES_IN_FLIGHT) |i| {
@@ -77,7 +78,7 @@ pub const DescriptorManager = struct {
             try Utils.checkVk(c.vkMapMemory(vulkan_device.vk_device, self.shadow_ubos[i].memory, 0, @sizeOf(ShadowUniforms), 0, &self.shadow_ubos_mapped[i]));
         }
 
-        // Create dummy textures. setCurrentFrame(1) ensures they aren't tied to frame 0's deletion queue.
+        // Create dummy textures at frame index 1 to isolate from frame 0's lifecycle.
         resource_manager.setCurrentFrame(1);
 
         const white_pixel = [_]u8{ 255, 255, 255, 255 };

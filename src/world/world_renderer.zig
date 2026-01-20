@@ -63,8 +63,8 @@ pub const WorldRenderer = struct {
         var instance_buffers: [rhi_mod.MAX_FRAMES_IN_FLIGHT]rhi_mod.BufferHandle = undefined;
         var indirect_buffers: [rhi_mod.MAX_FRAMES_IN_FLIGHT]rhi_mod.BufferHandle = undefined;
         for (0..rhi_mod.MAX_FRAMES_IN_FLIGHT) |i| {
-            instance_buffers[i] = rhi.createBuffer(max_chunks * @sizeOf(rhi_mod.InstanceData), .storage);
-            indirect_buffers[i] = rhi.createBuffer(max_chunks * @sizeOf(rhi_mod.DrawIndirectCommand) * 2, .indirect);
+            instance_buffers[i] = try rhi.createBuffer(max_chunks * @sizeOf(rhi_mod.InstanceData), .storage);
+            indirect_buffers[i] = try rhi.createBuffer(max_chunks * @sizeOf(rhi_mod.DrawIndirectCommand) * 2, .indirect);
         }
 
         renderer.* = .{

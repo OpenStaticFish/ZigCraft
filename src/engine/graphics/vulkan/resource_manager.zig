@@ -279,7 +279,7 @@ pub const ResourceManager = struct {
         return self.transfer_command_buffers[self.current_frame_index];
     }
 
-    pub fn createBuffer(self: *ResourceManager, size: usize, usage: rhi.BufferUsage) rhi.BufferHandle {
+    pub fn createBuffer(self: *ResourceManager, size: usize, usage: rhi.BufferUsage) rhi.RhiError!rhi.BufferHandle {
         const vk_usage: c.VkBufferUsageFlags = switch (usage) {
             .vertex => c.VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             .index => c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT | c.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -290,14 +290,11 @@ pub const ResourceManager = struct {
 
         const properties = c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
-        const buf = Utils.createVulkanBuffer(self.vulkan_device, size, vk_usage, properties) catch |err| {
-            std.log.err("ResourceManager.createBuffer failed: size={}, usage={}, err={}", .{ size, usage, err });
-            return rhi.InvalidBufferHandle;
-        };
+        const buf = try Utils.createVulkanBuffer(self.vulkan_device, size, vk_usage, properties);
 
         const handle = self.next_buffer_handle;
         self.next_buffer_handle += 1;
-        self.buffers.put(handle, buf) catch return rhi.InvalidBufferHandle;
+        try self.buffers.put(handle, buf);
 
         return handle;
     }
@@ -324,6 +321,7 @@ pub const ResourceManager = struct {
             return error.OutOfMemory;
         };
 
+        if (staging.mapped_ptr == null) return error.OutOfMemory;
         const dest = @as([*]u8, @ptrCast(staging.mapped_ptr.?)) + staging_offset;
         @memcpy(dest[0..data.len], data);
 
@@ -444,6 +442,7 @@ pub const ResourceManager = struct {
             const staging = &self.staging_buffers[self.current_frame_index];
             const offset = staging.allocate(data.len) orelse return error.OutOfMemory;
 
+            if (staging.mapped_ptr == null) return error.OutOfMemory;
             const dest = @as([*]u8, @ptrCast(staging.mapped_ptr.?)) + offset;
             @memcpy(dest[0..data.len], data);
 
@@ -592,6 +591,7 @@ pub const ResourceManager = struct {
 
         const staging = &self.staging_buffers[self.current_frame_index];
         if (staging.allocate(data.len)) |offset| {
+            if (staging.mapped_ptr == null) return error.OutOfMemory;
             // Async Path
             const dest = @as([*]u8, @ptrCast(staging.mapped_ptr.?)) + offset;
             @memcpy(dest[0..data.len], data);

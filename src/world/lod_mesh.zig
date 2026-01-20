@@ -241,7 +241,7 @@ pub const LODMesh = struct {
             if (self.buffer_handle != 0) {
                 rhi.destroyBuffer(self.buffer_handle);
             }
-            self.buffer_handle = rhi.createBuffer(needed_capacity, .vertex);
+            self.buffer_handle = try rhi.createBuffer(needed_capacity, .vertex);
             self.capacity = @intCast(needed_capacity / @sizeOf(Vertex));
         }
 

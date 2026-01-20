@@ -22,10 +22,8 @@ pub const HandRenderer = struct {
     swing_progress: f32,
     swinging: bool,
 
-    pub fn init(rhi: RHI) HandRenderer {
-        // Create a dynamic vertex buffer large enough for a cube (36 vertices)
-        // Usage: vertex buffer
-        const buffer = rhi.createBuffer(36 * @sizeOf(Vertex), .vertex);
+    pub fn init(rhi: RHI) !HandRenderer {
+        const buffer = try rhi.createBuffer(36 * @sizeOf(Vertex), .vertex);
 
         return .{
             .rhi = rhi,

@@ -45,7 +45,7 @@ pub const IResourceFactory = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        createBuffer: *const fn (ptr: *anyopaque, size: usize, usage: BufferUsage) BufferHandle,
+        createBuffer: *const fn (ptr: *anyopaque, size: usize, usage: BufferUsage) RhiError!BufferHandle,
         uploadBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle, data: []const u8) RhiError!void,
         updateBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle, offset: usize, data: []const u8) RhiError!void,
         destroyBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
@@ -58,7 +58,7 @@ pub const IResourceFactory = struct {
         unmapBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
     };
 
-    pub fn createBuffer(self: IResourceFactory, size: usize, usage: BufferUsage) BufferHandle {
+    pub fn createBuffer(self: IResourceFactory, size: usize, usage: BufferUsage) RhiError!BufferHandle {
         return self.vtable.createBuffer(self.ptr, size, usage);
     }
     pub fn uploadBuffer(self: IResourceFactory, handle: BufferHandle, data: []const u8) RhiError!void {
@@ -415,7 +415,7 @@ pub const RHI = struct {
     }
 
     // Legacy wrappers (redirecting to sub-interfaces)
-    pub fn createBuffer(self: RHI, size: usize, usage: BufferUsage) BufferHandle {
+    pub fn createBuffer(self: RHI, size: usize, usage: BufferUsage) RhiError!BufferHandle {
         return self.vtable.resources.createBuffer(self.ptr, size, usage);
     }
     pub fn updateBuffer(self: RHI, handle: BufferHandle, offset: usize, data: []const u8) RhiError!void {

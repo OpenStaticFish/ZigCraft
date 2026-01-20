@@ -2202,7 +2202,7 @@ fn initContext(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device:
     ctx.current_env_texture = ctx.dummy_texture;
 
     // Create cloud resources
-    const cloud_vbo_handle = ctx.resources.createBuffer(8 * @sizeOf(f32), .vertex);
+    const cloud_vbo_handle = try ctx.resources.createBuffer(8 * @sizeOf(f32), .vertex);
     std.log.info("Cloud VBO handle: {}, map count: {}", .{ cloud_vbo_handle, ctx.resources.buffers.count() });
     if (cloud_vbo_handle == 0) {
         std.log.err("Failed to create cloud VBO", .{});
@@ -2228,6 +2228,7 @@ fn initContext(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device:
     }
 
     try ctx.resources.flushTransfer();
+    // Reset to frame 0 after initialization. Dummy textures created at index 1 are safe.
     ctx.resources.setCurrentFrame(0);
 }
 
@@ -2262,7 +2263,7 @@ fn deinit(ctx_ptr: *anyopaque) void {
 
     ctx.allocator.destroy(ctx);
 }
-fn createBuffer(ctx_ptr: *anyopaque, size: usize, usage: rhi.BufferUsage) rhi.BufferHandle {
+fn createBuffer(ctx_ptr: *anyopaque, size: usize, usage: rhi.BufferUsage) rhi.RhiError!rhi.BufferHandle {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
