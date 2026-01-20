@@ -8,7 +8,7 @@ jobs:
   opencode:
     # Don't run on draft PRs; do run when they become ready_for_review.
     if: ${{ github.event.pull_request.draft == false }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     permissions:
       id-token: write
       contents: write
