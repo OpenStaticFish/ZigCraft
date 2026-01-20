@@ -77,6 +77,10 @@ pub const DescriptorManager = struct {
             try Utils.checkVk(c.vkMapMemory(vulkan_device.vk_device, self.shadow_ubos[i].memory, 0, @sizeOf(ShadowUniforms), 0, &self.shadow_ubos_mapped[i]));
         }
 
+        // Create dummy textures for materials without textures.
+        // Frame index set to 1 to isolate from frame 0's lifecycle.
+        resource_manager.setCurrentFrame(1);
+
         // Create dummy textures
         const white_pixel = [_]u8{ 255, 255, 255, 255 };
         self.dummy_texture = resource_manager.createTexture(1, 1, .rgba, .{}, &white_pixel);

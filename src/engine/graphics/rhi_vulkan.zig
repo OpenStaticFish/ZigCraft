@@ -2264,21 +2264,29 @@ fn deinit(ctx_ptr: *anyopaque) void {
 }
 fn createBuffer(ctx_ptr: *anyopaque, size: usize, usage: rhi.BufferUsage) rhi.BufferHandle {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
     return ctx.resources.createBuffer(size, usage);
 }
 
 fn uploadBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, data: []const u8) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
     ctx.resources.uploadBuffer(handle, data);
 }
 
 fn updateBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, dst_offset: usize, data: []const u8) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
     ctx.resources.updateBuffer(handle, dst_offset, data);
 }
 
 fn destroyBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
     ctx.resources.destroyBuffer(handle);
 }
 
@@ -2318,6 +2326,12 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
 
     if (ctx.framebuffer_resized) {
         recreateSwapchain(ctx);
+    }
+
+    if (ctx.resources.transfer_ready) {
+        ctx.resources.flushTransfer() catch |err| {
+            std.log.err("Failed to flush inter-frame transfers: {}", .{err});
+        };
     }
 
     // Begin frame (acquire image, reset fences/CBs)
