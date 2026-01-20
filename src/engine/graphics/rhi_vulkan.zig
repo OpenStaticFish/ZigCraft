@@ -2291,7 +2291,7 @@ fn destroyBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle) void {
     ctx.resources.destroyBuffer(handle);
 }
 
-fn recreateSwapchain(ctx: *VulkanContext) void {
+fn recreateSwapchainInternal(ctx: *VulkanContext) void {
     _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
 
     var w: c_int = 0;
@@ -2320,6 +2320,12 @@ fn recreateSwapchain(ctx: *VulkanContext) void {
     ctx.framebuffer_resized = false;
 }
 
+fn recreateSwapchain(ctx: *VulkanContext) void {
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
+    recreateSwapchainInternal(ctx);
+}
+
 fn beginFrame(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.mutex.lock();
@@ -2329,7 +2335,7 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
     if (ctx.frames.frame_in_progress) return;
 
     if (ctx.framebuffer_resized) {
-        recreateSwapchain(ctx);
+        recreateSwapchainInternal(ctx);
     }
 
     if (ctx.resources.transfer_ready) {
@@ -2341,7 +2347,7 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
     // Begin frame (acquire image, reset fences/CBs)
     if (ctx.frames.beginFrame(&ctx.swapchain) catch |err| {
         if (err == error.OutOfDate) {
-            recreateSwapchain(ctx);
+            recreateSwapchainInternal(ctx);
         } else {
             std.log.err("beginFrame failed: {}", .{err});
         }
@@ -2349,11 +2355,6 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
     }) {
         // Frame started successfully
     } else {
-        // false return means resize needed usually (handled by catch? FrameManager returns bool for success)
-        // FrameManager implementation returns bool. If false, it means OutOfDate usually.
-        // Wait, my FrameManager implementation returns `!bool`.
-        // If it returns `false`, it means "needs recreate" logic might be needed.
-        // Let's assume catch handles it.
         return;
     }
 
@@ -2542,8 +2543,7 @@ fn abortFrame(ctx_ptr: *anyopaque) void {
     ctx.bound_texture = 0;
 }
 
-fn beginGPass(ctx_ptr: *anyopaque) void {
-    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+fn beginGPassInternal(ctx: *VulkanContext) void {
     if (!ctx.frames.frame_in_progress or ctx.g_pass_active) return;
 
     // Safety: Skip G-pass if resources are not available
@@ -2565,7 +2565,7 @@ fn beginGPass(ctx_ptr: *anyopaque) void {
         };
     }
 
-    ensureNoRenderPassActive(ctx_ptr);
+    ensureNoRenderPassActiveInternal(ctx);
 
     ctx.g_pass_active = true;
     const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
@@ -2599,16 +2599,28 @@ fn beginGPass(ctx_ptr: *anyopaque) void {
     c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_layout, 0, 1, &ctx.descriptors.descriptor_sets[ctx.frames.current_frame], 0, null);
 }
 
-fn endGPass(ctx_ptr: *anyopaque) void {
+fn beginGPass(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
+    beginGPassInternal(ctx);
+}
+
+fn endGPassInternal(ctx: *VulkanContext) void {
     if (!ctx.g_pass_active) return;
     const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
     c.vkCmdEndRenderPass(command_buffer);
     ctx.g_pass_active = false;
 }
 
-fn computeSSAO(ctx_ptr: *anyopaque) void {
+fn endGPass(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
+    endGPassInternal(ctx);
+}
+
+fn computeSSAOInternal(ctx: *VulkanContext) void {
     if (!ctx.frames.frame_in_progress) return;
 
     // Safety: Skip SSAO if resources are not available
@@ -2619,7 +2631,7 @@ fn computeSSAO(ctx_ptr: *anyopaque) void {
         return;
     }
 
-    ensureNoRenderPassActive(ctx_ptr);
+    ensureNoRenderPassActiveInternal(ctx);
 
     const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
 
@@ -2686,6 +2698,13 @@ fn computeSSAO(ctx_ptr: *anyopaque) void {
     }
 }
 
+fn computeSSAO(ctx_ptr: *anyopaque) void {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
+    computeSSAOInternal(ctx);
+}
+
 fn endFrame(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.mutex.lock();
@@ -2693,8 +2712,8 @@ fn endFrame(ctx_ptr: *anyopaque) void {
 
     if (!ctx.frames.frame_in_progress) return;
 
-    if (ctx.main_pass_active) endMainPass(ctx_ptr);
-    if (ctx.shadow_system.pass_active) endShadowPass(ctx_ptr);
+    if (ctx.main_pass_active) endMainPassInternal(ctx);
+    if (ctx.shadow_system.pass_active) endShadowPassInternal(ctx);
 
     const transfer_cb = ctx.resources.getTransferCommandBuffer();
 
@@ -2757,8 +2776,7 @@ fn transitionShadowImage(ctx: *VulkanContext, cascade_index: u32, new_layout: c.
     ctx.shadow_system.shadow_image_layouts[cascade_index] = new_layout;
 }
 
-fn beginMainPass(ctx_ptr: *anyopaque) void {
-    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+fn beginMainPassInternal(ctx: *VulkanContext) void {
     if (!ctx.frames.frame_in_progress) return;
     if (ctx.swapchain.swapchain.extent.width == 0 or ctx.swapchain.swapchain.extent.height == 0) return;
 
@@ -2769,7 +2787,7 @@ fn beginMainPass(ctx_ptr: *anyopaque) void {
 
     const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
     if (!ctx.main_pass_active) {
-        ensureNoRenderPassActive(ctx_ptr);
+        ensureNoRenderPassActiveInternal(ctx);
 
         ctx.terrain_pipeline_bound = false;
 
@@ -2813,12 +2831,25 @@ fn beginMainPass(ctx_ptr: *anyopaque) void {
     c.vkCmdSetScissor(command_buffer, 0, 1, &scissor);
 }
 
-fn endMainPass(ctx_ptr: *anyopaque) void {
+fn beginMainPass(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
+    beginMainPassInternal(ctx);
+}
+
+fn endMainPassInternal(ctx: *VulkanContext) void {
     if (!ctx.main_pass_active) return;
     const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
     c.vkCmdEndRenderPass(command_buffer);
     ctx.main_pass_active = false;
+}
+
+fn endMainPass(ctx_ptr: *anyopaque) void {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
+    endMainPassInternal(ctx);
 }
 
 fn waitIdle(ctx_ptr: *anyopaque) void {
@@ -2880,8 +2911,6 @@ fn setLODInstanceBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle) void {
 
 fn applyPendingDescriptorUpdates(ctx: *VulkanContext, frame_index: usize) void {
     if (ctx.pending_instance_buffer != 0 and ctx.bound_instance_buffer[frame_index] != ctx.pending_instance_buffer) {
-        ctx.mutex.lock();
-        defer ctx.mutex.unlock();
         const buf_opt = ctx.resources.buffers.get(ctx.pending_instance_buffer);
 
         if (buf_opt) |buf| {
@@ -2905,8 +2934,6 @@ fn applyPendingDescriptorUpdates(ctx: *VulkanContext, frame_index: usize) void {
     }
 
     if (ctx.pending_lod_instance_buffer != 0 and ctx.bound_lod_instance_buffer[frame_index] != ctx.pending_lod_instance_buffer) {
-        ctx.mutex.lock();
-        defer ctx.mutex.unlock();
         const buf_opt = ctx.resources.buffers.get(ctx.pending_lod_instance_buffer);
 
         if (buf_opt) |buf| {
@@ -3875,25 +3902,42 @@ fn shaderSetInt(ctx_ptr: *anyopaque, handle: rhi.ShaderHandle, name: [*c]const u
     _ = value;
 }
 
-fn ensureNoRenderPassActive(ctx_ptr: *anyopaque) void {
-    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
-    if (ctx.main_pass_active) endMainPass(ctx_ptr);
-    if (ctx.shadow_system.pass_active) endShadowPass(ctx_ptr);
-    if (ctx.g_pass_active) endGPass(ctx_ptr);
+fn ensureNoRenderPassActiveInternal(ctx: *VulkanContext) void {
+    if (ctx.main_pass_active) endMainPassInternal(ctx);
+    if (ctx.shadow_system.pass_active) endShadowPassInternal(ctx);
+    if (ctx.g_pass_active) endGPassInternal(ctx);
 }
 
-fn beginShadowPass(ctx_ptr: *anyopaque, cascade_index: u32, light_space_matrix: Mat4) void {
+fn ensureNoRenderPassActive(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
-    if (!ctx.frames.frame_in_progress) return;
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
+    ensureNoRenderPassActiveInternal(ctx);
+}
 
+fn beginShadowPassInternal(ctx: *VulkanContext, cascade_index: u32, light_space_matrix: Mat4) void {
+    if (!ctx.frames.frame_in_progress) return;
     const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
     ctx.shadow_system.beginPass(command_buffer, cascade_index, light_space_matrix);
 }
 
-fn endShadowPass(ctx_ptr: *anyopaque) void {
+fn beginShadowPass(ctx_ptr: *anyopaque, cascade_index: u32, light_space_matrix: Mat4) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
+    beginShadowPassInternal(ctx, cascade_index, light_space_matrix);
+}
+
+fn endShadowPassInternal(ctx: *VulkanContext) void {
     const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
     ctx.shadow_system.endPass(command_buffer);
+}
+
+fn endShadowPass(ctx_ptr: *anyopaque) void {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
+    endShadowPassInternal(ctx);
 }
 
 fn updateShadowUniforms(ctx_ptr: *anyopaque, params: rhi.ShadowParams) void {
