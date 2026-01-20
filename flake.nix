@@ -67,6 +67,7 @@
             pkgs.zls
             pkgs.pkg-config
             pkgs.glslang
+            pkgs.weston
           ];
 
           buildInputs = [

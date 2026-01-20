@@ -94,10 +94,18 @@ jobs:
         restore-prefixes-first-match: nix-${{ runner.os }}-
         paths: ~/.cache/nix
 
+    - name: Start headless Wayland compositor
+      run: |
+        mkdir -p /tmp/runtime-runner
+        chmod 700 /tmp/runtime-runner
+        export XDG_RUNTIME_DIR=/tmp/runtime-runner
+        nix develop --command weston --socket=headless --backend=headless-backend.so --width=1280 --height=720 &
+        echo "WAYLAND_DISPLAY=headless" >> $GITHUB_ENV
+        echo "XDG_RUNTIME_DIR=/tmp/runtime-runner" >> $GITHUB_ENV
+        sleep 5 # Wait for Weston to start up properly
+
     - name: Run integration smoke test
       env:
-        XDG_RUNTIME_DIR: /tmp/runtime-runner
         ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-cache-global
       run: |
-        mkdir -p $XDG_RUNTIME_DIR
-        xvfb-run -a nix develop --command zig build test-integration
+        nix develop --command zig build test-integration
