@@ -10,7 +10,9 @@ const log = @import("../core/log.zig");
 
 pub const AudioSystem = struct {
     allocator: std.mem.Allocator,
-    backend: *sdl_backend.SDLAudioBackend,
+    backend: backend_pkg.IAudioBackend,
+    backend_ptr: ?*anyopaque = null, // To free if we allocated it
+    dummy_backend: ?backend_pkg.DummyAudioBackend = null,
     manager: manager_pkg.SoundManager,
 
     // Config
@@ -20,15 +22,25 @@ pub const AudioSystem = struct {
     pub fn init(allocator: std.mem.Allocator) !*AudioSystem {
         log.log.info("Initializing Audio System...", .{});
 
-        const config = sdl_backend.AudioConfig{};
-        const backend_inst = try sdl_backend.SDLAudioBackend.create(allocator, config);
-
         const self = try allocator.create(AudioSystem);
+        errdefer allocator.destroy(self);
+
         self.* = .{
             .allocator = allocator,
-            .backend = backend_inst,
+            .backend = undefined,
             .manager = manager_pkg.SoundManager.init(allocator),
         };
+
+        const config = sdl_backend.AudioConfig{};
+        if (sdl_backend.SDLAudioBackend.create(allocator, config)) |backend_inst| {
+            self.backend = backend_inst.backend;
+            self.backend_ptr = @ptrCast(backend_inst);
+        } else |err| {
+            log.log.warn("Failed to initialize SDL Audio Backend: {}. Falling back to dummy backend.", .{err});
+            self.dummy_backend = backend_pkg.DummyAudioBackend.init();
+            self.backend = self.dummy_backend.?.backend;
+            self.enabled = false;
+        }
 
         // Create some default test sounds
         _ = try self.manager.createTestSound("test_tone");
@@ -45,14 +57,17 @@ pub const AudioSystem = struct {
     pub fn deinit(self: *AudioSystem) void {
         self.stopAll();
         self.manager.deinit();
-        self.backend.destroy();
+        if (self.backend_ptr) |ptr| {
+            const backend_inst: *sdl_backend.SDLAudioBackend = @ptrCast(@alignCast(ptr));
+            backend_inst.destroy();
+        }
         self.allocator.destroy(self);
     }
 
     /// Update the audio backend. Should be called once per frame.
     pub fn update(self: *AudioSystem) void {
         if (!self.enabled) return;
-        self.backend.backend.update();
+        self.backend.update();
     }
 
     /// Update the listener's 3D position and orientation.
@@ -61,7 +76,7 @@ pub const AudioSystem = struct {
     /// listener_up: Up vector (normalized).
     pub fn setListener(self: *AudioSystem, listener_pos: Vec3, listener_fwd: Vec3, listener_up: Vec3) void {
         if (!self.enabled) return;
-        self.backend.backend.setListener(listener_pos, listener_fwd, listener_up);
+        self.backend.setListener(listener_pos, listener_fwd, listener_up);
     }
 
     /// Set the master volume (applied to all sounds).
@@ -69,7 +84,7 @@ pub const AudioSystem = struct {
     pub fn setMasterVolume(self: *AudioSystem, volume: f32) void {
         if (!self.enabled) return;
         const clamped = std.math.clamp(volume, 0.0, 1.0);
-        self.backend.backend.setMasterVolume(clamped);
+        self.backend.setMasterVolume(clamped);
     }
 
     /// Set volume for a specific category (Music, SFX, Ambient).
@@ -77,7 +92,7 @@ pub const AudioSystem = struct {
     pub fn setCategoryVolume(self: *AudioSystem, category: types.SoundCategory, volume: f32) void {
         if (!self.enabled) return;
         const clamped = std.math.clamp(volume, 0.0, 1.0);
-        self.backend.backend.setCategoryVolume(category, clamped);
+        self.backend.setCategoryVolume(category, clamped);
     }
 
     /// Play a sound by name (2D, no spatialization).
@@ -91,7 +106,7 @@ pub const AudioSystem = struct {
         }
 
         if (self.manager.getSound(handle)) |sound| {
-            return self.backend.backend.playSound(sound, .{});
+            return self.backend.playSound(sound, .{});
         }
         return null;
     }
@@ -104,7 +119,7 @@ pub const AudioSystem = struct {
         if (handle == types.InvalidSoundHandle) return null;
 
         if (self.manager.getSound(handle)) |sound| {
-            return self.backend.backend.playSound(sound, .{
+            return self.backend.playSound(sound, .{
                 .is_spatial = true,
                 .position = pos,
             });
@@ -115,11 +130,12 @@ pub const AudioSystem = struct {
     /// Stop a specific voice handle.
     pub fn stop(self: *AudioSystem, handle: types.VoiceHandle) void {
         if (!self.enabled) return;
-        self.backend.backend.stopVoice(handle);
+        self.backend.stopVoice(handle);
     }
 
     /// Stop all currently playing sounds.
     pub fn stopAll(self: *AudioSystem) void {
-        self.backend.stopAllVoices();
+        if (!self.enabled) return;
+        self.backend.stopAll();
     }
 };

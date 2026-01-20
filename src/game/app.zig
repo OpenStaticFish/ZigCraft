@@ -79,18 +79,22 @@ pub const App = struct {
 
         const settings = settings_pkg.persistence.load(allocator);
 
-        const wm = try WindowManager.init(allocator, true, settings.window_width, settings.window_height);
+        var wm = try WindowManager.init(allocator, true, settings.window_width, settings.window_height);
+        errdefer wm.deinit();
 
         var input = Input.init(allocator);
+        errdefer input.deinit();
         input.initWindowSize(wm.window);
         const time = Time.init();
 
         log.log.info("Initializing Vulkan backend...", .{});
         const rhi = try rhi_vulkan.createRHI(allocator, wm.window, null, settings.getShadowResolution(), settings.msaa_samples, settings.anisotropic_filtering);
+        errdefer rhi.deinit();
 
         try rhi.init(allocator, null);
 
         var resource_pack_manager = ResourcePackManager.init(allocator);
+        errdefer resource_pack_manager.deinit();
         try resource_pack_manager.scanPacks();
         if (resource_pack_manager.packExists(settings.texture_pack)) {
             try resource_pack_manager.setActivePack(settings.texture_pack);
@@ -163,6 +167,8 @@ pub const App = struct {
         }
 
         const atlas = try TextureAtlas.init(allocator, rhi, &resource_pack_manager, settings.max_texture_resolution);
+        var atlas_mut = atlas;
+        errdefer atlas_mut.deinit();
         atlas.bind(1);
         // Bind PBR textures if available
         atlas.bindNormal(6);
@@ -191,16 +197,22 @@ pub const App = struct {
             env_map = try Texture.initFloat(rhi, 1, 1, &white_pixel);
             env_map.?.bind(9);
         }
+        errdefer if (env_map) |*t| t.deinit();
 
         const atmosphere_system = try AtmosphereSystem.init(allocator, rhi);
+        errdefer atmosphere_system.deinit();
         const audio_system = try AudioSystem.init(allocator);
+        errdefer audio_system.deinit();
 
         const ui = try UISystem.init(rhi, input.window_width, input.window_height);
+        var ui_mut = ui;
+        errdefer ui_mut.deinit();
 
         // Load custom bindings
         const input_mapper = InputSettings.loadAndReturnMapper(allocator);
 
         const app = try allocator.create(App);
+        errdefer allocator.destroy(app);
         app.* = .{
             .allocator = allocator,
             .window_manager = wm,
@@ -238,10 +250,13 @@ pub const App = struct {
             .disable_clouds = disable_clouds,
             .smoke_test_frames = 0,
         };
+        errdefer app.screen_manager.deinit();
+        errdefer app.render_graph.deinit();
 
         // EngineContext uses rhi as a pointer; App owns the instance.
 
         app.material_system = try MaterialSystem.init(allocator, rhi, &app.atlas);
+        errdefer app.material_system.deinit();
 
         // Build RenderGraph (OCP: We can easily modify this list based on quality)
         if (!safe_render_mode) {

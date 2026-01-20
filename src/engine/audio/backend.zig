@@ -46,3 +46,36 @@ pub const IAudioBackend = struct {
         self.vtable.setCategoryVolume(self.ptr, category, volume);
     }
 };
+
+pub const DummyAudioBackend = struct {
+    backend: IAudioBackend,
+
+    pub fn init() DummyAudioBackend {
+        return .{
+            .backend = .{
+                .ptr = undefined,
+                .vtable = &VTABLE,
+            },
+        };
+    }
+
+    fn update(_: *anyopaque) void {}
+    fn setListener(_: *anyopaque, _: Vec3, _: Vec3, _: Vec3) void {}
+    fn playSound(_: *anyopaque, _: *const types.SoundData, _: types.PlayConfig) types.VoiceHandle {
+        return .{ .id = 0, .generation = 0 };
+    }
+    fn stopVoice(_: *anyopaque, _: types.VoiceHandle) void {}
+    fn stopAll(_: *anyopaque) void {}
+    fn setMasterVolume(_: *anyopaque, _: f32) void {}
+    fn setCategoryVolume(_: *anyopaque, _: types.SoundCategory, _: f32) void {}
+
+    const VTABLE = IAudioBackend.VTable{
+        .update = update,
+        .setListener = setListener,
+        .playSound = playSound,
+        .stopVoice = stopVoice,
+        .stopAll = stopAll,
+        .setMasterVolume = setMasterVolume,
+        .setCategoryVolume = setCategoryVolume,
+    };
+};
