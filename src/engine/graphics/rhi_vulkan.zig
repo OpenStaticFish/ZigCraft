@@ -2565,7 +2565,14 @@ fn beginGPassInternal(ctx: *VulkanContext) void {
     ensureNoRenderPassActiveInternal(ctx);
 
     ctx.g_pass_active = true;
-    const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
+    const current_frame = ctx.frames.current_frame;
+    const command_buffer = ctx.frames.command_buffers[current_frame];
+
+    // Debug: check for NULL handles
+    if (command_buffer == null) std.log.err("CRITICAL: command_buffer is NULL for frame {}", .{current_frame});
+    if (ctx.g_render_pass == null) std.log.err("CRITICAL: g_render_pass is NULL");
+    if (ctx.g_framebuffer == null) std.log.err("CRITICAL: g_framebuffer is NULL");
+    if (ctx.pipeline_layout == null) std.log.err("CRITICAL: pipeline_layout is NULL");
 
     var render_pass_info = std.mem.zeroes(c.VkRenderPassBeginInfo);
     render_pass_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -2576,7 +2583,7 @@ fn beginGPassInternal(ctx: *VulkanContext) void {
 
     // Debug: log extent on first few frames
     if (ctx.frame_index < 10) {
-        std.log.debug("beginGPass frame {}: extent {}x{}", .{ ctx.frame_index, ctx.swapchain.swapchain.extent.width, ctx.swapchain.swapchain.extent.height });
+        std.log.debug("beginGPass frame {}: extent {}x{} (cb={}, rp={}, fb={})", .{ ctx.frame_index, ctx.swapchain.swapchain.extent.width, ctx.swapchain.swapchain.extent.height, command_buffer != null, ctx.g_render_pass != null, ctx.g_framebuffer != null });
     }
 
     var clear_values: [2]c.VkClearValue = undefined;
@@ -2585,7 +2592,9 @@ fn beginGPassInternal(ctx: *VulkanContext) void {
     render_pass_info.clearValueCount = 2;
     render_pass_info.pClearValues = &clear_values[0];
 
+    std.log.debug("beginGPass: calling vkCmdBeginRenderPass", .{});
     c.vkCmdBeginRenderPass(command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
+    std.log.debug("beginGPass: calling vkCmdBindPipeline", .{});
     c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.g_pipeline);
 
     const viewport = c.VkViewport{ .x = 0, .y = 0, .width = @floatFromInt(ctx.swapchain.swapchain.extent.width), .height = @floatFromInt(ctx.swapchain.swapchain.extent.height), .minDepth = 0, .maxDepth = 1 };
@@ -2593,7 +2602,12 @@ fn beginGPassInternal(ctx: *VulkanContext) void {
     const scissor = c.VkRect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = ctx.swapchain.swapchain.extent };
     c.vkCmdSetScissor(command_buffer, 0, 1, &scissor);
 
-    c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_layout, 0, 1, &ctx.descriptors.descriptor_sets[ctx.frames.current_frame], 0, null);
+    const ds = ctx.descriptors.descriptor_sets[ctx.frames.current_frame];
+    if (ds == null) std.log.err("CRITICAL: descriptor_set is NULL for frame {}", .{ctx.frames.current_frame});
+
+    std.log.debug("beginGPass: calling vkCmdBindDescriptorSets", .{});
+    c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_layout, 0, 1, &ds, 0, null);
+    std.log.debug("beginGPass: done", .{});
 }
 
 fn beginGPass(ctx_ptr: *anyopaque) void {
@@ -2606,6 +2620,7 @@ fn beginGPass(ctx_ptr: *anyopaque) void {
 fn endGPassInternal(ctx: *VulkanContext) void {
     if (!ctx.g_pass_active) return;
     const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
+    std.log.debug("endGPass: calling vkCmdEndRenderPass (cb={})", .{command_buffer != null});
     c.vkCmdEndRenderPass(command_buffer);
     ctx.g_pass_active = false;
 }
@@ -2809,6 +2824,7 @@ fn beginMainPassInternal(ctx: *VulkanContext) void {
         }
         render_pass_info.pClearValues = &clear_values[0];
 
+        std.log.debug("beginMainPass: calling vkCmdBeginRenderPass (cb={}, rp={}, fb={})", .{ command_buffer != null, render_pass_info.renderPass != null, render_pass_info.framebuffer != null });
         c.vkCmdBeginRenderPass(command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
         ctx.main_pass_active = true;
     }
@@ -2838,6 +2854,7 @@ fn beginMainPass(ctx_ptr: *anyopaque) void {
 fn endMainPassInternal(ctx: *VulkanContext) void {
     if (!ctx.main_pass_active) return;
     const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
+    std.log.debug("endMainPass: calling vkCmdEndRenderPass (cb={})", .{command_buffer != null});
     c.vkCmdEndRenderPass(command_buffer);
     ctx.main_pass_active = false;
 }
