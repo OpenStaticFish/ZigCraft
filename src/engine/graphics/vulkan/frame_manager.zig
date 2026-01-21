@@ -24,6 +24,8 @@ pub const FrameManager = struct {
         const skip_env = std.posix.getenv("ZIGCRAFT_SKIP_PRESENT");
         const dry_run_active = if (skip_env) |val| (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) else false;
 
+        std.log.warn("FrameManager initialized. ZIGCRAFT_SKIP_PRESENT={?s}, dry_run={}", .{ skip_env, dry_run_active });
+
         var self = FrameManager{
             .vulkan_device = vulkan_device,
             .command_pool = null,
