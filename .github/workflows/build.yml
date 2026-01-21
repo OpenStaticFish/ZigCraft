@@ -117,7 +117,7 @@ jobs:
         WAYLAND_DISPLAY: headless
         VK_ICD_FILENAMES: /run/opengl-driver/share/vulkan/icd.d/lvp_icd.x86_64.json
         # Skip presentation and use dry-run mode to avoid driver crashes in CI
-        # Using build option -Dskip_present=true to guarantee it's baked in
+        # Using build option -Dskip-present=true to guarantee it's baked in
         # 3 frames is enough to test multi-frame synchronization logic in dry-run
         ZIGCRAFT_SMOKE_FRAMES: "3"
         ZIGCRAFT_SAFE_MODE: "1"
@@ -127,4 +127,4 @@ jobs:
         LAYER_PATH=$(nix build --no-link --print-out-paths nixpkgs#vulkan-validation-layers)/share/vulkan/explicit_layer.d
         export VK_ICD_FILENAMES=$LVP_PATH
         export VK_LAYER_PATH=$LAYER_PATH
-        nix develop --command zig build run -Dsmoke-test=true -Dskip_present=true
+        nix develop --command zig build run -Dsmoke-test=true -Dskip-present=true

@@ -24,6 +24,8 @@ pub const FrameManager = struct {
         const build_options = @import("build_options");
         const dry_run_active = if (@hasDecl(build_options, "skip_present")) build_options.skip_present else false;
 
+        std.log.err("FrameManager init: dry_run={}", .{dry_run_active});
+
         var self = FrameManager{
             .vulkan_device = vulkan_device,
             .command_pool = null,
