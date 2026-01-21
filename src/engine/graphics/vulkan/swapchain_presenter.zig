@@ -109,8 +109,6 @@ pub const SwapchainPresenter = struct {
             return error.ExtensionNotPresent;
         self.vulkan_device.mutex.unlock();
 
-        std.log.debug("SwapchainPresenter.present: result={}", .{result});
-
         if (result == c.VK_ERROR_OUT_OF_DATE_KHR or result == c.VK_SUBOPTIMAL_KHR or self.framebuffer_resized) {
             return error.OutOfDate;
         } else if (result != c.VK_SUCCESS) {
