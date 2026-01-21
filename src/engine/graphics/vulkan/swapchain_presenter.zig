@@ -76,7 +76,11 @@ pub const SwapchainPresenter = struct {
 
         if (result == c.VK_ERROR_OUT_OF_DATE_KHR) {
             return error.OutOfDate;
+        } else if (result == c.VK_TIMEOUT) {
+            std.log.err("vkAcquireNextImageKHR timed out (2s). Swapchain exhaustion?", .{});
+            return error.Timeout;
         } else if (result != c.VK_SUCCESS and result != c.VK_SUBOPTIMAL_KHR) {
+            std.log.err("vkAcquireNextImageKHR failed with result: {d}", .{result});
             return error.VulkanError;
         }
 

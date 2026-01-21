@@ -287,6 +287,9 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        // Ensure GPU is idle before destroying resources
+        self.rhi.waitIdle();
+
         if (self.ui) |*u| u.deinit();
 
         self.screen_manager.deinit();
@@ -346,13 +349,15 @@ pub const App = struct {
 
     pub fn runSingleFrame(self: *App) !void {
         log.log.debug("runSingleFrame: begin (frame {})", .{self.smoke_test_frames});
+        log.log.debug("runSingleFrame: updating time", .{});
         self.time.update();
+        log.log.debug("runSingleFrame: updating audio", .{});
         self.audio_system.update();
-
+        log.log.debug("runSingleFrame: input beginFrame", .{});
         self.input.beginFrame();
+        log.log.debug("runSingleFrame: polling events", .{});
         self.input.pollEvents();
-
-        self.rhi.setViewport(self.input.window_width, self.input.window_height);
+        log.log.debug("runSingleFrame: setting viewport", .{});
         if (self.ui) |*u| u.resize(self.input.window_width, self.input.window_height);
 
         // Update current screen. Transitions happen here.
