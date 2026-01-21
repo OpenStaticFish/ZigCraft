@@ -74,9 +74,22 @@ pub const SwapchainPresenter = struct {
         present_info.pSwapchains = &self.swapchain.handle;
         present_info.pImageIndices = &image_index;
 
+        std.log.debug("SwapchainPresenter.present: queue={any}, swapchain={any}, image_index={}, semaphore={any}", .{ self.vulkan_device.queue, self.swapchain.handle, image_index, wait_semaphore });
+
+        if (self.vulkan_device.queue == null) {
+            std.log.err("CRITICAL: Queue is NULL", .{});
+            return error.VulkanError;
+        }
+        if (self.swapchain.handle == null) {
+            std.log.err("CRITICAL: Swapchain handle is NULL", .{});
+            return error.VulkanError;
+        }
+
         self.vulkan_device.mutex.lock();
         const result = c.vkQueuePresentKHR(self.vulkan_device.queue, &present_info);
         self.vulkan_device.mutex.unlock();
+
+        std.log.debug("SwapchainPresenter.present: result={}", .{result});
 
         if (result == c.VK_ERROR_OUT_OF_DATE_KHR or result == c.VK_SUBOPTIMAL_KHR or self.framebuffer_resized) {
             return error.OutOfDate;
