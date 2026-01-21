@@ -19,14 +19,26 @@ pub const SwapchainPresenter = struct {
     // State
     framebuffer_resized: bool = false,
 
+    // Dynamic function pointers for extensions
+    fp_vkQueuePresentKHR: c.PFN_vkQueuePresentKHR = null,
+
     pub fn init(allocator: std.mem.Allocator, vulkan_device: *VulkanDevice, window: *c.SDL_Window, msaa_samples: u8) !SwapchainPresenter {
         const swapchain = try VulkanSwapchain.init(allocator, vulkan_device, window, msaa_samples);
+
+        // Load vkQueuePresentKHR dynamically to avoid linking issues or NULL symbols
+        const fp_present = c.vkGetDeviceProcAddr(vulkan_device.vk_device, "vkQueuePresentKHR");
+        if (fp_present == null) {
+            std.log.err("Failed to load vkQueuePresentKHR function pointer", .{});
+            return error.ExtensionNotPresent;
+        }
+
         return SwapchainPresenter{
             .allocator = allocator,
             .vulkan_device = vulkan_device,
             .window = window,
             .swapchain = swapchain,
             .msaa_samples = msaa_samples,
+            .fp_vkQueuePresentKHR = @ptrCast(fp_present),
         };
     }
 
@@ -86,7 +98,11 @@ pub const SwapchainPresenter = struct {
         }
 
         self.vulkan_device.mutex.lock();
-        const result = c.vkQueuePresentKHR(self.vulkan_device.queue, &present_info);
+        // Use dynamically loaded function pointer
+        const result = if (self.fp_vkQueuePresentKHR) |func|
+            func(self.vulkan_device.queue, &present_info)
+        else
+            return error.ExtensionNotPresent;
         self.vulkan_device.mutex.unlock();
 
         std.log.debug("SwapchainPresenter.present: result={}", .{result});
