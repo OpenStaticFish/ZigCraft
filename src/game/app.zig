@@ -348,16 +348,12 @@ pub const App = struct {
     }
 
     pub fn runSingleFrame(self: *App) !void {
-        log.log.debug("runSingleFrame: begin (frame {})", .{self.smoke_test_frames});
-        log.log.debug("runSingleFrame: updating time", .{});
         self.time.update();
-        log.log.debug("runSingleFrame: updating audio", .{});
         self.audio_system.update();
-        log.log.debug("runSingleFrame: input beginFrame", .{});
+
         self.input.beginFrame();
-        log.log.debug("runSingleFrame: polling events", .{});
         self.input.pollEvents();
-        log.log.debug("runSingleFrame: setting viewport", .{});
+
         if (self.ui) |*u| u.resize(self.input.window_width, self.input.window_height);
 
         // Update current screen. Transitions happen here.
@@ -379,11 +375,9 @@ pub const App = struct {
         }
 
         self.rhi.endFrame();
-        log.log.debug("runSingleFrame: endFrame returned", .{});
 
         const build_options = @import("build_options");
         if (build_options.smoke_test) {
-            log.log.debug("runSingleFrame: smoke test logic starting", .{});
             self.smoke_test_frames += 1;
             var target_frames: u32 = 120;
             if (std.posix.getenv("ZIGCRAFT_SMOKE_FRAMES")) |val| {
@@ -396,9 +390,7 @@ pub const App = struct {
                 log.log.info("SMOKE TEST COMPLETE: {} frames rendered. Exiting.", .{target_frames});
                 self.input.should_quit = true;
             }
-            log.log.debug("runSingleFrame: smoke test logic finished", .{});
         }
-        log.log.debug("runSingleFrame: finished", .{});
     }
 
     pub fn run(self: *App) !void {

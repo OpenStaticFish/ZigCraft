@@ -82,12 +82,18 @@ pub const FrameManager = struct {
         _ = c.vkWaitForFences(device, 1, &self.in_flight_fences[self.current_frame], c.VK_TRUE, std.math.maxInt(u64));
 
         // Acquire image
-        const result = swapchain.acquireNextImage(self.image_available_semaphores[self.current_frame]);
-        if (result) |index| {
-            self.current_image_index = index;
-        } else |err| {
-            if (err == error.OutOfDate) return false; // Needs recreate
-            return err;
+        if (swapchain.skip_present) {
+            // In headless mode, we skip image acquisition to avoid WSI/driver crashes.
+            // We just use image 0 as our target.
+            self.current_image_index = 0;
+        } else {
+            const result = swapchain.acquireNextImage(self.image_available_semaphores[self.current_frame]);
+            if (result) |index| {
+                self.current_image_index = index;
+            } else |err| {
+                if (err == error.OutOfDate) return false; // Needs recreate
+                return err;
+            }
         }
 
         // Reset fence
@@ -109,12 +115,10 @@ pub const FrameManager = struct {
         if (!self.frame_in_progress) return error.InvalidState;
 
         const cb = self.command_buffers[self.current_frame];
-        std.log.debug("FrameManager.endFrame: vkEndCommandBuffer(cb)", .{});
         try Utils.checkVk(c.vkEndCommandBuffer(cb));
 
         // End transfer command buffer if present
         if (transfer_cb) |tcb| {
-            std.log.debug("FrameManager.endFrame: vkEndCommandBuffer(tcb)", .{});
             try Utils.checkVk(c.vkEndCommandBuffer(tcb));
         }
 
@@ -123,9 +127,11 @@ pub const FrameManager = struct {
         var submit_info = std.mem.zeroes(c.VkSubmitInfo);
         submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
-        submit_info.waitSemaphoreCount = 1;
-        submit_info.pWaitSemaphores = &self.image_available_semaphores[self.current_frame];
-        submit_info.pWaitDstStageMask = &wait_stages[0];
+        if (!swapchain.skip_present) {
+            submit_info.waitSemaphoreCount = 1;
+            submit_info.pWaitSemaphores = &self.image_available_semaphores[self.current_frame];
+            submit_info.pWaitDstStageMask = &wait_stages[0];
+        }
 
         // Submit transfer buffer first if needed?
         // Actually, if we submit them in the same batch, we can list multiple command buffers.
@@ -153,10 +159,8 @@ pub const FrameManager = struct {
             submit_info.pSignalSemaphores = &self.render_finished_semaphores[self.current_frame];
         }
 
-        std.log.debug("FrameManager.endFrame: calling submitGuarded", .{});
         try self.vulkan_device.submitGuarded(submit_info, self.in_flight_fences[self.current_frame]);
 
-        std.log.debug("FrameManager.endFrame: calling swapchain.present", .{});
         swapchain.present(self.render_finished_semaphores[self.current_frame], self.current_image_index) catch |err| {
             if (err == error.OutOfDate) {
                 // Resize needed, handled by next frame
@@ -166,12 +170,11 @@ pub const FrameManager = struct {
         };
 
         if (swapchain.skip_present) {
-            std.log.debug("FrameManager.endFrame: skip_present is true, skipping wait to avoid driver crash", .{});
+            _ = c.vkWaitForFences(self.vulkan_device.vk_device, 1, &self.in_flight_fences[self.current_frame], c.VK_TRUE, std.math.maxInt(u64));
         }
 
         self.current_frame = (self.current_frame + 1) % rhi.MAX_FRAMES_IN_FLIGHT;
         self.frame_in_progress = false;
-        std.log.debug("FrameManager.endFrame: done", .{});
     }
 
     pub fn abortFrame(self: *FrameManager) void {
