@@ -122,6 +122,7 @@ pub const FrameManager = struct {
 
     pub fn endFrame(self: *FrameManager, swapchain: *SwapchainPresenter, transfer_cb: ?c.VkCommandBuffer) !void {
         if (!self.frame_in_progress) return error.InvalidState;
+        defer self.frame_in_progress = false;
 
         const cb = self.command_buffers[self.current_frame];
         try Utils.checkVk(c.vkEndCommandBuffer(cb));
@@ -181,7 +182,6 @@ pub const FrameManager = struct {
         }
 
         self.current_frame = (self.current_frame + 1) % rhi.MAX_FRAMES_IN_FLIGHT;
-        self.frame_in_progress = false;
     }
 
     pub fn abortFrame(self: *FrameManager) void {

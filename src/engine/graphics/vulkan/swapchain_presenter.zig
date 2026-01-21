@@ -89,13 +89,17 @@ pub const SwapchainPresenter = struct {
 
     pub fn present(self: *SwapchainPresenter, wait_semaphore: c.VkSemaphore, image_index: u32) !void {
         if (self.skip_present) {
-            _ = wait_semaphore;
-            _ = image_index;
             std.log.debug("Skipping vkQueuePresentKHR (headless mode)", .{});
             return;
         }
 
         var present_info = std.mem.zeroes(c.VkPresentInfoKHR);
+        present_info.sType = c.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        present_info.waitSemaphoreCount = 1;
+        present_info.pWaitSemaphores = &wait_semaphore;
+        present_info.swapchainCount = 1;
+        present_info.pSwapchains = &self.swapchain.handle;
+        present_info.pImageIndices = &image_index;
 
         self.vulkan_device.mutex.lock();
         // Use dynamically loaded function pointer
