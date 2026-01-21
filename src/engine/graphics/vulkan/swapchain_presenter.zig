@@ -86,7 +86,7 @@ pub const SwapchainPresenter = struct {
         present_info.pSwapchains = &self.swapchain.handle;
         present_info.pImageIndices = &image_index;
 
-        std.log.debug("SwapchainPresenter.present: queue={any}, swapchain={any}, image_index={}, semaphore={any}", .{ self.vulkan_device.queue, self.swapchain.handle, image_index, wait_semaphore });
+        std.log.debug("SwapchainPresenter.present: queue={any}, swapchain={any}, image_index={}, semaphore={any}, fp={any}", .{ self.vulkan_device.queue, self.swapchain.handle, image_index, wait_semaphore, self.fp_vkQueuePresentKHR });
 
         if (self.vulkan_device.queue == null) {
             std.log.err("CRITICAL: Queue is NULL", .{});
