@@ -38,8 +38,8 @@ pub const VulkanSwapchain = struct {
     scale: f32 = 1.0,
 
     pub fn init(allocator: std.mem.Allocator, device: *const VulkanDevice, window: *c.SDL_Window, msaa_samples: u8) !VulkanSwapchain {
-        const skip_env = std.posix.getenv("ZIGCRAFT_SKIP_PRESENT");
-        const headless = if (skip_env) |val| (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) else false;
+        const build_options = @import("build_options");
+        const headless = if (@hasDecl(build_options, "skip_present")) build_options.skip_present else false;
 
         var self = VulkanSwapchain{
             .allocator = allocator,

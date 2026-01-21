@@ -21,10 +21,8 @@ pub const FrameManager = struct {
     dry_run: bool = false,
 
     pub fn init(vulkan_device: *VulkanDevice) !FrameManager {
-        const skip_env = std.posix.getenv("ZIGCRAFT_SKIP_PRESENT");
-        const dry_run_active = if (skip_env) |val| (std.mem.eql(u8, val, "1") or std.mem.eql(u8, val, "true")) else false;
-
-        std.log.warn("FrameManager initialized. ZIGCRAFT_SKIP_PRESENT={?s}, dry_run={}", .{ skip_env, dry_run_active });
+        const build_options = @import("build_options");
+        const dry_run_active = if (@hasDecl(build_options, "skip_present")) build_options.skip_present else false;
 
         var self = FrameManager{
             .vulkan_device = vulkan_device,

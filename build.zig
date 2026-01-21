@@ -11,6 +11,9 @@ pub fn build(b: *std.Build) void {
     const smoke_test = b.option(bool, "smoke-test", "Enable automated smoke test mode (auto-loads world and exits)") orelse false;
     options.addOption(bool, "smoke_test", smoke_test);
 
+    const skip_present = b.option(bool, "skip-present", "Skip presentation (headless mode) to avoid driver crashes") orelse false;
+    options.addOption(bool, "skip_present", skip_present);
+
     const zig_math = b.createModule(.{
         .root_source_file = b.path("libs/zig-math/math.zig"),
         .target = target,
