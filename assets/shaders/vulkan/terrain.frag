@@ -288,104 +288,6 @@ vec3 fresnelSchlick(float cosTheta, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
-// AgX Tone Mapping (from Blender 4.0+)
-// Superior color preservation compared to ACES - doesn't desaturate highlights
-// Reference: https://github.com/sobotka/AgX
-
-// AgX Log2 encoding for HDR input
-vec3 agxDefaultContrastApprox(vec3 x) {
-    vec3 x2 = x * x;
-    vec3 x4 = x2 * x2;
-    return + 15.5     * x4 * x2
-           - 40.14    * x4 * x
-           + 31.96    * x4
-           - 6.868    * x2 * x
-           + 0.4298   * x2
-           + 0.1191   * x
-           - 0.00232;
-}
-
-vec3 agx(vec3 val) {
-    const mat3 agx_mat = mat3(
-        0.842479062253094, 0.0423282422610123, 0.0423756549057051,
-        0.0784335999999992, 0.878468636469772, 0.0784336,
-        0.0792237451477643, 0.0791661274605434, 0.879142973793104
-    );
-    
-    const float min_ev = -12.47393;
-    const float max_ev = 4.026069;
-    
-    // Input transform (sRGB to AgX working space)
-    val = agx_mat * val;
-    
-    // Log2 encoding
-    val = clamp(log2(val), min_ev, max_ev);
-    val = (val - min_ev) / (max_ev - min_ev);
-    
-    // Apply sigmoid contrast curve
-    val = agxDefaultContrastApprox(val);
-    
-    return val;
-}
-
-vec3 agxEotf(vec3 val) {
-    const mat3 agx_mat_inv = mat3(
-        1.19687900512017, -0.0528968517574562, -0.0529716355144438,
-        -0.0980208811401368, 1.15190312990417, -0.0980434501171241,
-        -0.0990297440797205, -0.0989611768448433, 1.15107367264116
-    );
-    
-    // Inverse input transform
-    val = agx_mat_inv * val;
-    
-    // sRGB IEC 61966-2-1 2.2 Exponent Reference EOTF Display
-    return pow(val, vec3(2.2));
-}
-
-// Optional: Add punch/saturation to AgX output
-vec3 agxLook(vec3 val, float saturation, float contrast) {
-    float luma = dot(val, vec3(0.2126, 0.7152, 0.0722));
-    
-    // Saturation adjustment
-    val = luma + saturation * (val - luma);
-    
-    // Contrast adjustment around mid-gray
-    val = 0.5 + (0.5 + contrast * 0.5) * (val - 0.5);
-    
-    return val;
-}
-
-// Complete AgX pipeline with optional look adjustment
-vec3 agxToneMap(vec3 color, float exposure, float saturation) {
-    // Apply exposure
-    color *= exposure;
-    
-    // Ensure no negative values
-    color = max(color, vec3(0.0));
-    
-    // AgX transform
-    color = agx(color);
-    
-    // Apply look (saturation boost and contrast boost to combat washed out appearance)
-    color = agxLook(color, saturation, 1.2);
-    
-    // Inverse EOTF (linearize for display)
-    color = agxEotf(color);
-    
-    // Clamp output
-    return clamp(color, 0.0, 1.0);
-}
-
-// ACES Filmic Tone Mapping
-vec3 ACESFilm(vec3 x) {
-    float a = 2.51;
-    float b = 0.03;
-    float c = 2.43;
-    float d = 0.59;
-    float e = 0.14;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
-}
-
 vec2 SampleSphericalMap(vec3 v) {
     // Clamp the normal to avoid precision issues at poles
     vec3 n = normalize(v);
@@ -600,14 +502,6 @@ void main() {
         fogFactor = clamp(fogFactor, 0.0, 1.0);
         color = mix(color, global.fog_color.rgb, fogFactor);
     }
-
-    // Tone mapping (AgX - much better color preservation/desaturation)
-    if (global.lighting.z > 0.5) {
-        color = agxToneMap(color, global.pbr_params.y, global.pbr_params.z);
-    }
-
-    // Gamma correction handled by hardware (VK_FORMAT_B8G8R8A8_SRGB)
-    // Removed to avoid double gamma correction.
 
     FragColor = vec4(color, 1.0);
 }

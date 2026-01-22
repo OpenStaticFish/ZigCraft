@@ -205,6 +205,7 @@ const VulkanContext = struct {
     g_render_pass: c.VkRenderPass = null,
     ssao_render_pass: c.VkRenderPass = null,
     ssao_blur_render_pass: c.VkRenderPass = null,
+    main_framebuffer: c.VkFramebuffer = null,
     g_framebuffer: c.VkFramebuffer = null,
     ssao_framebuffer: c.VkFramebuffer = null,
     ssao_blur_framebuffer: c.VkFramebuffer = null,
@@ -276,8 +277,54 @@ const VulkanContext = struct {
     cloud_mesh_size: f32,
     cloud_vao: c.VkBuffer,
 
+    // Post-Process Resources
+    hdr_image: c.VkImage = null,
+    hdr_memory: c.VkDeviceMemory = null,
+    hdr_view: c.VkImageView = null,
+    hdr_handle: rhi.TextureHandle = 0,
+    hdr_msaa_image: c.VkImage = null,
+    hdr_msaa_memory: c.VkDeviceMemory = null,
+    hdr_msaa_view: c.VkImageView = null,
+
+    post_process_render_pass: c.VkRenderPass = null,
+    post_process_pipeline: c.VkPipeline = null,
+    post_process_pipeline_layout: c.VkPipelineLayout = null,
+    post_process_descriptor_set_layout: c.VkDescriptorSetLayout = null,
+    post_process_descriptor_sets: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorSet = .{null} ** MAX_FRAMES_IN_FLIGHT,
+    post_process_sampler: c.VkSampler = null,
+    post_process_pass_active: bool = false,
+
     debug_shadow: DebugShadowResources = .{},
 };
+
+fn destroyHDRResources(ctx: *VulkanContext) void {
+    const vk = ctx.vulkan_device.vk_device;
+    if (ctx.hdr_view != null) c.vkDestroyImageView(vk, ctx.hdr_view, null);
+    if (ctx.hdr_image != null) c.vkDestroyImage(vk, ctx.hdr_image, null);
+    if (ctx.hdr_memory != null) c.vkFreeMemory(vk, ctx.hdr_memory, null);
+    if (ctx.hdr_msaa_view != null) c.vkDestroyImageView(vk, ctx.hdr_msaa_view, null);
+    if (ctx.hdr_msaa_image != null) c.vkDestroyImage(vk, ctx.hdr_msaa_image, null);
+    if (ctx.hdr_msaa_memory != null) c.vkFreeMemory(vk, ctx.hdr_msaa_memory, null);
+    ctx.hdr_view = null;
+    ctx.hdr_image = null;
+    ctx.hdr_memory = null;
+    ctx.hdr_msaa_view = null;
+    ctx.hdr_msaa_image = null;
+    ctx.hdr_msaa_memory = null;
+}
+
+fn destroyPostProcessResources(ctx: *VulkanContext) void {
+    const vk = ctx.vulkan_device.vk_device;
+    if (ctx.post_process_sampler != null) c.vkDestroySampler(vk, ctx.post_process_sampler, null);
+    if (ctx.post_process_pipeline != null) c.vkDestroyPipeline(vk, ctx.post_process_pipeline, null);
+    if (ctx.post_process_pipeline_layout != null) c.vkDestroyPipelineLayout(vk, ctx.post_process_pipeline_layout, null);
+    if (ctx.post_process_descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(vk, ctx.post_process_descriptor_set_layout, null);
+    if (ctx.post_process_render_pass != null) c.vkDestroyRenderPass(vk, ctx.post_process_render_pass, null);
+    ctx.post_process_pipeline = null;
+    ctx.post_process_pipeline_layout = null;
+    ctx.post_process_descriptor_set_layout = null;
+    ctx.post_process_render_pass = null;
+}
 
 fn destroyGPassResources(ctx: *VulkanContext) void {
     const vk = ctx.vulkan_device.vk_device;
@@ -483,19 +530,253 @@ fn createVulkanBuffer(ctx: *VulkanContext, size: usize, usage: c.VkBufferUsageFl
     };
 }
 
+fn createHDRResources(ctx: *VulkanContext) !void {
+    const extent = ctx.swapchain.getExtent();
+    const format = c.VK_FORMAT_R16G16B16A16_SFLOAT;
+    const sample_count = getMSAASampleCountFlag(ctx.msaa_samples);
+
+    // 1. Create HDR image
+    var image_info = std.mem.zeroes(c.VkImageCreateInfo);
+    image_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = c.VK_IMAGE_TYPE_2D;
+    image_info.extent = .{ .width = extent.width, .height = extent.height, .depth = 1 };
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.format = format;
+    image_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
+    image_info.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+    image_info.usage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT;
+    image_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
+    image_info.sharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
+
+    try Utils.checkVk(c.vkCreateImage(ctx.vulkan_device.vk_device, &image_info, null, &ctx.hdr_image));
+
+    var mem_reqs: c.VkMemoryRequirements = undefined;
+    c.vkGetImageMemoryRequirements(ctx.vulkan_device.vk_device, ctx.hdr_image, &mem_reqs);
+    var alloc_info = std.mem.zeroes(c.VkMemoryAllocateInfo);
+    alloc_info.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    alloc_info.allocationSize = mem_reqs.size;
+    alloc_info.memoryTypeIndex = try Utils.findMemoryType(ctx.vulkan_device.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    try Utils.checkVk(c.vkAllocateMemory(ctx.vulkan_device.vk_device, &alloc_info, null, &ctx.hdr_memory));
+    try Utils.checkVk(c.vkBindImageMemory(ctx.vulkan_device.vk_device, ctx.hdr_image, ctx.hdr_memory, 0));
+
+    var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
+    view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = ctx.hdr_image;
+    view_info.viewType = c.VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = format;
+    view_info.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
+    try Utils.checkVk(c.vkCreateImageView(ctx.vulkan_device.vk_device, &view_info, null, &ctx.hdr_view));
+
+    // 2. Create MSAA HDR image if needed
+    if (ctx.msaa_samples > 1) {
+        image_info.samples = sample_count;
+        image_info.usage = c.VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        try Utils.checkVk(c.vkCreateImage(ctx.vulkan_device.vk_device, &image_info, null, &ctx.hdr_msaa_image));
+        c.vkGetImageMemoryRequirements(ctx.vulkan_device.vk_device, ctx.hdr_msaa_image, &mem_reqs);
+        alloc_info.allocationSize = mem_reqs.size;
+        alloc_info.memoryTypeIndex = try Utils.findMemoryType(ctx.vulkan_device.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        try Utils.checkVk(c.vkAllocateMemory(ctx.vulkan_device.vk_device, &alloc_info, null, &ctx.hdr_msaa_memory));
+        try Utils.checkVk(c.vkBindImageMemory(ctx.vulkan_device.vk_device, ctx.hdr_msaa_image, ctx.hdr_msaa_memory, 0));
+
+        view_info.image = ctx.hdr_msaa_image;
+        try Utils.checkVk(c.vkCreateImageView(ctx.vulkan_device.vk_device, &view_info, null, &ctx.hdr_msaa_view));
+    }
+}
+
+fn createPostProcessResources(ctx: *VulkanContext) !void {
+    const vk = ctx.vulkan_device.vk_device;
+
+    // 1. Render Pass
+    var color_attachment = std.mem.zeroes(c.VkAttachmentDescription);
+    color_attachment.format = ctx.swapchain.swapchain.image_format;
+    color_attachment.samples = c.VK_SAMPLE_COUNT_1_BIT;
+    color_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR;
+    color_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_STORE;
+    color_attachment.stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    color_attachment.stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    color_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+    color_attachment.finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    var color_ref = c.VkAttachmentReference{ .attachment = 0, .layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+
+    var subpass = std.mem.zeroes(c.VkSubpassDescription);
+    subpass.pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &color_ref;
+
+    var dependency = std.mem.zeroes(c.VkSubpassDependency);
+    dependency.srcSubpass = c.VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass = 0;
+    dependency.srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcAccessMask = 0;
+    dependency.dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
+    var rp_info = std.mem.zeroes(c.VkRenderPassCreateInfo);
+    rp_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    rp_info.attachmentCount = 1;
+    rp_info.pAttachments = &color_attachment;
+    rp_info.subpassCount = 1;
+    rp_info.pSubpasses = &subpass;
+    rp_info.dependencyCount = 1;
+    rp_info.pDependencies = &dependency;
+
+    try Utils.checkVk(c.vkCreateRenderPass(vk, &rp_info, null, &ctx.post_process_render_pass));
+
+    // 2. Descriptor Set Layout
+    var bindings = [_]c.VkDescriptorSetLayoutBinding{
+        .{ .binding = 0, .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT },
+        .{ .binding = 1, .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT },
+    };
+    var layout_info = std.mem.zeroes(c.VkDescriptorSetLayoutCreateInfo);
+    layout_info.sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layout_info.bindingCount = 2;
+    layout_info.pBindings = &bindings[0];
+    try Utils.checkVk(c.vkCreateDescriptorSetLayout(vk, &layout_info, null, &ctx.post_process_descriptor_set_layout));
+
+    // 3. Pipeline Layout
+    var pipe_layout_info = std.mem.zeroes(c.VkPipelineLayoutCreateInfo);
+    pipe_layout_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipe_layout_info.setLayoutCount = 1;
+    pipe_layout_info.pSetLayouts = &ctx.post_process_descriptor_set_layout;
+    try Utils.checkVk(c.vkCreatePipelineLayout(vk, &pipe_layout_info, null, &ctx.post_process_pipeline_layout));
+
+    // 4. Create Linear Sampler
+    var sampler_info = std.mem.zeroes(c.VkSamplerCreateInfo);
+    sampler_info.sType = c.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sampler_info.magFilter = c.VK_FILTER_LINEAR;
+    sampler_info.minFilter = c.VK_FILTER_LINEAR;
+    sampler_info.addressModeU = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeV = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeW = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.mipmapMode = c.VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    var linear_sampler: c.VkSampler = null;
+    try Utils.checkVk(c.vkCreateSampler(vk, &sampler_info, null, &linear_sampler));
+
+    // 5. Pipeline
+    const vert_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/post_process.vert.spv", ctx.allocator, @enumFromInt(1024 * 1024));
+    defer ctx.allocator.free(vert_code);
+    const frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/post_process.frag.spv", ctx.allocator, @enumFromInt(1024 * 1024));
+    defer ctx.allocator.free(frag_code);
+    const vert_module = try createShaderModule(vk, vert_code);
+    defer c.vkDestroyShaderModule(vk, vert_module, null);
+    const frag_module = try createShaderModule(vk, frag_code);
+    defer c.vkDestroyShaderModule(vk, frag_module, null);
+
+    var stages = [_]c.VkPipelineShaderStageCreateInfo{
+        .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main" },
+        .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_module, .pName = "main" },
+    };
+
+    var vi_info = std.mem.zeroes(c.VkPipelineVertexInputStateCreateInfo);
+    vi_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    var ia_info = std.mem.zeroes(c.VkPipelineInputAssemblyStateCreateInfo);
+    ia_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    ia_info.topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    var vp_info = std.mem.zeroes(c.VkPipelineViewportStateCreateInfo);
+    vp_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    vp_info.viewportCount = 1;
+    vp_info.scissorCount = 1;
+
+    var rs_info = std.mem.zeroes(c.VkPipelineRasterizationStateCreateInfo);
+    rs_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rs_info.lineWidth = 1.0;
+    rs_info.cullMode = c.VK_CULL_MODE_NONE;
+    rs_info.frontFace = c.VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+    var ms_info = std.mem.zeroes(c.VkPipelineMultisampleStateCreateInfo);
+    ms_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    ms_info.rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT;
+
+    var cb_attach = std.mem.zeroes(c.VkPipelineColorBlendAttachmentState);
+    cb_attach.colorWriteMask = c.VK_COLOR_COMPONENT_R_BIT | c.VK_COLOR_COMPONENT_G_BIT | c.VK_COLOR_COMPONENT_B_BIT | c.VK_COLOR_COMPONENT_A_BIT;
+    var cb_info = std.mem.zeroes(c.VkPipelineColorBlendStateCreateInfo);
+    cb_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    cb_info.attachmentCount = 1;
+    cb_info.pAttachments = &cb_attach;
+
+    var dyn_states = [_]c.VkDynamicState{ c.VK_DYNAMIC_STATE_VIEWPORT, c.VK_DYNAMIC_STATE_SCISSOR };
+    var dyn_info = std.mem.zeroes(c.VkPipelineDynamicStateCreateInfo);
+    dyn_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dyn_info.dynamicStateCount = 2;
+    dyn_info.pDynamicStates = &dyn_states[0];
+
+    var pipe_info = std.mem.zeroes(c.VkGraphicsPipelineCreateInfo);
+    pipe_info.sType = c.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipe_info.stageCount = 2;
+    pipe_info.pStages = &stages[0];
+    pipe_info.pVertexInputState = &vi_info;
+    pipe_info.pInputAssemblyState = &ia_info;
+    pipe_info.pViewportState = &vp_info;
+    pipe_info.pRasterizationState = &rs_info;
+    pipe_info.pMultisampleState = &ms_info;
+    pipe_info.pColorBlendState = &cb_info;
+    pipe_info.pDynamicState = &dyn_info;
+    pipe_info.layout = ctx.post_process_pipeline_layout;
+    pipe_info.renderPass = ctx.post_process_render_pass;
+
+    try Utils.checkVk(c.vkCreateGraphicsPipelines(vk, null, 1, &pipe_info, null, &ctx.post_process_pipeline));
+
+    // 6. Descriptor Sets
+    for (0..MAX_FRAMES_IN_FLIGHT) |i| {
+        var alloc_ds_info = std.mem.zeroes(c.VkDescriptorSetAllocateInfo);
+        alloc_ds_info.sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        alloc_ds_info.descriptorPool = ctx.descriptors.descriptor_pool;
+        alloc_ds_info.descriptorSetCount = 1;
+        alloc_ds_info.pSetLayouts = &ctx.post_process_descriptor_set_layout;
+        try Utils.checkVk(c.vkAllocateDescriptorSets(vk, &alloc_ds_info, &ctx.post_process_descriptor_sets[i]));
+
+        var image_info_ds = std.mem.zeroes(c.VkDescriptorImageInfo);
+        image_info_ds.imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        image_info_ds.imageView = ctx.hdr_view;
+        image_info_ds.sampler = linear_sampler;
+
+        var buffer_info_ds = std.mem.zeroes(c.VkDescriptorBufferInfo);
+        buffer_info_ds.buffer = ctx.descriptors.global_ubos[i].buffer;
+        buffer_info_ds.offset = 0;
+        buffer_info_ds.range = @sizeOf(GlobalUniforms);
+
+        var writes = [_]c.VkWriteDescriptorSet{
+            .{
+                .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = ctx.post_process_descriptor_sets[i],
+                .dstBinding = 0,
+                .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .descriptorCount = 1,
+                .pImageInfo = &image_info_ds,
+            },
+            .{
+                .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = ctx.post_process_descriptor_sets[i],
+                .dstBinding = 1,
+                .descriptorType = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .descriptorCount = 1,
+                .pBufferInfo = &buffer_info_ds,
+            },
+        };
+        c.vkUpdateDescriptorSets(vk, 2, &writes[0], 0, null);
+    }
+
+    // Clean up local sampler if not stored in context (but we should probably store it to destroy it later)
+    ctx.post_process_sampler = linear_sampler;
+}
+
 /// Helper to create a texture sampler based on config and global anisotropy.
 fn createMainRenderPass(ctx: *VulkanContext) !void {
     const sample_count = getMSAASampleCountFlag(ctx.msaa_samples);
     const use_msaa = ctx.msaa_samples > 1;
     const depth_format = DEPTH_FORMAT;
+    const hdr_format = c.VK_FORMAT_R16G16B16A16_SFLOAT;
 
     if (use_msaa) {
         // MSAA render pass: 3 attachments (MSAA color, MSAA depth, resolve)
         var msaa_color_attachment = std.mem.zeroes(c.VkAttachmentDescription);
-        msaa_color_attachment.format = ctx.swapchain.swapchain.image_format;
+        msaa_color_attachment.format = hdr_format;
         msaa_color_attachment.samples = sample_count;
         msaa_color_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR;
-        msaa_color_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE; // MSAA image not needed after resolve
+        msaa_color_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE;
         msaa_color_attachment.stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         msaa_color_attachment.stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE;
         msaa_color_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
@@ -512,14 +793,14 @@ fn createMainRenderPass(ctx: *VulkanContext) !void {
         depth_attachment.finalLayout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
         var resolve_attachment = std.mem.zeroes(c.VkAttachmentDescription);
-        resolve_attachment.format = ctx.swapchain.swapchain.image_format;
+        resolve_attachment.format = hdr_format;
         resolve_attachment.samples = c.VK_SAMPLE_COUNT_1_BIT;
         resolve_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         resolve_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_STORE;
         resolve_attachment.stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         resolve_attachment.stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE;
         resolve_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
-        resolve_attachment.finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        resolve_attachment.finalLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         var color_ref = c.VkAttachmentReference{ .attachment = 0, .layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
         var depth_ref = c.VkAttachmentReference{ .attachment = 1, .layout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
@@ -532,13 +813,26 @@ fn createMainRenderPass(ctx: *VulkanContext) !void {
         subpass.pDepthStencilAttachment = &depth_ref;
         subpass.pResolveAttachments = &resolve_ref;
 
-        var dependency = std.mem.zeroes(c.VkSubpassDependency);
-        dependency.srcSubpass = c.VK_SUBPASS_EXTERNAL;
-        dependency.dstSubpass = 0;
-        dependency.srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        dependency.srcAccessMask = 0;
-        dependency.dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        dependency.dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        var dependencies = [_]c.VkSubpassDependency{
+            .{
+                .srcSubpass = c.VK_SUBPASS_EXTERNAL,
+                .dstSubpass = 0,
+                .srcStageMask = c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                .srcAccessMask = c.VK_ACCESS_MEMORY_READ_BIT,
+                .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                .dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT,
+            },
+            .{
+                .srcSubpass = 0,
+                .dstSubpass = c.VK_SUBPASS_EXTERNAL,
+                .srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                .dstStageMask = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                .srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                .dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT,
+                .dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT,
+            },
+        };
 
         var attachment_descs = [_]c.VkAttachmentDescription{ msaa_color_attachment, depth_attachment, resolve_attachment };
         var render_pass_info = std.mem.zeroes(c.VkRenderPassCreateInfo);
@@ -547,25 +841,25 @@ fn createMainRenderPass(ctx: *VulkanContext) !void {
         render_pass_info.pAttachments = &attachment_descs[0];
         render_pass_info.subpassCount = 1;
         render_pass_info.pSubpasses = &subpass;
-        render_pass_info.dependencyCount = 1;
-        render_pass_info.pDependencies = &dependency;
+        render_pass_info.dependencyCount = 2;
+        render_pass_info.pDependencies = &dependencies[0];
 
         try Utils.checkVk(c.vkCreateRenderPass(ctx.vulkan_device.vk_device, &render_pass_info, null, &ctx.swapchain.swapchain.main_render_pass));
-        std.log.info("Created MSAA {}x render pass", .{ctx.msaa_samples});
+        std.log.info("Created HDR MSAA {}x render pass", .{ctx.msaa_samples});
     } else {
         // Non-MSAA render pass: 2 attachments (color, depth)
         var color_attachment = std.mem.zeroes(c.VkAttachmentDescription);
-        color_attachment.format = ctx.swapchain.swapchain.image_format;
+        color_attachment.format = hdr_format;
         color_attachment.samples = c.VK_SAMPLE_COUNT_1_BIT;
         color_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR;
         color_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_STORE;
         color_attachment.stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         color_attachment.stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE;
         color_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
-        color_attachment.finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        color_attachment.finalLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
         var depth_attachment = std.mem.zeroes(c.VkAttachmentDescription);
-        depth_attachment.format = DEPTH_FORMAT;
+        depth_attachment.format = depth_format;
         depth_attachment.samples = c.VK_SAMPLE_COUNT_1_BIT;
         depth_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR;
         depth_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_STORE;
@@ -588,13 +882,26 @@ fn createMainRenderPass(ctx: *VulkanContext) !void {
         subpass.pColorAttachments = &color_attachment_ref;
         subpass.pDepthStencilAttachment = &depth_attachment_ref;
 
-        var dependency = std.mem.zeroes(c.VkSubpassDependency);
-        dependency.srcSubpass = c.VK_SUBPASS_EXTERNAL;
-        dependency.dstSubpass = 0;
-        dependency.srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        dependency.srcAccessMask = 0;
-        dependency.dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        dependency.dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        var dependencies = [_]c.VkSubpassDependency{
+            .{
+                .srcSubpass = c.VK_SUBPASS_EXTERNAL,
+                .dstSubpass = 0,
+                .srcStageMask = c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                .srcAccessMask = c.VK_ACCESS_MEMORY_READ_BIT,
+                .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                .dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT,
+            },
+            .{
+                .srcSubpass = 0,
+                .dstSubpass = c.VK_SUBPASS_EXTERNAL,
+                .srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                .dstStageMask = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                .srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                .dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT,
+                .dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT,
+            },
+        };
 
         var attachment_descs = [_]c.VkAttachmentDescription{ color_attachment, depth_attachment };
         var render_pass_info = std.mem.zeroes(c.VkRenderPassCreateInfo);
@@ -603,11 +910,14 @@ fn createMainRenderPass(ctx: *VulkanContext) !void {
         render_pass_info.pAttachments = &attachment_descs[0];
         render_pass_info.subpassCount = 1;
         render_pass_info.pSubpasses = &subpass;
-        render_pass_info.dependencyCount = 1;
-        render_pass_info.pDependencies = &dependency;
+        render_pass_info.dependencyCount = 2;
+        render_pass_info.pDependencies = &dependencies[0];
 
         try Utils.checkVk(c.vkCreateRenderPass(ctx.vulkan_device.vk_device, &render_pass_info, null, &ctx.swapchain.swapchain.main_render_pass));
+        std.log.info("Created HDR render pass", .{});
     }
+
+    try createMainFramebuffers(ctx);
 }
 
 /// Creates G-Pass resources: render pass, normal image, framebuffer, and pipeline.
@@ -1114,14 +1424,26 @@ fn createSSAOResources(ctx: *VulkanContext) !void {
         subpass.colorAttachmentCount = 1;
         subpass.pColorAttachments = &color_ref;
 
-        var dependency = std.mem.zeroes(c.VkSubpassDependency);
-        dependency.srcSubpass = c.VK_SUBPASS_EXTERNAL;
-        dependency.dstSubpass = 0;
-        dependency.srcStageMask = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-        dependency.dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dependency.srcAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
-        dependency.dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        dependency.dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT;
+        var dependencies = [_]c.VkSubpassDependency{
+            .{
+                .srcSubpass = c.VK_SUBPASS_EXTERNAL,
+                .dstSubpass = 0,
+                .srcStageMask = c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                .srcAccessMask = c.VK_ACCESS_MEMORY_READ_BIT,
+                .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                .dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT,
+            },
+            .{
+                .srcSubpass = 0,
+                .dstSubpass = c.VK_SUBPASS_EXTERNAL,
+                .srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                .dstStageMask = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                .srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                .dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT,
+                .dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT,
+            },
+        };
 
         var rp_info = std.mem.zeroes(c.VkRenderPassCreateInfo);
         rp_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -1129,12 +1451,10 @@ fn createSSAOResources(ctx: *VulkanContext) !void {
         rp_info.pAttachments = &ao_attachment;
         rp_info.subpassCount = 1;
         rp_info.pSubpasses = &subpass;
-        rp_info.dependencyCount = 1;
-        rp_info.pDependencies = &dependency;
+        rp_info.dependencyCount = 2;
+        rp_info.pDependencies = &dependencies[0];
 
         try Utils.checkVk(c.vkCreateRenderPass(ctx.vulkan_device.vk_device, &rp_info, null, &ctx.ssao_render_pass));
-        // Blur uses same format
-        try Utils.checkVk(c.vkCreateRenderPass(ctx.vulkan_device.vk_device, &rp_info, null, &ctx.ssao_blur_render_pass));
     }
 
     // 2. Create SSAO output image (store directly in context)
@@ -1639,29 +1959,33 @@ fn createSSAOResources(ctx: *VulkanContext) !void {
 
 fn createMainFramebuffers(ctx: *VulkanContext) !void {
     const use_msaa = ctx.msaa_samples > 1;
-    for (ctx.swapchain.swapchain.image_views.items) |iv| {
-        var fb: c.VkFramebuffer = null;
-        var framebuffer_info = std.mem.zeroes(c.VkFramebufferCreateInfo);
-        framebuffer_info.sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        framebuffer_info.renderPass = ctx.swapchain.swapchain.main_render_pass;
-        framebuffer_info.width = ctx.swapchain.swapchain.extent.width;
-        framebuffer_info.height = ctx.swapchain.swapchain.extent.height;
-        framebuffer_info.layers = 1;
+    const extent = ctx.swapchain.getExtent();
 
-        if (use_msaa and ctx.swapchain.swapchain.msaa_color_view != null) {
-            // MSAA framebuffer: [msaa_color, depth, swapchain_resolve]
-            const fb_attachments = [_]c.VkImageView{ ctx.swapchain.swapchain.msaa_color_view.?, ctx.swapchain.swapchain.depth_image_view, iv };
-            framebuffer_info.attachmentCount = 3;
-            framebuffer_info.pAttachments = &fb_attachments[0];
-            try Utils.checkVk(c.vkCreateFramebuffer(ctx.vulkan_device.vk_device, &framebuffer_info, null, &fb));
-        } else {
-            // Non-MSAA framebuffer: [swapchain_color, depth]
-            const fb_attachments = [_]c.VkImageView{ iv, ctx.swapchain.swapchain.depth_image_view };
-            framebuffer_info.attachmentCount = 2;
-            framebuffer_info.pAttachments = &fb_attachments[0];
-            try Utils.checkVk(c.vkCreateFramebuffer(ctx.vulkan_device.vk_device, &framebuffer_info, null, &fb));
-        }
-        try ctx.swapchain.swapchain.framebuffers.append(ctx.allocator, fb);
+    var fb_info = std.mem.zeroes(c.VkFramebufferCreateInfo);
+    fb_info.sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fb_info.renderPass = ctx.swapchain.swapchain.main_render_pass;
+    fb_info.width = extent.width;
+    fb_info.height = extent.height;
+    fb_info.layers = 1;
+
+    // Destroy old framebuffer if it exists
+    if (ctx.main_framebuffer != null) {
+        c.vkDestroyFramebuffer(ctx.vulkan_device.vk_device, ctx.main_framebuffer, null);
+        ctx.main_framebuffer = null;
+    }
+
+    if (use_msaa) {
+        // [MSAA Color, MSAA Depth, Resolve HDR]
+        const attachments = [_]c.VkImageView{ ctx.hdr_msaa_view, ctx.swapchain.swapchain.depth_image_view, ctx.hdr_view };
+        fb_info.attachmentCount = 3;
+        fb_info.pAttachments = &attachments[0];
+        try Utils.checkVk(c.vkCreateFramebuffer(ctx.vulkan_device.vk_device, &fb_info, null, &ctx.main_framebuffer));
+    } else {
+        // [HDR Color, Depth]
+        const attachments = [_]c.VkImageView{ ctx.hdr_view, ctx.swapchain.swapchain.depth_image_view };
+        fb_info.attachmentCount = 2;
+        fb_info.pAttachments = &attachments[0];
+        try Utils.checkVk(c.vkCreateFramebuffer(ctx.vulkan_device.vk_device, &fb_info, null, &ctx.main_framebuffer));
     }
 }
 
@@ -2189,8 +2513,10 @@ fn initContext(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device:
     try createMainPipelines(ctx);
 
     // Initial resources
+    try createHDRResources(ctx);
     try createGPassResources(ctx);
     try createSSAOResources(ctx);
+    try createPostProcessResources(ctx);
 
     // Setup Dummy Textures from DescriptorManager
     ctx.dummy_texture = ctx.descriptors.dummy_texture;
@@ -2240,6 +2566,8 @@ fn deinit(ctx_ptr: *anyopaque) void {
     }
 
     destroyMainRenderPassAndPipelines(ctx);
+    destroyHDRResources(ctx);
+    destroyPostProcessResources(ctx);
     destroyGPassResources(ctx);
     destroySSAOResources(ctx);
 
@@ -2334,6 +2662,8 @@ fn recreateSwapchainInternal(ctx: *VulkanContext) void {
     if (w == 0 or h == 0) return;
 
     destroyMainRenderPassAndPipelines(ctx);
+    destroyHDRResources(ctx);
+    destroyPostProcessResources(ctx);
     destroyGPassResources(ctx);
     destroySSAOResources(ctx);
 
@@ -2347,9 +2677,13 @@ fn recreateSwapchainInternal(ctx: *VulkanContext) void {
         return;
     };
 
-    createMainPipelines(ctx) catch |err| std.log.err("Failed to recreate main pipelines: {}", .{err});
-    createGPassResources(ctx) catch |err| std.log.err("Failed to recreate G-pass resources: {}", .{err});
+    // Recreate resources
+    createHDRResources(ctx) catch |err| std.log.err("Failed to recreate HDR resources: {}", .{err});
+    createGPassResources(ctx) catch |err| std.log.err("Failed to recreate G-Pass resources: {}", .{err});
     createSSAOResources(ctx) catch |err| std.log.err("Failed to recreate SSAO resources: {}", .{err});
+    createMainRenderPass(ctx) catch |err| std.log.err("Failed to recreate render pass: {}", .{err});
+    createMainPipelines(ctx) catch |err| std.log.err("Failed to recreate pipelines: {}", .{err});
+    createPostProcessResources(ctx) catch |err| std.log.err("Failed to recreate post-process resources: {}", .{err});
 
     ctx.framebuffer_resized = false;
 }
@@ -2840,7 +3174,7 @@ fn beginMainPassInternal(ctx: *VulkanContext) void {
         var render_pass_info = std.mem.zeroes(c.VkRenderPassBeginInfo);
         render_pass_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         render_pass_info.renderPass = ctx.swapchain.swapchain.main_render_pass;
-        render_pass_info.framebuffer = ctx.swapchain.swapchain.framebuffers.items[ctx.frames.current_image_index];
+        render_pass_info.framebuffer = ctx.main_framebuffer;
         render_pass_info.renderArea.offset = .{ .x = 0, .y = 0 };
         render_pass_info.renderArea.extent = ctx.swapchain.swapchain.extent;
 
@@ -2896,6 +3230,68 @@ fn endMainPass(ctx_ptr: *anyopaque) void {
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
     endMainPassInternal(ctx);
+}
+
+fn beginPostProcessPassInternal(ctx: *VulkanContext) void {
+    if (!ctx.frames.frame_in_progress) return;
+
+    const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
+    if (!ctx.post_process_pass_active) {
+        ensureNoRenderPassActiveInternal(ctx);
+
+        var render_pass_info = std.mem.zeroes(c.VkRenderPassBeginInfo);
+        render_pass_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        render_pass_info.renderPass = ctx.post_process_render_pass;
+        render_pass_info.framebuffer = ctx.swapchain.swapchain.framebuffers.items[ctx.frames.current_image_index];
+        render_pass_info.renderArea.offset = .{ .x = 0, .y = 0 };
+        render_pass_info.renderArea.extent = ctx.swapchain.swapchain.extent;
+
+        var clear_value = std.mem.zeroes(c.VkClearValue);
+        clear_value.color = .{ .float32 = .{ 0, 0, 0, 1 } };
+        render_pass_info.clearValueCount = 1;
+        render_pass_info.pClearValues = &clear_value;
+
+        c.vkCmdBeginRenderPass(command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
+        ctx.post_process_pass_active = true;
+
+        c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.post_process_pipeline);
+        c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.post_process_pipeline_layout, 0, 1, &ctx.post_process_descriptor_sets[ctx.frames.current_frame], 0, null);
+
+        var viewport = std.mem.zeroes(c.VkViewport);
+        viewport.x = 0.0;
+        viewport.y = 0.0;
+        viewport.width = @floatFromInt(ctx.swapchain.swapchain.extent.width);
+        viewport.height = @floatFromInt(ctx.swapchain.swapchain.extent.height);
+        viewport.minDepth = 0.0;
+        viewport.maxDepth = 1.0;
+        c.vkCmdSetViewport(command_buffer, 0, 1, &viewport);
+
+        var scissor = std.mem.zeroes(c.VkRect2D);
+        scissor.offset = .{ .x = 0, .y = 0 };
+        scissor.extent = ctx.swapchain.swapchain.extent;
+        c.vkCmdSetScissor(command_buffer, 0, 1, &scissor);
+    }
+}
+
+fn beginPostProcessPass(ctx_ptr: *anyopaque) void {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
+    beginPostProcessPassInternal(ctx);
+}
+
+fn endPostProcessPassInternal(ctx: *VulkanContext) void {
+    if (!ctx.post_process_pass_active) return;
+    const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
+    c.vkCmdEndRenderPass(command_buffer);
+    ctx.post_process_pass_active = false;
+}
+
+fn endPostProcessPass(ctx_ptr: *anyopaque) void {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
+    endPostProcessPassInternal(ctx);
 }
 
 fn waitIdle(ctx_ptr: *anyopaque) void {
@@ -3972,6 +4368,7 @@ fn ensureNoRenderPassActiveInternal(ctx: *VulkanContext) void {
     if (ctx.main_pass_active) endMainPassInternal(ctx);
     if (ctx.shadow_system.pass_active) endShadowPassInternal(ctx);
     if (ctx.g_pass_active) endGPassInternal(ctx);
+    if (ctx.post_process_pass_active) endPostProcessPassInternal(ctx);
 }
 
 fn ensureNoRenderPassActive(ctx_ptr: *anyopaque) void {
@@ -4158,6 +4555,8 @@ const VULKAN_RHI_VTABLE = rhi.RHI.VTable{
         .abortFrame = abortFrame,
         .beginMainPass = beginMainPass,
         .endMainPass = endMainPass,
+        .beginPostProcessPass = beginPostProcessPass,
+        .endPostProcessPass = endPostProcessPass,
         .beginGPass = beginGPass,
         .endGPass = endGPass,
         .getEncoder = getEncoder,

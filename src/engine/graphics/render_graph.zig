@@ -262,3 +262,23 @@ pub const CloudPass = struct {
         };
     }
 };
+
+pub const PostProcessPass = struct {
+    pub fn pass(self: *PostProcessPass) IRenderPass {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .name = "PostProcessPass",
+                .needs_main_pass = false,
+                .execute = execute,
+            },
+        };
+    }
+
+    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+        _ = ptr;
+        ctx.rhi.beginPostProcessPass();
+        ctx.rhi.draw(rhi_pkg.InvalidBufferHandle, 3, .triangles);
+        ctx.rhi.endPostProcessPass();
+    }
+};

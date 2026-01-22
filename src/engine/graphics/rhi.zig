@@ -228,6 +228,8 @@ pub const IRenderContext = struct {
         abortFrame: *const fn (ptr: *anyopaque) void,
         beginMainPass: *const fn (ptr: *anyopaque) void,
         endMainPass: *const fn (ptr: *anyopaque) void,
+        beginPostProcessPass: *const fn (ptr: *anyopaque) void,
+        endPostProcessPass: *const fn (ptr: *anyopaque) void,
         beginGPass: *const fn (ptr: *anyopaque) void,
         endGPass: *const fn (ptr: *anyopaque) void,
         getEncoder: *const fn (ptr: *anyopaque) IGraphicsCommandEncoder,
@@ -299,6 +301,12 @@ pub const IRenderContext = struct {
     }
     pub fn endMainPass(self: IRenderContext) void {
         self.vtable.endMainPass(self.ptr);
+    }
+    pub fn beginPostProcessPass(self: IRenderContext) void {
+        self.vtable.beginPostProcessPass(self.ptr);
+    }
+    pub fn endPostProcessPass(self: IRenderContext) void {
+        self.vtable.endPostProcessPass(self.ptr);
     }
     pub fn getEncoder(self: IRenderContext) IGraphicsCommandEncoder {
         return self.vtable.getEncoder(self.ptr);
@@ -468,6 +476,12 @@ pub const RHI = struct {
     }
     pub fn endMainPass(self: RHI) void {
         self.vtable.render.endMainPass(self.ptr);
+    }
+    pub fn beginPostProcessPass(self: RHI) void {
+        self.vtable.render.beginPostProcessPass(self.ptr);
+    }
+    pub fn endPostProcessPass(self: RHI) void {
+        self.vtable.render.endPostProcessPass(self.ptr);
     }
     pub fn draw(self: RHI, handle: BufferHandle, count: u32, mode: DrawMode) void {
         self.encoder().draw(handle, count, mode);

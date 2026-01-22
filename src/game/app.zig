@@ -50,6 +50,7 @@ pub const App = struct {
     sky_pass: render_graph_pkg.SkyPass,
     opaque_pass: render_graph_pkg.OpaquePass,
     cloud_pass: render_graph_pkg.CloudPass,
+    post_process_pass: render_graph_pkg.PostProcessPass,
 
     settings: Settings,
     input: Input,
@@ -235,6 +236,7 @@ pub const App = struct {
             .sky_pass = .{},
             .opaque_pass = .{},
             .cloud_pass = .{},
+            .post_process_pass = .{},
             .settings = settings,
             .input = input,
             .input_mapper = input_mapper,
@@ -268,6 +270,7 @@ pub const App = struct {
             try app.render_graph.addPass(app.sky_pass.pass());
             try app.render_graph.addPass(app.opaque_pass.pass());
             try app.render_graph.addPass(app.cloud_pass.pass());
+            try app.render_graph.addPass(app.post_process_pass.pass());
         } else {
             log.log.warn("ZIGCRAFT_SAFE_RENDER: render graph disabled (UI only)", .{});
         }
