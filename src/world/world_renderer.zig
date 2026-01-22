@@ -110,7 +110,7 @@ pub const WorldRenderer = struct {
         defer self.storage.chunks_mutex.unlockShared();
 
         if (lod_manager) |lod_mgr| {
-            lod_mgr.render(view_proj, camera_pos, isChunkRenderable, @ptrCast(self.storage));
+            lod_mgr.render(view_proj, camera_pos, ChunkStorage.isChunkRenderable, @ptrCast(self.storage));
         }
 
         self.visible_chunks.clearRetainingCapacity();
@@ -202,13 +202,5 @@ pub const WorldRenderer = struct {
 
         self.mdi_instance_offset = 0;
         self.mdi_command_offset = 0;
-    }
-
-    fn isChunkRenderable(chunk_x: i32, chunk_z: i32, ctx: *anyopaque) bool {
-        const storage: *ChunkStorage = @ptrCast(@alignCast(ctx));
-        if (storage.chunks.get(.{ .x = chunk_x, .z = chunk_z })) |data| {
-            return data.chunk.state == .renderable;
-        }
-        return false;
     }
 };

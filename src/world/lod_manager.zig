@@ -303,7 +303,7 @@ pub const LODManager = struct {
     }
 
     /// Update LOD system with player position
-    pub fn update(self: *LODManager, player_pos: Vec3, player_velocity: Vec3) !void {
+    pub fn update(self: *LODManager, player_pos: Vec3, player_velocity: Vec3, chunk_checker: ?ChunkChecker, checker_ctx: ?*anyopaque) !void {
         if (self.paused) return;
 
         // Deferred deletion handling (Issue #119: Performance optimization)
@@ -325,6 +325,11 @@ pub const LODManager = struct {
         // Throttle heavy LOD management logic
         self.update_tick += 1;
         if (self.update_tick % 4 != 0) return; // Only update every 4 frames
+
+        // Issue #211: Clean up LOD chunks that are fully covered by LOD0 (throttled)
+        if (chunk_checker) |checker| {
+            self.unloadLODWhereChunksLoaded(checker, checker_ctx.?);
+        }
 
         const pc = worldToChunk(@intFromFloat(player_pos.x), @intFromFloat(player_pos.z));
         self.player_cx = pc.chunk_x;
@@ -355,6 +360,11 @@ pub const LODManager = struct {
 
         // Unload distant regions
         try self.unloadDistantRegions();
+
+        // Issue #211: Clean up LOD chunks that are fully covered by LOD0 (throttled)
+        if (chunk_checker) |checker| {
+            self.unloadLODWhereChunksLoaded(checker, checker_ctx.?);
+        }
     }
 
     /// Queue LOD regions that need generation
@@ -675,11 +685,6 @@ pub const LODManager = struct {
         const frustum = Frustum.fromViewProj(view_proj);
         const lod_y_offset: f32 = -3.0;
 
-        // Check and free LOD meshes where all underlying chunks are loaded
-        if (chunk_checker) |checker| {
-            self.unloadLODWhereChunksLoaded(checker, checker_ctx.?);
-        }
-
         self.instance_data.clearRetainingCapacity();
         self.draw_list.clearRetainingCapacity();
 
@@ -701,7 +706,7 @@ pub const LODManager = struct {
         }
     }
 
-    fn collectVisibleMeshes(self: *LODManager, meshes: *std.HashMap(LODRegionKey, *LODMesh, LODRegionKeyContext, 80), regions: *std.HashMap(LODRegionKey, *LODChunk, LODRegionKeyContext, 80), view_proj: Mat4, camera_pos: Vec3, frustum: Frustum, lod_y_offset: f32, chunk_checker: ?ChunkChecker, checker_ctx: ?*anyopaque) !void {
+    fn collectVisibleMeshes(self: *LODManager, meshes: *std.HashMap(LODRegionKey, *LODMesh, LODRegionKeyContext, 80), regions: *std.HashMap(LODRegionKey, *LODChunk, LODRegionKeyContext, 80), view_proj: Mat4, camera_pos: Vec3, frustum: Frustum, lod_y_offset: f32, _: ?ChunkChecker, _: ?*anyopaque) !void {
         var iter = meshes.iterator();
         while (iter.next()) |entry| {
             const mesh = entry.value_ptr.*;
@@ -710,9 +715,8 @@ pub const LODManager = struct {
                 if (chunk.state != .renderable) continue;
                 const bounds = chunk.worldBounds();
 
-                if (chunk_checker) |checker| {
-                    if (self.areAllChunksLoaded(bounds, checker, checker_ctx.?)) continue;
-                }
+                // Issue #211: removed expensive areAllChunksLoaded check from render.
+                // Throttled cleanup in update handles this, and shader masking handles partial overlaps.
 
                 const aabb_min = Vec3.init(@as(f32, @floatFromInt(bounds.min_x)) - camera_pos.x, 0.0 - camera_pos.y, @as(f32, @floatFromInt(bounds.min_z)) - camera_pos.z);
                 const aabb_max = Vec3.init(@as(f32, @floatFromInt(bounds.max_x)) - camera_pos.x, 256.0 - camera_pos.y, @as(f32, @floatFromInt(bounds.max_z)) - camera_pos.z);
@@ -723,7 +727,7 @@ pub const LODManager = struct {
                 try self.instance_data.append(self.allocator, .{
                     .view_proj = view_proj,
                     .model = model,
-                    .mask_radius = 0,
+                    .mask_radius = @floatFromInt(self.config.radii[0]),
                     .padding = .{ 0, 0, 0 },
                 });
                 try self.draw_list.append(self.allocator, mesh);

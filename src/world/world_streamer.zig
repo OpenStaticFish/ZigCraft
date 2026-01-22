@@ -281,7 +281,7 @@ pub const WorldStreamer = struct {
                 0,
                 self.player_movement.dir_z * self.player_movement.speed,
             );
-            try lod_mgr.update(player_pos, velocity);
+            try lod_mgr.update(player_pos, velocity, ChunkStorage.isChunkRenderable, self.storage);
         }
     }
 

@@ -51,6 +51,7 @@ test {
     _ = @import("world/worldgen/tree_registry.zig");
     _ = @import("world/lod_manager.zig");
     _ = @import("engine/atmosphere/tests.zig");
+    _ = @import("game/settings/tests.zig");
 }
 
 test "Vec3 addition" {

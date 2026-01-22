@@ -42,7 +42,7 @@ pub const Settings = struct {
     ui_scale: f32 = 1.0, // Manual UI scale multiplier (0.5 to 2.0)
     window_width: u32 = 1920,
     window_height: u32 = 1080,
-    lod_enabled: bool = false, // Disabled by default due to performance issues
+    lod_enabled: bool = false,
     texture_pack: []const u8 = "default",
     environment_map: []const u8 = "default", // "default" or filename.exr/hdr
 
@@ -153,6 +153,11 @@ pub const Settings = struct {
         };
         pub const cloud_shadows_enabled = SettingMetadata{
             .label = "CLOUD SHADOWS",
+            .kind = .toggle,
+        };
+        pub const lod_enabled = SettingMetadata{
+            .label = "LOD SYSTEM",
+            .description = "Enables high-distance simplified terrain rendering",
             .kind = .toggle,
         };
         pub const ssao_enabled = SettingMetadata{

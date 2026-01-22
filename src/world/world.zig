@@ -252,6 +252,14 @@ pub const World = struct {
         // NOTE: LOD Manager update is handled inside streamer.update() now
     }
 
+    pub fn isChunkRenderable(chunk_x: i32, chunk_z: i32, ctx: *anyopaque) bool {
+        const storage: *ChunkStorage = @ptrCast(@alignCast(ctx));
+        if (storage.chunks.get(.{ .x = chunk_x, .z = chunk_z })) |data| {
+            return data.chunk.state == .renderable;
+        }
+        return false;
+    }
+
     pub fn render(self: *World, view_proj: Mat4, camera_pos: Vec3) void {
         self.renderer.render(view_proj, camera_pos, self.render_distance, self.lod_manager);
     }
