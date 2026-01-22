@@ -15,6 +15,7 @@ const LODManager = @import("lod_manager.zig").LODManager;
 const worldToChunk = @import("chunk.zig").worldToChunk;
 const CHUNK_UNLOAD_BUFFER = @import("chunk.zig").CHUNK_UNLOAD_BUFFER;
 const GlobalVertexAllocator = @import("chunk_allocator.zig").GlobalVertexAllocator;
+const TextureAtlas = @import("../engine/graphics/texture_atlas.zig").TextureAtlas;
 const log = @import("../engine/core/log.zig");
 
 /// Buffer distance beyond render_distance for chunk unloading.
@@ -84,6 +85,7 @@ pub const WorldStreamer = struct {
     allocator: std.mem.Allocator,
     storage: *ChunkStorage,
     generator: Generator,
+    atlas: *const TextureAtlas,
 
     gen_queue: *JobQueue,
     mesh_queue: *JobQueue,
@@ -100,7 +102,7 @@ pub const WorldStreamer = struct {
     const GEN_WORKERS = 4;
     const MESH_WORKERS = 3;
 
-    pub fn init(allocator: std.mem.Allocator, storage: *ChunkStorage, generator: Generator, render_distance: i32) !*WorldStreamer {
+    pub fn init(allocator: std.mem.Allocator, storage: *ChunkStorage, generator: Generator, atlas: *const TextureAtlas, render_distance: i32) !*WorldStreamer {
         const streamer = try allocator.create(WorldStreamer);
 
         const gen_queue = try allocator.create(JobQueue);
@@ -113,6 +115,7 @@ pub const WorldStreamer = struct {
             .allocator = allocator,
             .storage = storage,
             .generator = generator,
+            .atlas = atlas,
             .gen_queue = gen_queue,
             .mesh_queue = mesh_queue,
             .gen_pool = undefined,
@@ -420,7 +423,7 @@ pub const WorldStreamer = struct {
         }
 
         if (chunk_data.chunk.state == .meshing and chunk_data.chunk.job_token == job.data.chunk.job_token) {
-            chunk_data.mesh.buildWithNeighbors(&chunk_data.chunk, neighbors) catch |err| {
+            chunk_data.mesh.buildWithNeighbors(&chunk_data.chunk, neighbors, self.atlas) catch |err| {
                 log.log.err("Mesh build failed for chunk ({}, {}): {}", .{ cx, cz, err });
             };
             if (self.mesh_queue.abort_worker) {

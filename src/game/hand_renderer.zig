@@ -82,13 +82,12 @@ pub const HandRenderer = struct {
         var vertices: [36]Vertex = undefined;
         var idx: usize = 0;
 
-        _ = atlas; // Unused if getTilesForBlock is static
-        const tiles = TextureAtlas.getTilesForBlock(@intFromEnum(block_type));
+        const tiles = atlas.getTilesForBlock(@intFromEnum(block_type));
         const color = block_registry.getBlockDefinition(block_type).default_color;
 
         // Standard cube faces
         // 0: top, 1: bottom, 2: north, 3: south, 4: east, 5: west
-        const faces = [6]struct { normal: [3]f32, tile: u8 }{
+        const faces = [6]struct { normal: [3]f32, tile: u16 }{
             .{ .normal = .{ 0, 1, 0 }, .tile = tiles.top }, // Top
             .{ .normal = .{ 0, -1, 0 }, .tile = tiles.bottom }, // Bottom
             .{ .normal = .{ 0, 0, -1 }, .tile = tiles.side }, // North
@@ -117,7 +116,7 @@ pub const HandRenderer = struct {
         try self.rhi.uploadBuffer(self.buffer_handle, std.mem.asBytes(&vertices));
     }
 
-    fn addQuad(verts: *[36]Vertex, idx: *usize, p0: [3]f32, p1: [3]f32, p2: [3]f32, p3: [3]f32, normal: [3]f32, tile: u8, color: [3]f32) void {
+    fn addQuad(verts: *[36]Vertex, idx: *usize, p0: [3]f32, p1: [3]f32, p2: [3]f32, p3: [3]f32, normal: [3]f32, tile: u16, color: [3]f32) void {
         const v0 = Vertex{ .pos = p0, .color = color, .normal = normal, .uv = .{ 0, 0 }, .tile_id = @floatFromInt(tile), .skylight = 1.0, .blocklight = .{ 1.0, 1.0, 1.0 }, .ao = 1.0 };
         const v1 = Vertex{ .pos = p1, .color = color, .normal = normal, .uv = .{ 1, 0 }, .tile_id = @floatFromInt(tile), .skylight = 1.0, .blocklight = .{ 1.0, 1.0, 1.0 }, .ao = 1.0 };
         const v2 = Vertex{ .pos = p2, .color = color, .normal = normal, .uv = .{ 1, 1 }, .tile_id = @floatFromInt(tile), .skylight = 1.0, .blocklight = .{ 1.0, 1.0, 1.0 }, .ao = 1.0 };

@@ -24,7 +24,7 @@ pub const WorldScreen = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, context: EngineContext, seed: u64, generator_index: usize) !*WorldScreen {
-        const session = try GameSession.init(allocator, context.rhi, seed, context.settings.render_distance, context.settings.lod_enabled, generator_index);
+        const session = try GameSession.init(allocator, context.rhi, context.atlas, seed, context.settings.render_distance, context.settings.lod_enabled, generator_index);
         errdefer session.deinit();
 
         const self = try allocator.create(WorldScreen);
@@ -181,7 +181,7 @@ pub const WorldScreen = struct {
         const mouse_y: f32 = @floatFromInt(mouse_pos.y);
         const mouse_clicked = ctx.input.isMouseButtonPressed(.left);
 
-        try self.session.drawHUD(ui, ctx.resource_pack_manager.active_pack, ctx.time.fps, screen_w, screen_h, mouse_x, mouse_y, mouse_clicked);
+        try self.session.drawHUD(ui, ctx.atlas, ctx.resource_pack_manager.active_pack, ctx.time.fps, screen_w, screen_h, mouse_x, mouse_y, mouse_clicked);
     }
 
     pub fn onEnter(ptr: *anyopaque) void {

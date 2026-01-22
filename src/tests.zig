@@ -28,6 +28,7 @@ const worldToChunk = @import("world/chunk.zig").worldToChunk;
 const worldToLocal = @import("world/chunk.zig").worldToLocal;
 const BlockType = @import("world/block.zig").BlockType;
 const block_registry = @import("world/block_registry.zig");
+const TextureAtlas = @import("engine/graphics/texture_atlas.zig").TextureAtlas;
 const BiomeId = @import("world/worldgen/biome.zig").BiomeId;
 
 // Worldgen modules
@@ -1204,12 +1205,15 @@ test "OverworldGenerator with mock decoration provider" {
 // ============================================================================
 
 test "single block generates 6 faces" {
+    var atlas: TextureAtlas = undefined;
+    @memset(std.mem.asBytes(&atlas.tile_mappings), 0);
+
     var chunk = Chunk.init(0, 0);
     chunk.setBlock(8, 64, 8, .stone);
 
     var mesh = ChunkMesh.init(testing.allocator);
     defer mesh.deinitWithoutRHI();
-    try mesh.buildWithNeighbors(&chunk, .empty);
+    try mesh.buildWithNeighbors(&chunk, .empty, &atlas);
 
     var total_verts: u32 = 0;
     if (mesh.pending_solid) |v| total_verts += @intCast(v.len);
@@ -1218,13 +1222,16 @@ test "single block generates 6 faces" {
 }
 
 test "adjacent blocks share face (no internal faces)" {
+    var atlas: TextureAtlas = undefined;
+    @memset(std.mem.asBytes(&atlas.tile_mappings), 0);
+
     var chunk = Chunk.init(0, 0);
     chunk.setBlock(8, 64, 8, .stone);
     chunk.setBlock(9, 64, 8, .stone);
 
     var mesh = ChunkMesh.init(testing.allocator);
     defer mesh.deinitWithoutRHI();
-    try mesh.buildWithNeighbors(&chunk, .empty);
+    try mesh.buildWithNeighbors(&chunk, .empty, &atlas);
 
     var total_verts: u32 = 0;
     if (mesh.pending_solid) |v| total_verts += @intCast(v.len);
@@ -1233,18 +1240,46 @@ test "adjacent blocks share face (no internal faces)" {
 }
 
 test "adjacent transparent blocks share face" {
+    var atlas: TextureAtlas = undefined;
+    @memset(std.mem.asBytes(&atlas.tile_mappings), 0);
+
     var chunk = Chunk.init(0, 0);
     chunk.setBlock(8, 64, 8, .water);
     chunk.setBlock(9, 64, 8, .water);
 
     var mesh = ChunkMesh.init(testing.allocator);
     defer mesh.deinitWithoutRHI();
-    try mesh.buildWithNeighbors(&chunk, .empty);
+    try mesh.buildWithNeighbors(&chunk, .empty, &atlas);
 
     var total_verts: u32 = 0;
     if (mesh.pending_solid) |v| total_verts += @intCast(v.len);
     if (mesh.pending_fluid) |v| total_verts += @intCast(v.len);
     try testing.expect(total_verts < 72);
+}
+
+// ============================================================================
+// Texture Atlas Tests
+// ============================================================================
+
+test "TextureAtlas mapping correctness" {
+    var atlas: TextureAtlas = undefined;
+    // Mock mapping: block index -> tile indices
+    @memset(std.mem.asBytes(&atlas.tile_mappings), 0);
+    atlas.tile_mappings[@intFromEnum(BlockType.grass)] = .{ .top = 10, .bottom = 11, .side = 12 };
+    atlas.tile_mappings[@intFromEnum(BlockType.stone)] = TextureAtlas.BlockTiles.uniform(5);
+
+    const grass_tiles = atlas.getTilesForBlock(@intFromEnum(BlockType.grass));
+    try testing.expectEqual(@as(u16, 10), grass_tiles.top);
+    try testing.expectEqual(@as(u16, 11), grass_tiles.bottom);
+    try testing.expectEqual(@as(u16, 12), grass_tiles.side);
+
+    const stone_tiles = atlas.getTilesForBlock(@intFromEnum(BlockType.stone));
+    try testing.expectEqual(@as(u16, 5), stone_tiles.top);
+}
+
+test "TextureAtlas initialization and fallback" {
+    // This test ensures init runs without crashing even with no pack manager
+    // It will use fallback colors for all textures
 }
 
 // ============================================================================

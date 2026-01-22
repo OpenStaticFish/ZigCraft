@@ -24,6 +24,7 @@ const shadow_scene = @import("../engine/graphics/shadow_scene.zig");
 const rhi_mod = @import("../engine/graphics/rhi.zig");
 const RHI = rhi_mod.RHI;
 const WorldStreamer = @import("world_streamer.zig").WorldStreamer;
+const TextureAtlas = @import("../engine/graphics/texture_atlas.zig").TextureAtlas;
 const WorldRenderer = @import("world_renderer.zig").WorldRenderer;
 const RenderStats = @import("world_renderer.zig").RenderStats;
 const JobQueue = @import("../engine/core/job_system.zig").JobQueue;
@@ -58,11 +59,11 @@ pub const World = struct {
     lod_manager: ?*LODManager,
     lod_enabled: bool,
 
-    pub fn init(allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI) !*World {
-        return initGen(0, allocator, render_distance, seed, rhi);
+    pub fn init(allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI, atlas: *const TextureAtlas) !*World {
+        return initGen(0, allocator, render_distance, seed, rhi, atlas);
     }
 
-    pub fn initGen(generator_index: usize, allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI) !*World {
+    pub fn initGen(generator_index: usize, allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI, atlas: *const TextureAtlas) !*World {
         const world = try allocator.create(World);
 
         const storage = ChunkStorage.init(allocator);
@@ -96,19 +97,19 @@ pub const World = struct {
             .lod_enabled = false,
         };
 
-        world.streamer = try WorldStreamer.init(allocator, &world.storage, world.generator, render_distance);
+        world.streamer = try WorldStreamer.init(allocator, &world.storage, world.generator, atlas, render_distance);
         world.renderer = try WorldRenderer.init(allocator, rhi, &world.storage);
 
         return world;
     }
 
     /// Initialize with LOD system enabled for extended render distances
-    pub fn initWithLOD(allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI, lod_config: LODConfig) !*World {
-        return initGenWithLOD(0, allocator, render_distance, seed, rhi, lod_config);
+    pub fn initWithLOD(allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI, lod_config: LODConfig, atlas: *const TextureAtlas) !*World {
+        return initGenWithLOD(0, allocator, render_distance, seed, rhi, lod_config, atlas);
     }
 
-    pub fn initGenWithLOD(generator_index: usize, allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI, lod_config: LODConfig) !*World {
-        const world = try initGen(generator_index, allocator, render_distance, seed, rhi);
+    pub fn initGenWithLOD(generator_index: usize, allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI, lod_config: LODConfig, atlas: *const TextureAtlas) !*World {
+        const world = try initGen(generator_index, allocator, render_distance, seed, rhi, atlas);
 
         // Initialize LOD manager with generator reference
         world.lod_manager = try LODManager.init(allocator, lod_config, rhi, world.generator);

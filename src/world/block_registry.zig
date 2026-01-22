@@ -8,6 +8,8 @@ const BlockType = @import("block.zig").BlockType;
 const Face = @import("block.zig").Face;
 
 /// Rendering pass for the block
+const MAX_BLOCK_TYPES = @import("chunk.zig").MAX_BLOCK_TYPES;
+
 pub const RenderPass = enum {
     /// Opaque blocks (e.g., stone, dirt).
     /// These are drawn first and obscure everything behind them.
@@ -36,6 +38,9 @@ pub const BlockDefinition = struct {
     render_pass: RenderPass,
     light_emission: [3]u4, // RGB light emission
     default_color: [3]f32,
+    texture_top: []const u8,
+    texture_bottom: []const u8,
+    texture_side: []const u8,
 
     /// Check if this block occludes another block on a given face
     pub fn occludes(self: *const BlockDefinition, other_def: *const BlockDefinition, face: Face) bool {
@@ -83,14 +88,14 @@ pub const BLOCK_REGISTRY = blk: {
     }
 
     // Validate that all enum fields are covered by the registry size
-    if (@typeInfo(BlockType).@"enum".fields.len > 256) {
-        @compileError("BlockType has more fields than BLOCK_REGISTRY size (256)");
+    if (@typeInfo(BlockType).@"enum".fields.len > MAX_BLOCK_TYPES) {
+        @compileError("BlockType has more fields than BLOCK_REGISTRY size");
     }
 
-    var definitions = [_]BlockDefinition{undefined} ** 256; // Max u8 blocks
+    var definitions = [_]BlockDefinition{undefined} ** MAX_BLOCK_TYPES; // Max u8 blocks
 
     // Default "Air" definition for all slots first
-    for (0..256) |i| {
+    for (0..MAX_BLOCK_TYPES) |i| {
         definitions[i] = .{
             .id = .air,
             .name = "unknown",
@@ -101,6 +106,9 @@ pub const BLOCK_REGISTRY = blk: {
             .render_pass = .solid, // Default, though air isn't drawn
             .light_emission = .{ 0, 0, 0 },
             .default_color = .{ 1, 0, 1 }, // Magenta for unknown
+            .texture_top = "unknown",
+            .texture_bottom = "unknown",
+            .texture_side = "unknown",
         };
     }
 
@@ -125,11 +133,84 @@ pub const BLOCK_REGISTRY = blk: {
             .render_pass = .solid, // Default
             .light_emission = .{ 0, 0, 0 }, // Default
             .default_color = .{ 1, 1, 1 }, // Default
+            .texture_top = field.name,
+            .texture_bottom = field.name,
+            .texture_side = field.name,
         };
 
         // Apply specific properties based on the original switch statements
 
-        // 1. Color
+        // 1. Textures
+        switch (id) {
+            .air => {
+                def.texture_top = "air";
+                def.texture_bottom = "air";
+                def.texture_side = "air";
+            },
+            .grass => {
+                def.texture_top = "grass_top";
+                def.texture_bottom = "dirt";
+                def.texture_side = "grass_side";
+            },
+            .wood => {
+                def.texture_top = "wood_top";
+                def.texture_bottom = "wood_top";
+                def.texture_side = "wood_side";
+            },
+            .cactus => {
+                def.texture_top = "cactus_top";
+                def.texture_bottom = "cactus_top";
+                def.texture_side = "cactus_side";
+            },
+            .mangrove_log => {
+                def.texture_top = "mangrove_log_top";
+                def.texture_bottom = "mangrove_log_top";
+                def.texture_side = "mangrove_log_side";
+            },
+            .jungle_log => {
+                def.texture_top = "jungle_log_top";
+                def.texture_bottom = "jungle_log_top";
+                def.texture_side = "jungle_log_side";
+            },
+            .melon => {
+                def.texture_top = "melon_top";
+                def.texture_bottom = "melon_top";
+                def.texture_side = "melon_side";
+            },
+            .acacia_log => {
+                def.texture_top = "acacia_log_top";
+                def.texture_bottom = "acacia_log_top";
+                def.texture_side = "acacia_log_side";
+            },
+            .mycelium => {
+                def.texture_top = "mycelium_top";
+                def.texture_bottom = "dirt";
+                def.texture_side = "mycelium_side";
+            },
+            .red_mushroom_block => {
+                def.texture_top = "red_mushroom_block";
+                def.texture_bottom = "mushroom_stem";
+                def.texture_side = "red_mushroom_block";
+            },
+            .brown_mushroom_block => {
+                def.texture_top = "brown_mushroom_block";
+                def.texture_bottom = "mushroom_stem";
+                def.texture_side = "brown_mushroom_block";
+            },
+            .birch_log => {
+                def.texture_top = "birch_log_top";
+                def.texture_bottom = "birch_log_top";
+                def.texture_side = "birch_log_side";
+            },
+            .spruce_log => {
+                def.texture_top = "spruce_log_top";
+                def.texture_bottom = "spruce_log_top";
+                def.texture_side = "spruce_log_side";
+            },
+            else => {},
+        }
+
+        // 2. Color
         def.default_color = switch (id) {
             .air => .{ 0, 0, 0 },
             .stone => .{ 0.5, 0.5, 0.5 },

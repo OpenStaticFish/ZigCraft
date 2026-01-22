@@ -105,17 +105,17 @@ pub const ChunkMesh = struct {
         }
     }
 
-    pub fn buildWithNeighbors(self: *ChunkMesh, chunk: *const Chunk, neighbors: NeighborChunks) !void {
+    pub fn buildWithNeighbors(self: *ChunkMesh, chunk: *const Chunk, neighbors: NeighborChunks, atlas: *const TextureAtlas) !void {
         // Build each subchunk separately (greedy meshing works per Y slice)
         for (0..NUM_SUBCHUNKS) |i| {
-            try self.buildSubchunk(chunk, neighbors, @intCast(i));
+            try self.buildSubchunk(chunk, neighbors, @intCast(i), atlas);
         }
 
         // Merge all subchunk vertices into single buffers
         try self.mergeSubchunks();
     }
 
-    fn buildSubchunk(self: *ChunkMesh, chunk: *const Chunk, neighbors: NeighborChunks, si: u32) !void {
+    fn buildSubchunk(self: *ChunkMesh, chunk: *const Chunk, neighbors: NeighborChunks, si: u32, atlas: *const TextureAtlas) !void {
         var solid_verts = std.ArrayListUnmanaged(Vertex).empty;
         defer solid_verts.deinit(self.allocator);
         var fluid_verts = std.ArrayListUnmanaged(Vertex).empty;
@@ -126,15 +126,15 @@ pub const ChunkMesh = struct {
 
         var sy: i32 = y0;
         while (sy <= y1) : (sy += 1) {
-            try self.meshSlice(chunk, neighbors, .top, sy, si, &solid_verts, &fluid_verts);
+            try self.meshSlice(chunk, neighbors, .top, sy, si, &solid_verts, &fluid_verts, atlas);
         }
         var sx: i32 = 0;
         while (sx <= CHUNK_SIZE_X) : (sx += 1) {
-            try self.meshSlice(chunk, neighbors, .east, sx, si, &solid_verts, &fluid_verts);
+            try self.meshSlice(chunk, neighbors, .east, sx, si, &solid_verts, &fluid_verts, atlas);
         }
         var sz: i32 = 0;
         while (sz <= CHUNK_SIZE_Z) : (sz += 1) {
-            try self.meshSlice(chunk, neighbors, .south, sz, si, &solid_verts, &fluid_verts);
+            try self.meshSlice(chunk, neighbors, .south, sz, si, &solid_verts, &fluid_verts, atlas);
         }
 
         // Store subchunk data temporarily (will be merged later)
@@ -214,7 +214,7 @@ pub const ChunkMesh = struct {
         color: [3]f32,
     };
 
-    fn meshSlice(self: *ChunkMesh, chunk: *const Chunk, neighbors: NeighborChunks, axis: Face, s: i32, si: u32, solid_list: *std.ArrayListUnmanaged(Vertex), fluid_list: *std.ArrayListUnmanaged(Vertex)) !void {
+    fn meshSlice(self: *ChunkMesh, chunk: *const Chunk, neighbors: NeighborChunks, axis: Face, s: i32, si: u32, solid_list: *std.ArrayListUnmanaged(Vertex), fluid_list: *std.ArrayListUnmanaged(Vertex), atlas: *const TextureAtlas) !void {
         const du: u32 = 16;
         const dv: u32 = 16;
         var mask = try self.allocator.alloc(?FaceKey, du * dv);
@@ -300,7 +300,7 @@ pub const ChunkMesh = struct {
 
                 const k_def = block_registry.getBlockDefinition(k.block);
                 const target = if (k_def.render_pass == .fluid) fluid_list else solid_list;
-                try addGreedyFace(self.allocator, target, axis, s, su, sv, width, height, k_def, k.side, si, k.light, k.color, chunk, neighbors);
+                try addGreedyFace(self.allocator, target, axis, s, su, sv, width, height, k_def, k.side, si, k.light, k.color, chunk, neighbors, atlas);
 
                 var dy: u32 = 0;
                 while (dy < height) : (dy += 1) {
@@ -472,7 +472,7 @@ fn calculateVertexAO(s1: f32, s2: f32, c: f32) f32 {
     return 1.0 - (s1 + s2 + c) * 0.2;
 }
 
-fn addGreedyFace(allocator: std.mem.Allocator, verts: *std.ArrayListUnmanaged(Vertex), axis: Face, s: i32, u: u32, v: u32, w: u32, h: u32, block_def: *const block_registry.BlockDefinition, forward: bool, si: u32, light: PackedLight, tint: [3]f32, chunk: *const Chunk, neighbors: NeighborChunks) !void {
+fn addGreedyFace(allocator: std.mem.Allocator, verts: *std.ArrayListUnmanaged(Vertex), axis: Face, s: i32, u: u32, v: u32, w: u32, h: u32, block_def: *const block_registry.BlockDefinition, forward: bool, si: u32, light: PackedLight, tint: [3]f32, chunk: *const Chunk, neighbors: NeighborChunks, atlas: *const TextureAtlas) !void {
     const face = if (forward) axis else switch (axis) {
         .top => Face.bottom,
         .east => Face.west,
@@ -483,7 +483,7 @@ fn addGreedyFace(allocator: std.mem.Allocator, verts: *std.ArrayListUnmanaged(Ve
     const col = [3]f32{ base_col[0] * tint[0], base_col[1] * tint[1], base_col[2] * tint[2] };
     const norm = face.getNormal();
     const nf = [3]f32{ @floatFromInt(norm[0]), @floatFromInt(norm[1]), @floatFromInt(norm[2]) };
-    const tiles = TextureAtlas.getTilesForBlock(@intFromEnum(block_def.id));
+    const tiles = atlas.getTilesForBlock(@intFromEnum(block_def.id));
     const tid: f32 = @floatFromInt(switch (face) {
         .top => tiles.top,
         .bottom => tiles.bottom,

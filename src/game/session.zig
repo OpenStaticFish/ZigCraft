@@ -98,7 +98,7 @@ pub const GameSession = struct {
     debug_shadows: bool = false,
     debug_cascade_idx: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator, rhi: *RHI, seed: u64, render_distance: i32, lod_enabled: bool, generator_index: usize) !*GameSession {
+    pub fn init(allocator: std.mem.Allocator, rhi: *RHI, atlas: *const TextureAtlas, seed: u64, render_distance: i32, lod_enabled: bool, generator_index: usize) !*GameSession {
         const session = try allocator.create(GameSession);
 
         const safe_mode_env = std.posix.getenv("ZIGCRAFT_SAFE_MODE");
@@ -129,9 +129,9 @@ pub const GameSession = struct {
             };
 
         const world = if (effective_lod_enabled)
-            try World.initGenWithLOD(generator_index, allocator, effective_render_distance, seed, rhi.*, lod_config)
+            try World.initGenWithLOD(generator_index, allocator, effective_render_distance, seed, rhi.*, lod_config, atlas)
         else
-            try World.initGen(generator_index, allocator, effective_render_distance, seed, rhi.*);
+            try World.initGen(generator_index, allocator, effective_render_distance, seed, rhi.*, atlas);
 
         const world_map = try WorldMap.init(rhi.*, 256, 256);
 
@@ -274,7 +274,7 @@ pub const GameSession = struct {
         self.ecs_render_system.render(&self.ecs_registry, camera_pos);
     }
 
-    pub fn drawHUD(self: *GameSession, ui: *UISystem, active_pack: ?[]const u8, fps: f32, screen_w: f32, screen_h: f32, mouse_x: f32, mouse_y: f32, mouse_clicked: bool) !void {
+    pub fn drawHUD(self: *GameSession, ui: *UISystem, atlas: *const TextureAtlas, active_pack: ?[]const u8, fps: f32, screen_w: f32, screen_h: f32, mouse_x: f32, mouse_y: f32, mouse_clicked: bool) !void {
         if (self.map_controller.show_map) {
             try self.map_controller.draw(ui, screen_w, screen_h, &self.world_map, self.world.generator, self.camera.position, self.allocator);
             return;
@@ -333,7 +333,7 @@ pub const GameSession = struct {
         if (self.debug_show_block_info) {
             if (self.player.target_block) |target| {
                 const block_type = self.world.getBlock(target.x, target.y, target.z);
-                const tiles = TextureAtlas.getTilesForBlock(@intFromEnum(block_type));
+                const tiles = atlas.getTilesForBlock(@intFromEnum(block_type));
                 const ux = screen_w - 350;
                 var uy: f32 = 10;
                 ui.drawRect(.{ .x = ux - 10, .y = uy, .width = 350, .height = 80 }, Color.rgba(0, 0, 0, 0.7));
