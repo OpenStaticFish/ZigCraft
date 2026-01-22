@@ -864,12 +864,22 @@ pub fn LODManager(comptime RHI: type) type {
 test "LODManager initialization" {
     const allocator = std.testing.allocator;
 
+    const MockRHIState = struct {
+        buffer_created: bool = false,
+        buffer_destroyed: bool = false,
+    };
+
     // Mock RHI for testing
     const MockRHI = struct {
-        pub fn createBuffer(_: @This(), _: usize, _: anytype) !u32 {
+        state: *MockRHIState,
+
+        pub fn createBuffer(self: @This(), _: usize, _: anytype) !u32 {
+            self.state.buffer_created = true;
             return 1;
         }
-        pub fn destroyBuffer(_: @This(), _: u32) void {}
+        pub fn destroyBuffer(self: @This(), _: u32) void {
+            self.state.buffer_destroyed = true;
+        }
         pub fn getFrameIndex(_: @This()) usize {
             return 0;
         }
@@ -921,14 +931,24 @@ test "LODManager initialization" {
     };
 
     // Test that we can instantiate the generic manager with MockRHI
+    var mock_state = MockRHIState{};
+    const mock_rhi = MockRHI{ .state = &mock_state };
+
     const Manager = LODManager(MockRHI);
-    var mgr = try Manager.init(allocator, config, MockRHI{}, mock_gen);
-    defer mgr.deinit();
+    var mgr = try Manager.init(allocator, config, mock_rhi, mock_gen);
+
+    // Verify init called createBuffer (via LODRenderer)
+    try std.testing.expect(mock_state.buffer_created);
 
     // Verify initial state
     const stats = mgr.getStats();
     try std.testing.expectEqual(@as(u32, 0), stats.totalLoaded());
     try std.testing.expectEqual(@as(u32, 0), stats.totalGenerating());
+
+    mgr.deinit();
+
+    // Verify deinit called destroyBuffer
+    try std.testing.expect(mock_state.buffer_destroyed);
 
     // Check config values
     try std.testing.expectEqual(LODLevel.lod0, config.getLODForDistance(5));
