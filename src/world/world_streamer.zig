@@ -11,7 +11,6 @@ const WorkerPool = @import("../engine/core/job_system.zig").WorkerPool;
 const Job = @import("../engine/core/job_system.zig").Job;
 const RingBuffer = @import("../engine/core/ring_buffer.zig").RingBuffer;
 const Generator = @import("worldgen/generator_interface.zig").Generator;
-const LODManager = @import("lod_manager.zig").LODManager;
 const worldToChunk = @import("chunk.zig").worldToChunk;
 const CHUNK_UNLOAD_BUFFER = @import("chunk.zig").CHUNK_UNLOAD_BUFFER;
 const GlobalVertexAllocator = @import("chunk_allocator.zig").GlobalVertexAllocator;
@@ -180,7 +179,7 @@ pub const WorldStreamer = struct {
         }
     }
 
-    pub fn update(self: *WorldStreamer, player_pos: Vec3, dt: f32, lod_manager: ?*LODManager) !void {
+    pub fn update(self: *WorldStreamer, player_pos: Vec3, dt: f32, lod_manager: anytype) !void {
         if (self.paused) return;
 
         // Update velocity tracking for predictive loading
@@ -303,7 +302,7 @@ pub const WorldStreamer = struct {
         }
     }
 
-    pub fn processUnloads(self: *WorldStreamer, player_pos: Vec3, vertex_allocator: *GlobalVertexAllocator, lod_manager: ?*LODManager) !void {
+    pub fn processUnloads(self: *WorldStreamer, player_pos: Vec3, vertex_allocator: *GlobalVertexAllocator, lod_manager: anytype) !void {
         const pc = worldToChunk(@intFromFloat(player_pos.x), @intFromFloat(player_pos.z));
         const render_dist_unload = if (lod_manager) |mgr| @min(self.render_distance, mgr.config.radii[0]) else self.render_distance;
         const unload_dist_sq = (render_dist_unload + CHUNK_UNLOAD_BUFFER) * (render_dist_unload + CHUNK_UNLOAD_BUFFER);

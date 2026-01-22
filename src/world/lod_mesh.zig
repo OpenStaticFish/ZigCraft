@@ -18,10 +18,10 @@ const LODSimplifiedData = lod_chunk.LODSimplifiedData;
 const BiomeId = @import("worldgen/biome.zig").BiomeId;
 const biome_mod = @import("worldgen/biome.zig");
 const BlockType = @import("block.zig").BlockType;
-const rhi_mod = @import("../engine/graphics/rhi.zig");
-const RHI = rhi_mod.RHI;
-const Vertex = rhi_mod.Vertex;
-const BufferHandle = rhi_mod.BufferHandle;
+const rhi_types = @import("../engine/graphics/rhi_types.zig");
+const Vertex = rhi_types.Vertex;
+const BufferHandle = rhi_types.BufferHandle;
+const RhiError = rhi_types.RhiError;
 
 /// Size of each LOD mesh grid cell in blocks
 pub fn getCellSize(lod: LODLevel) u32 {
@@ -54,7 +54,7 @@ pub const LODMesh = struct {
         };
     }
 
-    pub fn deinit(self: *LODMesh, rhi: RHI) void {
+    pub fn deinit(self: *LODMesh, rhi: anytype) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -218,7 +218,7 @@ pub const LODMesh = struct {
     }
 
     /// Upload pending vertices to GPU
-    pub fn upload(self: *LODMesh, rhi: RHI) rhi_mod.RhiError!void {
+    pub fn upload(self: *LODMesh, rhi: anytype) RhiError!void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -255,7 +255,7 @@ pub const LODMesh = struct {
     }
 
     /// Draw the LOD mesh
-    pub fn draw(self: *const LODMesh, rhi: RHI) void {
+    pub fn draw(self: *const LODMesh, rhi: anytype) void {
         if (!self.ready or self.buffer_handle == 0 or self.vertex_count == 0) return;
         rhi.draw(self.buffer_handle, self.vertex_count, .triangles);
     }
@@ -676,7 +676,10 @@ pub const LODMeshBuilder = struct {
 test "LODMesh initialization" {
     const allocator = std.testing.allocator;
     var mesh = LODMesh.init(allocator, .lod1);
-    defer mesh.deinit(undefined); // Can't test GPU operations
+    const MockRHI = struct {
+        pub fn destroyBuffer(_: @This(), _: BufferHandle) void {}
+    };
+    defer mesh.deinit(MockRHI{});
 
     try std.testing.expectEqual(LODLevel.lod1, mesh.lod_level);
     try std.testing.expectEqual(@as(u32, 0), mesh.vertex_count);
