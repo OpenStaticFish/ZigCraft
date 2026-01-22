@@ -265,13 +265,16 @@ pub const ResourceManager = struct {
     fn prepareTransfer(self: *ResourceManager) !c.VkCommandBuffer {
         if (self.transfer_ready) return self.transfer_command_buffers[self.current_frame_index];
 
+        const cb = self.transfer_command_buffers[self.current_frame_index];
+        try Utils.checkVk(c.vkResetCommandBuffer(cb, 0));
+
         var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
         begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin_info.flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        try Utils.checkVk(c.vkBeginCommandBuffer(self.transfer_command_buffers[self.current_frame_index], &begin_info));
+        try Utils.checkVk(c.vkBeginCommandBuffer(cb, &begin_info));
 
         self.transfer_ready = true;
-        return self.transfer_command_buffers[self.current_frame_index];
+        return cb;
     }
 
     pub fn getTransferCommandBuffer(self: *ResourceManager) ?c.VkCommandBuffer {

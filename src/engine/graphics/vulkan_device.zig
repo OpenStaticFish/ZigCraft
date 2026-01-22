@@ -23,13 +23,19 @@ const rhi = @import("rhi.zig");
 fn debugCallback(
     severity: c.VkDebugUtilsMessageSeverityFlagBitsEXT,
     _: c.VkDebugUtilsMessageTypeFlagsEXT,
-    _: ?*const c.VkDebugUtilsMessengerCallbackDataEXT,
+    callback_data: ?*const c.VkDebugUtilsMessengerCallbackDataEXT,
     user_data: ?*anyopaque,
 ) callconv(.c) c.VkBool32 {
     if (user_data) |ptr| {
         const device: *VulkanDevice = @ptrCast(@alignCast(ptr));
         if ((severity & c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0) {
             _ = device.validation_error_count.fetchAdd(1, .monotonic);
+            if (callback_data) |data| {
+                if (data.pMessage != null) {
+                    const message = std.mem.span(data.pMessage);
+                    std.log.err("Vulkan validation error: {s}", .{message});
+                }
+            }
         }
     }
     return c.VK_FALSE;

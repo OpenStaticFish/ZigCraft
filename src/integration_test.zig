@@ -14,6 +14,7 @@ const App = @import("game/app.zig").App;
 const WorldScreen = @import("game/screens/world.zig").WorldScreen;
 const Screen = @import("game/screen.zig");
 const rhi = @import("engine/graphics/rhi.zig");
+const UISystem = @import("engine/ui/ui_system.zig").UISystem;
 const c = @import("c.zig").c;
 
 const EngineContext = Screen.EngineContext;
@@ -28,6 +29,7 @@ const UploadScreen = struct {
     pub const vtable = IScreen.VTable{
         .deinit = deinit,
         .update = update,
+        .draw = draw,
     };
 
     pub fn init(allocator: std.mem.Allocator, context: EngineContext) !*UploadScreen {
@@ -50,6 +52,11 @@ const UploadScreen = struct {
         try self.context.rhi.updateBuffer(self.buffer, 0, self.payload[0..]);
     }
 
+    fn draw(_: *anyopaque, ui: *UISystem) !void {
+        ui.begin();
+        ui.end();
+    }
+
     pub fn screen(self: *UploadScreen) IScreen {
         return Screen.makeScreen(@This(), self);
     }
@@ -57,6 +64,8 @@ const UploadScreen = struct {
 
 test "smoke test: launch, generate, render, exit" {
     const test_allocator = testing.allocator;
+
+    @import("engine/core/log.zig").log.min_level = .err;
 
     var app = App.init(test_allocator) catch |err| {
         if (err == error.WindowCreationFailed or err == error.SDLInitializationFailed) {
