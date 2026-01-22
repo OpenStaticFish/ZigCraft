@@ -40,8 +40,7 @@ jobs:
         with:
           model: openrouter/minimax/minimax-m2.1
           prompt: |
-            Check previous code review and if they have been solved
-            Check for code quality issues
-            Look for potential bugs
-            Suggest improvements
+            1. If the PR tags or references any issues (e.g., "Fixes #123"), verify if the implementation fully satisfies the requirements of those issues. If no issues are tagged, proceed without mentioning it.
+            2. If there are previous code reviews on this PR, verify if the feedback has been addressed. If there are no previous reviews, do not mention their absence.
+            3. Analyze for code quality issues, potential bugs, and architectural improvements.
 
