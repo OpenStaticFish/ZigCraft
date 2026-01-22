@@ -43,4 +43,5 @@ jobs:
             1. If the PR tags or references any issues (e.g., "Fixes #123"), verify if the implementation fully satisfies the requirements of those issues. If no issues are tagged, proceed without mentioning it.
             2. If there are previous code reviews on this PR, verify if the feedback has been addressed. If there are no previous reviews, do not mention their absence.
             3. Analyze for code quality issues, potential bugs, and architectural improvements.
+            4. Enforce SOLID principles. Provide a table breakdown scoring the PR on each of the 5 SOLID points (Single Responsibility, Open/Closed, Liskov Substitution, Interface Segregation, Dependency Inversion). For each point, provide a score (e.g., 0-10 or N/A) and specific, actionable suggestions on where and how to improve.
 
