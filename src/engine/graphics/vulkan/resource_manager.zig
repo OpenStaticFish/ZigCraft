@@ -265,13 +265,16 @@ pub const ResourceManager = struct {
     fn prepareTransfer(self: *ResourceManager) !c.VkCommandBuffer {
         if (self.transfer_ready) return self.transfer_command_buffers[self.current_frame_index];
 
+        const cb = self.transfer_command_buffers[self.current_frame_index];
+        try Utils.checkVk(c.vkResetCommandBuffer(cb, 0));
+
         var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
         begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin_info.flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        try Utils.checkVk(c.vkBeginCommandBuffer(self.transfer_command_buffers[self.current_frame_index], &begin_info));
+        try Utils.checkVk(c.vkBeginCommandBuffer(cb, &begin_info));
 
         self.transfer_ready = true;
-        return self.transfer_command_buffers[self.current_frame_index];
+        return cb;
     }
 
     pub fn getTransferCommandBuffer(self: *ResourceManager) ?c.VkCommandBuffer {
@@ -305,7 +308,9 @@ pub const ResourceManager = struct {
             return;
         };
         _ = self.buffers.remove(handle);
-        self.buffer_deletion_queue[self.current_frame_index].append(self.allocator, .{ .buffer = buf.buffer, .memory = buf.memory }) catch {};
+        self.buffer_deletion_queue[self.current_frame_index].append(self.allocator, .{ .buffer = buf.buffer, .memory = buf.memory }) catch |err| {
+            std.log.err("Failed to queue buffer deletion: {}", .{err});
+        };
     }
 
     pub fn uploadBuffer(self: *ResourceManager, handle: rhi.BufferHandle, data: []const u8) rhi.RhiError!void {
@@ -397,6 +402,16 @@ pub const ResourceManager = struct {
             usage_flags |= c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         }
 
+        var staging_offset: u64 = 0;
+        var staging_ptr: ?*StagingBuffer = null;
+        if (data_opt) |data| {
+            const staging = &self.staging_buffers[self.current_frame_index];
+            const offset = staging.allocate(data.len) orelse return error.OutOfMemory;
+            if (staging.mapped_ptr == null) return error.OutOfMemory;
+            staging_offset = offset;
+            staging_ptr = staging;
+        }
+
         const device = self.vulkan_device.vk_device;
 
         var image: c.VkImage = null;
@@ -432,31 +447,11 @@ pub const ResourceManager = struct {
 
         try Utils.checkVk(c.vkBindImageMemory(device, image, memory, 0));
 
-        var view: c.VkImageView = null;
-        var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
-        view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        view_info.image = image;
-        view_info.viewType = c.VK_IMAGE_VIEW_TYPE_2D;
-        view_info.format = vk_format;
-        view_info.subresourceRange.aspectMask = aspect_mask;
-        view_info.subresourceRange.baseMipLevel = 0;
-        view_info.subresourceRange.levelCount = mip_levels;
-        view_info.subresourceRange.baseArrayLayer = 0;
-        view_info.subresourceRange.layerCount = 1;
-
-        try Utils.checkVk(c.vkCreateImageView(device, &view_info, null, &view));
-        errdefer c.vkDestroyImageView(device, view, null);
-
-        const sampler = try Utils.createSampler(self.vulkan_device, config, mip_levels, self.vulkan_device.max_anisotropy);
-        errdefer c.vkDestroySampler(device, sampler, null);
-
         // Upload data if present
         if (data_opt) |data| {
-            const staging = &self.staging_buffers[self.current_frame_index];
-            const offset = staging.allocate(data.len) orelse return error.OutOfMemory;
-
-            if (staging.mapped_ptr == null) return error.OutOfMemory;
-            const dest = @as([*]u8, @ptrCast(staging.mapped_ptr.?)) + offset;
+            const staging = staging_ptr orelse return error.OutOfMemory;
+            std.debug.assert(staging.mapped_ptr != null);
+            const dest = @as([*]u8, @ptrCast(staging.mapped_ptr.?)) + staging_offset;
             @memcpy(dest[0..data.len], data);
 
             const transfer_cb = try self.prepareTransfer();
@@ -479,7 +474,7 @@ pub const ResourceManager = struct {
             c.vkCmdPipelineBarrier(transfer_cb, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, 1, &barrier);
 
             var region = std.mem.zeroes(c.VkBufferImageCopy);
-            region.bufferOffset = offset;
+            region.bufferOffset = staging_offset;
             region.imageSubresource.aspectMask = aspect_mask;
             region.imageSubresource.layerCount = 1;
             region.imageExtent = .{ .width = width, .height = height, .depth = 1 };
@@ -569,6 +564,24 @@ pub const ResourceManager = struct {
             c.vkCmdPipelineBarrier(transfer_cb, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
         }
 
+        var view: c.VkImageView = null;
+        var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
+        view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        view_info.image = image;
+        view_info.viewType = c.VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = vk_format;
+        view_info.subresourceRange.aspectMask = aspect_mask;
+        view_info.subresourceRange.baseMipLevel = 0;
+        view_info.subresourceRange.levelCount = mip_levels;
+        view_info.subresourceRange.baseArrayLayer = 0;
+        view_info.subresourceRange.layerCount = 1;
+
+        const sampler = try Utils.createSampler(self.vulkan_device, config, mip_levels, self.vulkan_device.max_anisotropy);
+        errdefer c.vkDestroySampler(device, sampler, null);
+
+        try Utils.checkVk(c.vkCreateImageView(device, &view_info, null, &view));
+        errdefer c.vkDestroyImageView(device, view, null);
+
         const handle = self.next_texture_handle;
         self.next_texture_handle += 1;
         try self.textures.put(handle, .{
@@ -596,7 +609,9 @@ pub const ResourceManager = struct {
             .memory = tex.memory,
             .view = tex.view,
             .sampler = tex.sampler,
-        }) catch {};
+        }) catch |err| {
+            std.log.err("Failed to queue texture deletion: {}", .{err});
+        };
     }
 
     pub fn updateTexture(self: *ResourceManager, handle: rhi.TextureHandle, data: []const u8) rhi.RhiError!void {

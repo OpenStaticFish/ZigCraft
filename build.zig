@@ -111,6 +111,7 @@ pub fn build(b: *std.Build) void {
 
     const test_integration_step = b.step("test-integration", "Run integration smoke test");
     const run_integration_tests = b.addRunArtifact(exe_integration_tests);
+    run_integration_tests.stdio_limit = .unlimited;
     run_integration_tests.step.dependOn(&shader_cmd.step);
     test_integration_step.dependOn(&run_integration_tests.step);
 
