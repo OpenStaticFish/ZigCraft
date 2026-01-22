@@ -437,24 +437,6 @@ pub const ResourceManager = struct {
 
         try Utils.checkVk(c.vkBindImageMemory(device, image, memory, 0));
 
-        var view: c.VkImageView = null;
-        var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
-        view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        view_info.image = image;
-        view_info.viewType = c.VK_IMAGE_VIEW_TYPE_2D;
-        view_info.format = vk_format;
-        view_info.subresourceRange.aspectMask = aspect_mask;
-        view_info.subresourceRange.baseMipLevel = 0;
-        view_info.subresourceRange.levelCount = mip_levels;
-        view_info.subresourceRange.baseArrayLayer = 0;
-        view_info.subresourceRange.layerCount = 1;
-
-        const sampler = try Utils.createSampler(self.vulkan_device, config, mip_levels, self.vulkan_device.max_anisotropy);
-        errdefer c.vkDestroySampler(device, sampler, null);
-
-        try Utils.checkVk(c.vkCreateImageView(device, &view_info, null, &view));
-        errdefer c.vkDestroyImageView(device, view, null);
-
         // Upload data if present
         if (data_opt) |data| {
             const staging = &self.staging_buffers[self.current_frame_index];
@@ -573,6 +555,24 @@ pub const ResourceManager = struct {
 
             c.vkCmdPipelineBarrier(transfer_cb, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &barrier);
         }
+
+        var view: c.VkImageView = null;
+        var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
+        view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        view_info.image = image;
+        view_info.viewType = c.VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = vk_format;
+        view_info.subresourceRange.aspectMask = aspect_mask;
+        view_info.subresourceRange.baseMipLevel = 0;
+        view_info.subresourceRange.levelCount = mip_levels;
+        view_info.subresourceRange.baseArrayLayer = 0;
+        view_info.subresourceRange.layerCount = 1;
+
+        const sampler = try Utils.createSampler(self.vulkan_device, config, mip_levels, self.vulkan_device.max_anisotropy);
+        errdefer c.vkDestroySampler(device, sampler, null);
+
+        try Utils.checkVk(c.vkCreateImageView(device, &view_info, null, &view));
+        errdefer c.vkDestroyImageView(device, view, null);
 
         const handle = self.next_texture_handle;
         self.next_texture_handle += 1;
