@@ -35,10 +35,9 @@ pub const LODRenderer = struct {
 
         // Init MDI buffers (capacity for ~2048 LOD regions)
         const max_regions = 2048;
-        const instance_buffer = try rhi.createBuffer(max_regions * @sizeOf(rhi_mod.InstanceData), .storage);
         var instance_buffers: [rhi_mod.MAX_FRAMES_IN_FLIGHT]rhi_mod.BufferHandle = undefined;
         for (0..rhi_mod.MAX_FRAMES_IN_FLIGHT) |i| {
-            instance_buffers[i] = instance_buffer;
+            instance_buffers[i] = try rhi.createBuffer(max_regions * @sizeOf(rhi_mod.InstanceData), .storage);
         }
 
         renderer.* = .{
@@ -54,9 +53,8 @@ pub const LODRenderer = struct {
     }
 
     pub fn deinit(self: *LODRenderer) void {
-        if (self.instance_buffers[0] != 0) self.rhi.destroyBuffer(self.instance_buffers[0]);
-        for (1..rhi_mod.MAX_FRAMES_IN_FLIGHT) |i| {
-            if (self.instance_buffers[i] != 0 and self.instance_buffers[i] != self.instance_buffers[0]) {
+        for (0..rhi_mod.MAX_FRAMES_IN_FLIGHT) |i| {
+            if (self.instance_buffers[i] != 0) {
                 self.rhi.destroyBuffer(self.instance_buffers[i]);
             }
         }
@@ -74,6 +72,9 @@ pub const LODRenderer = struct {
         chunk_checker: ?LODManager.ChunkChecker,
         checker_ctx: ?*anyopaque,
     ) void {
+        // Update frame index
+        self.frame_index = self.rhi.getFrameIndex();
+
         const frustum = Frustum.fromViewProj(view_proj);
         const lod_y_offset: f32 = -3.0;
 
