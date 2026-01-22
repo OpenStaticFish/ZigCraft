@@ -34,12 +34,9 @@ pub const SwapchainPresenter = struct {
         }
 
         const build_options = @import("build_options");
-        const skip = if (@hasDecl(build_options, "skip_present"))
-            (build_options.skip_present or build_options.smoke_test)
-        else
-            build_options.smoke_test;
+        const skip = if (@hasDecl(build_options, "skip_present")) build_options.skip_present else false;
 
-        if (skip) std.log.warn("Headless/SmokeTest mode: Skipping vkQueuePresentKHR", .{});
+        if (skip) std.log.warn("Headless/DryRun mode: Skipping vkQueuePresentKHR", .{});
 
         return SwapchainPresenter{
             .allocator = allocator,
