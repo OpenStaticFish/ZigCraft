@@ -42,7 +42,15 @@ jobs:
         with:
           model: minimax-coding-plan/MiniMax-M2.1
           prompt: |
-            Review this issue. If there's a clear fix or relevant docs:
-            - Provide documentation links
-            - Add error handling guidance for code examples
-            Otherwise, do not comment.
+            Analyze this issue. You have access to the codebase context.
+
+            1. **Classify**: Determine if this is a Bug, Feature Request, or Question.
+            2. **Validate & Request Info**:
+               - **Missing Data**: If critical information is needed to understand or reproduce the issue (e.g., reproduction steps, crash logs, version numbers, screenshots), **you must explicitly ask the user to provide it.**
+            3. **Analyze**:
+               - If a stack trace or error is provided, analyze the codebase to find the root cause.
+               - If it's a feature request, briefly summarize the architectural impact.
+            4. **Action**:
+               - If you can provide a fix, code pointer, documentation link, or answer: **Comment**.
+               - If you need more info: **Comment and specify exactly what is missing**.
+               - If the issue is vague, spam, or you have nothing valuable to add: **DO NOT COMMENT**.
