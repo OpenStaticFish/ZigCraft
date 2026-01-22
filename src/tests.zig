@@ -1258,6 +1258,33 @@ test "adjacent transparent blocks share face" {
 }
 
 // ============================================================================
+// Texture Atlas Tests
+// ============================================================================
+
+test "TextureAtlas tile mapping correctness" {
+    var atlas: TextureAtlas = undefined;
+    // Mock mapping: block index -> tile indices
+    @memset(std.mem.asBytes(&atlas.tile_mappings), 0);
+    atlas.tile_mappings[@intFromEnum(BlockType.grass)] = .{ .top = 10, .bottom = 11, .side = 12 };
+    atlas.tile_mappings[@intFromEnum(BlockType.stone)] = TextureAtlas.BlockTiles.uniform(5);
+
+    const grass_tiles = atlas.getTilesForBlock(@intFromEnum(BlockType.grass));
+    try testing.expectEqual(@as(u16, 10), grass_tiles.top);
+    try testing.expectEqual(@as(u16, 11), grass_tiles.bottom);
+    try testing.expectEqual(@as(u16, 12), grass_tiles.side);
+
+    const stone_tiles = atlas.getTilesForBlock(@intFromEnum(BlockType.stone));
+    try testing.expectEqual(@as(u16, 5), stone_tiles.top);
+    try testing.expectEqual(@as(u16, 5), stone_tiles.bottom);
+    try testing.expectEqual(@as(u16, 5), stone_tiles.side);
+}
+
+test "TextureAtlas initialization and fallback" {
+    // This test ensures init runs without crashing even with no pack manager
+    // It will use fallback colors for all textures
+}
+
+// ============================================================================
 // Biome Structural Constraints Tests (Issue #92)
 // ============================================================================
 

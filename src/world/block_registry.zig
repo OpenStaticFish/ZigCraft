@@ -8,6 +8,8 @@ const BlockType = @import("block.zig").BlockType;
 const Face = @import("block.zig").Face;
 
 /// Rendering pass for the block
+const MAX_BLOCK_TYPES = @import("block.zig").MAX_BLOCK_TYPES;
+
 pub const RenderPass = enum {
     /// Opaque blocks (e.g., stone, dirt).
     /// These are drawn first and obscure everything behind them.
