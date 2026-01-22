@@ -450,6 +450,7 @@ pub const ResourceManager = struct {
         // Upload data if present
         if (data_opt) |data| {
             const staging = staging_ptr orelse return error.OutOfMemory;
+            std.debug.assert(staging.mapped_ptr != null);
             const dest = @as([*]u8, @ptrCast(staging.mapped_ptr.?)) + staging_offset;
             @memcpy(dest[0..data.len], data);
 
