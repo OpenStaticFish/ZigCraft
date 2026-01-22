@@ -34,8 +34,12 @@ pub const SwapchainPresenter = struct {
         }
 
         const build_options = @import("build_options");
-        const skip = if (@hasDecl(build_options, "skip_present")) build_options.skip_present else false;
-        if (skip) std.log.warn("ZIGCRAFT_SKIP_PRESENT (headless mode) enabled: Skipping vkQueuePresentKHR", .{});
+        const skip = if (@hasDecl(build_options, "skip_present"))
+            (build_options.skip_present or build_options.smoke_test)
+        else
+            build_options.smoke_test;
+
+        if (skip) std.log.warn("Headless/SmokeTest mode: Skipping vkQueuePresentKHR", .{});
 
         return SwapchainPresenter{
             .allocator = allocator,

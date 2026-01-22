@@ -22,9 +22,12 @@ pub const FrameManager = struct {
 
     pub fn init(vulkan_device: *VulkanDevice) !FrameManager {
         const build_options = @import("build_options");
-        const dry_run_active = if (@hasDecl(build_options, "skip_present")) build_options.skip_present else false;
-
-        std.log.err("FrameManager init: dry_run={}", .{dry_run_active});
+        // Force dry_run if skip_present OR smoke_test is enabled.
+        // This ensures CI smoke tests always use the safe dry-run path.
+        const dry_run_active = if (@hasDecl(build_options, "skip_present"))
+            (build_options.skip_present or build_options.smoke_test)
+        else
+            build_options.smoke_test;
 
         var self = FrameManager{
             .vulkan_device = vulkan_device,
