@@ -1,0 +1,19 @@
+**Classification**: Feature Request (Optimization Task)
+
+This is a well-structured optimization task. Key observations:
+
+1. **Dependencies**: Correctly blocked by #211, #212, #213. Profiling requires all features implemented first.
+
+2. **Implementation**: GPU timestamp queries will need additions to the RHI layer (rhi.zig, rhi_vulkan.zig) to wrap Vulkan timestamp queries around render passes.
+
+3. **Conflict Risk**: Medium risk noted for presets.json. Rebasing after Phase 1 merges will be necessary.
+
+4. **Testing**: `-Doptimize=ReleaseFast` is appropriate for performance profiling.
+
+**Recommended sequence**:
+1. Ensure #211-213 are merged first
+2. Add timing infrastructure to RHI
+3. Profile across hardware tiers (integrated, mid-range, high-end)
+4. Tune presets based on measured data
+
+The proposed preset matrix provides reasonable starting values, but final tuning should use actual performance measurements per tier.
