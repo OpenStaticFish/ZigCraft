@@ -877,12 +877,7 @@ pub const OverworldGenerator = struct {
                 const wz: f32 = @floatFromInt(wz_i);
 
                 // Compute octave reduction from LOD level
-                const reduction: u8 = switch (lod_level) {
-                    .lod0 => 0,
-                    .lod1 => 1,
-                    .lod2 => 2,
-                    .lod3 => 3,
-                };
+                const reduction: u8 = @intCast(@intFromEnum(lod_level));
 
                 // === Issue #119: Try classification cache first ===
                 // If this position was generated at LOD0, use the cached values

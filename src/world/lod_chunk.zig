@@ -21,6 +21,8 @@ pub const LODLevel = enum(u3) {
     lod2 = 2, // 4x simplified (8x8 chunks = 64 chunks)
     lod3 = 3, // 8x simplified (16x16 chunks = 256 chunks, heightmap only)
 
+    pub const count = 4;
+
     pub fn scale(self: LODLevel) u32 {
         return @as(u32, 1) << @intFromEnum(self);
     }
@@ -81,12 +83,8 @@ pub const LODSimplifiedData = struct {
     /// - LOD2: 32x32 grid = 4 blocks/cell
     /// - LOD3: 32x32 grid = 8 blocks/cell
     pub fn getGridSize(lod_level: LODLevel) u32 {
-        return switch (lod_level) {
-            .lod0 => 16, // Not used for LOD0
-            .lod1 => 32,
-            .lod2 => 32,
-            .lod3 => 32,
-        };
+        if (lod_level == .lod0) return 16;
+        return 32;
     }
 
     /// Get cell size in blocks for a given LOD level and grid size.
@@ -129,6 +127,12 @@ pub const LODSimplifiedData = struct {
     pub fn setHeight(self: *LODSimplifiedData, gx: u32, gz: u32, height: f32) void {
         if (gx >= self.width or gz >= self.width) return;
         self.heightmap[gz * self.width + gx] = height;
+    }
+
+    /// Calculate total heap memory used by this data structure
+    pub fn totalMemoryBytes(self: *const LODSimplifiedData) usize {
+        const count = self.width * self.width;
+        return count * (@sizeOf(f32) + @sizeOf(BiomeId) + @sizeOf(BlockType) + @sizeOf(u32));
     }
 };
 
@@ -282,10 +286,7 @@ pub const LODConfig = struct {
     /// Radius in chunks for each LOD level
     /// LOD0 = render_distance (user-controlled block chunks)
     /// LOD1/2/3 = Fixed large values for "infinite" terrain view
-    lod0_radius: i32 = 16, // Default, will be set to render_distance
-    lod1_radius: i32 = 40, // Fixed - not affected by render_distance
-    lod2_radius: i32 = 80, // Fixed - not affected by render_distance
-    lod3_radius: i32 = 160, // Fixed - not affected by render_distance
+    radii: [LODLevel.count]i32 = .{ 16, 40, 80, 160 },
 
     /// Memory budget in MB
     memory_budget_mb: u32 = 256,
@@ -297,15 +298,14 @@ pub const LODConfig = struct {
     fog_transitions: bool = true,
 
     pub fn getLODForDistance(self: *const LODConfig, dist_chunks: i32) LODLevel {
-        if (dist_chunks <= self.lod0_radius) return .lod0;
-        if (dist_chunks <= self.lod1_radius) return .lod1;
-        if (dist_chunks <= self.lod2_radius) return .lod2;
-        if (dist_chunks <= self.lod3_radius) return .lod3;
+        inline for (0..LODLevel.count) |i| {
+            if (dist_chunks <= self.radii[i]) return @enumFromInt(@as(u3, @intCast(i)));
+        }
         return .lod3; // Beyond max distance, still use LOD3
     }
 
     pub fn isInRange(self: *const LODConfig, dist_chunks: i32) bool {
-        return dist_chunks <= self.lod3_radius;
+        return dist_chunks <= self.radii[LODLevel.count - 1];
     }
 };
 

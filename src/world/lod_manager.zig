@@ -25,6 +25,8 @@ const Chunk = @import("chunk.zig").Chunk;
 const CHUNK_SIZE_X = @import("chunk.zig").CHUNK_SIZE_X;
 const ChunkMesh = @import("chunk_mesh.zig").ChunkMesh;
 const worldToChunk = @import("chunk.zig").worldToChunk;
+const BlockType = @import("block.zig").BlockType;
+const BiomeId = @import("worldgen/biome.zig").BiomeId;
 const Vec3 = @import("../engine/math/vec3.zig").Vec3;
 const Mat4 = @import("../engine/math/mat4.zig").Mat4;
 const Frustum = @import("../engine/math/frustum.zig").Frustum;
@@ -44,35 +46,66 @@ const RingBuffer = @import("../engine/core/ring_buffer.zig").RingBuffer;
 const Generator = @import("worldgen/generator_interface.zig").Generator;
 const LODMesh = @import("lod_mesh.zig").LODMesh;
 
+const MAX_LOD_REGIONS = 2048;
+
+comptime {
+    if (LODLevel.count < 2) {
+        @compileError("LOD system requires at least two levels (LOD0 and at least one simplified level)");
+    }
+}
+
 /// Statistics for LOD system monitoring
 pub const LODStats = struct {
-    lod0_loaded: u32 = 0,
-    lod1_loaded: u32 = 0,
-    lod2_loaded: u32 = 0,
-    lod3_loaded: u32 = 0,
-    lod0_generating: u32 = 0,
-    lod1_generating: u32 = 0,
-    lod2_generating: u32 = 0,
-    lod3_generating: u32 = 0,
-    // Debug: additional state counts for LOD1/LOD2
-    lod1_meshing: u32 = 0,
-    lod1_mesh_ready: u32 = 0,
-    lod1_uploading: u32 = 0,
-    lod1_generated: u32 = 0,
-    lod2_meshing: u32 = 0,
-    lod2_mesh_ready: u32 = 0,
-    lod2_uploading: u32 = 0,
-    lod2_generated: u32 = 0,
+    loaded: [LODLevel.count]u32 = [_]u32{0} ** LODLevel.count,
+    generating: [LODLevel.count]u32 = [_]u32{0} ** LODLevel.count,
+    generated: [LODLevel.count]u32 = [_]u32{0} ** LODLevel.count,
+    meshing: [LODLevel.count]u32 = [_]u32{0} ** LODLevel.count,
+    mesh_ready: [LODLevel.count]u32 = [_]u32{0} ** LODLevel.count,
+    uploading: [LODLevel.count]u32 = [_]u32{0} ** LODLevel.count,
+
     memory_used_mb: u32 = 0,
     upgrades_pending: u32 = 0,
     downgrades_pending: u32 = 0,
 
     pub fn totalLoaded(self: *const LODStats) u32 {
-        return self.lod0_loaded + self.lod1_loaded + self.lod2_loaded + self.lod3_loaded;
+        var total: u32 = 0;
+        for (self.loaded) |count| total += count;
+        return total;
     }
 
     pub fn totalGenerating(self: *const LODStats) u32 {
-        return self.lod0_generating + self.lod1_generating + self.lod2_generating + self.lod3_generating;
+        var total: u32 = 0;
+        for (self.generating) |count| total += count;
+        return total;
+    }
+
+    pub fn reset(self: *LODStats) void {
+        self.loaded = [_]u32{0} ** LODLevel.count;
+        self.generating = [_]u32{0} ** LODLevel.count;
+        self.generated = [_]u32{0} ** LODLevel.count;
+        self.meshing = [_]u32{0} ** LODLevel.count;
+        self.mesh_ready = [_]u32{0} ** LODLevel.count;
+        self.uploading = [_]u32{0} ** LODLevel.count;
+        self.memory_used_mb = 0;
+        self.upgrades_pending = 0;
+        self.downgrades_pending = 0;
+    }
+
+    pub fn recordState(self: *LODStats, lod_idx: usize, state: LODState) void {
+        switch (state) {
+            .renderable => self.loaded[lod_idx] += 1,
+            .generating => self.generating[lod_idx] += 1,
+            .generated => self.generated[lod_idx] += 1,
+            .meshing => self.meshing[lod_idx] += 1,
+            .mesh_ready => self.mesh_ready[lod_idx] += 1,
+            .uploading => self.uploading[lod_idx] += 1,
+            else => {},
+        }
+    }
+
+    pub fn addMemory(self: *LODStats, bytes: usize) void {
+        const mb = bytes / (1024 * 1024);
+        self.memory_used_mb += @intCast(mb);
     }
 };
 
@@ -89,28 +122,20 @@ pub const LODManager = struct {
     config: LODConfig,
 
     // Storage per LOD level (LOD0 uses existing World.chunks)
-    lod1_regions: std.HashMap(LODRegionKey, *LODChunk, LODRegionKeyContext, 80),
-    lod2_regions: std.HashMap(LODRegionKey, *LODChunk, LODRegionKeyContext, 80),
-    lod3_regions: std.HashMap(LODRegionKey, *LODChunk, LODRegionKeyContext, 80),
+    regions: [LODLevel.count]std.HashMap(LODRegionKey, *LODChunk, LODRegionKeyContext, 80),
 
     // Mesh storage per LOD level
-    lod1_meshes: std.HashMap(LODRegionKey, *LODMesh, LODRegionKeyContext, 80),
-    lod2_meshes: std.HashMap(LODRegionKey, *LODMesh, LODRegionKeyContext, 80),
-    lod3_meshes: std.HashMap(LODRegionKey, *LODMesh, LODRegionKeyContext, 80),
+    meshes: [LODLevel.count]std.HashMap(LODRegionKey, *LODMesh, LODRegionKeyContext, 80),
 
     // Separate job queues per LOD level
     // LOD3 queue processes first (fast), LOD0 queue last (slow but priority)
-    lod1_gen_queue: *JobQueue,
-    lod2_gen_queue: *JobQueue,
-    lod3_gen_queue: *JobQueue,
+    gen_queues: [LODLevel.count]*JobQueue,
 
     // Worker pool for LOD generation
     lod_gen_pool: ?*WorkerPool,
 
     // Upload queues per LOD level
-    lod1_upload_queue: RingBuffer(*LODChunk),
-    lod2_upload_queue: RingBuffer(*LODChunk),
-    lod3_upload_queue: RingBuffer(*LODChunk),
+    upload_queues: [LODLevel.count]RingBuffer(*LODChunk),
 
     // Transition queue for LOD upgrades/downgrades
     transition_queue: std.ArrayListUnmanaged(LODTransition),
@@ -156,19 +181,24 @@ pub const LODManager = struct {
     pub fn init(allocator: std.mem.Allocator, config: LODConfig, rhi: RHI, generator: Generator) !*LODManager {
         const mgr = try allocator.create(LODManager);
 
-        // Create job queues for each LOD level
-        const lod1_queue = try allocator.create(JobQueue);
-        lod1_queue.* = JobQueue.init(allocator);
+        var regions: [LODLevel.count]std.HashMap(LODRegionKey, *LODChunk, LODRegionKeyContext, 80) = undefined;
+        var meshes: [LODLevel.count]std.HashMap(LODRegionKey, *LODMesh, LODRegionKeyContext, 80) = undefined;
+        var gen_queues: [LODLevel.count]*JobQueue = undefined;
+        var upload_queues: [LODLevel.count]RingBuffer(*LODChunk) = undefined;
 
-        const lod2_queue = try allocator.create(JobQueue);
-        lod2_queue.* = JobQueue.init(allocator);
+        for (0..LODLevel.count) |i| {
+            regions[i] = std.HashMap(LODRegionKey, *LODChunk, LODRegionKeyContext, 80).init(allocator);
+            meshes[i] = std.HashMap(LODRegionKey, *LODMesh, LODRegionKeyContext, 80).init(allocator);
 
-        const lod3_queue = try allocator.create(JobQueue);
-        lod3_queue.* = JobQueue.init(allocator);
+            const queue = try allocator.create(JobQueue);
+            queue.* = JobQueue.init(allocator);
+            gen_queues[i] = queue;
 
-        // Init MDI buffers (capacity for ~2048 LOD regions)
-        const max_regions = 2048;
-        const instance_buffer = try rhi.createBuffer(max_regions * @sizeOf(rhi_mod.InstanceData), .storage);
+            upload_queues[i] = try RingBuffer(*LODChunk).init(allocator, 32);
+        }
+
+        // Init MDI buffers (capacity for ~MAX_LOD_REGIONS LOD regions)
+        const instance_buffer = try rhi.createBuffer(MAX_LOD_REGIONS * @sizeOf(rhi_mod.InstanceData), .storage);
         var instance_buffers: [rhi_mod.MAX_FRAMES_IN_FLIGHT]rhi_mod.BufferHandle = undefined;
         for (0..rhi_mod.MAX_FRAMES_IN_FLIGHT) |i| {
             instance_buffers[i] = instance_buffer;
@@ -177,19 +207,11 @@ pub const LODManager = struct {
         mgr.* = .{
             .allocator = allocator,
             .config = config,
-            .lod1_regions = std.HashMap(LODRegionKey, *LODChunk, LODRegionKeyContext, 80).init(allocator),
-            .lod2_regions = std.HashMap(LODRegionKey, *LODChunk, LODRegionKeyContext, 80).init(allocator),
-            .lod3_regions = std.HashMap(LODRegionKey, *LODChunk, LODRegionKeyContext, 80).init(allocator),
-            .lod1_meshes = std.HashMap(LODRegionKey, *LODMesh, LODRegionKeyContext, 80).init(allocator),
-            .lod2_meshes = std.HashMap(LODRegionKey, *LODMesh, LODRegionKeyContext, 80).init(allocator),
-            .lod3_meshes = std.HashMap(LODRegionKey, *LODMesh, LODRegionKeyContext, 80).init(allocator),
-            .lod1_gen_queue = lod1_queue,
-            .lod2_gen_queue = lod2_queue,
-            .lod3_gen_queue = lod3_queue,
+            .regions = regions,
+            .meshes = meshes,
+            .gen_queues = gen_queues,
             .lod_gen_pool = null, // Will be initialized below
-            .lod1_upload_queue = try RingBuffer(*LODChunk).init(allocator, 32),
-            .lod2_upload_queue = try RingBuffer(*LODChunk).init(allocator, 32),
-            .lod3_upload_queue = try RingBuffer(*LODChunk).init(allocator, 32),
+            .upload_queues = upload_queues,
             .transition_queue = .empty,
             .player_cx = 0,
             .player_cz = 0,
@@ -210,85 +232,51 @@ pub const LODManager = struct {
         };
 
         // Initialize worker pool for LOD generation and meshing (3 workers for LOD tasks)
-        mgr.lod_gen_pool = try WorkerPool.init(allocator, 3, lod3_queue, mgr, processLODJob);
+        // All LOD jobs go to LOD3 queue in original code, we keep it consistent but use generic index
+        mgr.lod_gen_pool = try WorkerPool.init(allocator, 3, mgr.gen_queues[LODLevel.count - 1], mgr, processLODJob);
 
         log.log.info("LODManager initialized with radii: LOD0={}, LOD1={}, LOD2={}, LOD3={}", .{
-            config.lod0_radius,
-            config.lod1_radius,
-            config.lod2_radius,
-            config.lod3_radius,
+            config.radii[0],
+            config.radii[1],
+            config.radii[2],
+            config.radii[3],
         });
 
         return mgr;
     }
 
     pub fn deinit(self: *LODManager) void {
-        // Stop queues
-        self.lod1_gen_queue.stop();
-        self.lod2_gen_queue.stop();
-        self.lod3_gen_queue.stop();
+        // Stop and cleanup queues
+        for (0..LODLevel.count) |i| {
+            self.gen_queues[i].stop();
+        }
 
         // Cleanup worker pool
         if (self.lod_gen_pool) |pool| {
             pool.deinit();
         }
 
-        // Cleanup queues
-        self.lod1_gen_queue.deinit();
-        self.lod2_gen_queue.deinit();
-        self.lod3_gen_queue.deinit();
-        self.allocator.destroy(self.lod1_gen_queue);
-        self.allocator.destroy(self.lod2_gen_queue);
-        self.allocator.destroy(self.lod3_gen_queue);
+        for (0..LODLevel.count) |i| {
+            self.gen_queues[i].deinit();
+            self.allocator.destroy(self.gen_queues[i]);
+            self.upload_queues[i].deinit();
 
-        // Cleanup upload queues
-        self.lod1_upload_queue.deinit();
-        self.lod2_upload_queue.deinit();
-        self.lod3_upload_queue.deinit();
+            // Cleanup meshes
+            var mesh_iter = self.meshes[i].iterator();
+            while (mesh_iter.next()) |entry| {
+                entry.value_ptr.*.deinit(self.rhi);
+                self.allocator.destroy(entry.value_ptr.*);
+            }
+            self.meshes[i].deinit();
 
-        // Cleanup meshes
-        var mesh_iter1 = self.lod1_meshes.iterator();
-        while (mesh_iter1.next()) |entry| {
-            entry.value_ptr.*.deinit(self.rhi);
-            self.allocator.destroy(entry.value_ptr.*);
+            // Cleanup regions
+            var region_iter = self.regions[i].iterator();
+            while (region_iter.next()) |entry| {
+                entry.value_ptr.*.deinit(self.allocator);
+                self.allocator.destroy(entry.value_ptr.*);
+            }
+            self.regions[i].deinit();
         }
-        self.lod1_meshes.deinit();
-
-        var mesh_iter2 = self.lod2_meshes.iterator();
-        while (mesh_iter2.next()) |entry| {
-            entry.value_ptr.*.deinit(self.rhi);
-            self.allocator.destroy(entry.value_ptr.*);
-        }
-        self.lod2_meshes.deinit();
-
-        var mesh_iter3 = self.lod3_meshes.iterator();
-        while (mesh_iter3.next()) |entry| {
-            entry.value_ptr.*.deinit(self.rhi);
-            self.allocator.destroy(entry.value_ptr.*);
-        }
-        self.lod3_meshes.deinit();
-
-        // Cleanup regions
-        var iter1 = self.lod1_regions.iterator();
-        while (iter1.next()) |entry| {
-            entry.value_ptr.*.deinit(self.allocator);
-            self.allocator.destroy(entry.value_ptr.*);
-        }
-        self.lod1_regions.deinit();
-
-        var iter2 = self.lod2_regions.iterator();
-        while (iter2.next()) |entry| {
-            entry.value_ptr.*.deinit(self.allocator);
-            self.allocator.destroy(entry.value_ptr.*);
-        }
-        self.lod2_regions.deinit();
-
-        var iter3 = self.lod3_regions.iterator();
-        while (iter3.next()) |entry| {
-            entry.value_ptr.*.deinit(self.allocator);
-            self.allocator.destroy(entry.value_ptr.*);
-        }
-        self.lod3_regions.deinit();
 
         self.transition_queue.deinit(self.allocator);
 
@@ -339,8 +327,6 @@ pub const LODManager = struct {
         if (self.update_tick % 4 != 0) return; // Only update every 4 frames
 
         const pc = worldToChunk(@intFromFloat(player_pos.x), @intFromFloat(player_pos.z));
-        _ = pc.chunk_x != self.player_cx or pc.chunk_z != self.player_cz; // Track movement for future use
-
         self.player_cx = pc.chunk_x;
         self.player_cz = pc.chunk_z;
 
@@ -352,9 +338,11 @@ pub const LODManager = struct {
 
         // Queue LOD regions that need loading (also queue on first frame)
         // Priority: LOD3 first (fast, fills horizon), then LOD2, LOD1
-        try self.queueLODRegions(.lod3, player_velocity);
-        try self.queueLODRegions(.lod2, player_velocity);
-        try self.queueLODRegions(.lod1, player_velocity);
+        // We iterate backwards from LODLevel.count-1 down to 1
+        var i: usize = LODLevel.count - 1;
+        while (i > 0) : (i -= 1) {
+            try self.queueLODRegions(@enumFromInt(@as(u3, @intCast(i))), player_velocity);
+        }
 
         // Process state transitions
         try self.processStateTransitions();
@@ -371,12 +359,7 @@ pub const LODManager = struct {
 
     /// Queue LOD regions that need generation
     fn queueLODRegions(self: *LODManager, lod: LODLevel, velocity: Vec3) !void {
-        const radius = switch (lod) {
-            .lod0 => self.config.lod0_radius, // LOD0 handled by existing World
-            .lod1 => self.config.lod1_radius,
-            .lod2 => self.config.lod2_radius,
-            .lod3 => self.config.lod3_radius,
-        };
+        const radius = self.config.radii[@intFromEnum(lod)];
 
         // Skip LOD0 - handled by existing World system
         if (lod == .lod0) return;
@@ -392,16 +375,11 @@ pub const LODManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const storage = switch (lod) {
-            .lod0 => unreachable,
-            .lod1 => &self.lod1_regions,
-            .lod2 => &self.lod2_regions,
-            .lod3 => &self.lod3_regions,
-        };
+        const storage = &self.regions[@intFromEnum(lod)];
 
         // All LOD jobs go to LOD3 queue (worker pool processes from there)
         // We encode the actual LOD level in the dist_sq high bits
-        const queue = self.lod3_gen_queue;
+        const queue = self.gen_queues[LODLevel.count - 1];
         const lod_bits: i32 = @as(i32, @intCast(@intFromEnum(lod))) << 28;
 
         // Calculate velocity direction for priority
@@ -488,84 +466,33 @@ pub const LODManager = struct {
         self.mutex.lockShared();
         defer self.mutex.unlockShared();
 
-        // Check LOD1 regions
-        var iter1 = self.lod1_regions.iterator();
-        while (iter1.next()) |entry| {
-            const chunk = entry.value_ptr.*;
-            if (chunk.state == .generated) {
-                const dx = chunk.region_x * 4 - self.player_cx;
-                const dz = chunk.region_z * 4 - self.player_cz;
-                const dist_sq = dx * dx + dz * dz;
+        for (1..LODLevel.count) |i| {
+            const lod = @as(LODLevel, @enumFromInt(@as(u3, @intCast(i))));
+            var iter = self.regions[i].iterator();
+            while (iter.next()) |entry| {
+                const chunk = entry.value_ptr.*;
+                if (chunk.state == .generated) {
+                    const scale = @as(i32, @intCast(lod.chunksPerSide()));
+                    const dx = chunk.region_x * scale - self.player_cx;
+                    const dz = chunk.region_z * scale - self.player_cz;
+                    const dist_sq = dx * dx + dz * dz;
 
-                chunk.state = .meshing;
-                try self.lod3_gen_queue.push(.{
-                    .type = .chunk_meshing,
-                    .dist_sq = (dist_sq & 0x0FFFFFFF) | (@as(i32, @intFromEnum(LODLevel.lod1)) << 28),
-                    .data = .{
-                        .chunk = .{
-                            .x = chunk.region_x,
-                            .z = chunk.region_z,
-                            .job_token = chunk.job_token,
+                    chunk.state = .meshing;
+                    try self.gen_queues[LODLevel.count - 1].push(.{
+                        .type = .chunk_meshing,
+                        .dist_sq = (dist_sq & 0x0FFFFFFF) | (@as(i32, @intCast(@intFromEnum(lod))) << 28),
+                        .data = .{
+                            .chunk = .{
+                                .x = chunk.region_x,
+                                .z = chunk.region_z,
+                                .job_token = chunk.job_token,
+                            },
                         },
-                    },
-                });
-            } else if (chunk.state == .mesh_ready) {
-                chunk.state = .uploading;
-                try self.lod1_upload_queue.push(chunk);
-            }
-        }
-
-        // Check LOD2 regions
-        var iter2 = self.lod2_regions.iterator();
-        while (iter2.next()) |entry| {
-            const chunk = entry.value_ptr.*;
-            if (chunk.state == .generated) {
-                const dx = chunk.region_x * 8 - self.player_cx;
-                const dz = chunk.region_z * 8 - self.player_cz;
-                const dist_sq = dx * dx + dz * dz;
-
-                chunk.state = .meshing;
-                try self.lod3_gen_queue.push(.{
-                    .type = .chunk_meshing,
-                    .dist_sq = (dist_sq & 0x0FFFFFFF) | (@as(i32, @intFromEnum(LODLevel.lod2)) << 28),
-                    .data = .{
-                        .chunk = .{
-                            .x = chunk.region_x,
-                            .z = chunk.region_z,
-                            .job_token = chunk.job_token,
-                        },
-                    },
-                });
-            } else if (chunk.state == .mesh_ready) {
-                chunk.state = .uploading;
-                try self.lod2_upload_queue.push(chunk);
-            }
-        }
-
-        // Check LOD3 regions
-        var iter3 = self.lod3_regions.iterator();
-        while (iter3.next()) |entry| {
-            const chunk = entry.value_ptr.*;
-            if (chunk.state == .generated) {
-                const dx = chunk.region_x * 16 - self.player_cx;
-                const dz = chunk.region_z * 16 - self.player_cz;
-                const dist_sq = dx * dx + dz * dz;
-
-                chunk.state = .meshing;
-                try self.lod3_gen_queue.push(.{
-                    .type = .chunk_meshing,
-                    .dist_sq = (dist_sq & 0x0FFFFFFF) | (@as(i32, @intFromEnum(LODLevel.lod3)) << 28),
-                    .data = .{
-                        .chunk = .{
-                            .x = chunk.region_x,
-                            .z = chunk.region_z,
-                            .job_token = chunk.job_token,
-                        },
-                    },
-                });
-            } else if (chunk.state == .mesh_ready) {
-                chunk.state = .uploading;
-                try self.lod3_upload_queue.push(chunk);
+                    });
+                } else if (chunk.state == .mesh_ready) {
+                    chunk.state = .uploading;
+                    try self.upload_queues[i].push(chunk);
+                }
             }
         }
     }
@@ -575,80 +502,39 @@ pub const LODManager = struct {
         const max_uploads = self.config.max_uploads_per_frame;
         var uploads: u32 = 0;
 
-        // Process LOD3 first (furthest, should be ready first)
-        while (!self.lod3_upload_queue.isEmpty() and uploads < max_uploads) {
-            if (self.lod3_upload_queue.pop()) |chunk| {
-                // Upload mesh to GPU
-                const key = LODRegionKey{
-                    .rx = chunk.region_x,
-                    .rz = chunk.region_z,
-                    .lod = chunk.lod_level,
-                };
-                if (self.lod3_meshes.get(key)) |mesh| {
-                    mesh.upload(self.rhi) catch |err| {
-                        log.log.err("Failed to upload LOD3 mesh: {}", .{err});
-                        continue;
+        // Process from highest LOD down (furthest, should be ready first)
+        var i: usize = LODLevel.count - 1;
+        while (i > 0) : (i -= 1) {
+            while (!self.upload_queues[i].isEmpty() and uploads < max_uploads) {
+                if (self.upload_queues[i].pop()) |chunk| {
+                    // Upload mesh to GPU
+                    const key = LODRegionKey{
+                        .rx = chunk.region_x,
+                        .rz = chunk.region_z,
+                        .lod = chunk.lod_level,
                     };
+                    if (self.meshes[i].get(key)) |mesh| {
+                        mesh.upload(self.rhi) catch |err| {
+                            log.log.err("Failed to upload LOD{} mesh: {}", .{ i, err });
+                            continue;
+                        };
+                    }
+                    chunk.state = .renderable;
+                    uploads += 1;
                 }
-                chunk.state = .renderable;
-                uploads += 1;
-            }
-        }
-
-        // Then LOD2
-        while (!self.lod2_upload_queue.isEmpty() and uploads < max_uploads) {
-            if (self.lod2_upload_queue.pop()) |chunk| {
-                const key = LODRegionKey{
-                    .rx = chunk.region_x,
-                    .rz = chunk.region_z,
-                    .lod = chunk.lod_level,
-                };
-                if (self.lod2_meshes.get(key)) |mesh| {
-                    mesh.upload(self.rhi) catch |err| {
-                        log.log.err("Failed to upload LOD2 mesh: {}", .{err});
-                        continue;
-                    };
-                }
-                chunk.state = .renderable;
-                uploads += 1;
-            }
-        }
-
-        // Then LOD1
-        while (!self.lod1_upload_queue.isEmpty() and uploads < max_uploads) {
-            if (self.lod1_upload_queue.pop()) |chunk| {
-                const key = LODRegionKey{
-                    .rx = chunk.region_x,
-                    .rz = chunk.region_z,
-                    .lod = chunk.lod_level,
-                };
-                if (self.lod1_meshes.get(key)) |mesh| {
-                    mesh.upload(self.rhi) catch |err| {
-                        log.log.err("Failed to upload LOD1 mesh: {}", .{err});
-                        continue;
-                    };
-                }
-                chunk.state = .renderable;
-                uploads += 1;
             }
         }
     }
 
     /// Unload regions that are too far from player
     fn unloadDistantRegions(self: *LODManager) !void {
-        // Use same radius as queuing to prevent accumulation
-        try self.unloadDistantForLevel(.lod1, self.config.lod1_radius);
-        try self.unloadDistantForLevel(.lod2, self.config.lod2_radius);
-        try self.unloadDistantForLevel(.lod3, self.config.lod3_radius);
+        for (1..LODLevel.count) |i| {
+            try self.unloadDistantForLevel(@enumFromInt(@as(u3, @intCast(i))), self.config.radii[i]);
+        }
     }
 
     fn unloadDistantForLevel(self: *LODManager, lod: LODLevel, max_radius: i32) !void {
-        const storage = switch (lod) {
-            .lod0 => return,
-            .lod1 => &self.lod1_regions,
-            .lod2 => &self.lod2_regions,
-            .lod3 => &self.lod3_regions,
-        };
+        const storage = &self.regions[@intFromEnum(lod)];
 
         const scale: i32 = @intCast(lod.chunksPerSide());
         const player_rx = @divFloor(self.player_cx, scale);
@@ -686,12 +572,7 @@ pub const LODManager = struct {
             for (to_remove.items) |key| {
                 if (storage.get(key)) |chunk| {
                     // Clean up mesh before removing chunk
-                    const meshes = switch (lod) {
-                        .lod0 => return,
-                        .lod1 => &self.lod1_meshes,
-                        .lod2 => &self.lod2_meshes,
-                        .lod3 => &self.lod3_meshes,
-                    };
+                    const meshes = &self.meshes[@intFromEnum(lod)];
                     if (meshes.get(key)) |mesh| {
                         // Push to deferred deletion queue instead of deleting immediately
                         self.deletion_queue.append(self.allocator, mesh) catch {
@@ -712,68 +593,35 @@ pub const LODManager = struct {
 
     /// Update statistics
     fn updateStats(self: *LODManager) void {
-        self.stats = .{};
-        var mem_usage: u32 = 0;
+        self.stats.reset();
+        var mem_usage: usize = 0;
 
         self.mutex.lockShared();
         defer self.mutex.unlockShared();
 
-        var iter1 = self.lod1_regions.iterator();
-        while (iter1.next()) |entry| {
-            const state = entry.value_ptr.*.state;
-            switch (state) {
-                .renderable => self.stats.lod1_loaded += 1,
-                .generating => self.stats.lod1_generating += 1,
-                .generated => self.stats.lod1_generated += 1,
-                .meshing => self.stats.lod1_meshing += 1,
-                .mesh_ready => self.stats.lod1_mesh_ready += 1,
-                .uploading => self.stats.lod1_uploading += 1,
-                else => {},
+        for (0..LODLevel.count) |i| {
+            var iter = self.regions[i].iterator();
+            while (iter.next()) |entry| {
+                const chunk = entry.value_ptr.*;
+                self.stats.recordState(i, chunk.state);
+
+                // Calculate actual memory usage for this chunk's data
+                switch (chunk.data) {
+                    .simplified => |*s| {
+                        mem_usage += s.totalMemoryBytes();
+                    },
+                    else => {},
+                }
             }
-            // Approx memory: 32x32 grid * (height(2) + biome(2) + block(2) + color(4)) = 10240 bytes
-            mem_usage += 10240;
-        }
 
-        var iter2 = self.lod2_regions.iterator();
-        while (iter2.next()) |entry| {
-            const state = entry.value_ptr.*.state;
-            switch (state) {
-                .renderable => self.stats.lod2_loaded += 1,
-                .generating => self.stats.lod2_generating += 1,
-                .generated => self.stats.lod2_generated += 1,
-                .meshing => self.stats.lod2_meshing += 1,
-                .mesh_ready => self.stats.lod2_mesh_ready += 1,
-                .uploading => self.stats.lod2_uploading += 1,
-                else => {},
+            // Add mesh memory
+            var mesh_iter = self.meshes[i].iterator();
+            while (mesh_iter.next()) |entry| {
+                mem_usage += entry.value_ptr.*.capacity * @sizeOf(Vertex);
             }
-            mem_usage += 10240;
         }
 
-        var iter3 = self.lod3_regions.iterator();
-        while (iter3.next()) |entry| {
-            if (entry.value_ptr.*.state == .renderable) {
-                self.stats.lod3_loaded += 1;
-            } else if (entry.value_ptr.*.state == .generating) {
-                self.stats.lod3_generating += 1;
-            }
-            mem_usage += 10240;
-        }
-
-        // Add mesh memory
-        var mesh_iter1 = self.lod1_meshes.iterator();
-        while (mesh_iter1.next()) |entry| {
-            mem_usage += entry.value_ptr.*.capacity * @sizeOf(Vertex);
-        }
-        var mesh_iter2 = self.lod2_meshes.iterator();
-        while (mesh_iter2.next()) |entry| {
-            mem_usage += entry.value_ptr.*.capacity * @sizeOf(Vertex);
-        }
-        var mesh_iter3 = self.lod3_meshes.iterator();
-        while (mesh_iter3.next()) |entry| {
-            mem_usage += entry.value_ptr.*.capacity * @sizeOf(Vertex);
-        }
-
-        self.stats.memory_used_mb = mem_usage / (1024 * 1024);
+        self.stats.addMemory(mem_usage);
         self.memory_used_bytes = mem_usage;
     }
 
@@ -785,17 +633,17 @@ pub const LODManager = struct {
     /// Pause all LOD generation
     pub fn pause(self: *LODManager) void {
         self.paused = true;
-        self.lod1_gen_queue.setPaused(true);
-        self.lod2_gen_queue.setPaused(true);
-        self.lod3_gen_queue.setPaused(true);
+        for (0..LODLevel.count) |i| {
+            self.gen_queues[i].setPaused(true);
+        }
     }
 
     /// Resume LOD generation
     pub fn unpause(self: *LODManager) void {
         self.paused = false;
-        self.lod1_gen_queue.setPaused(false);
-        self.lod2_gen_queue.setPaused(false);
-        self.lod3_gen_queue.setPaused(false);
+        for (0..LODLevel.count) |i| {
+            self.gen_queues[i].setPaused(false);
+        }
     }
 
     /// Get LOD level for a given chunk distance
@@ -836,15 +684,18 @@ pub const LODManager = struct {
         self.draw_list.clearRetainingCapacity();
 
         // Collect visible meshes
-        // Process LOD3, LOD2, LOD1 in order
-        self.collectVisibleMeshes(&self.lod3_meshes, &self.lod3_regions, view_proj, camera_pos, frustum, lod_y_offset, chunk_checker, checker_ctx) catch {};
-        self.collectVisibleMeshes(&self.lod2_meshes, &self.lod2_regions, view_proj, camera_pos, frustum, lod_y_offset, chunk_checker, checker_ctx) catch {};
-        self.collectVisibleMeshes(&self.lod1_meshes, &self.lod1_regions, view_proj, camera_pos, frustum, lod_y_offset, chunk_checker, checker_ctx) catch {};
+        // Process from highest LOD down
+        var i: usize = LODLevel.count - 1;
+        while (i > 0) : (i -= 1) {
+            self.collectVisibleMeshes(&self.meshes[i], &self.regions[i], view_proj, camera_pos, frustum, lod_y_offset, chunk_checker, checker_ctx) catch |err| {
+                log.log.err("Failed to collect visible meshes for LOD{}: {}", .{ i, err });
+            };
+        }
 
         if (self.instance_data.items.len == 0) return;
 
-        for (self.draw_list.items, 0..) |mesh, i| {
-            const instance = self.instance_data.items[i];
+        for (self.draw_list.items, 0..) |mesh, idx| {
+            const instance = self.instance_data.items[idx];
             self.rhi.setModelMatrix(instance.model, Vec3.one, instance.mask_radius);
             self.rhi.draw(mesh.buffer_handle, mesh.vertex_count, .triangles);
         }
@@ -882,13 +733,9 @@ pub const LODManager = struct {
 
     /// Free LOD meshes where all underlying chunks are loaded
     fn unloadLODWhereChunksLoaded(self: *LODManager, checker: ChunkChecker, ctx: *anyopaque) void {
-        const levels = [_]LODLevel{ .lod1, .lod2, .lod3 };
-        const storages = [_]*std.HashMap(LODRegionKey, *LODChunk, LODRegionKeyContext, 80){ &self.lod1_regions, &self.lod2_regions, &self.lod3_regions };
-        const meshes_maps = [_]*std.HashMap(LODRegionKey, *LODMesh, LODRegionKeyContext, 80){ &self.lod1_meshes, &self.lod2_meshes, &self.lod3_meshes };
-
-        for (levels, 0..) |_, i| {
-            const storage = storages[i];
-            const meshes = meshes_maps[i];
+        for (1..LODLevel.count) |i| {
+            const storage = &self.regions[i];
+            const meshes = &self.meshes[i];
 
             var to_remove = std.ArrayListUnmanaged(LODRegionKey).empty;
             defer to_remove.deinit(self.allocator);
@@ -949,12 +796,10 @@ pub const LODManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const meshes = switch (key.lod) {
-            .lod0 => return error.InvalidLODLevel,
-            .lod1 => &self.lod1_meshes,
-            .lod2 => &self.lod2_meshes,
-            .lod3 => &self.lod3_meshes,
-        };
+        const lod_idx = @intFromEnum(key.lod);
+        if (lod_idx == 0 or lod_idx >= LODLevel.count) return error.InvalidLODLevel;
+
+        const meshes = &self.meshes[lod_idx];
 
         if (meshes.get(key)) |mesh| {
             return mesh;
@@ -1004,15 +849,12 @@ fn processLODJob(ctx: *anyopaque, job: Job) void {
     };
 
     self.mutex.lockShared();
-    const storage = switch (lod_level) {
-        .lod0 => {
-            self.mutex.unlockShared();
-            return;
-        },
-        .lod1 => &self.lod1_regions,
-        .lod2 => &self.lod2_regions,
-        .lod3 => &self.lod3_regions,
-    };
+    const lod_idx = @intFromEnum(lod_level);
+    if (lod_idx == 0) {
+        self.mutex.unlockShared();
+        return;
+    }
+    const storage = &self.regions[lod_idx];
 
     const chunk = storage.get(key) orelse {
         self.mutex.unlockShared();
@@ -1025,12 +867,7 @@ fn processLODJob(ctx: *anyopaque, job: Job) void {
     const player_rz = @divFloor(self.player_cz, scale);
     const dx = job.data.chunk.x - player_rx;
     const dz = job.data.chunk.z - player_rz;
-    const radius = switch (lod_level) {
-        .lod0 => self.config.lod0_radius,
-        .lod1 => self.config.lod1_radius,
-        .lod2 => self.config.lod2_radius,
-        .lod3 => self.config.lod3_radius,
-    };
+    const radius = self.config.radii[lod_idx];
     const region_radius = @divFloor(radius, scale) + 2;
 
     if (dx * dx + dz * dz > region_radius * region_radius) {
@@ -1086,10 +923,7 @@ test "LODManager initialization" {
 
     // We can't fully test without RHI, but we can test the config
     const config = LODConfig{
-        .lod0_radius = 8,
-        .lod1_radius = 16,
-        .lod2_radius = 32,
-        .lod3_radius = 64,
+        .radii = .{ 8, 16, 32, 64 },
     };
 
     try std.testing.expectEqual(LODLevel.lod0, config.getLODForDistance(5));
@@ -1098,4 +932,28 @@ test "LODManager initialization" {
     try std.testing.expectEqual(LODLevel.lod3, config.getLODForDistance(50));
 
     _ = allocator;
+}
+
+test "LODStats aggregation" {
+    var stats = LODStats{};
+    stats.recordState(1, .renderable);
+    stats.recordState(1, .renderable);
+    stats.recordState(2, .generating);
+
+    try std.testing.expectEqual(@as(u32, 2), stats.loaded[1]);
+    try std.testing.expectEqual(@as(u32, 1), stats.generating[2]);
+    try std.testing.expectEqual(@as(u32, 2), stats.totalLoaded());
+    try std.testing.expectEqual(@as(u32, 1), stats.totalGenerating());
+
+    stats.addMemory(2 * 1024 * 1024);
+    try std.testing.expectEqual(@as(u32, 2), stats.memory_used_mb);
+
+    stats.reset();
+    try std.testing.expectEqual(@as(u32, 0), stats.totalLoaded());
+    try std.testing.expectEqual(@as(u32, 0), stats.memory_used_mb);
+}
+
+test "LODManager constants" {
+    try std.testing.expect(MAX_LOD_REGIONS > 0);
+    try std.testing.expect(LODLevel.count >= 2);
 }

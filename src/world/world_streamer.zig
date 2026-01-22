@@ -196,7 +196,7 @@ pub const WorldStreamer = struct {
             try self.mesh_queue.updatePlayerPos(pc.chunk_x, pc.chunk_z);
 
             // Clamp generation distance to LOD0 radius if LOD is active
-            const render_dist = if (lod_manager) |mgr| @min(self.render_distance, mgr.config.lod0_radius) else self.render_distance;
+            const render_dist = if (lod_manager) |mgr| @min(self.render_distance, mgr.config.radii[0]) else self.render_distance;
 
             var cz = pc.chunk_z - render_dist;
             while (cz <= pc.chunk_z + render_dist) : (cz += 1) {
@@ -239,7 +239,7 @@ pub const WorldStreamer = struct {
         self.storage.chunks_mutex.lockShared();
         var mesh_iter = self.storage.iteratorUnsafe();
 
-        const render_dist = if (lod_manager) |mgr| @min(self.render_distance, mgr.config.lod0_radius) else self.render_distance;
+        const render_dist = if (lod_manager) |mgr| @min(self.render_distance, mgr.config.radii[0]) else self.render_distance;
 
         while (mesh_iter.next()) |entry| {
             const key = entry.key_ptr.*;
@@ -305,7 +305,7 @@ pub const WorldStreamer = struct {
 
     pub fn processUnloads(self: *WorldStreamer, player_pos: Vec3, vertex_allocator: *GlobalVertexAllocator, lod_manager: ?*LODManager) !void {
         const pc = worldToChunk(@intFromFloat(player_pos.x), @intFromFloat(player_pos.z));
-        const render_dist_unload = if (lod_manager) |mgr| @min(self.render_distance, mgr.config.lod0_radius) else self.render_distance;
+        const render_dist_unload = if (lod_manager) |mgr| @min(self.render_distance, mgr.config.radii[0]) else self.render_distance;
         const unload_dist_sq = (render_dist_unload + CHUNK_UNLOAD_BUFFER) * (render_dist_unload + CHUNK_UNLOAD_BUFFER);
 
         self.storage.chunks_mutex.lock();

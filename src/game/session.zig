@@ -115,17 +115,21 @@ pub const GameSession = struct {
 
         const lod_config = if (safe_mode)
             LODConfig{
-                .lod0_radius = @min(effective_render_distance, 8),
-                .lod1_radius = 12,
-                .lod2_radius = 24,
-                .lod3_radius = 40,
+                .radii = .{
+                    @min(effective_render_distance, 8),
+                    12,
+                    24,
+                    40,
+                },
             }
         else
             LODConfig{
-                .lod0_radius = @min(effective_render_distance, 16),
-                .lod1_radius = 40,
-                .lod2_radius = 80,
-                .lod3_radius = 160,
+                .radii = .{
+                    @min(effective_render_distance, 16),
+                    40,
+                    80,
+                    160,
+                },
             };
 
         const world = if (effective_lod_enabled)

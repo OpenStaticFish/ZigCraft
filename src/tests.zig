@@ -49,6 +49,7 @@ test {
     _ = @import("engine/graphics/rhi_tests.zig");
     _ = @import("world/worldgen/schematics.zig");
     _ = @import("world/worldgen/tree_registry.zig");
+    _ = @import("world/lod_manager.zig");
     _ = @import("engine/atmosphere/tests.zig");
 }
 

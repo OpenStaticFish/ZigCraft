@@ -44,47 +44,16 @@ pub const GenerationOptions = struct {
 
     /// Create options from LOD level with sensible defaults
     pub fn fromLOD(lod: LODLevel) GenerationOptions {
-        return switch (lod) {
-            .lod0 => .{
-                .lod_level = .lod0,
-                .enable_caves = true,
-                .enable_worm_caves = true,
-                .enable_decorations = true,
-                .enable_ores = true,
-                .enable_lighting = true,
-                .octave_reduction = 0,
-                .skip_biome_blending = false,
-            },
-            .lod1 => .{
-                .lod_level = .lod1,
-                .enable_caves = true,
-                .enable_worm_caves = false, // Skip expensive worm caves
-                .enable_decorations = true,
-                .enable_ores = false,
-                .enable_lighting = false,
-                .octave_reduction = 1,
-                .skip_biome_blending = true,
-            },
-            .lod2 => .{
-                .lod_level = .lod2,
-                .enable_caves = false, // Skip all caves
-                .enable_worm_caves = false,
-                .enable_decorations = false,
-                .enable_ores = false,
-                .enable_lighting = false,
-                .octave_reduction = 2,
-                .skip_biome_blending = true,
-            },
-            .lod3 => .{
-                .lod_level = .lod3,
-                .enable_caves = false,
-                .enable_worm_caves = false,
-                .enable_decorations = false,
-                .enable_ores = false,
-                .enable_lighting = false,
-                .octave_reduction = 3, // Maximum simplification
-                .skip_biome_blending = true,
-            },
+        const level = @intFromEnum(lod);
+        return .{
+            .lod_level = lod,
+            .enable_caves = level <= 1,
+            .enable_worm_caves = level == 0,
+            .enable_decorations = level <= 1,
+            .enable_ores = level == 0,
+            .enable_lighting = level == 0,
+            .octave_reduction = @intCast(level),
+            .skip_biome_blending = level > 0,
         };
     }
 };

@@ -115,7 +115,7 @@ pub const World = struct {
         world.lod_manager = try LODManager.init(allocator, lod_config, rhi, world.generator);
         world.lod_enabled = true;
 
-        log.log.info("World initialized with LOD system enabled (LOD3 radius: {} chunks)", .{lod_config.lod3_radius});
+        log.log.info("World initialized with LOD system enabled (LOD3 radius: {} chunks)", .{lod_config.radii[3]});
 
         return world;
     }
@@ -174,7 +174,7 @@ pub const World = struct {
 
             // Only update LOD0 radius - LOD1/2/3 are fixed for "infinite" terrain view
             if (self.lod_manager) |lod_mgr| {
-                lod_mgr.config.lod0_radius = target;
+                lod_mgr.config.radii[0] = target;
                 std.log.info("LOD0 radius updated to match render distance: {}", .{target});
             }
         }
