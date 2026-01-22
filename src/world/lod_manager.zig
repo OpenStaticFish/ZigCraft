@@ -10,6 +10,7 @@
 //! - LOD3 generates first (fast heightmap), fills horizon quickly
 //! - LOD0 generates last but gets priority in movement direction
 //! - Smooth transitions via fog masking
+//!
 
 const std = @import("std");
 const lod_chunk = @import("lod_chunk.zig");
@@ -45,6 +46,7 @@ const RingBuffer = @import("../engine/core/ring_buffer.zig").RingBuffer;
 
 const Generator = @import("worldgen/generator_interface.zig").Generator;
 const LODMesh = @import("lod_mesh.zig").LODMesh;
+const LODRenderer = @import("lod_renderer.zig").LODRenderer;
 
 const MAX_LOD_REGIONS = 2048;
 
@@ -172,11 +174,7 @@ pub const LODManager = struct {
     deletion_queue: std.ArrayListUnmanaged(*LODMesh),
     deletion_timer: f32 = 0,
 
-    // MDI
-    instance_data: std.ArrayListUnmanaged(rhi_mod.InstanceData),
-    draw_list: std.ArrayListUnmanaged(*LODMesh),
-    instance_buffers: [rhi_mod.MAX_FRAMES_IN_FLIGHT]rhi_mod.BufferHandle,
-    frame_index: usize,
+    renderer: *LODRenderer,
 
     pub fn init(allocator: std.mem.Allocator, config: LODConfig, rhi: RHI, generator: Generator) !*LODManager {
         const mgr = try allocator.create(LODManager);
@@ -197,12 +195,7 @@ pub const LODManager = struct {
             upload_queues[i] = try RingBuffer(*LODChunk).init(allocator, 32);
         }
 
-        // Init MDI buffers (capacity for ~MAX_LOD_REGIONS LOD regions)
-        const instance_buffer = try rhi.createBuffer(MAX_LOD_REGIONS * @sizeOf(rhi_mod.InstanceData), .storage);
-        var instance_buffers: [rhi_mod.MAX_FRAMES_IN_FLIGHT]rhi_mod.BufferHandle = undefined;
-        for (0..rhi_mod.MAX_FRAMES_IN_FLIGHT) |i| {
-            instance_buffers[i] = instance_buffer;
-        }
+        const renderer = try LODRenderer.init(allocator, rhi);
 
         mgr.* = .{
             .allocator = allocator,
@@ -225,10 +218,7 @@ pub const LODManager = struct {
             .update_tick = 0,
             .deletion_queue = .empty,
             .deletion_timer = 0,
-            .instance_data = .empty,
-            .draw_list = .empty,
-            .instance_buffers = instance_buffers,
-            .frame_index = 0,
+            .renderer = renderer,
         };
 
         // Initialize worker pool for LOD generation and meshing (3 workers for LOD tasks)
@@ -290,14 +280,7 @@ pub const LODManager = struct {
         }
         self.deletion_queue.deinit(self.allocator);
 
-        if (self.instance_buffers[0] != 0) self.rhi.destroyBuffer(self.instance_buffers[0]);
-        for (1..rhi_mod.MAX_FRAMES_IN_FLIGHT) |i| {
-            if (self.instance_buffers[i] != 0 and self.instance_buffers[i] != self.instance_buffers[0]) {
-                self.rhi.destroyBuffer(self.instance_buffers[i]);
-            }
-        }
-        self.instance_data.deinit(self.allocator);
-        self.draw_list.deinit(self.allocator);
+        self.renderer.deinit();
 
         self.allocator.destroy(self);
     }
@@ -668,71 +651,18 @@ pub const LODManager = struct {
     /// Render all LOD meshes
     /// chunk_checker: Optional callback to check if regular chunks cover this region.
     ///                If all chunks in region are loaded, the LOD region is skipped.
+    ///
+    /// NOTE: Acquires a shared lock on LODManager. LODRenderer must NOT attempt to acquire
+    /// a write lock on LODManager during rendering to avoid deadlocks.
     pub fn render(self: *LODManager, view_proj: Mat4, camera_pos: Vec3, chunk_checker: ?ChunkChecker, checker_ctx: ?*anyopaque) void {
         self.mutex.lockShared();
         defer self.mutex.unlockShared();
 
-        const frustum = Frustum.fromViewProj(view_proj);
-        const lod_y_offset: f32 = -3.0;
-
-        // Check and free LOD meshes where all underlying chunks are loaded
-        if (chunk_checker) |checker| {
-            self.unloadLODWhereChunksLoaded(checker, checker_ctx.?);
-        }
-
-        self.instance_data.clearRetainingCapacity();
-        self.draw_list.clearRetainingCapacity();
-
-        // Collect visible meshes
-        // Process from highest LOD down
-        var i: usize = LODLevel.count - 1;
-        while (i > 0) : (i -= 1) {
-            self.collectVisibleMeshes(&self.meshes[i], &self.regions[i], view_proj, camera_pos, frustum, lod_y_offset, chunk_checker, checker_ctx) catch |err| {
-                log.log.err("Failed to collect visible meshes for LOD{}: {}", .{ i, err });
-            };
-        }
-
-        if (self.instance_data.items.len == 0) return;
-
-        for (self.draw_list.items, 0..) |mesh, idx| {
-            const instance = self.instance_data.items[idx];
-            self.rhi.setModelMatrix(instance.model, Vec3.one, instance.mask_radius);
-            self.rhi.draw(mesh.buffer_handle, mesh.vertex_count, .triangles);
-        }
-    }
-
-    fn collectVisibleMeshes(self: *LODManager, meshes: *std.HashMap(LODRegionKey, *LODMesh, LODRegionKeyContext, 80), regions: *std.HashMap(LODRegionKey, *LODChunk, LODRegionKeyContext, 80), view_proj: Mat4, camera_pos: Vec3, frustum: Frustum, lod_y_offset: f32, chunk_checker: ?ChunkChecker, checker_ctx: ?*anyopaque) !void {
-        var iter = meshes.iterator();
-        while (iter.next()) |entry| {
-            const mesh = entry.value_ptr.*;
-            if (!mesh.ready or mesh.vertex_count == 0) continue;
-            if (regions.get(entry.key_ptr.*)) |chunk| {
-                if (chunk.state != .renderable) continue;
-                const bounds = chunk.worldBounds();
-
-                if (chunk_checker) |checker| {
-                    if (self.areAllChunksLoaded(bounds, checker, checker_ctx.?)) continue;
-                }
-
-                const aabb_min = Vec3.init(@as(f32, @floatFromInt(bounds.min_x)) - camera_pos.x, 0.0 - camera_pos.y, @as(f32, @floatFromInt(bounds.min_z)) - camera_pos.z);
-                const aabb_max = Vec3.init(@as(f32, @floatFromInt(bounds.max_x)) - camera_pos.x, 256.0 - camera_pos.y, @as(f32, @floatFromInt(bounds.max_z)) - camera_pos.z);
-                if (!frustum.intersectsAABB(AABB.init(aabb_min, aabb_max))) continue;
-
-                const model = Mat4.translate(Vec3.init(@as(f32, @floatFromInt(bounds.min_x)) - camera_pos.x, -camera_pos.y + lod_y_offset, @as(f32, @floatFromInt(bounds.min_z)) - camera_pos.z));
-
-                try self.instance_data.append(self.allocator, .{
-                    .view_proj = view_proj,
-                    .model = model,
-                    .mask_radius = 0,
-                    .padding = .{ 0, 0, 0 },
-                });
-                try self.draw_list.append(self.allocator, mesh);
-            }
-        }
+        self.renderer.render(self, view_proj, camera_pos, chunk_checker, checker_ctx);
     }
 
     /// Free LOD meshes where all underlying chunks are loaded
-    fn unloadLODWhereChunksLoaded(self: *LODManager, checker: ChunkChecker, ctx: *anyopaque) void {
+    pub fn unloadLODWhereChunksLoaded(self: *LODManager, checker: ChunkChecker, ctx: *anyopaque) void {
         for (1..LODLevel.count) |i| {
             const storage = &self.regions[i];
             const meshes = &self.meshes[i];
@@ -770,7 +700,7 @@ pub const LODManager = struct {
     }
 
     /// Check if all chunks within the given world bounds are loaded and renderable
-    fn areAllChunksLoaded(self: *LODManager, bounds: LODChunk.WorldBounds, checker: ChunkChecker, ctx: *anyopaque) bool {
+    pub fn areAllChunksLoaded(self: *LODManager, bounds: LODChunk.WorldBounds, checker: ChunkChecker, ctx: *anyopaque) bool {
         _ = self;
         // Convert world bounds to chunk coordinates
         const min_cx = @divFloor(bounds.min_x, CHUNK_SIZE_X);
