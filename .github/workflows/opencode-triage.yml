@@ -43,14 +43,16 @@ jobs:
           model: minimax-coding-plan/MiniMax-M2.1
           prompt: |
             Analyze this issue. You have access to the codebase context.
+            **CRITICAL: Your only allowed action is to post a COMMENT on the issue. DO NOT create branches, pull requests, or attempt to modify the codebase.**
 
             1. **Classify**: Determine if this is a Bug, Feature Request, or Question.
             2. **Validate & Request Info**:
-               - **Missing Data**: If critical information is needed to understand or reproduce the issue (e.g., reproduction steps, crash logs, version numbers, screenshots), **you must explicitly ask the user to provide it.**
+               - **Missing Data**: If critical information is needed to understand or reproduce the issue (e.g., reproduction steps, crash logs, version numbers, screenshots), explicitly ask the user to provide it.
             3. **Analyze**:
-               - If a stack trace or error is provided, analyze the codebase to find the root cause.
+               - If a stack trace or error is provided, analyze the codebase to find the root cause and provide code pointers.
                - If it's a feature request, briefly summarize the architectural impact.
             4. **Action**:
-               - If you can provide a fix, code pointer, documentation link, or answer: **Comment**.
-               - If you need more info: **Comment and specify exactly what is missing**.
+               - Your response MUST be a comment on the issue.
+               - If you can provide a potential fix or documentation link, describe it in the comment but do NOT implement it.
+               - If you need more info, specify exactly what is missing.
                - If the issue is vague, spam, or you have nothing valuable to add: **DO NOT COMMENT**.
