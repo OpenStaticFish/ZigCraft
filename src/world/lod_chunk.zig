@@ -292,6 +292,7 @@ pub const ILODConfig = struct {
         getLODForDistance: *const fn (ptr: *anyopaque, dist_chunks: i32) LODLevel,
         isInRange: *const fn (ptr: *anyopaque, dist_chunks: i32) bool,
         getMaxUploadsPerFrame: *const fn (ptr: *anyopaque) u32,
+        calculateMaskRadius: *const fn (ptr: *anyopaque) f32,
     };
 
     pub fn getRadii(self: ILODConfig) [LODLevel.count]i32 {
@@ -313,8 +314,7 @@ pub const ILODConfig = struct {
     /// Calculate the masking radius used by shaders to discard LOD pixels overlapping with high-detail chunks.
     /// This is a pure function based on config state, extracted for testability.
     pub fn calculateMaskRadius(self: ILODConfig) f32 {
-        const radii = self.getRadii();
-        return @floatFromInt(radii[0]);
+        return self.vtable.calculateMaskRadius(self.ptr);
     }
 };
 
@@ -359,6 +359,7 @@ pub const LODConfig = struct {
         .getLODForDistance = getLODForDistanceWrapper,
         .isInRange = isInRangeWrapper,
         .getMaxUploadsPerFrame = getMaxUploadsPerFrameWrapper,
+        .calculateMaskRadius = calculateMaskRadiusWrapper,
     };
 
     fn getRadiiWrapper(ptr: *anyopaque) [LODLevel.count]i32 {
@@ -380,6 +381,10 @@ pub const LODConfig = struct {
     fn getMaxUploadsPerFrameWrapper(ptr: *anyopaque) u32 {
         const self: *LODConfig = @ptrCast(@alignCast(ptr));
         return self.max_uploads_per_frame;
+    }
+    fn calculateMaskRadiusWrapper(ptr: *anyopaque) f32 {
+        const self: *LODConfig = @ptrCast(@alignCast(ptr));
+        return @floatFromInt(self.radii[0]);
     }
 };
 

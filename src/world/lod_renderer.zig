@@ -84,11 +84,6 @@ pub fn LODRenderer(comptime RHI: type) type {
             const frustum = Frustum.fromViewProj(view_proj);
             const lod_y_offset: f32 = -3.0;
 
-            // Check and free LOD meshes where all underlying chunks are loaded
-            if (chunk_checker) |checker| {
-                manager.unloadLODWhereChunksLoaded(checker, checker_ctx.?);
-            }
-
             self.instance_data.clearRetainingCapacity();
             self.draw_list.clearRetainingCapacity();
 
