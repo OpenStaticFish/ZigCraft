@@ -7,12 +7,12 @@ const worldToChunk = @import("chunk.zig").worldToChunk;
 const CHUNK_SIZE_X = @import("chunk.zig").CHUNK_SIZE_X;
 const CHUNK_SIZE_Z = @import("chunk.zig").CHUNK_SIZE_Z;
 const GlobalVertexAllocator = @import("chunk_allocator.zig").GlobalVertexAllocator;
-const LODManager = @import("lod_manager.zig").LODManager;
+const rhi_mod = @import("../engine/graphics/rhi.zig");
+const RHI = rhi_mod.RHI;
+const LODManager = @import("lod_manager.zig").LODManager(RHI);
 const Vec3 = @import("../engine/math/vec3.zig").Vec3;
 const Mat4 = @import("../engine/math/mat4.zig").Mat4;
 const Frustum = @import("../engine/math/frustum.zig").Frustum;
-const rhi_mod = @import("../engine/graphics/rhi.zig");
-const RHI = rhi_mod.RHI;
 const World = @import("world.zig").World; // Circular dependency if not careful, better avoid. But isChunkRenderable callback needs it?
 // Actually isChunkRenderable uses World* but only needs access to storage/chunk state.
 
