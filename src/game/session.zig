@@ -91,6 +91,7 @@ pub const GameSession = struct {
     atmosphere: Atmosphere,
     clouds: CloudState,
 
+    lod_config: LODConfig,
     creative_mode: bool,
 
     debug_show_fps: bool = false,
@@ -113,7 +114,7 @@ pub const GameSession = struct {
             std.log.warn("ZIGCRAFT_SAFE_MODE enabled: render distance capped to {} and LOD disabled", .{effective_render_distance});
         }
 
-        const lod_config = if (safe_mode)
+        var lod_config = if (safe_mode)
             LODConfig{
                 .radii = .{
                     @min(effective_render_distance, 8),
@@ -133,7 +134,7 @@ pub const GameSession = struct {
             };
 
         const world = if (effective_lod_enabled)
-            try World.initGenWithLOD(generator_index, allocator, effective_render_distance, seed, rhi.*, lod_config, atlas)
+            try World.initGenWithLOD(generator_index, allocator, effective_render_distance, seed, rhi.*, lod_config.interface(), atlas)
         else
             try World.initGen(generator_index, allocator, effective_render_distance, seed, rhi.*, atlas);
 
@@ -162,6 +163,7 @@ pub const GameSession = struct {
             .rhi = rhi,
             .atmosphere = atmosphere,
             .clouds = CloudState{},
+            .lod_config = lod_config,
             .creative_mode = true,
         };
 

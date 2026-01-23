@@ -5,6 +5,7 @@ const lod_chunk = @import("lod_chunk.zig");
 const LODLevel = lod_chunk.LODLevel;
 const LODChunk = lod_chunk.LODChunk;
 const LODConfig = lod_chunk.LODConfig;
+const ILODConfig = lod_chunk.ILODConfig;
 const LODRegionKey = lod_chunk.LODRegionKey;
 const LODRegionKeyContext = lod_chunk.LODRegionKeyContext;
 const LODMesh = @import("lod_mesh.zig").LODMesh;
@@ -141,7 +142,7 @@ pub fn LODRenderer(comptime RHI: type) type {
                     try self.instance_data.append(self.allocator, .{
                         .view_proj = view_proj,
                         .model = model,
-                        .mask_radius = @floatFromInt(manager.config.radii[0]),
+                        .mask_radius = manager.config.calculateMaskRadius(),
                         .padding = .{ 0, 0, 0 },
                     });
                     try self.draw_list.append(self.allocator, mesh);
@@ -265,7 +266,7 @@ test "LODRenderer render draw path" {
     const MockManager = struct {
         meshes: *[LODLevel.count]MeshMap,
         regions: *[LODLevel.count]RegionMap,
-        config: LODConfig = .{},
+        config: ILODConfig,
 
         pub fn unloadLODWhereChunksLoaded(_: @This(), _: anytype, _: anytype) void {}
         pub fn areAllChunksLoaded(_: @This(), _: anytype, _: anytype, _: anytype) bool {
@@ -273,9 +274,11 @@ test "LODRenderer render draw path" {
         }
     };
 
+    var mock_config = LODConfig{};
     const mock_manager = MockManager{
         .meshes = &meshes,
         .regions = &regions,
+        .config = mock_config.interface(),
     };
 
     // Create view-projection matrix that includes origin (where our chunk is)

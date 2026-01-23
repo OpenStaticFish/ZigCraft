@@ -281,7 +281,44 @@ pub const LODChunk = struct {
     }
 };
 
-/// Configuration for LOD system
+/// Configuration interface for LOD system to decouple settings from logic.
+pub const ILODConfig = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        getRadii: *const fn (ptr: *anyopaque) [LODLevel.count]i32,
+        setLOD0Radius: *const fn (ptr: *anyopaque, radius: i32) void,
+        getLODForDistance: *const fn (ptr: *anyopaque, dist_chunks: i32) LODLevel,
+        isInRange: *const fn (ptr: *anyopaque, dist_chunks: i32) bool,
+        getMaxUploadsPerFrame: *const fn (ptr: *anyopaque) u32,
+    };
+
+    pub fn getRadii(self: ILODConfig) [LODLevel.count]i32 {
+        return self.vtable.getRadii(self.ptr);
+    }
+    pub fn setLOD0Radius(self: ILODConfig, radius: i32) void {
+        self.vtable.setLOD0Radius(self.ptr, radius);
+    }
+    pub fn getLODForDistance(self: ILODConfig, dist_chunks: i32) LODLevel {
+        return self.vtable.getLODForDistance(self.ptr, dist_chunks);
+    }
+    pub fn isInRange(self: ILODConfig, dist_chunks: i32) bool {
+        return self.vtable.isInRange(self.ptr, dist_chunks);
+    }
+    pub fn getMaxUploadsPerFrame(self: ILODConfig) u32 {
+        return self.vtable.getMaxUploadsPerFrame(self.ptr);
+    }
+
+    /// Calculate the masking radius used by shaders to discard LOD pixels overlapping with high-detail chunks.
+    /// This is a pure function based on config state, extracted for testability.
+    pub fn calculateMaskRadius(self: ILODConfig) f32 {
+        const radii = self.getRadii();
+        return @floatFromInt(radii[0]);
+    }
+};
+
+/// Concrete implementation of LOD system configuration.
 pub const LODConfig = struct {
     /// Radius in chunks for each LOD level
     /// LOD0 = render_distance (user-controlled block chunks)
@@ -306,6 +343,43 @@ pub const LODConfig = struct {
 
     pub fn isInRange(self: *const LODConfig, dist_chunks: i32) bool {
         return dist_chunks <= self.radii[LODLevel.count - 1];
+    }
+
+    /// Returns the interface for this concrete config.
+    pub fn interface(self: *LODConfig) ILODConfig {
+        return .{
+            .ptr = self,
+            .vtable = &VTABLE,
+        };
+    }
+
+    const VTABLE = ILODConfig.VTable{
+        .getRadii = getRadiiWrapper,
+        .setLOD0Radius = setLOD0RadiusWrapper,
+        .getLODForDistance = getLODForDistanceWrapper,
+        .isInRange = isInRangeWrapper,
+        .getMaxUploadsPerFrame = getMaxUploadsPerFrameWrapper,
+    };
+
+    fn getRadiiWrapper(ptr: *anyopaque) [LODLevel.count]i32 {
+        const self: *LODConfig = @ptrCast(@alignCast(ptr));
+        return self.radii;
+    }
+    fn setLOD0RadiusWrapper(ptr: *anyopaque, radius: i32) void {
+        const self: *LODConfig = @ptrCast(@alignCast(ptr));
+        self.radii[0] = radius;
+    }
+    fn getLODForDistanceWrapper(ptr: *anyopaque, dist_chunks: i32) LODLevel {
+        const self: *LODConfig = @ptrCast(@alignCast(ptr));
+        return self.getLODForDistance(dist_chunks);
+    }
+    fn isInRangeWrapper(ptr: *anyopaque, dist_chunks: i32) bool {
+        const self: *LODConfig = @ptrCast(@alignCast(ptr));
+        return self.isInRange(dist_chunks);
+    }
+    fn getMaxUploadsPerFrameWrapper(ptr: *anyopaque) u32 {
+        const self: *LODConfig = @ptrCast(@alignCast(ptr));
+        return self.max_uploads_per_frame;
     }
 };
 
@@ -338,4 +412,15 @@ test "LODConfig distance calculation" {
     try std.testing.expectEqual(LODLevel.lod1, config.getLODForDistance(20));
     try std.testing.expectEqual(LODLevel.lod2, config.getLODForDistance(50));
     try std.testing.expectEqual(LODLevel.lod3, config.getLODForDistance(100));
+}
+
+test "ILODConfig.calculateMaskRadius" {
+    var config = LODConfig{
+        .radii = .{ 16, 40, 80, 160 },
+    };
+    const interface = config.interface();
+    try std.testing.expectEqual(@as(f32, 16.0), interface.calculateMaskRadius());
+
+    config.radii[0] = 32;
+    try std.testing.expectEqual(@as(f32, 32.0), interface.calculateMaskRadius());
 }
