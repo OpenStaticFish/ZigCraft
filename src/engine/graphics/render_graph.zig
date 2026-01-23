@@ -30,6 +30,9 @@ pub const SceneContext = struct {
     disable_gpass_draw: bool,
     disable_ssao: bool,
     disable_clouds: bool,
+    // Phase 3: FXAA and Bloom flags
+    fxaa_enabled: bool = true,
+    bloom_enabled: bool = true,
 };
 
 pub const IRenderPass = struct {
@@ -280,5 +283,50 @@ pub const PostProcessPass = struct {
         ctx.rhi.beginPostProcessPass();
         ctx.rhi.draw(rhi_pkg.InvalidBufferHandle, 3, .triangles);
         ctx.rhi.endPostProcessPass();
+    }
+};
+
+// Phase 3: Bloom Pass - Computes bloom mip chain from HDR buffer
+pub const BloomPass = struct {
+    enabled: bool = true,
+
+    pub fn pass(self: *BloomPass) IRenderPass {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .name = "BloomPass",
+                .needs_main_pass = false,
+                .execute = execute,
+            },
+        };
+    }
+
+    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+        const self: *BloomPass = @ptrCast(@alignCast(ptr));
+        if (!self.enabled or !ctx.bloom_enabled) return;
+        ctx.rhi.computeBloom();
+    }
+};
+
+// Phase 3: FXAA Pass - Applies FXAA to LDR output
+pub const FXAAPass = struct {
+    enabled: bool = true,
+
+    pub fn pass(self: *FXAAPass) IRenderPass {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .name = "FXAAPass",
+                .needs_main_pass = false,
+                .execute = execute,
+            },
+        };
+    }
+
+    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+        const self: *FXAAPass = @ptrCast(@alignCast(ptr));
+        if (!self.enabled or !ctx.fxaa_enabled) return;
+        ctx.rhi.beginFXAAPass();
+        ctx.rhi.endFXAAPass();
     }
 };

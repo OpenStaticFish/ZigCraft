@@ -10,6 +10,7 @@ const Utils = @import("utils.zig");
 
 const GlobalUniforms = extern struct {
     view_proj: Mat4,
+    view_proj_prev: Mat4,
     cam_pos: [4]f32,
     sun_dir: [4]f32,
     sun_color: [4]f32,

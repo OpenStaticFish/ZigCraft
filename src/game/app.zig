@@ -50,7 +50,9 @@ pub const App = struct {
     sky_pass: render_graph_pkg.SkyPass,
     opaque_pass: render_graph_pkg.OpaquePass,
     cloud_pass: render_graph_pkg.CloudPass,
+    bloom_pass: render_graph_pkg.BloomPass,
     post_process_pass: render_graph_pkg.PostProcessPass,
+    fxaa_pass: render_graph_pkg.FXAAPass,
 
     settings: Settings,
     input: Input,
@@ -236,7 +238,9 @@ pub const App = struct {
             .sky_pass = .{},
             .opaque_pass = .{},
             .cloud_pass = .{},
+            .bloom_pass = .{},
             .post_process_pass = .{},
+            .fxaa_pass = .{},
             .settings = settings,
             .input = input,
             .input_mapper = input_mapper,
@@ -260,6 +264,11 @@ pub const App = struct {
         app.material_system = try MaterialSystem.init(allocator, rhi, &app.atlas);
         errdefer app.material_system.deinit();
 
+        // Sync FXAA and Bloom settings to RHI after initialization
+        app.rhi.setFXAA(settings.fxaa_enabled);
+        app.rhi.setBloom(settings.bloom_enabled);
+        app.rhi.setBloomIntensity(settings.bloom_intensity);
+
         // Build RenderGraph (OCP: We can easily modify this list based on quality)
         if (!safe_render_mode) {
             try app.render_graph.addPass(app.shadow_passes[0].pass());
@@ -270,7 +279,9 @@ pub const App = struct {
             try app.render_graph.addPass(app.sky_pass.pass());
             try app.render_graph.addPass(app.opaque_pass.pass());
             try app.render_graph.addPass(app.cloud_pass.pass());
+            try app.render_graph.addPass(app.bloom_pass.pass());
             try app.render_graph.addPass(app.post_process_pass.pass());
+            try app.render_graph.addPass(app.fxaa_pass.pass());
         } else {
             log.log.warn("ZIGCRAFT_SAFE_RENDER: render graph disabled (UI only)", .{});
         }

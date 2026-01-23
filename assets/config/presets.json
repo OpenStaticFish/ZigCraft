@@ -18,7 +18,10 @@
     "volumetric_scattering": 0.5,
     "ssao_enabled": false,
     "lod_enabled": false,
-    "render_distance": 6
+    "render_distance": 6,
+    "fxaa_enabled": true,
+    "bloom_enabled": false,
+    "bloom_intensity": 0.3
   },
   {
     "name": "MEDIUM",
@@ -39,7 +42,10 @@
     "volumetric_scattering": 0.7,
     "ssao_enabled": true,
     "lod_enabled": false,
-    "render_distance": 12
+    "render_distance": 12,
+    "fxaa_enabled": true,
+    "bloom_enabled": true,
+    "bloom_intensity": 0.5
   },
   {
     "name": "HIGH",
@@ -60,7 +66,10 @@
     "volumetric_scattering": 0.75,
     "ssao_enabled": true,
     "lod_enabled": true,
-    "render_distance": 18
+    "render_distance": 18,
+    "fxaa_enabled": true,
+    "bloom_enabled": true,
+    "bloom_intensity": 0.7
   },
   {
     "name": "ULTRA",
@@ -81,6 +90,9 @@
     "volumetric_scattering": 0.8,
     "ssao_enabled": true,
     "lod_enabled": true,
-    "render_distance": 28
+    "render_distance": 28,
+    "fxaa_enabled": true,
+    "bloom_enabled": true,
+    "bloom_intensity": 1.0
   }
 ]

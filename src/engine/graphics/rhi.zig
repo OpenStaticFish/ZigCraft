@@ -17,6 +17,7 @@ pub const InvalidTextureHandle = rhi_types.InvalidTextureHandle;
 
 pub const MAX_FRAMES_IN_FLIGHT = rhi_types.MAX_FRAMES_IN_FLIGHT;
 pub const SHADOW_CASCADE_COUNT = rhi_types.SHADOW_CASCADE_COUNT;
+pub const BLOOM_MIP_COUNT = 5;
 
 pub const BufferUsage = rhi_types.BufferUsage;
 pub const TextureFormat = rhi_types.TextureFormat;
@@ -232,6 +233,11 @@ pub const IRenderContext = struct {
         endPostProcessPass: *const fn (ptr: *anyopaque) void,
         beginGPass: *const fn (ptr: *anyopaque) void,
         endGPass: *const fn (ptr: *anyopaque) void,
+        // FXAA Pass (Phase 3)
+        beginFXAAPass: *const fn (ptr: *anyopaque) void,
+        endFXAAPass: *const fn (ptr: *anyopaque) void,
+        // Bloom Pass (Phase 3)
+        computeBloom: *const fn (ptr: *anyopaque) void,
         getEncoder: *const fn (ptr: *anyopaque) IGraphicsCommandEncoder,
         getStateContext: *const fn (ptr: *anyopaque) IRenderStateContext,
 
@@ -307,6 +313,15 @@ pub const IRenderContext = struct {
     }
     pub fn endPostProcessPass(self: IRenderContext) void {
         self.vtable.endPostProcessPass(self.ptr);
+    }
+    pub fn beginFXAAPass(self: IRenderContext) void {
+        self.vtable.beginFXAAPass(self.ptr);
+    }
+    pub fn endFXAAPass(self: IRenderContext) void {
+        self.vtable.endFXAAPass(self.ptr);
+    }
+    pub fn computeBloom(self: IRenderContext) void {
+        self.vtable.computeBloom(self.ptr);
     }
     pub fn getEncoder(self: IRenderContext) IGraphicsCommandEncoder {
         return self.vtable.getEncoder(self.ptr);
@@ -406,6 +421,10 @@ pub const RHI = struct {
         setVolumetricDensity: *const fn (ctx: *anyopaque, density: f32) void,
         setMSAA: *const fn (ctx: *anyopaque, samples: u8) void,
         recover: *const fn (ctx: *anyopaque) anyerror!void,
+        // Phase 3: FXAA and Bloom options
+        setFXAA: *const fn (ctx: *anyopaque, enabled: bool) void,
+        setBloom: *const fn (ctx: *anyopaque, enabled: bool) void,
+        setBloomIntensity: *const fn (ctx: *anyopaque, intensity: f32) void,
     };
 
     pub fn factory(self: RHI) IResourceFactory {
@@ -564,6 +583,15 @@ pub const RHI = struct {
     pub fn computeSSAO(self: RHI) void {
         self.vtable.render.computeSSAO(self.ptr);
     }
+    pub fn beginFXAAPass(self: RHI) void {
+        self.vtable.render.beginFXAAPass(self.ptr);
+    }
+    pub fn endFXAAPass(self: RHI) void {
+        self.vtable.render.endFXAAPass(self.ptr);
+    }
+    pub fn computeBloom(self: RHI) void {
+        self.vtable.render.computeBloom(self.ptr);
+    }
     pub fn updateShadowUniforms(self: RHI, params: ShadowParams) void {
         self.vtable.shadow.updateUniforms(self.ptr, params);
     }
@@ -597,5 +625,15 @@ pub const RHI = struct {
     }
     pub fn bindUIPipeline(self: RHI, textured: bool) void {
         self.vtable.ui.bindPipeline(self.ptr, textured);
+    }
+    // Phase 3: FXAA and Bloom controls
+    pub fn setFXAA(self: RHI, enabled: bool) void {
+        self.vtable.setFXAA(self.ptr, enabled);
+    }
+    pub fn setBloom(self: RHI, enabled: bool) void {
+        self.vtable.setBloom(self.ptr, enabled);
+    }
+    pub fn setBloomIntensity(self: RHI, intensity: f32) void {
+        self.vtable.setBloomIntensity(self.ptr, intensity);
     }
 };

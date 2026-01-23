@@ -17,6 +17,7 @@ layout(location = 0) out vec4 FragColor;
 
 layout(set = 0, binding = 0) uniform GlobalUniforms {
     mat4 view_proj;
+    mat4 view_proj_prev; // Previous frame's view-projection for velocity buffer
     vec4 cam_pos;
     vec4 sun_dir;
     vec4 sun_color;

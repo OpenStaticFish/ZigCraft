@@ -21,9 +21,12 @@ layout(location = 8) out float vViewDepth;
 layout(location = 9) out vec3 vTangent;
 layout(location = 10) out vec3 vBitangent;
 layout(location = 11) out float vAO;
+layout(location = 12) out vec4 vClipPosCurrent;
+layout(location = 13) out vec4 vClipPosPrev;
 
 layout(set = 0, binding = 0) uniform GlobalUniforms {
     mat4 view_proj;
+    mat4 view_proj_prev; // Previous frame's view-projection for velocity buffer
     vec4 cam_pos;
     vec4 sun_dir;
     vec4 sun_color;
@@ -46,10 +49,15 @@ layout(push_constant) uniform ModelUniforms {
 void main() {
     vec4 worldPos = model_data.model * vec4(aPos, 1.0);
     vec4 clipPos = global.view_proj * worldPos;
+    vec4 clipPosPrev = global.view_proj_prev * worldPos;
     
     // Vulkan has inverted Y in clip space compared to OpenGL
     gl_Position = clipPos;
-    gl_Position.y = -gl_Position.y; 
+    gl_Position.y = -gl_Position.y;
+    
+    // Store clip positions for velocity buffer calculation (with Y inverted)
+    vClipPosCurrent = vec4(clipPos.x, -clipPos.y, clipPos.z, clipPos.w);
+    vClipPosPrev = vec4(clipPosPrev.x, -clipPosPrev.y, clipPosPrev.z, clipPosPrev.w); 
 
     vColor = aColor * model_data.color_override;
     vNormal = aNormal;

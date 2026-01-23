@@ -7,14 +7,18 @@ layout(location = 3) flat in int vTileID;
 layout(location = 7) in vec3 vFragPosWorld;
 layout(location = 9) in vec3 vTangent;
 layout(location = 10) in vec3 vBitangent;
+layout(location = 12) in vec4 vClipPosCurrent;
+layout(location = 13) in vec4 vClipPosPrev;
 
 layout(location = 0) out vec3 outNormal;
+layout(location = 1) out vec2 outVelocity;
 
 layout(set = 0, binding = 1) uniform sampler2D uTexture;
 layout(set = 0, binding = 6) uniform sampler2D uNormalMap;
 
 layout(set = 0, binding = 0) uniform GlobalUniforms {
     mat4 view_proj;
+    mat4 view_proj_prev; // Previous frame's view-projection for velocity buffer
     vec4 cam_pos;
     vec4 sun_dir;
     vec4 sun_color;
@@ -49,4 +53,12 @@ void main() {
 
     // Convert normal from [-1, 1] to [0, 1] for storage in UNORM texture
     outNormal = N * 0.5 + 0.5;
+    
+    // Calculate velocity (screen-space motion vectors)
+    vec2 ndcCurrent = vClipPosCurrent.xy / vClipPosCurrent.w;
+    vec2 ndcPrev = vClipPosPrev.xy / vClipPosPrev.w;
+    
+    // Velocity in NDC space [-2, 2] -> store as is for RG16F texture
+    // Divide by 2 to get UV-space velocity [-1, 1]
+    outVelocity = (ndcCurrent - ndcPrev) * 0.5;
 }

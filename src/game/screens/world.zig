@@ -163,6 +163,8 @@ pub const WorldScreen = struct {
                 .disable_gpass_draw = ctx.disable_gpass_draw,
                 .disable_ssao = ctx.disable_ssao,
                 .disable_clouds = ctx.disable_clouds,
+                .fxaa_enabled = ctx.settings.fxaa_enabled,
+                .bloom_enabled = ctx.settings.bloom_enabled,
             };
             ctx.render_graph.execute(render_ctx);
 

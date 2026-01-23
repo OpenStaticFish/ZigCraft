@@ -4,9 +4,16 @@ layout(location = 0) in vec2 inUV;
 layout(location = 0) out vec4 outColor;
 
 layout(set = 0, binding = 0) uniform sampler2D uHDRBuffer;
+layout(set = 0, binding = 2) uniform sampler2D uBloomTexture;
+
+layout(push_constant) uniform PostProcessParams {
+    float bloomEnabled;   // 0.0 = disabled, 1.0 = enabled
+    float bloomIntensity; // Final bloom blend intensity
+} postParams;
 
 layout(set = 0, binding = 1) uniform GlobalUniforms {
     mat4 view_proj;
+    mat4 view_proj_prev; // Previous frame's view-projection for velocity buffer
     vec4 cam_pos;
     vec4 sun_dir;
     vec4 sun_color;
@@ -102,6 +109,12 @@ vec3 ACESFilm(vec3 x) {
 
 void main() {
     vec3 hdrColor = texture(uHDRBuffer, inUV).rgb;
+    
+    // Add bloom contribution before tonemapping (in HDR space)
+    if (postParams.bloomEnabled > 0.5) {
+        vec3 bloom = texture(uBloomTexture, inUV).rgb;
+        hdrColor += bloom * postParams.bloomIntensity;
+    }
     
     vec3 color;
     // Tone mapper selection: 0.0 (default) = AgX, 1.0 = AgX, 2.0 = ACES

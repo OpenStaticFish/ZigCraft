@@ -214,6 +214,12 @@ pub const GraphicsScreen = struct {
                     ctx.rhi.*.setVSync(settings.vsync);
                 } else if (std.mem.eql(u8, decl.name, "volumetric_density")) {
                     ctx.rhi.*.setVolumetricDensity(settings.volumetric_density);
+                } else if (std.mem.eql(u8, decl.name, "fxaa_enabled")) {
+                    ctx.rhi.*.setFXAA(settings.fxaa_enabled);
+                } else if (std.mem.eql(u8, decl.name, "bloom_enabled")) {
+                    ctx.rhi.*.setBloom(settings.bloom_enabled);
+                } else if (std.mem.eql(u8, decl.name, "bloom_intensity")) {
+                    ctx.rhi.*.setBloomIntensity(settings.bloom_intensity);
                 }
             }
 
