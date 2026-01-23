@@ -17,6 +17,7 @@
     "volumetric_steps": 4,
     "volumetric_scattering": 0.5,
     "ssao_enabled": false,
+    "lod_enabled": false,
     "render_distance": 6
   },
   {
@@ -37,6 +38,7 @@
     "volumetric_steps": 8,
     "volumetric_scattering": 0.7,
     "ssao_enabled": true,
+    "lod_enabled": false,
     "render_distance": 12
   },
   {
@@ -57,6 +59,7 @@
     "volumetric_steps": 12,
     "volumetric_scattering": 0.75,
     "ssao_enabled": true,
+    "lod_enabled": true,
     "render_distance": 18
   },
   {
@@ -77,6 +80,7 @@
     "volumetric_steps": 16,
     "volumetric_scattering": 0.8,
     "ssao_enabled": true,
+    "lod_enabled": true,
     "render_distance": 28
   }
 ]

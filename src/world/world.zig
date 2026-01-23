@@ -34,6 +34,7 @@ const RingBuffer = @import("../engine/core/ring_buffer.zig").RingBuffer;
 const log = @import("../engine/core/log.zig");
 
 const LODConfig = @import("lod_chunk.zig").LODConfig;
+const ILODConfig = @import("lod_chunk.zig").ILODConfig;
 const CHUNK_UNLOAD_BUFFER = @import("chunk.zig").CHUNK_UNLOAD_BUFFER;
 
 /// Buffer distance beyond render_distance for chunk unloading.
@@ -104,18 +105,19 @@ pub const World = struct {
     }
 
     /// Initialize with LOD system enabled for extended render distances
-    pub fn initWithLOD(allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI, lod_config: LODConfig, atlas: *const TextureAtlas) !*World {
+    pub fn initWithLOD(allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI, lod_config: ILODConfig, atlas: *const TextureAtlas) !*World {
         return initGenWithLOD(0, allocator, render_distance, seed, rhi, lod_config, atlas);
     }
 
-    pub fn initGenWithLOD(generator_index: usize, allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI, lod_config: LODConfig, atlas: *const TextureAtlas) !*World {
+    pub fn initGenWithLOD(generator_index: usize, allocator: std.mem.Allocator, render_distance: i32, seed: u64, rhi: RHI, lod_config: ILODConfig, atlas: *const TextureAtlas) !*World {
         const world = try initGen(generator_index, allocator, render_distance, seed, rhi, atlas);
 
         // Initialize LOD manager with generator reference
         world.lod_manager = try LODManager.init(allocator, lod_config, rhi, world.generator);
         world.lod_enabled = true;
 
-        log.log.info("World initialized with LOD system enabled (LOD3 radius: {} chunks)", .{lod_config.radii[3]});
+        const radii = lod_config.getRadii();
+        log.log.info("World initialized with LOD system enabled (LOD3 radius: {} chunks)", .{radii[3]});
 
         return world;
     }
@@ -174,7 +176,7 @@ pub const World = struct {
 
             // Only update LOD0 radius - LOD1/2/3 are fixed for "infinite" terrain view
             if (self.lod_manager) |lod_mgr| {
-                lod_mgr.config.radii[0] = target;
+                lod_mgr.config.setLOD0Radius(target);
                 std.log.info("LOD0 radius updated to match render distance: {}", .{target});
             }
         }
@@ -250,6 +252,14 @@ pub const World = struct {
         try self.streamer.processUnloads(player_pos, self.renderer.vertex_allocator, self.lod_manager);
 
         // NOTE: LOD Manager update is handled inside streamer.update() now
+    }
+
+    pub fn isChunkRenderable(chunk_x: i32, chunk_z: i32, ctx: *anyopaque) bool {
+        const storage: *ChunkStorage = @ptrCast(@alignCast(ctx));
+        if (storage.chunks.get(.{ .x = chunk_x, .z = chunk_z })) |data| {
+            return data.chunk.state == .renderable;
+        }
+        return false;
     }
 
     pub fn render(self: *World, view_proj: Mat4, camera_pos: Vec3) void {

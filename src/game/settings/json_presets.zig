@@ -21,6 +21,7 @@ pub const PresetConfig = struct {
     volumetric_steps: u32,
     volumetric_scattering: f32,
     ssao_enabled: bool,
+    lod_enabled: bool,
     render_distance: i32,
 };
 
@@ -84,6 +85,7 @@ pub fn apply(settings: *Settings, preset_idx: usize) void {
     settings.volumetric_steps = config.volumetric_steps;
     settings.volumetric_scattering = config.volumetric_scattering;
     settings.ssao_enabled = config.ssao_enabled;
+    settings.lod_enabled = config.lod_enabled;
     settings.render_distance = config.render_distance;
 }
 
@@ -112,7 +114,8 @@ fn matches(settings: *const Settings, preset: PresetConfig) bool {
         std.math.approxEqAbs(f32, settings.volumetric_density, preset.volumetric_density, epsilon) and
         settings.volumetric_steps == preset.volumetric_steps and
         std.math.approxEqAbs(f32, settings.volumetric_scattering, preset.volumetric_scattering, epsilon) and
-        settings.ssao_enabled == preset.ssao_enabled;
+        settings.ssao_enabled == preset.ssao_enabled and
+        settings.lod_enabled == preset.lod_enabled;
 }
 
 pub fn getPresetName(idx: usize) []const u8 {

@@ -158,8 +158,8 @@ pub const SettingsScreen = struct {
         }
         sy += row_height;
 
-        // LOD System (experimental)
-        Font.drawText(ui, "LOD SYSTEM", lx, sy, label_scale, Color.rgba(0.7, 0.7, 0.8, 1.0));
+        // LOD System
+        Font.drawText(ui, "LOD SYSTEM", lx, sy, label_scale, Color.white);
         if (Widgets.drawButton(ui, .{ .x = vx, .y = sy - 5.0, .width = toggle_width, .height = btn_height }, if (settings.lod_enabled) "ENABLED" else "DISABLED", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
             settings.lod_enabled = !settings.lod_enabled;
         }

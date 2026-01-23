@@ -19,6 +19,7 @@ const LODChunk = lod_chunk.LODChunk;
 const LODRegionKey = lod_chunk.LODRegionKey;
 const LODRegionKeyContext = lod_chunk.LODRegionKeyContext;
 const LODConfig = lod_chunk.LODConfig;
+const ILODConfig = lod_chunk.ILODConfig;
 const LODState = lod_chunk.LODState;
 const LODSimplifiedData = lod_chunk.LODSimplifiedData;
 
@@ -133,7 +134,7 @@ pub fn LODManager(comptime RHI: type) type {
         const Self = @This();
 
         allocator: std.mem.Allocator,
-        config: LODConfig,
+        config: ILODConfig,
 
         // Storage per LOD level (LOD0 uses existing World.chunks)
         regions: [LODLevel.count]std.HashMap(LODRegionKey, *LODChunk, LODRegionKeyContext, 80),
@@ -191,7 +192,7 @@ pub fn LODManager(comptime RHI: type) type {
         // Callback type to check if a regular chunk is loaded and renderable
         pub const ChunkChecker = *const fn (chunk_x: i32, chunk_z: i32, ctx: *anyopaque) bool;
 
-        pub fn init(allocator: std.mem.Allocator, config: LODConfig, rhi: RHI, generator: Generator) !*Self {
+        pub fn init(allocator: std.mem.Allocator, config: ILODConfig, rhi: RHI, generator: Generator) !*Self {
             const mgr = try allocator.create(Self);
 
             var regions: [LODLevel.count]std.HashMap(LODRegionKey, *LODChunk, LODRegionKeyContext, 80) = undefined;
@@ -240,11 +241,12 @@ pub fn LODManager(comptime RHI: type) type {
             // All LOD jobs go to LOD3 queue in original code, we keep it consistent but use generic index
             mgr.lod_gen_pool = try WorkerPool.init(allocator, 3, mgr.gen_queues[LODLevel.count - 1], mgr, processLODJob);
 
+            const radii = config.getRadii();
             log.log.info("LODManager initialized with radii: LOD0={}, LOD1={}, LOD2={}, LOD3={}", .{
-                config.radii[0],
-                config.radii[1],
-                config.radii[2],
-                config.radii[3],
+                radii[0],
+                radii[1],
+                radii[2],
+                radii[3],
             });
 
             return mgr;
@@ -301,7 +303,7 @@ pub fn LODManager(comptime RHI: type) type {
         }
 
         /// Update LOD system with player position
-        pub fn update(self: *Self, player_pos: Vec3, player_velocity: Vec3) !void {
+        pub fn update(self: *Self, player_pos: Vec3, player_velocity: Vec3, chunk_checker: ?ChunkChecker, checker_ctx: ?*anyopaque) !void {
             if (self.paused) return;
 
             // Deferred deletion handling (Issue #119: Performance optimization)
@@ -320,9 +322,17 @@ pub fn LODManager(comptime RHI: type) type {
                 self.deletion_timer = 0;
             }
 
-            // Throttle heavy LOD management logic
+            // Throttle heavy LOD management logic (generation queuing, state processing, unloads).
+            // LOD management involves iterating over thousands of potential regions and can
+            // take several milliseconds. Throttling to every 4 frames (approx 15Hz at 60fps)
+            // significantly reduces CPU overhead while remaining responsive to player movement.
             self.update_tick += 1;
-            if (self.update_tick % 4 != 0) return; // Only update every 4 frames
+            if (self.update_tick % 4 != 0) return;
+
+            // Issue #211: Clean up LOD chunks that are fully covered by LOD0 (throttled)
+            if (chunk_checker) |checker| {
+                self.unloadLODWhereChunksLoaded(checker, checker_ctx.?);
+            }
 
             const pc = worldToChunk(@intFromFloat(player_pos.x), @intFromFloat(player_pos.z));
             self.player_cx = pc.chunk_x;
@@ -339,7 +349,7 @@ pub fn LODManager(comptime RHI: type) type {
             // We iterate backwards from LODLevel.count-1 down to 1
             var i: usize = LODLevel.count - 1;
             while (i > 0) : (i -= 1) {
-                try self.queueLODRegions(@enumFromInt(@as(u3, @intCast(i))), player_velocity);
+                try self.queueLODRegions(@enumFromInt(@as(u3, @intCast(i))), player_velocity, chunk_checker, checker_ctx);
             }
 
             // Process state transitions
@@ -356,8 +366,9 @@ pub fn LODManager(comptime RHI: type) type {
         }
 
         /// Queue LOD regions that need generation
-        fn queueLODRegions(self: *Self, lod: LODLevel, velocity: Vec3) !void {
-            const radius = self.config.radii[@intFromEnum(lod)];
+        fn queueLODRegions(self: *Self, lod: LODLevel, velocity: Vec3, chunk_checker: ?ChunkChecker, checker_ctx: ?*anyopaque) !void {
+            const radii = self.config.getRadii();
+            const radius = radii[@intFromEnum(lod)];
 
             // Skip LOD0 - handled by existing World system
             if (lod == .lod0) return;
@@ -396,6 +407,15 @@ pub fn LODManager(comptime RHI: type) type {
                     if (dx * dx + dz * dz > region_radius * region_radius) continue;
 
                     const key = LODRegionKey{ .rx = rx, .rz = rz, .lod = lod };
+
+                    // Check if region is covered by higher detail chunks
+                    if (chunk_checker) |checker| {
+                        // We use a temporary chunk to calculate bounds
+                        const temp_chunk = LODChunk.init(rx, rz, lod);
+                        if (self.areAllChunksLoaded(temp_chunk.worldBounds(), checker, checker_ctx.?)) {
+                            continue;
+                        }
+                    }
 
                     // Check if region exists and what state it's in
                     const existing = storage.get(key);
@@ -497,7 +517,7 @@ pub fn LODManager(comptime RHI: type) type {
 
         /// Process GPU uploads (limited per frame)
         fn processUploads(self: *Self) void {
-            const max_uploads = self.config.max_uploads_per_frame;
+            const max_uploads = self.config.getMaxUploadsPerFrame();
             var uploads: u32 = 0;
 
             // Process from highest LOD down (furthest, should be ready first)
@@ -526,12 +546,16 @@ pub fn LODManager(comptime RHI: type) type {
 
         /// Unload regions that are too far from player
         fn unloadDistantRegions(self: *Self) !void {
+            const radii = self.config.getRadii();
             for (1..LODLevel.count) |i| {
-                try self.unloadDistantForLevel(@enumFromInt(@as(u3, @intCast(i))), self.config.radii[i]);
+                try self.unloadDistantForLevel(@enumFromInt(@as(u3, @intCast(i))), radii[i]);
             }
         }
 
         fn unloadDistantForLevel(self: *Self, lod: LODLevel, max_radius: i32) !void {
+            _ = max_radius; // Interface provides current radii
+            const radii = self.config.getRadii();
+            const lod_radius = radii[@intFromEnum(lod)];
             const storage = &self.regions[@intFromEnum(lod)];
 
             const scale: i32 = @intCast(lod.chunksPerSide());
@@ -539,7 +563,7 @@ pub fn LODManager(comptime RHI: type) type {
             const player_rz = @divFloor(self.player_cz, scale);
 
             // Use same +1 buffer as queuing to match radius exactly
-            const region_radius = @divFloor(max_radius, scale) + 1;
+            const region_radius = @divFloor(lod_radius, scale) + 1;
 
             var to_remove = std.ArrayListUnmanaged(LODRegionKey).empty;
             defer to_remove.deinit(self.allocator);
@@ -695,15 +719,15 @@ pub fn LODManager(comptime RHI: type) type {
                     }
                 }
 
-                for (to_remove.items) |key| {
-                    if (meshes.fetchRemove(key)) |mesh_entry| {
+                for (to_remove.items) |rem_key| {
+                    if (meshes.fetchRemove(rem_key)) |mesh_entry| {
                         // Queue for deferred deletion to avoid waitIdle stutter
                         self.deletion_queue.append(self.allocator, mesh_entry.value) catch {
                             mesh_entry.value.deinit(self.rhi);
                             self.allocator.destroy(mesh_entry.value);
                         };
                     }
-                    if (storage.fetchRemove(key)) |chunk_entry| {
+                    if (storage.fetchRemove(rem_key)) |chunk_entry| {
                         chunk_entry.value.deinit(self.allocator);
                         self.allocator.destroy(chunk_entry.value);
                     }
@@ -808,7 +832,8 @@ pub fn LODManager(comptime RHI: type) type {
             const player_rz = @divFloor(self.player_cz, scale);
             const dx = job.data.chunk.x - player_rx;
             const dz = job.data.chunk.z - player_rz;
-            const radius = self.config.radii[lod_idx];
+            const radii = self.config.getRadii();
+            const radius = radii[lod_idx];
             const region_radius = @divFloor(radius, scale) + 2;
 
             if (dx * dx + dz * dz > region_radius * region_radius) {
@@ -926,7 +951,7 @@ test "LODManager initialization" {
     };
 
     // We can't fully test without RHI, but we can test the config
-    const config = LODConfig{
+    var config = LODConfig{
         .radii = .{ 8, 16, 32, 64 },
     };
 
@@ -935,7 +960,7 @@ test "LODManager initialization" {
     const mock_rhi = MockRHI{ .state = &mock_state };
 
     const Manager = LODManager(MockRHI);
-    var mgr = try Manager.init(allocator, config, mock_rhi, mock_gen);
+    var mgr = try Manager.init(allocator, config.interface(), mock_rhi, mock_gen);
 
     // Verify init called createBuffer (via LODRenderer)
     try std.testing.expect(mock_state.buffer_created);
@@ -955,6 +980,117 @@ test "LODManager initialization" {
     try std.testing.expectEqual(LODLevel.lod1, config.getLODForDistance(12));
     try std.testing.expectEqual(LODLevel.lod2, config.getLODForDistance(24));
     try std.testing.expectEqual(LODLevel.lod3, config.getLODForDistance(50));
+}
+
+test "LODManager end-to-end covered cleanup" {
+    const allocator = std.testing.allocator;
+
+    // Mock setup
+    const MockRHI = struct {
+        pub fn createBuffer(_: @This(), _: usize, _: anytype) !u32 {
+            return 1;
+        }
+        pub fn destroyBuffer(_: @This(), _: u32) void {}
+        pub fn uploadBuffer(_: @This(), _: u32, _: []const u8) !void {}
+        pub fn getFrameIndex(_: @This()) usize {
+            return 0;
+        }
+        pub fn waitIdle(_: @This()) void {}
+        pub fn setModelMatrix(_: @This(), _: Mat4, _: Vec3, _: f32) void {}
+        pub fn draw(_: @This(), _: u32, _: u32, _: anytype) void {}
+    };
+
+    const MockGenerator = struct {
+        fn generate(_: *anyopaque, _: *Chunk, _: ?*const bool) void {}
+        fn generateHeightmapOnly(_: *anyopaque, _: *LODSimplifiedData, _: i32, _: i32, _: LODLevel) void {}
+        fn maybeRecenterCache(_: *anyopaque, _: i32, _: i32) bool {
+            return false;
+        }
+        fn getSeed(_: *anyopaque) u64 {
+            return 0;
+        }
+        fn getRegionInfo(_: *anyopaque, _: i32, _: i32) @import("worldgen/region.zig").RegionInfo {
+            return undefined;
+        }
+        fn getColumnInfo(_: *anyopaque, _: f32, _: f32) @import("worldgen/generator_interface.zig").ColumnInfo {
+            return .{ .height = 0, .biome = .plains, .is_ocean = false, .temperature = 0, .humidity = 0, .continentalness = 0 };
+        }
+        fn deinit(_: *anyopaque, _: std.mem.Allocator) void {}
+
+        const vtable = Generator.VTable{
+            .generate = generate,
+            .generateHeightmapOnly = generateHeightmapOnly,
+            .maybeRecenterCache = maybeRecenterCache,
+            .getSeed = getSeed,
+            .getRegionInfo = getRegionInfo,
+            .getColumnInfo = getColumnInfo,
+            .deinit = deinit,
+        };
+    };
+
+    var mock_gen_impl = MockGenerator{};
+    const mock_gen = Generator{
+        .ptr = &mock_gen_impl,
+        .vtable = &MockGenerator.vtable,
+        .info = .{ .name = "Mock", .description = "Mock Generator" },
+    };
+
+    var config = LODConfig{
+        .radii = .{ 2, 4, 8, 16 },
+    };
+
+    const Manager = LODManager(MockRHI);
+    var mgr = try Manager.init(allocator, config.interface(), .{}, mock_gen);
+    defer mgr.deinit();
+
+    // 1. Initial position at origin
+    try mgr.update(Vec3.zero, Vec3.zero, null, null);
+
+    // 2. Mock a chunk checker that says NO chunks are loaded
+    const Checker = struct {
+        pub fn isLoaded(_: i32, _: i32, _: *anyopaque) bool {
+            return false;
+        }
+    };
+
+    // Force some regions to be renderable for testing cleanup
+    const key = LODRegionKey{ .rx = 2, .rz = 0, .lod = .lod1 }; // radii[1]=4, scale=4. rx=2 is 8 chunks away.
+    // Wait, scale for lod1 is 4. rx=2 means blocks 32-47.
+    // radii[1] is 4 chunks. region_radius = 4/4 + 1 = 2.
+    // rx=2 is right at the edge.
+
+    const chunk = try allocator.create(LODChunk);
+    chunk.* = LODChunk.init(2, 0, .lod1);
+    chunk.state = .renderable;
+    try mgr.regions[1].put(key, chunk);
+
+    const mesh = try allocator.create(LODMesh);
+    mesh.* = LODMesh.init(allocator, .lod1);
+    mesh.ready = true;
+    mesh.vertex_count = 100;
+    try mgr.meshes[1].put(key, mesh);
+
+    var dummy: u8 = 0;
+    // Update - should NOT unload because checker says not loaded
+    try mgr.update(Vec3.zero, Vec3.zero, Checker.isLoaded, &dummy);
+    try std.testing.expect(mgr.regions[1].contains(key));
+
+    // 3. Mock a chunk checker that says ALL chunks are loaded
+    const FullChecker = struct {
+        pub fn isLoaded(_: i32, _: i32, _: *anyopaque) bool {
+            return true;
+        }
+    };
+
+    // Update - should unload because checker says all chunks are loaded
+    // Need to trigger the throttle (every 4 frames)
+    try mgr.update(Vec3.zero, Vec3.zero, FullChecker.isLoaded, &dummy);
+    try mgr.update(Vec3.zero, Vec3.zero, FullChecker.isLoaded, &dummy);
+    try mgr.update(Vec3.zero, Vec3.zero, FullChecker.isLoaded, &dummy);
+    // 4th update triggers throttled logic
+    try mgr.update(Vec3.zero, Vec3.zero, FullChecker.isLoaded, &dummy);
+
+    try std.testing.expect(!mgr.regions[1].contains(key));
 }
 
 test "LODStats aggregation" {

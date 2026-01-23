@@ -122,4 +122,14 @@ pub const ChunkStorage = struct {
     pub fn iteratorUnsafe(self: *ChunkStorage) std.HashMap(ChunkKey, *ChunkData, ChunkKeyContext, 80).Iterator {
         return self.chunks.iterator();
     }
+
+    pub fn isChunkRenderable(cx: i32, cz: i32, ctx: *anyopaque) bool {
+        const self: *ChunkStorage = @ptrCast(@alignCast(ctx));
+        // Note: this uses an internal lock, which is safe from main thread
+        // but might be slow if called many times.
+        if (self.get(cx, cz)) |data| {
+            return data.chunk.state == .renderable;
+        }
+        return false;
+    }
 };

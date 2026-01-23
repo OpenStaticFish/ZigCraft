@@ -52,6 +52,7 @@ test {
     _ = @import("world/lod_manager.zig");
     _ = @import("world/lod_renderer.zig");
     _ = @import("engine/atmosphere/tests.zig");
+    _ = @import("game/settings/tests.zig");
 }
 
 test "Vec3 addition" {

@@ -4,6 +4,8 @@ const std = @import("std");
 const lod_chunk = @import("lod_chunk.zig");
 const LODLevel = lod_chunk.LODLevel;
 const LODChunk = lod_chunk.LODChunk;
+const LODConfig = lod_chunk.LODConfig;
+const ILODConfig = lod_chunk.ILODConfig;
 const LODRegionKey = lod_chunk.LODRegionKey;
 const LODRegionKeyContext = lod_chunk.LODRegionKeyContext;
 const LODMesh = @import("lod_mesh.zig").LODMesh;
@@ -82,11 +84,6 @@ pub fn LODRenderer(comptime RHI: type) type {
             const frustum = Frustum.fromViewProj(view_proj);
             const lod_y_offset: f32 = -3.0;
 
-            // Check and free LOD meshes where all underlying chunks are loaded
-            if (chunk_checker) |checker| {
-                manager.unloadLODWhereChunksLoaded(checker, checker_ctx.?);
-            }
-
             self.instance_data.clearRetainingCapacity();
             self.draw_list.clearRetainingCapacity();
 
@@ -117,8 +114,8 @@ pub fn LODRenderer(comptime RHI: type) type {
             camera_pos: Vec3,
             frustum: Frustum,
             lod_y_offset: f32,
-            chunk_checker: ?*const fn (i32, i32, *anyopaque) bool,
-            checker_ctx: ?*anyopaque,
+            _: ?*const fn (i32, i32, *anyopaque) bool,
+            _: ?*anyopaque,
         ) !void {
             var iter = meshes.iterator();
             while (iter.next()) |entry| {
@@ -128,9 +125,8 @@ pub fn LODRenderer(comptime RHI: type) type {
                     if (chunk.state != .renderable) continue;
                     const bounds = chunk.worldBounds();
 
-                    if (chunk_checker) |checker| {
-                        if (manager.areAllChunksLoaded(bounds, checker, checker_ctx.?)) continue;
-                    }
+                    // Issue #211: removed expensive areAllChunksLoaded check from render.
+                    // Throttled cleanup in update handles this, and shader masking handles partial overlaps.
 
                     const aabb_min = Vec3.init(@as(f32, @floatFromInt(bounds.min_x)) - camera_pos.x, 0.0 - camera_pos.y, @as(f32, @floatFromInt(bounds.min_z)) - camera_pos.z);
                     const aabb_max = Vec3.init(@as(f32, @floatFromInt(bounds.max_x)) - camera_pos.x, 256.0 - camera_pos.y, @as(f32, @floatFromInt(bounds.max_z)) - camera_pos.z);
@@ -141,7 +137,7 @@ pub fn LODRenderer(comptime RHI: type) type {
                     try self.instance_data.append(self.allocator, .{
                         .view_proj = view_proj,
                         .model = model,
-                        .mask_radius = 0,
+                        .mask_radius = manager.config.calculateMaskRadius(),
                         .padding = .{ 0, 0, 0 },
                     });
                     try self.draw_list.append(self.allocator, mesh);
@@ -265,6 +261,7 @@ test "LODRenderer render draw path" {
     const MockManager = struct {
         meshes: *[LODLevel.count]MeshMap,
         regions: *[LODLevel.count]RegionMap,
+        config: ILODConfig,
 
         pub fn unloadLODWhereChunksLoaded(_: @This(), _: anytype, _: anytype) void {}
         pub fn areAllChunksLoaded(_: @This(), _: anytype, _: anytype, _: anytype) bool {
@@ -272,9 +269,11 @@ test "LODRenderer render draw path" {
         }
     };
 
+    var mock_config = LODConfig{};
     const mock_manager = MockManager{
         .meshes = &meshes,
         .regions = &regions,
+        .config = mock_config.interface(),
     };
 
     // Create view-projection matrix that includes origin (where our chunk is)
