@@ -16,6 +16,7 @@ pub const ShadowSystem = struct {
     shadow_image_layouts: [rhi.SHADOW_CASCADE_COUNT]c.VkImageLayout = .{c.VK_IMAGE_LAYOUT_UNDEFINED} ** rhi.SHADOW_CASCADE_COUNT,
     shadow_framebuffers: [rhi.SHADOW_CASCADE_COUNT]c.VkFramebuffer = .{null} ** rhi.SHADOW_CASCADE_COUNT,
     shadow_sampler: c.VkSampler = null,
+    shadow_sampler_regular: c.VkSampler = null,
     shadow_render_pass: c.VkRenderPass = null,
     shadow_pipeline: c.VkPipeline = null,
     shadow_extent: c.VkExtent2D,
@@ -38,6 +39,7 @@ pub const ShadowSystem = struct {
         if (self.shadow_pipeline != null) c.vkDestroyPipeline(device, self.shadow_pipeline, null);
         if (self.shadow_render_pass != null) c.vkDestroyRenderPass(device, self.shadow_render_pass, null);
         if (self.shadow_sampler != null) c.vkDestroySampler(device, self.shadow_sampler, null);
+        if (self.shadow_sampler_regular != null) c.vkDestroySampler(device, self.shadow_sampler_regular, null);
 
         for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
             if (self.shadow_framebuffers[i] != null) c.vkDestroyFramebuffer(device, self.shadow_framebuffers[i], null);
@@ -58,6 +60,7 @@ pub const ShadowSystem = struct {
             self.shadow_framebuffers[i] = null;
         }
         self.shadow_sampler = null;
+        self.shadow_sampler_regular = null;
         self.shadow_render_pass = null;
         self.shadow_pipeline = null;
         self.pass_active = false;
