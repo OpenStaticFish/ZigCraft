@@ -118,15 +118,15 @@ pub const DescriptorManager = struct {
 
         // Create Descriptor Pool
         var pool_sizes = [_]c.VkDescriptorPoolSize{
-            .{ .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 100 },
-            .{ .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 100 },
+            .{ .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 500 },
+            .{ .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 500 },
         };
 
         var pool_info = std.mem.zeroes(c.VkDescriptorPoolCreateInfo);
         pool_info.sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         pool_info.poolSizeCount = pool_sizes.len;
         pool_info.pPoolSizes = &pool_sizes[0];
-        pool_info.maxSets = 100;
+        pool_info.maxSets = 500;
         pool_info.flags = c.VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
 
         Utils.checkVk(c.vkCreateDescriptorPool(vulkan_device.vk_device, &pool_info, null, &self.descriptor_pool)) catch |err| {

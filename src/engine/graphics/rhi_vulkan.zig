@@ -3315,6 +3315,9 @@ fn destroyMainRenderPassAndPipelines(ctx: *VulkanContext) void {
 
 fn initContext(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device: ?*RenderDevice) anyerror!void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    // Ensure we cleanup everything on error
+    errdefer deinit(ctx_ptr);
+
     ctx.allocator = allocator;
     ctx.render_device = render_device;
 
