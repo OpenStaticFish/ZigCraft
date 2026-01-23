@@ -3345,7 +3345,13 @@ fn beginPostProcessPassInternal(ctx: *VulkanContext) void {
         ctx.post_process_pass_active = true;
 
         c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.post_process_pipeline);
-        c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.post_process_pipeline_layout, 0, 1, &ctx.post_process_descriptor_sets[ctx.frames.current_frame], 0, null);
+
+        const pp_ds = ctx.post_process_descriptor_sets[ctx.frames.current_frame];
+        if (pp_ds == null) {
+            std.log.err("Post-process descriptor set is null for frame {}", .{ctx.frames.current_frame});
+            return;
+        }
+        c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.post_process_pipeline_layout, 0, 1, &pp_ds, 0, null);
 
         var viewport = std.mem.zeroes(c.VkViewport);
         viewport.x = 0.0;

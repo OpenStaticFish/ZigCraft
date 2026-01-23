@@ -104,7 +104,9 @@ void main() {
     vec3 hdrColor = texture(uHDRBuffer, inUV).rgb;
     
     vec3 color;
-    if (global.lighting.z > 0.5) {
+    // Tone mapper selection: 0.0 (default) = AgX, 1.0 = AgX, 2.0 = ACES
+    // We use pbr_params.w as a spare field for this.
+    if (global.pbr_params.w < 1.5) {
         color = agxToneMap(hdrColor, global.pbr_params.y, global.pbr_params.z);
     } else {
         color = ACESFilm(hdrColor * global.pbr_params.y);
