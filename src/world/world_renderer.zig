@@ -117,7 +117,7 @@ pub const WorldRenderer = struct {
 
         const frustum = Frustum.fromViewProj(view_proj);
         const pc = worldToChunk(@intFromFloat(camera_pos.x), @intFromFloat(camera_pos.z));
-        const render_dist = if (lod_manager) |mgr| @min(render_distance, mgr.config.radii[0]) else render_distance;
+        const render_dist = if (lod_manager) |mgr| @min(render_distance, mgr.config.getRadii()[0]) else render_distance;
 
         var cz = pc.chunk_z - render_dist;
         while (cz <= pc.chunk_z + render_dist) : (cz += 1) {
@@ -170,7 +170,7 @@ pub const WorldRenderer = struct {
 
         const frustum = shadow_frustum;
         const pc = worldToChunk(@intFromFloat(camera_pos.x), @intFromFloat(camera_pos.z));
-        const render_dist = if (lod_manager) |mgr| @min(render_distance, mgr.config.radii[0]) else render_distance;
+        const render_dist = if (lod_manager) |mgr| @min(render_distance, mgr.config.getRadii()[0]) else render_distance;
 
         var cz = pc.chunk_z - render_dist;
         while (cz <= pc.chunk_z + render_dist) : (cz += 1) {

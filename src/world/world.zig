@@ -113,7 +113,7 @@ pub const World = struct {
         const world = try initGen(generator_index, allocator, render_distance, seed, rhi, atlas);
 
         // Initialize LOD manager with generator reference
-        world.lod_manager = try LODManager(RHI).init(allocator, lod_config, rhi, world.generator);
+        world.lod_manager = try LODManager.init(allocator, lod_config, rhi, world.generator);
         world.lod_enabled = true;
 
         const radii = lod_config.getRadii();
