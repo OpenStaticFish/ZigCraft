@@ -299,55 +299,98 @@ const VulkanContext = struct {
 
 fn destroyHDRResources(ctx: *VulkanContext) void {
     const vk = ctx.vulkan_device.vk_device;
-    if (ctx.hdr_view != null) c.vkDestroyImageView(vk, ctx.hdr_view, null);
-    if (ctx.hdr_image != null) c.vkDestroyImage(vk, ctx.hdr_image, null);
-    if (ctx.hdr_memory != null) c.vkFreeMemory(vk, ctx.hdr_memory, null);
-    if (ctx.hdr_msaa_view != null) c.vkDestroyImageView(vk, ctx.hdr_msaa_view, null);
-    if (ctx.hdr_msaa_image != null) c.vkDestroyImage(vk, ctx.hdr_msaa_image, null);
-    if (ctx.hdr_msaa_memory != null) c.vkFreeMemory(vk, ctx.hdr_msaa_memory, null);
-    ctx.hdr_view = null;
-    ctx.hdr_image = null;
-    ctx.hdr_memory = null;
-    ctx.hdr_msaa_view = null;
-    ctx.hdr_msaa_image = null;
-    ctx.hdr_msaa_memory = null;
+    if (ctx.hdr_view != null) {
+        c.vkDestroyImageView(vk, ctx.hdr_view, null);
+        ctx.hdr_view = null;
+    }
+    if (ctx.hdr_image != null) {
+        c.vkDestroyImage(vk, ctx.hdr_image, null);
+        ctx.hdr_image = null;
+    }
+    if (ctx.hdr_memory != null) {
+        c.vkFreeMemory(vk, ctx.hdr_memory, null);
+        ctx.hdr_memory = null;
+    }
+    if (ctx.hdr_msaa_view != null) {
+        c.vkDestroyImageView(vk, ctx.hdr_msaa_view, null);
+        ctx.hdr_msaa_view = null;
+    }
+    if (ctx.hdr_msaa_image != null) {
+        c.vkDestroyImage(vk, ctx.hdr_msaa_image, null);
+        ctx.hdr_msaa_image = null;
+    }
+    if (ctx.hdr_msaa_memory != null) {
+        c.vkFreeMemory(vk, ctx.hdr_msaa_memory, null);
+        ctx.hdr_msaa_memory = null;
+    }
 }
 
 fn destroyPostProcessResources(ctx: *VulkanContext) void {
     const vk = ctx.vulkan_device.vk_device;
-    if (ctx.post_process_sampler != null) c.vkDestroySampler(vk, ctx.post_process_sampler, null);
-    if (ctx.post_process_pipeline != null) c.vkDestroyPipeline(vk, ctx.post_process_pipeline, null);
-    if (ctx.post_process_pipeline_layout != null) c.vkDestroyPipelineLayout(vk, ctx.post_process_pipeline_layout, null);
-    if (ctx.post_process_descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(vk, ctx.post_process_descriptor_set_layout, null);
-    if (ctx.post_process_render_pass != null) c.vkDestroyRenderPass(vk, ctx.post_process_render_pass, null);
-    ctx.post_process_pipeline = null;
-    ctx.post_process_pipeline_layout = null;
-    ctx.post_process_descriptor_set_layout = null;
-    ctx.post_process_render_pass = null;
+    if (ctx.post_process_sampler != null) {
+        c.vkDestroySampler(vk, ctx.post_process_sampler, null);
+        ctx.post_process_sampler = null;
+    }
+    if (ctx.post_process_pipeline != null) {
+        c.vkDestroyPipeline(vk, ctx.post_process_pipeline, null);
+        ctx.post_process_pipeline = null;
+    }
+    if (ctx.post_process_pipeline_layout != null) {
+        c.vkDestroyPipelineLayout(vk, ctx.post_process_pipeline_layout, null);
+        ctx.post_process_pipeline_layout = null;
+    }
+    if (ctx.post_process_descriptor_set_layout != null) {
+        c.vkDestroyDescriptorSetLayout(vk, ctx.post_process_descriptor_set_layout, null);
+        ctx.post_process_descriptor_set_layout = null;
+    }
+    if (ctx.post_process_render_pass != null) {
+        c.vkDestroyRenderPass(vk, ctx.post_process_render_pass, null);
+        ctx.post_process_render_pass = null;
+    }
 }
 
 fn destroyGPassResources(ctx: *VulkanContext) void {
     const vk = ctx.vulkan_device.vk_device;
-    if (ctx.g_pipeline != null) c.vkDestroyPipeline(vk, ctx.g_pipeline, null);
-    if (ctx.g_pipeline_layout != null) c.vkDestroyPipelineLayout(vk, ctx.g_pipeline_layout, null);
-    if (ctx.g_framebuffer != null) c.vkDestroyFramebuffer(vk, ctx.g_framebuffer, null);
-    if (ctx.g_render_pass != null) c.vkDestroyRenderPass(vk, ctx.g_render_pass, null);
-    if (ctx.g_normal_view != null) c.vkDestroyImageView(vk, ctx.g_normal_view, null);
-    if (ctx.g_normal_image != null) c.vkDestroyImage(vk, ctx.g_normal_image, null);
-    if (ctx.g_normal_memory != null) c.vkFreeMemory(vk, ctx.g_normal_memory, null);
-    if (ctx.g_depth_view != null) c.vkDestroyImageView(vk, ctx.g_depth_view, null);
-    if (ctx.g_depth_image != null) c.vkDestroyImage(vk, ctx.g_depth_image, null);
-    if (ctx.g_depth_memory != null) c.vkFreeMemory(vk, ctx.g_depth_memory, null);
-    ctx.g_pipeline = null;
-    ctx.g_pipeline_layout = null;
-    ctx.g_framebuffer = null;
-    ctx.g_render_pass = null;
-    ctx.g_normal_view = null;
-    ctx.g_normal_image = null;
-    ctx.g_normal_memory = null;
-    ctx.g_depth_view = null;
-    ctx.g_depth_image = null;
-    ctx.g_depth_memory = null;
+    if (ctx.g_pipeline != null) {
+        c.vkDestroyPipeline(vk, ctx.g_pipeline, null);
+        ctx.g_pipeline = null;
+    }
+    if (ctx.g_pipeline_layout != null) {
+        c.vkDestroyPipelineLayout(vk, ctx.g_pipeline_layout, null);
+        ctx.g_pipeline_layout = null;
+    }
+    if (ctx.g_framebuffer != null) {
+        c.vkDestroyFramebuffer(vk, ctx.g_framebuffer, null);
+        ctx.g_framebuffer = null;
+    }
+    if (ctx.g_render_pass != null) {
+        c.vkDestroyRenderPass(vk, ctx.g_render_pass, null);
+        ctx.g_render_pass = null;
+    }
+    if (ctx.g_normal_view != null) {
+        c.vkDestroyImageView(vk, ctx.g_normal_view, null);
+        ctx.g_normal_view = null;
+    }
+    if (ctx.g_normal_image != null) {
+        c.vkDestroyImage(vk, ctx.g_normal_image, null);
+        ctx.g_normal_image = null;
+    }
+    if (ctx.g_normal_memory != null) {
+        c.vkFreeMemory(vk, ctx.g_normal_memory, null);
+        ctx.g_normal_memory = null;
+    }
+    if (ctx.g_depth_view != null) {
+        c.vkDestroyImageView(vk, ctx.g_depth_view, null);
+        ctx.g_depth_view = null;
+    }
+    if (ctx.g_depth_image != null) {
+        c.vkDestroyImage(vk, ctx.g_depth_image, null);
+        ctx.g_depth_image = null;
+    }
+    if (ctx.g_depth_memory != null) {
+        c.vkFreeMemory(vk, ctx.g_depth_memory, null);
+        ctx.g_depth_memory = null;
+    }
 }
 
 fn destroySSAOResources(ctx: *VulkanContext) void {
@@ -373,45 +416,78 @@ fn destroySSAOResources(ctx: *VulkanContext) void {
         }
     }
 
-    if (ctx.ssao_descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(vk, ctx.ssao_descriptor_set_layout, null);
-    if (ctx.ssao_blur_descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(vk, ctx.ssao_blur_descriptor_set_layout, null);
-    if (ctx.ssao_framebuffer != null) c.vkDestroyFramebuffer(vk, ctx.ssao_framebuffer, null);
-    if (ctx.ssao_blur_framebuffer != null) c.vkDestroyFramebuffer(vk, ctx.ssao_blur_framebuffer, null);
-    if (ctx.ssao_render_pass != null) c.vkDestroyRenderPass(vk, ctx.ssao_render_pass, null);
-    if (ctx.ssao_blur_render_pass != null) c.vkDestroyRenderPass(vk, ctx.ssao_blur_render_pass, null);
-    if (ctx.ssao_view != null) c.vkDestroyImageView(vk, ctx.ssao_view, null);
-    if (ctx.ssao_image != null) c.vkDestroyImage(vk, ctx.ssao_image, null);
-    if (ctx.ssao_memory != null) c.vkFreeMemory(vk, ctx.ssao_memory, null);
-    if (ctx.ssao_blur_view != null) c.vkDestroyImageView(vk, ctx.ssao_blur_view, null);
-    if (ctx.ssao_blur_image != null) c.vkDestroyImage(vk, ctx.ssao_blur_image, null);
-    if (ctx.ssao_blur_memory != null) c.vkFreeMemory(vk, ctx.ssao_blur_memory, null);
-    if (ctx.ssao_noise_view != null) c.vkDestroyImageView(vk, ctx.ssao_noise_view, null);
-    if (ctx.ssao_noise_image != null) c.vkDestroyImage(vk, ctx.ssao_noise_image, null);
-    if (ctx.ssao_noise_memory != null) c.vkFreeMemory(vk, ctx.ssao_noise_memory, null);
-    if (ctx.ssao_kernel_ubo.buffer != null) c.vkDestroyBuffer(vk, ctx.ssao_kernel_ubo.buffer, null);
-    if (ctx.ssao_kernel_ubo.memory != null) c.vkFreeMemory(vk, ctx.ssao_kernel_ubo.memory, null);
-    if (ctx.ssao_sampler != null) c.vkDestroySampler(vk, ctx.ssao_sampler, null);
-    ctx.ssao_pipeline = null;
-    ctx.ssao_blur_pipeline = null;
-    ctx.ssao_pipeline_layout = null;
-    ctx.ssao_blur_pipeline_layout = null;
-    ctx.ssao_descriptor_set_layout = null;
-    ctx.ssao_blur_descriptor_set_layout = null;
-    ctx.ssao_framebuffer = null;
-    ctx.ssao_blur_framebuffer = null;
-    ctx.ssao_render_pass = null;
-    ctx.ssao_blur_render_pass = null;
-    ctx.ssao_view = null;
-    ctx.ssao_image = null;
-    ctx.ssao_memory = null;
-    ctx.ssao_blur_view = null;
-    ctx.ssao_blur_image = null;
-    ctx.ssao_blur_memory = null;
-    ctx.ssao_noise_view = null;
-    ctx.ssao_noise_image = null;
-    ctx.ssao_noise_memory = null;
-    ctx.ssao_kernel_ubo = .{};
-    ctx.ssao_sampler = null;
+    if (ctx.ssao_descriptor_set_layout != null) {
+        c.vkDestroyDescriptorSetLayout(vk, ctx.ssao_descriptor_set_layout, null);
+        ctx.ssao_descriptor_set_layout = null;
+    }
+    if (ctx.ssao_blur_descriptor_set_layout != null) {
+        c.vkDestroyDescriptorSetLayout(vk, ctx.ssao_blur_descriptor_set_layout, null);
+        ctx.ssao_blur_descriptor_set_layout = null;
+    }
+    if (ctx.ssao_framebuffer != null) {
+        c.vkDestroyFramebuffer(vk, ctx.ssao_framebuffer, null);
+        ctx.ssao_framebuffer = null;
+    }
+    if (ctx.ssao_blur_framebuffer != null) {
+        c.vkDestroyFramebuffer(vk, ctx.ssao_blur_framebuffer, null);
+        ctx.ssao_blur_framebuffer = null;
+    }
+    if (ctx.ssao_render_pass != null) {
+        c.vkDestroyRenderPass(vk, ctx.ssao_render_pass, null);
+        ctx.ssao_render_pass = null;
+    }
+    if (ctx.ssao_blur_render_pass != null) {
+        c.vkDestroyRenderPass(vk, ctx.ssao_blur_render_pass, null);
+        ctx.ssao_blur_render_pass = null;
+    }
+    if (ctx.ssao_view != null) {
+        c.vkDestroyImageView(vk, ctx.ssao_view, null);
+        ctx.ssao_view = null;
+    }
+    if (ctx.ssao_image != null) {
+        c.vkDestroyImage(vk, ctx.ssao_image, null);
+        ctx.ssao_image = null;
+    }
+    if (ctx.ssao_memory != null) {
+        c.vkFreeMemory(vk, ctx.ssao_memory, null);
+        ctx.ssao_memory = null;
+    }
+    if (ctx.ssao_blur_view != null) {
+        c.vkDestroyImageView(vk, ctx.ssao_blur_view, null);
+        ctx.ssao_blur_view = null;
+    }
+    if (ctx.ssao_blur_image != null) {
+        c.vkDestroyImage(vk, ctx.ssao_blur_image, null);
+        ctx.ssao_blur_image = null;
+    }
+    if (ctx.ssao_blur_memory != null) {
+        c.vkFreeMemory(vk, ctx.ssao_blur_memory, null);
+        ctx.ssao_blur_memory = null;
+    }
+    if (ctx.ssao_noise_view != null) {
+        c.vkDestroyImageView(vk, ctx.ssao_noise_view, null);
+        ctx.ssao_noise_view = null;
+    }
+    if (ctx.ssao_noise_image != null) {
+        c.vkDestroyImage(vk, ctx.ssao_noise_image, null);
+        ctx.ssao_noise_image = null;
+    }
+    if (ctx.ssao_noise_memory != null) {
+        c.vkFreeMemory(vk, ctx.ssao_noise_memory, null);
+        ctx.ssao_noise_memory = null;
+    }
+    if (ctx.ssao_kernel_ubo.buffer != null) {
+        c.vkDestroyBuffer(vk, ctx.ssao_kernel_ubo.buffer, null);
+        ctx.ssao_kernel_ubo.buffer = null;
+    }
+    if (ctx.ssao_kernel_ubo.memory != null) {
+        c.vkFreeMemory(vk, ctx.ssao_kernel_ubo.memory, null);
+        ctx.ssao_kernel_ubo.memory = null;
+    }
+    if (ctx.ssao_sampler != null) {
+        c.vkDestroySampler(vk, ctx.ssao_sampler, null);
+        ctx.ssao_sampler = null;
+    }
 }
 
 fn createShaderModule(device: c.VkDevice, code: []const u8) !c.VkShaderModule {
@@ -653,6 +729,7 @@ fn createPostProcessResources(ctx: *VulkanContext) !void {
     sampler_info.mipmapMode = c.VK_SAMPLER_MIPMAP_MODE_LINEAR;
     var linear_sampler: c.VkSampler = null;
     try Utils.checkVk(c.vkCreateSampler(vk, &sampler_info, null, &linear_sampler));
+    errdefer c.vkDestroySampler(vk, linear_sampler, null);
 
     // 5. Pipeline
     const vert_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/post_process.vert.spv", ctx.allocator, @enumFromInt(1024 * 1024));
@@ -3238,6 +3315,19 @@ fn beginPostProcessPassInternal(ctx: *VulkanContext) void {
     const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
     if (!ctx.post_process_pass_active) {
         ensureNoRenderPassActiveInternal(ctx);
+
+        // Explicit image barrier for HDR buffer transition (Color Attachment -> Shader Read)
+        var hdr_barrier = std.mem.zeroes(c.VkImageMemoryBarrier);
+        hdr_barrier.sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        hdr_barrier.oldLayout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        hdr_barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        hdr_barrier.srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        hdr_barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+        hdr_barrier.srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+        hdr_barrier.dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+        hdr_barrier.image = ctx.hdr_image;
+        hdr_barrier.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
+        c.vkCmdPipelineBarrier(command_buffer, c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, 1, &hdr_barrier);
 
         var render_pass_info = std.mem.zeroes(c.VkRenderPassBeginInfo);
         render_pass_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
