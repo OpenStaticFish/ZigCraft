@@ -63,6 +63,7 @@ pub fn initPresets(allocator: std.mem.Allocator) !void {
         }
         // Duplicate name because parsed.deinit() will free strings
         p.name = try allocator.dupe(u8, preset.name);
+        errdefer allocator.free(p.name);
         try graphics_presets.append(allocator, p);
     }
     std.log.info("Loaded {} graphics presets", .{graphics_presets.items.len});
