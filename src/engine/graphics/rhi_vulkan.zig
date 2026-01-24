@@ -1824,15 +1824,148 @@ fn createGPassResources(ctx: *VulkanContext) !void {
         try Utils.checkVk(c.vkCreateRenderPass(ctx.vulkan_device.vk_device, &rp_info, null, &ctx.g_render_pass));
     }
 
-    // Transition images...
+    const vk = ctx.vulkan_device.vk_device;
+    const extent = ctx.swapchain.swapchain.extent;
+
+    // 2. Create normal image for G-Pass output
+    {
+        var img_info = std.mem.zeroes(c.VkImageCreateInfo);
+        img_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        img_info.imageType = c.VK_IMAGE_TYPE_2D;
+        img_info.extent = .{ .width = extent.width, .height = extent.height, .depth = 1 };
+        img_info.mipLevels = 1;
+        img_info.arrayLayers = 1;
+        img_info.format = normal_format;
+        img_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
+        img_info.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+        img_info.usage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT;
+        img_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
+        img_info.sharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
+
+        try Utils.checkVk(c.vkCreateImage(vk, &img_info, null, &ctx.g_normal_image));
+
+        var mem_reqs: c.VkMemoryRequirements = undefined;
+        c.vkGetImageMemoryRequirements(vk, ctx.g_normal_image, &mem_reqs);
+
+        var alloc_info = std.mem.zeroes(c.VkMemoryAllocateInfo);
+        alloc_info.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        alloc_info.allocationSize = mem_reqs.size;
+        alloc_info.memoryTypeIndex = try Utils.findMemoryType(ctx.vulkan_device.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+        try Utils.checkVk(c.vkAllocateMemory(vk, &alloc_info, null, &ctx.g_normal_memory));
+        try Utils.checkVk(c.vkBindImageMemory(vk, ctx.g_normal_image, ctx.g_normal_memory, 0));
+
+        var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
+        view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        view_info.image = ctx.g_normal_image;
+        view_info.viewType = c.VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = normal_format;
+        view_info.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
+
+        try Utils.checkVk(c.vkCreateImageView(vk, &view_info, null, &ctx.g_normal_view));
+    }
+
+    // 3. Create velocity image for motion vectors (Phase 3)
+    {
+        var img_info = std.mem.zeroes(c.VkImageCreateInfo);
+        img_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        img_info.imageType = c.VK_IMAGE_TYPE_2D;
+        img_info.extent = .{ .width = extent.width, .height = extent.height, .depth = 1 };
+        img_info.mipLevels = 1;
+        img_info.arrayLayers = 1;
+        img_info.format = velocity_format;
+        img_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
+        img_info.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+        img_info.usage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT;
+        img_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
+        img_info.sharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
+
+        try Utils.checkVk(c.vkCreateImage(vk, &img_info, null, &ctx.velocity_image));
+
+        var mem_reqs: c.VkMemoryRequirements = undefined;
+        c.vkGetImageMemoryRequirements(vk, ctx.velocity_image, &mem_reqs);
+
+        var alloc_info = std.mem.zeroes(c.VkMemoryAllocateInfo);
+        alloc_info.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        alloc_info.allocationSize = mem_reqs.size;
+        alloc_info.memoryTypeIndex = try Utils.findMemoryType(ctx.vulkan_device.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+        try Utils.checkVk(c.vkAllocateMemory(vk, &alloc_info, null, &ctx.velocity_memory));
+        try Utils.checkVk(c.vkBindImageMemory(vk, ctx.velocity_image, ctx.velocity_memory, 0));
+
+        var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
+        view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        view_info.image = ctx.velocity_image;
+        view_info.viewType = c.VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = velocity_format;
+        view_info.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
+
+        try Utils.checkVk(c.vkCreateImageView(vk, &view_info, null, &ctx.velocity_view));
+    }
+
+    // 4. Create G-Pass depth image (separate from MSAA depth, 1x sampled for SSAO)
+    {
+        var img_info = std.mem.zeroes(c.VkImageCreateInfo);
+        img_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        img_info.imageType = c.VK_IMAGE_TYPE_2D;
+        img_info.extent = .{ .width = extent.width, .height = extent.height, .depth = 1 };
+        img_info.mipLevels = 1;
+        img_info.arrayLayers = 1;
+        img_info.format = DEPTH_FORMAT;
+        img_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
+        img_info.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+        img_info.usage = c.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT;
+        img_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
+        img_info.sharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
+
+        try Utils.checkVk(c.vkCreateImage(vk, &img_info, null, &ctx.g_depth_image));
+
+        var mem_reqs: c.VkMemoryRequirements = undefined;
+        c.vkGetImageMemoryRequirements(vk, ctx.g_depth_image, &mem_reqs);
+
+        var alloc_info = std.mem.zeroes(c.VkMemoryAllocateInfo);
+        alloc_info.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        alloc_info.allocationSize = mem_reqs.size;
+        alloc_info.memoryTypeIndex = try Utils.findMemoryType(ctx.vulkan_device.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+        try Utils.checkVk(c.vkAllocateMemory(vk, &alloc_info, null, &ctx.g_depth_memory));
+        try Utils.checkVk(c.vkBindImageMemory(vk, ctx.g_depth_image, ctx.g_depth_memory, 0));
+
+        var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
+        view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        view_info.image = ctx.g_depth_image;
+        view_info.viewType = c.VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = DEPTH_FORMAT;
+        view_info.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
+
+        try Utils.checkVk(c.vkCreateImageView(vk, &view_info, null, &ctx.g_depth_view));
+    }
+
+    // 5. Create G-Pass framebuffer (3 attachments: normal, velocity, depth)
+    {
+        const fb_attachments = [_]c.VkImageView{ ctx.g_normal_view, ctx.velocity_view, ctx.g_depth_view };
+
+        var fb_info = std.mem.zeroes(c.VkFramebufferCreateInfo);
+        fb_info.sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        fb_info.renderPass = ctx.g_render_pass;
+        fb_info.attachmentCount = 3;
+        fb_info.pAttachments = &fb_attachments;
+        fb_info.width = extent.width;
+        fb_info.height = extent.height;
+        fb_info.layers = 1;
+
+        try Utils.checkVk(c.vkCreateFramebuffer(vk, &fb_info, null, &ctx.g_framebuffer));
+    }
+
+    // Transition images to shader read layout
     const g_images = [_]c.VkImage{ ctx.g_normal_image, ctx.velocity_image };
     try transitionImagesToShaderRead(ctx, &g_images, false);
     const d_images = [_]c.VkImage{ctx.g_depth_image};
     try transitionImagesToShaderRead(ctx, &d_images, true);
 
     // Store the extent we created resources with for mismatch detection
-    ctx.g_pass_extent = ctx.swapchain.swapchain.extent;
-    std.log.info("G-Pass resources created ({}x{}) with velocity buffer", .{ ctx.swapchain.swapchain.extent.width, ctx.swapchain.swapchain.extent.height });
+    ctx.g_pass_extent = extent;
+    std.log.info("G-Pass resources created ({}x{}) with velocity buffer", .{ extent.width, extent.height });
 }
 
 /// Creates SSAO resources: render pass, AO image, noise texture, kernel UBO, framebuffer, pipeline.
@@ -3744,7 +3877,7 @@ fn computeBloomInternal(ctx: *VulkanContext) void {
             .soft_threshold_or_intensity = 0.5, // soft knee
             .mip_level = @intCast(i),
         };
-        c.vkCmdPushConstants(command_buffer, ctx.bloom.pipeline_layout, c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(BloomPushConstants), &push);
+        c.vkCmdPushConstants(command_buffer, ctx.bloom.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(BloomPushConstants), &push);
 
         // Draw fullscreen triangle
         c.vkCmdDraw(command_buffer, 3, 1, 0, 0);
@@ -3801,7 +3934,7 @@ fn computeBloomInternal(ctx: *VulkanContext) void {
             .soft_threshold_or_intensity = ctx.bloom.intensity,
             .mip_level = 0,
         };
-        c.vkCmdPushConstants(command_buffer, ctx.bloom.pipeline_layout, c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(BloomPushConstants), &push);
+        c.vkCmdPushConstants(command_buffer, ctx.bloom.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(BloomPushConstants), &push);
 
         // Draw fullscreen triangle
         c.vkCmdDraw(command_buffer, 3, 1, 0, 0);
