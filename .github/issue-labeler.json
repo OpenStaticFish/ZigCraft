@@ -7,6 +7,10 @@
     { "title": ["feature", "enhancement", "improve", "optimize", "refactor"] },
     { "body": ["feature", "enhancement", "improve", "optimize", "refactor"] }
   ],
+  "hotfix": [
+    { "title": ["crash", "critical", "emergency", "urgent", "regression", "data loss", "corruption"] },
+    { "body": ["crash", "critical", "emergency", "urgent", "regression", "data loss", "corruption"] }
+  ],
   "documentation": [
     { "title": ["doc", "readme", "wiki"] },
     { "body": ["doc", "readme", "wiki"] }
