@@ -1525,6 +1525,30 @@ fn createShadowResources(ctx: *VulkanContext) !void {
         try Utils.checkVk(c.vkCreateFramebuffer(vk, &fb_info, null, &ctx.shadow_system.shadow_framebuffers[si]));
         ctx.shadow_system.shadow_image_layouts[si] = c.VK_IMAGE_LAYOUT_UNDEFINED;
     }
+
+    // Shadow Sampler (comparison sampler for PCF shadow mapping)
+    {
+        var sampler_info = std.mem.zeroes(c.VkSamplerCreateInfo);
+        sampler_info.sType = c.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        sampler_info.magFilter = c.VK_FILTER_LINEAR;
+        sampler_info.minFilter = c.VK_FILTER_LINEAR;
+        sampler_info.addressModeU = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        sampler_info.addressModeV = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        sampler_info.addressModeW = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        sampler_info.anisotropyEnable = c.VK_FALSE;
+        sampler_info.maxAnisotropy = 1.0;
+        sampler_info.borderColor = c.VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+        sampler_info.compareEnable = c.VK_TRUE;
+        sampler_info.compareOp = c.VK_COMPARE_OP_GREATER_OR_EQUAL;
+
+        try Utils.checkVk(c.vkCreateSampler(vk, &sampler_info, null, &ctx.shadow_system.shadow_sampler));
+
+        // Regular sampler (no comparison) for debug visualization
+        var regular_sampler_info = sampler_info;
+        regular_sampler_info.compareEnable = c.VK_FALSE;
+        regular_sampler_info.compareOp = c.VK_COMPARE_OP_ALWAYS;
+        try Utils.checkVk(c.vkCreateSampler(vk, &regular_sampler_info, null, &ctx.shadow_system.shadow_sampler_regular));
+    }
 }
 
 /// Updates post-process descriptor sets to include bloom texture (called after bloom resources are created)
