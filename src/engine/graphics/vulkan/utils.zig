@@ -122,3 +122,14 @@ pub fn createSampler(device: *const VulkanDevice, config: rhi.TextureConfig, mip
     try checkVk(c.vkCreateSampler(device.vk_device, &sampler_info, null, &sampler));
     return sampler;
 }
+
+pub fn createShaderModule(device: c.VkDevice, code: []const u8) !c.VkShaderModule {
+    var create_info = std.mem.zeroes(c.VkShaderModuleCreateInfo);
+    create_info.sType = c.VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    create_info.codeSize = code.len;
+    create_info.pCode = @ptrCast(@alignCast(code.ptr));
+
+    var shader_module: c.VkShaderModule = null;
+    try checkVk(c.vkCreateShaderModule(device, &create_info, null, &shader_module));
+    return shader_module;
+}

@@ -560,55 +560,24 @@ fn destroyVelocityResources(ctx: *VulkanContext) void {
     }
 }
 
-fn createShaderModule(device: c.VkDevice, code: []const u8) !c.VkShaderModule {
-    var create_info = std.mem.zeroes(c.VkShaderModuleCreateInfo);
-    create_info.sType = c.VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    create_info.codeSize = code.len;
-    create_info.pCode = @ptrCast(@alignCast(code.ptr));
-
-    var shader_module: c.VkShaderModule = null;
-    try Utils.checkVk(c.vkCreateShaderModule(device, &create_info, null, &shader_module));
-    return shader_module;
-}
-
-/// Finds memory type index matching filter and properties (e.g., HOST_VISIBLE).
-fn findMemoryType(physical_device: c.VkPhysicalDevice, type_filter: u32, properties: c.VkMemoryPropertyFlags) !u32 {
-    var mem_properties: c.VkPhysicalDeviceMemoryProperties = undefined;
-    c.vkGetPhysicalDeviceMemoryProperties(physical_device, &mem_properties);
-
-    var i: u32 = 0;
-    while (i < mem_properties.memoryTypeCount) : (i += 1) {
-        if ((type_filter & (@as(u32, 1) << @intCast(i))) != 0 and
-            (mem_properties.memoryTypes[i].propertyFlags & properties) == properties)
-        {
-            return i;
-        }
-    }
-    return error.NoMatchingMemoryType;
-}
-
 /// Transitions an array of images to SHADER_READ_ONLY_OPTIMAL layout.
 fn transitionImagesToShaderRead(ctx: *VulkanContext, images: []const c.VkImage, is_depth: bool) !void {
-    if (images.len == 0) return;
-
-    var cmd_info = std.mem.zeroes(c.VkCommandBufferAllocateInfo);
-    cmd_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    cmd_info.commandPool = ctx.frames.command_pool;
-    cmd_info.level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cmd_info.commandBufferCount = 1;
+    const aspect_mask: c.VkImageAspectFlags = if (is_depth) c.VK_IMAGE_ASPECT_DEPTH_BIT else c.VK_IMAGE_ASPECT_COLOR_BIT;
+    var alloc_info = std.mem.zeroes(c.VkCommandBufferAllocateInfo);
+    alloc_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    alloc_info.level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    alloc_info.commandPool = ctx.frames.command_pool;
+    alloc_info.commandBufferCount = 1;
 
     var cmd: c.VkCommandBuffer = null;
-    try Utils.checkVk(c.vkAllocateCommandBuffers(ctx.vulkan_device.vk_device, &cmd_info, &cmd));
-
+    try Utils.checkVk(c.vkAllocateCommandBuffers(ctx.vulkan_device.vk_device, &alloc_info, &cmd));
     var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
     begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin_info.flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     try Utils.checkVk(c.vkBeginCommandBuffer(cmd, &begin_info));
 
-    const count = @min(images.len, 4);
-    const aspect_mask: c.VkImageAspectFlags = if (is_depth) c.VK_IMAGE_ASPECT_DEPTH_BIT else c.VK_IMAGE_ASPECT_COLOR_BIT;
-
-    var barriers: [4]c.VkImageMemoryBarrier = undefined;
+    const count = images.len;
+    var barriers: [16]c.VkImageMemoryBarrier = undefined;
     for (0..count) |i| {
         barriers[i] = std.mem.zeroes(c.VkImageMemoryBarrier);
         barriers[i].sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -735,7 +704,7 @@ fn createPostProcessResources(ctx: *VulkanContext) !void {
 
     // 1. Render Pass
     var color_attachment = std.mem.zeroes(c.VkAttachmentDescription);
-    color_attachment.format = ctx.swapchain.swapchain.image_format;
+    color_attachment.format = ctx.swapchain.getImageFormat();
     color_attachment.samples = c.VK_SAMPLE_COUNT_1_BIT;
     color_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR;
     color_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_STORE;
@@ -814,9 +783,9 @@ fn createPostProcessResources(ctx: *VulkanContext) !void {
     defer ctx.allocator.free(vert_code);
     const frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/post_process.frag.spv", ctx.allocator, @enumFromInt(1024 * 1024));
     defer ctx.allocator.free(frag_code);
-    const vert_module = try createShaderModule(vk, vert_code);
+    const vert_module = try Utils.createShaderModule(vk, vert_code);
     defer c.vkDestroyShaderModule(vk, vert_module, null);
-    const frag_module = try createShaderModule(vk, frag_code);
+    const frag_module = try Utils.createShaderModule(vk, frag_code);
     defer c.vkDestroyShaderModule(vk, frag_module, null);
 
     var stages = [_]c.VkPipelineShaderStageCreateInfo{
@@ -915,14 +884,14 @@ fn createPostProcessResources(ctx: *VulkanContext) !void {
     }
 
     // 7. Create post-process framebuffers (one per swapchain image)
-    for (ctx.swapchain.swapchain.image_views.items) |iv| {
+    for (ctx.swapchain.getImageViews()) |iv| {
         var fb_info = std.mem.zeroes(c.VkFramebufferCreateInfo);
         fb_info.sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         fb_info.renderPass = ctx.post_process_render_pass;
         fb_info.attachmentCount = 1;
         fb_info.pAttachments = &iv;
-        fb_info.width = ctx.swapchain.swapchain.extent.width;
-        fb_info.height = ctx.swapchain.swapchain.extent.height;
+        fb_info.width = ctx.swapchain.getExtent().width;
+        fb_info.height = ctx.swapchain.getExtent().height;
         fb_info.layers = 1;
 
         var fb: c.VkFramebuffer = null;
@@ -932,508 +901,6 @@ fn createPostProcessResources(ctx: *VulkanContext) !void {
 
     // Clean up local sampler if not stored in context (but we should probably store it to destroy it later)
     ctx.post_process_sampler = linear_sampler;
-}
-
-/// Creates FXAA anti-aliasing resources including intermediate texture, render pass, pipeline and descriptor sets.
-fn createFXAAResources(ctx: *VulkanContext) !void {
-    ctx.fxaa.deinit(ctx.vulkan_device.vk_device, ctx.allocator, ctx.descriptors.descriptor_pool);
-    const vk = ctx.vulkan_device.vk_device;
-    const extent = ctx.swapchain.swapchain.extent;
-    const swapchain_format = ctx.swapchain.swapchain.image_format;
-
-    errdefer ctx.fxaa.deinit(vk, ctx.allocator, ctx.descriptors.descriptor_pool);
-
-    // 1. Create intermediate LDR texture for FXAA input
-    var image_info = std.mem.zeroes(c.VkImageCreateInfo);
-    image_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    image_info.imageType = c.VK_IMAGE_TYPE_2D;
-    image_info.format = swapchain_format;
-    image_info.extent = .{ .width = extent.width, .height = extent.height, .depth = 1 };
-    image_info.mipLevels = 1;
-    image_info.arrayLayers = 1;
-    image_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
-    image_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
-    image_info.usage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT;
-    image_info.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
-
-    try Utils.checkVk(c.vkCreateImage(vk, &image_info, null, &ctx.fxaa.input_image));
-
-    var mem_reqs: c.VkMemoryRequirements = undefined;
-    c.vkGetImageMemoryRequirements(vk, ctx.fxaa.input_image, &mem_reqs);
-
-    var alloc_info = std.mem.zeroes(c.VkMemoryAllocateInfo);
-    alloc_info.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    alloc_info.allocationSize = mem_reqs.size;
-    alloc_info.memoryTypeIndex = try findMemoryType(ctx.vulkan_device.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-    try Utils.checkVk(c.vkAllocateMemory(vk, &alloc_info, null, &ctx.fxaa.input_memory));
-    try Utils.checkVk(c.vkBindImageMemory(vk, ctx.fxaa.input_image, ctx.fxaa.input_memory, 0));
-
-    // Create image view
-    var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
-    view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-    view_info.image = ctx.fxaa.input_image;
-    view_info.viewType = c.VK_IMAGE_VIEW_TYPE_2D;
-    view_info.format = swapchain_format;
-    view_info.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
-
-    try Utils.checkVk(c.vkCreateImageView(vk, &view_info, null, &ctx.fxaa.input_view));
-
-    // 2. Render Pass
-    var color_attachment = std.mem.zeroes(c.VkAttachmentDescription);
-    color_attachment.format = swapchain_format;
-    color_attachment.samples = c.VK_SAMPLE_COUNT_1_BIT;
-    color_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    color_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_STORE;
-    color_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
-    color_attachment.finalLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-    var color_ref = c.VkAttachmentReference{ .attachment = 0, .layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
-    var subpass = std.mem.zeroes(c.VkSubpassDescription);
-    subpass.pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &color_ref;
-
-    var dependency = std.mem.zeroes(c.VkSubpassDependency);
-    dependency.srcSubpass = c.VK_SUBPASS_EXTERNAL;
-    dependency.dstSubpass = 0;
-    dependency.srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency.dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency.dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-
-    var rp_info = std.mem.zeroes(c.VkRenderPassCreateInfo);
-    rp_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    rp_info.attachmentCount = 1;
-    rp_info.pAttachments = &color_attachment;
-    rp_info.subpassCount = 1;
-    rp_info.pSubpasses = &subpass;
-    rp_info.dependencyCount = 1;
-    rp_info.pDependencies = &dependency;
-
-    try Utils.checkVk(c.vkCreateRenderPass(vk, &rp_info, null, &ctx.fxaa.render_pass));
-
-    // 2.5. Post-process to FXAA pass
-    {
-        var pp_to_fxaa_attachment = color_attachment;
-        pp_to_fxaa_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR;
-        pp_to_fxaa_attachment.finalLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-        var pp_rp_info = rp_info;
-        pp_rp_info.pAttachments = &pp_to_fxaa_attachment;
-
-        try Utils.checkVk(c.vkCreateRenderPass(vk, &pp_rp_info, null, &ctx.fxaa.post_process_to_fxaa_render_pass));
-
-        var fb_info = std.mem.zeroes(c.VkFramebufferCreateInfo);
-        fb_info.sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        fb_info.renderPass = ctx.fxaa.post_process_to_fxaa_render_pass;
-        fb_info.attachmentCount = 1;
-        fb_info.pAttachments = &ctx.fxaa.input_view;
-        fb_info.width = extent.width;
-        fb_info.height = extent.height;
-        fb_info.layers = 1;
-
-        try Utils.checkVk(c.vkCreateFramebuffer(vk, &fb_info, null, &ctx.fxaa.post_process_to_fxaa_framebuffer));
-    }
-
-    // 3. Descriptor Set Layout
-    var binding = std.mem.zeroes(c.VkDescriptorSetLayoutBinding);
-    binding.binding = 0;
-    binding.descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    binding.descriptorCount = 1;
-    binding.stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT;
-
-    var layout_info = std.mem.zeroes(c.VkDescriptorSetLayoutCreateInfo);
-    layout_info.sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout_info.bindingCount = 1;
-    layout_info.pBindings = &binding;
-
-    try Utils.checkVk(c.vkCreateDescriptorSetLayout(vk, &layout_info, null, &ctx.fxaa.descriptor_set_layout));
-
-    // 4. Pipeline Layout
-    var push_constant_range = std.mem.zeroes(c.VkPushConstantRange);
-    push_constant_range.stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT;
-    push_constant_range.offset = 0;
-    push_constant_range.size = @sizeOf(FXAAPushConstants);
-
-    var pipe_layout_info = std.mem.zeroes(c.VkPipelineLayoutCreateInfo);
-    pipe_layout_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipe_layout_info.setLayoutCount = 1;
-    pipe_layout_info.pSetLayouts = &ctx.fxaa.descriptor_set_layout;
-    pipe_layout_info.pushConstantRangeCount = 1;
-    pipe_layout_info.pPushConstantRanges = &push_constant_range;
-
-    try Utils.checkVk(c.vkCreatePipelineLayout(vk, &pipe_layout_info, null, &ctx.fxaa.pipeline_layout));
-
-    // 5. Shaders & Pipeline
-    const vert_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/fxaa.vert.spv", ctx.allocator, @enumFromInt(1024 * 1024));
-    defer ctx.allocator.free(vert_code);
-    const frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/fxaa.frag.spv", ctx.allocator, @enumFromInt(1024 * 1024));
-    defer ctx.allocator.free(frag_code);
-    const vert_module = try createShaderModule(vk, vert_code);
-    defer c.vkDestroyShaderModule(vk, vert_module, null);
-    const frag_module = try createShaderModule(vk, frag_code);
-    defer c.vkDestroyShaderModule(vk, frag_module, null);
-
-    var stages = [_]c.VkPipelineShaderStageCreateInfo{
-        .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main" },
-        .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_module, .pName = "main" },
-    };
-
-    var vi_info = std.mem.zeroes(c.VkPipelineVertexInputStateCreateInfo);
-    vi_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    var ia_info = std.mem.zeroes(c.VkPipelineInputAssemblyStateCreateInfo);
-    ia_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    ia_info.topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    var vp_info = std.mem.zeroes(c.VkPipelineViewportStateCreateInfo);
-    vp_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-    vp_info.viewportCount = 1;
-    vp_info.scissorCount = 1;
-    var rs_info = std.mem.zeroes(c.VkPipelineRasterizationStateCreateInfo);
-    rs_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-    rs_info.lineWidth = 1.0;
-    rs_info.frontFace = c.VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    var ms_info = std.mem.zeroes(c.VkPipelineMultisampleStateCreateInfo);
-    ms_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    ms_info.rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT;
-    var cb_attach = std.mem.zeroes(c.VkPipelineColorBlendAttachmentState);
-    cb_attach.colorWriteMask = c.VK_COLOR_COMPONENT_R_BIT | c.VK_COLOR_COMPONENT_G_BIT | c.VK_COLOR_COMPONENT_B_BIT | c.VK_COLOR_COMPONENT_A_BIT;
-    var cb_info = std.mem.zeroes(c.VkPipelineColorBlendStateCreateInfo);
-    cb_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    cb_info.attachmentCount = 1;
-    cb_info.pAttachments = &cb_attach;
-    var dyn_states = [_]c.VkDynamicState{ c.VK_DYNAMIC_STATE_VIEWPORT, c.VK_DYNAMIC_STATE_SCISSOR };
-    var dyn_info = std.mem.zeroes(c.VkPipelineDynamicStateCreateInfo);
-    dyn_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    dyn_info.dynamicStateCount = 2;
-    dyn_info.pDynamicStates = &dyn_states[0];
-
-    var pipe_info = std.mem.zeroes(c.VkGraphicsPipelineCreateInfo);
-    pipe_info.sType = c.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    pipe_info.stageCount = 2;
-    pipe_info.pStages = &stages[0];
-    pipe_info.pVertexInputState = &vi_info;
-    pipe_info.pInputAssemblyState = &ia_info;
-    pipe_info.pViewportState = &vp_info;
-    pipe_info.pRasterizationState = &rs_info;
-    pipe_info.pMultisampleState = &ms_info;
-    pipe_info.pColorBlendState = &cb_info;
-    pipe_info.pDynamicState = &dyn_info;
-    pipe_info.layout = ctx.fxaa.pipeline_layout;
-    pipe_info.renderPass = ctx.fxaa.render_pass;
-
-    try Utils.checkVk(c.vkCreateGraphicsPipelines(vk, null, 1, &pipe_info, null, &ctx.fxaa.pipeline));
-
-    // 6. Descriptor Sets
-    for (0..MAX_FRAMES_IN_FLIGHT) |i| {
-        var alloc_ds_info = std.mem.zeroes(c.VkDescriptorSetAllocateInfo);
-        alloc_ds_info.sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        alloc_ds_info.descriptorPool = ctx.descriptors.descriptor_pool;
-        alloc_ds_info.descriptorSetCount = 1;
-        alloc_ds_info.pSetLayouts = &ctx.fxaa.descriptor_set_layout;
-        try Utils.checkVk(c.vkAllocateDescriptorSets(vk, &alloc_ds_info, &ctx.fxaa.descriptor_sets[i]));
-
-        var image_info_ds = std.mem.zeroes(c.VkDescriptorImageInfo);
-        image_info_ds.imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        image_info_ds.imageView = ctx.fxaa.input_view;
-        image_info_ds.sampler = ctx.post_process_sampler;
-
-        var write = std.mem.zeroes(c.VkWriteDescriptorSet);
-        write.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = ctx.fxaa.descriptor_sets[i];
-        write.dstBinding = 0;
-        write.descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        write.descriptorCount = 1;
-        write.pImageInfo = &image_info_ds;
-
-        c.vkUpdateDescriptorSets(vk, 1, &write, 0, null);
-    }
-
-    // 7. Framebuffers
-    for (ctx.swapchain.swapchain.image_views.items) |iv| {
-        var fb_info = std.mem.zeroes(c.VkFramebufferCreateInfo);
-        fb_info.sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        fb_info.renderPass = ctx.fxaa.render_pass;
-        fb_info.attachmentCount = 1;
-        fb_info.pAttachments = &iv;
-        fb_info.width = extent.width;
-        fb_info.height = extent.height;
-        fb_info.layers = 1;
-
-        var fb: c.VkFramebuffer = null;
-        try Utils.checkVk(c.vkCreateFramebuffer(vk, &fb_info, null, &fb));
-        try ctx.fxaa.framebuffers.append(ctx.allocator, fb);
-    }
-}
-
-fn createBloomResources(ctx: *VulkanContext) !void {
-    ctx.bloom.deinit(ctx.vulkan_device.vk_device, ctx.allocator, ctx.descriptors.descriptor_pool);
-    const vk = ctx.vulkan_device.vk_device;
-    const extent = ctx.swapchain.swapchain.extent;
-    const bloom_format = c.VK_FORMAT_R16G16B16A16_SFLOAT;
-
-    errdefer ctx.bloom.deinit(vk, ctx.allocator, ctx.descriptors.descriptor_pool);
-
-    // Calculate mip dimensions
-    var mip_width: u32 = extent.width / 2;
-    var mip_height: u32 = extent.height / 2;
-    for (0..BLOOM_MIP_COUNT) |i| {
-        ctx.bloom.mip_widths[i] = @max(mip_width, 1);
-        ctx.bloom.mip_heights[i] = @max(mip_height, 1);
-        mip_width /= 2;
-        mip_height /= 2;
-    }
-
-    // 1. Render Pass
-    var color_attachment = std.mem.zeroes(c.VkAttachmentDescription);
-    color_attachment.format = bloom_format;
-    color_attachment.samples = c.VK_SAMPLE_COUNT_1_BIT;
-    color_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    color_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_STORE;
-    color_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
-    color_attachment.finalLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-    var color_ref = c.VkAttachmentReference{ .attachment = 0, .layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
-    var subpass = std.mem.zeroes(c.VkSubpassDescription);
-    subpass.pipelineBindPoint = c.VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpass.colorAttachmentCount = 1;
-    subpass.pColorAttachments = &color_ref;
-
-    var dependency = std.mem.zeroes(c.VkSubpassDependency);
-    dependency.srcSubpass = c.VK_SUBPASS_EXTERNAL;
-    dependency.dstSubpass = 0;
-    dependency.srcStageMask = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dependency.srcAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
-    dependency.dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency.dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-
-    var rp_info = std.mem.zeroes(c.VkRenderPassCreateInfo);
-    rp_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    rp_info.attachmentCount = 1;
-    rp_info.pAttachments = &color_attachment;
-    rp_info.subpassCount = 1;
-    rp_info.pSubpasses = &subpass;
-    rp_info.dependencyCount = 1;
-    rp_info.pDependencies = &dependency;
-
-    try Utils.checkVk(c.vkCreateRenderPass(vk, &rp_info, null, &ctx.bloom.render_pass));
-
-    // 2. Sampler
-    var sampler_info = std.mem.zeroes(c.VkSamplerCreateInfo);
-    sampler_info.sType = c.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    sampler_info.magFilter = c.VK_FILTER_LINEAR;
-    sampler_info.minFilter = c.VK_FILTER_LINEAR;
-    sampler_info.addressModeU = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sampler_info.addressModeV = c.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    sampler_info.mipmapMode = c.VK_SAMPLER_MIPMAP_MODE_LINEAR;
-
-    try Utils.checkVk(c.vkCreateSampler(vk, &sampler_info, null, &ctx.bloom.sampler));
-
-    // 3. Mips
-    for (0..BLOOM_MIP_COUNT) |i| {
-        var image_info = std.mem.zeroes(c.VkImageCreateInfo);
-        image_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        image_info.imageType = c.VK_IMAGE_TYPE_2D;
-        image_info.format = bloom_format;
-        image_info.extent = .{ .width = ctx.bloom.mip_widths[i], .height = ctx.bloom.mip_heights[i], .depth = 1 };
-        image_info.mipLevels = 1;
-        image_info.arrayLayers = 1;
-        image_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
-        image_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
-        image_info.usage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT;
-        image_info.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
-
-        try Utils.checkVk(c.vkCreateImage(vk, &image_info, null, &ctx.bloom.mip_images[i]));
-
-        var mem_reqs: c.VkMemoryRequirements = undefined;
-        c.vkGetImageMemoryRequirements(vk, ctx.bloom.mip_images[i], &mem_reqs);
-        var alloc_info = std.mem.zeroes(c.VkMemoryAllocateInfo);
-        alloc_info.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        alloc_info.allocationSize = mem_reqs.size;
-        alloc_info.memoryTypeIndex = try findMemoryType(ctx.vulkan_device.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-
-        try Utils.checkVk(c.vkAllocateMemory(vk, &alloc_info, null, &ctx.bloom.mip_memories[i]));
-        try Utils.checkVk(c.vkBindImageMemory(vk, ctx.bloom.mip_images[i], ctx.bloom.mip_memories[i], 0));
-
-        var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
-        view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        view_info.image = ctx.bloom.mip_images[i];
-        view_info.viewType = c.VK_IMAGE_VIEW_TYPE_2D;
-        view_info.format = bloom_format;
-        view_info.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
-        try Utils.checkVk(c.vkCreateImageView(vk, &view_info, null, &ctx.bloom.mip_views[i]));
-
-        var fb_info = std.mem.zeroes(c.VkFramebufferCreateInfo);
-        fb_info.sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        fb_info.renderPass = ctx.bloom.render_pass;
-        fb_info.attachmentCount = 1;
-        fb_info.pAttachments = &ctx.bloom.mip_views[i];
-        fb_info.width = ctx.bloom.mip_widths[i];
-        fb_info.height = ctx.bloom.mip_heights[i];
-        fb_info.layers = 1;
-        try Utils.checkVk(c.vkCreateFramebuffer(vk, &fb_info, null, &ctx.bloom.mip_framebuffers[i]));
-    }
-
-    // 4. Descriptor Layout
-    var dsl_bindings = [_]c.VkDescriptorSetLayoutBinding{
-        .{ .binding = 0, .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT },
-        .{ .binding = 1, .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_FRAGMENT_BIT },
-    };
-    var layout_info = std.mem.zeroes(c.VkDescriptorSetLayoutCreateInfo);
-    layout_info.sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout_info.bindingCount = 2;
-    layout_info.pBindings = &dsl_bindings[0];
-    try Utils.checkVk(c.vkCreateDescriptorSetLayout(vk, &layout_info, null, &ctx.bloom.descriptor_set_layout));
-
-    // 5. Pipeline Layout
-    var push_constant_range = std.mem.zeroes(c.VkPushConstantRange);
-    push_constant_range.stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT;
-    push_constant_range.offset = 0;
-    push_constant_range.size = @sizeOf(BloomPushConstants);
-
-    var pipe_layout_info = std.mem.zeroes(c.VkPipelineLayoutCreateInfo);
-    pipe_layout_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipe_layout_info.setLayoutCount = 1;
-    pipe_layout_info.pSetLayouts = &ctx.bloom.descriptor_set_layout;
-    pipe_layout_info.pushConstantRangeCount = 1;
-    pipe_layout_info.pPushConstantRanges = &push_constant_range;
-    try Utils.checkVk(c.vkCreatePipelineLayout(vk, &pipe_layout_info, null, &ctx.bloom.pipeline_layout));
-
-    // 6. Pipelines
-    const vert_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/bloom_downsample.vert.spv", ctx.allocator, @enumFromInt(1024 * 1024));
-    defer ctx.allocator.free(vert_code);
-    const down_frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/bloom_downsample.frag.spv", ctx.allocator, @enumFromInt(1024 * 1024));
-    defer ctx.allocator.free(down_frag_code);
-    const up_frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/bloom_upsample.frag.spv", ctx.allocator, @enumFromInt(1024 * 1024));
-    defer ctx.allocator.free(up_frag_code);
-
-    const vert_module = try createShaderModule(vk, vert_code);
-    defer c.vkDestroyShaderModule(vk, vert_module, null);
-    const down_frag_module = try createShaderModule(vk, down_frag_code);
-    defer c.vkDestroyShaderModule(vk, down_frag_module, null);
-    const up_frag_module = try createShaderModule(vk, up_frag_code);
-    defer c.vkDestroyShaderModule(vk, up_frag_module, null);
-
-    var vi_info = std.mem.zeroes(c.VkPipelineVertexInputStateCreateInfo);
-    vi_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    var ia_info = std.mem.zeroes(c.VkPipelineInputAssemblyStateCreateInfo);
-    ia_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    ia_info.topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    var vp_info = std.mem.zeroes(c.VkPipelineViewportStateCreateInfo);
-    vp_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-    vp_info.viewportCount = 1;
-    vp_info.scissorCount = 1;
-    var rs_info = std.mem.zeroes(c.VkPipelineRasterizationStateCreateInfo);
-    rs_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-    rs_info.lineWidth = 1.0;
-    rs_info.frontFace = c.VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    var ms_info = std.mem.zeroes(c.VkPipelineMultisampleStateCreateInfo);
-    ms_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    ms_info.rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT;
-    var cb_attach = std.mem.zeroes(c.VkPipelineColorBlendAttachmentState);
-    cb_attach.colorWriteMask = c.VK_COLOR_COMPONENT_R_BIT | c.VK_COLOR_COMPONENT_G_BIT | c.VK_COLOR_COMPONENT_B_BIT | c.VK_COLOR_COMPONENT_A_BIT;
-    var cb_info = std.mem.zeroes(c.VkPipelineColorBlendStateCreateInfo);
-    cb_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    cb_info.attachmentCount = 1;
-    cb_info.pAttachments = &cb_attach;
-    var dyn_states = [_]c.VkDynamicState{ c.VK_DYNAMIC_STATE_VIEWPORT, c.VK_DYNAMIC_STATE_SCISSOR };
-    var dyn_info = std.mem.zeroes(c.VkPipelineDynamicStateCreateInfo);
-    dyn_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    dyn_info.dynamicStateCount = 2;
-    dyn_info.pDynamicStates = &dyn_states[0];
-
-    var pipe_info = std.mem.zeroes(c.VkGraphicsPipelineCreateInfo);
-    pipe_info.sType = c.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    pipe_info.stageCount = 2;
-    pipe_info.pVertexInputState = &vi_info;
-    pipe_info.pInputAssemblyState = &ia_info;
-    pipe_info.pViewportState = &vp_info;
-    pipe_info.pRasterizationState = &rs_info;
-    pipe_info.pMultisampleState = &ms_info;
-    pipe_info.pColorBlendState = &cb_info;
-    pipe_info.pDynamicState = &dyn_info;
-    pipe_info.layout = ctx.bloom.pipeline_layout;
-    pipe_info.renderPass = ctx.bloom.render_pass;
-
-    var down_stages = [_]c.VkPipelineShaderStageCreateInfo{
-        .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main" },
-        .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = down_frag_module, .pName = "main" },
-    };
-    pipe_info.pStages = &down_stages[0];
-    try Utils.checkVk(c.vkCreateGraphicsPipelines(vk, null, 1, &pipe_info, null, &ctx.bloom.downsample_pipeline));
-
-    cb_attach.blendEnable = c.VK_TRUE;
-    cb_attach.srcColorBlendFactor = c.VK_BLEND_FACTOR_ONE;
-    cb_attach.dstColorBlendFactor = c.VK_BLEND_FACTOR_ONE;
-    cb_attach.colorBlendOp = c.VK_BLEND_OP_ADD;
-    cb_attach.srcAlphaBlendFactor = c.VK_BLEND_FACTOR_ONE;
-    cb_attach.dstAlphaBlendFactor = c.VK_BLEND_FACTOR_ONE;
-    cb_attach.alphaBlendOp = c.VK_BLEND_OP_ADD;
-
-    const up_vert_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/bloom_upsample.vert.spv", ctx.allocator, @enumFromInt(1024 * 1024));
-    defer ctx.allocator.free(up_vert_code);
-    const up_vert_module = try createShaderModule(vk, up_vert_code);
-    defer c.vkDestroyShaderModule(vk, up_vert_module, null);
-
-    var up_stages = [_]c.VkPipelineShaderStageCreateInfo{
-        .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = up_vert_module, .pName = "main" },
-        .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = up_frag_module, .pName = "main" },
-    };
-    pipe_info.pStages = &up_stages[0];
-    try Utils.checkVk(c.vkCreateGraphicsPipelines(vk, null, 1, &pipe_info, null, &ctx.bloom.upsample_pipeline));
-
-    // 7. Descriptor Sets
-    for (0..MAX_FRAMES_IN_FLIGHT) |frame| {
-        for (0..BLOOM_MIP_COUNT * 2) |i| {
-            var alloc_ds_info = std.mem.zeroes(c.VkDescriptorSetAllocateInfo);
-            alloc_ds_info.sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-            alloc_ds_info.descriptorPool = ctx.descriptors.descriptor_pool;
-            alloc_ds_info.descriptorSetCount = 1;
-            alloc_ds_info.pSetLayouts = &ctx.bloom.descriptor_set_layout;
-            try Utils.checkVk(c.vkAllocateDescriptorSets(vk, &alloc_ds_info, &ctx.bloom.descriptor_sets[frame][i]));
-        }
-
-        // Update downsample sets
-        var hdr_info = std.mem.zeroes(c.VkDescriptorImageInfo);
-        hdr_info.imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        hdr_info.imageView = ctx.hdr_view;
-        hdr_info.sampler = ctx.bloom.sampler;
-        var write = std.mem.zeroes(c.VkWriteDescriptorSet);
-        write.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = ctx.bloom.descriptor_sets[frame][0];
-        write.descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        write.descriptorCount = 1;
-        write.pImageInfo = &hdr_info;
-        c.vkUpdateDescriptorSets(vk, 1, &write, 0, null);
-
-        for (1..BLOOM_MIP_COUNT) |i| {
-            var mip_info = std.mem.zeroes(c.VkDescriptorImageInfo);
-            mip_info.imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            mip_info.imageView = ctx.bloom.mip_views[i - 1];
-            mip_info.sampler = ctx.bloom.sampler;
-            write.dstSet = ctx.bloom.descriptor_sets[frame][i];
-            write.pImageInfo = &mip_info;
-            c.vkUpdateDescriptorSets(vk, 1, &write, 0, null);
-        }
-
-        // Update upsample sets
-        for (0..BLOOM_MIP_COUNT) |i| {
-            const up_idx = (BLOOM_MIP_COUNT - 1) - i;
-            const base_idx = if (up_idx > 0) up_idx - 1 else 0;
-            var up_info = std.mem.zeroes(c.VkDescriptorImageInfo);
-            up_info.imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            up_info.imageView = ctx.bloom.mip_views[up_idx];
-            up_info.sampler = ctx.bloom.sampler;
-            var base_info = std.mem.zeroes(c.VkDescriptorImageInfo);
-            base_info.imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            base_info.imageView = ctx.bloom.mip_views[base_idx];
-            base_info.sampler = ctx.bloom.sampler;
-            var writes = [_]c.VkWriteDescriptorSet{
-                .{ .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx.bloom.descriptor_sets[frame][BLOOM_MIP_COUNT + i], .dstBinding = 0, .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &up_info },
-                .{ .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ctx.bloom.descriptor_sets[frame][BLOOM_MIP_COUNT + i], .dstBinding = 1, .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &base_info },
-            };
-            c.vkUpdateDescriptorSets(vk, 2, &writes[0], 0, null);
-        }
-    }
 }
 
 fn createShadowResources(ctx: *VulkanContext) !void {
@@ -1502,7 +969,7 @@ fn createShadowResources(ctx: *VulkanContext) !void {
 
     var mem_reqs: c.VkMemoryRequirements = undefined;
     c.vkGetImageMemoryRequirements(vk, ctx.shadow_system.shadow_image, &mem_reqs);
-    var alloc_info = c.VkMemoryAllocateInfo{ .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mem_reqs.size, .memoryTypeIndex = try findMemoryType(ctx.vulkan_device.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
+    var alloc_info = c.VkMemoryAllocateInfo{ .sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mem_reqs.size, .memoryTypeIndex = try Utils.findMemoryType(ctx.vulkan_device.physical_device, mem_reqs.memoryTypeBits, c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
     try Utils.checkVk(c.vkAllocateMemory(vk, &alloc_info, null, &ctx.shadow_system.shadow_image_memory));
     try Utils.checkVk(c.vkBindImageMemory(vk, ctx.shadow_system.shadow_image, ctx.shadow_system.shadow_image_memory, 0));
 
@@ -1838,7 +1305,7 @@ fn createGPassResources(ctx: *VulkanContext) !void {
     }
 
     const vk = ctx.vulkan_device.vk_device;
-    const extent = ctx.swapchain.swapchain.extent;
+    const extent = ctx.swapchain.getExtent();
 
     // 2. Create normal image for G-Pass output
     {
@@ -2045,7 +1512,7 @@ fn createSSAOResources(ctx: *VulkanContext) !void {
         var img_info = std.mem.zeroes(c.VkImageCreateInfo);
         img_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         img_info.imageType = c.VK_IMAGE_TYPE_2D;
-        img_info.extent = .{ .width = ctx.swapchain.swapchain.extent.width, .height = ctx.swapchain.swapchain.extent.height, .depth = 1 };
+        img_info.extent = .{ .width = ctx.swapchain.getExtent().width, .height = ctx.swapchain.getExtent().height, .depth = 1 };
         img_info.mipLevels = 1;
         img_info.arrayLayers = 1;
         img_info.format = ao_format;
@@ -2083,7 +1550,7 @@ fn createSSAOResources(ctx: *VulkanContext) !void {
         var img_info = std.mem.zeroes(c.VkImageCreateInfo);
         img_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         img_info.imageType = c.VK_IMAGE_TYPE_2D;
-        img_info.extent = .{ .width = ctx.swapchain.swapchain.extent.width, .height = ctx.swapchain.swapchain.extent.height, .depth = 1 };
+        img_info.extent = .{ .width = ctx.swapchain.getExtent().width, .height = ctx.swapchain.getExtent().height, .depth = 1 };
         img_info.mipLevels = 1;
         img_info.arrayLayers = 1;
         img_info.format = ao_format;
@@ -2268,8 +1735,8 @@ fn createSSAOResources(ctx: *VulkanContext) !void {
         fb_info.renderPass = ctx.ssao_render_pass;
         fb_info.attachmentCount = 1;
         fb_info.pAttachments = &ctx.ssao_view;
-        fb_info.width = ctx.swapchain.swapchain.extent.width;
-        fb_info.height = ctx.swapchain.swapchain.extent.height;
+        fb_info.width = ctx.swapchain.getExtent().width;
+        fb_info.height = ctx.swapchain.getExtent().height;
         fb_info.layers = 1;
 
         try Utils.checkVk(c.vkCreateFramebuffer(ctx.vulkan_device.vk_device, &fb_info, null, &ctx.ssao_framebuffer));
@@ -2337,11 +1804,11 @@ fn createSSAOResources(ctx: *VulkanContext) !void {
         const blur_frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/ssao_blur.frag.spv", ctx.allocator, @enumFromInt(1024 * 1024));
         defer ctx.allocator.free(blur_frag_code);
 
-        const vert_module = try createShaderModule(ctx.vulkan_device.vk_device, vert_code);
+        const vert_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, vert_code);
         defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, vert_module, null);
-        const frag_module = try createShaderModule(ctx.vulkan_device.vk_device, frag_code);
+        const frag_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, frag_code);
         defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, frag_module, null);
-        const blur_frag_module = try createShaderModule(ctx.vulkan_device.vk_device, blur_frag_code);
+        const blur_frag_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, blur_frag_code);
         defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, blur_frag_module, null);
 
         var stages = [_]c.VkPipelineShaderStageCreateInfo{
@@ -2537,7 +2004,7 @@ fn createSSAOResources(ctx: *VulkanContext) !void {
     const ssao_images = [_]c.VkImage{ ctx.ssao_image, ctx.ssao_blur_image };
     try transitionImagesToShaderRead(ctx, &ssao_images, false);
 
-    std.log.info("SSAO resources created ({}x{})", .{ ctx.swapchain.swapchain.extent.width, ctx.swapchain.swapchain.extent.height });
+    std.log.info("SSAO resources created ({}x{})", .{ ctx.swapchain.getExtent().width, ctx.swapchain.getExtent().height });
 }
 
 fn createMainFramebuffers(ctx: *VulkanContext) !void {
@@ -2636,9 +2103,9 @@ fn createMainPipelines(ctx: *VulkanContext) !void {
         defer ctx.allocator.free(vert_code);
         const frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/terrain.frag.spv", ctx.allocator, @enumFromInt(1024 * 1024));
         defer ctx.allocator.free(frag_code);
-        const vert_module = try createShaderModule(ctx.vulkan_device.vk_device, vert_code);
+        const vert_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, vert_code);
         defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, vert_module, null);
-        const frag_module = try createShaderModule(ctx.vulkan_device.vk_device, frag_code);
+        const frag_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, frag_code);
         defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, frag_module, null);
         var shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
             .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main" },
@@ -2692,9 +2159,9 @@ fn createMainPipelines(ctx: *VulkanContext) !void {
         defer ctx.allocator.free(vert_code);
         const frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/sky.frag.spv", ctx.allocator, @enumFromInt(1024 * 1024));
         defer ctx.allocator.free(frag_code);
-        const vert_module = try createShaderModule(ctx.vulkan_device.vk_device, vert_code);
+        const vert_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, vert_code);
         defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, vert_module, null);
-        const frag_module = try createShaderModule(ctx.vulkan_device.vk_device, frag_code);
+        const frag_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, frag_code);
         defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, frag_module, null);
         var shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
             .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main" },
@@ -2728,9 +2195,9 @@ fn createMainPipelines(ctx: *VulkanContext) !void {
         defer ctx.allocator.free(vert_code);
         const frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/ui.frag.spv", ctx.allocator, @enumFromInt(1024 * 1024));
         defer ctx.allocator.free(frag_code);
-        const vert_module = try createShaderModule(ctx.vulkan_device.vk_device, vert_code);
+        const vert_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, vert_code);
         defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, vert_module, null);
-        const frag_module = try createShaderModule(ctx.vulkan_device.vk_device, frag_code);
+        const frag_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, frag_code);
         defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, frag_module, null);
         var shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
             .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main" },
@@ -2771,9 +2238,9 @@ fn createMainPipelines(ctx: *VulkanContext) !void {
         defer ctx.allocator.free(tex_vert_code);
         const tex_frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/ui_tex.frag.spv", ctx.allocator, @enumFromInt(1024 * 1024));
         defer ctx.allocator.free(tex_frag_code);
-        const tex_vert_module = try createShaderModule(ctx.vulkan_device.vk_device, tex_vert_code);
+        const tex_vert_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, tex_vert_code);
         defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, tex_vert_module, null);
-        const tex_frag_module = try createShaderModule(ctx.vulkan_device.vk_device, tex_frag_code);
+        const tex_frag_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, tex_frag_code);
         defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, tex_frag_module, null);
         var tex_shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
             .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = tex_vert_module, .pName = "main" },
@@ -2790,9 +2257,9 @@ fn createMainPipelines(ctx: *VulkanContext) !void {
         defer ctx.allocator.free(vert_code);
         const frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/debug_shadow.frag.spv", ctx.allocator, @enumFromInt(1024 * 1024));
         defer ctx.allocator.free(frag_code);
-        const vert_module = try createShaderModule(ctx.vulkan_device.vk_device, vert_code);
+        const vert_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, vert_code);
         defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, vert_module, null);
-        const frag_module = try createShaderModule(ctx.vulkan_device.vk_device, frag_code);
+        const frag_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, frag_code);
         defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, frag_module, null);
         var shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
             .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main" },
@@ -2835,9 +2302,9 @@ fn createMainPipelines(ctx: *VulkanContext) !void {
         defer ctx.allocator.free(vert_code);
         const frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/cloud.frag.spv", ctx.allocator, @enumFromInt(1024 * 1024));
         defer ctx.allocator.free(frag_code);
-        const vert_module = try createShaderModule(ctx.vulkan_device.vk_device, vert_code);
+        const vert_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, vert_code);
         defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, vert_module, null);
-        const frag_module = try createShaderModule(ctx.vulkan_device.vk_device, frag_code);
+        const frag_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, frag_code);
         defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, frag_module, null);
         var shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
             .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main" },
@@ -3115,8 +2582,8 @@ fn initContext(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device:
     try createPostProcessResources(ctx);
 
     // Phase 3: FXAA and Bloom resources (depend on post-process sampler and HDR views)
-    try createFXAAResources(ctx);
-    try createBloomResources(ctx);
+    try ctx.fxaa.init(&ctx.vulkan_device, ctx.allocator, ctx.descriptors.descriptor_pool, ctx.swapchain.getExtent(), ctx.swapchain.getImageFormat(), ctx.post_process_sampler, ctx.swapchain.getImageViews());
+    try ctx.bloom.init(&ctx.vulkan_device, ctx.allocator, ctx.descriptors.descriptor_pool, ctx.hdr_view, ctx.swapchain.getExtent().width, ctx.swapchain.getExtent().height, c.VK_FORMAT_R16G16B16A16_SFLOAT);
 
     // Update post-process descriptor sets to include bloom texture (binding 2)
     updatePostProcessDescriptorsWithBloom(ctx);
@@ -3299,8 +2766,8 @@ fn recreateSwapchainInternal(ctx: *VulkanContext) void {
     createMainRenderPass(ctx) catch |err| std.log.err("Failed to recreate render pass: {}", .{err});
     createMainPipelines(ctx) catch |err| std.log.err("Failed to recreate pipelines: {}", .{err});
     createPostProcessResources(ctx) catch |err| std.log.err("Failed to recreate post-process resources: {}", .{err});
-    createFXAAResources(ctx) catch |err| std.log.err("Failed to recreate FXAA resources: {}", .{err});
-    createBloomResources(ctx) catch |err| std.log.err("Failed to recreate Bloom resources: {}", .{err});
+    ctx.fxaa.init(&ctx.vulkan_device, ctx.allocator, ctx.descriptors.descriptor_pool, ctx.swapchain.getExtent(), ctx.swapchain.getImageFormat(), ctx.post_process_sampler, ctx.swapchain.getImageViews()) catch |err| std.log.err("Failed to recreate FXAA resources: {}", .{err});
+    ctx.bloom.init(&ctx.vulkan_device, ctx.allocator, ctx.descriptors.descriptor_pool, ctx.hdr_view, ctx.swapchain.getExtent().width, ctx.swapchain.getExtent().height, c.VK_FORMAT_R16G16B16A16_SFLOAT) catch |err| std.log.err("Failed to recreate Bloom resources: {}", .{err});
     updatePostProcessDescriptorsWithBloom(ctx);
 
     ctx.framebuffer_resized = false;
@@ -3558,8 +3025,8 @@ fn beginGPassInternal(ctx: *VulkanContext) void {
     }
 
     // Safety: Check for size mismatch between G-pass resources and current swapchain
-    if (ctx.g_pass_extent.width != ctx.swapchain.swapchain.extent.width or ctx.g_pass_extent.height != ctx.swapchain.swapchain.extent.height) {
-        std.log.warn("beginGPass: size mismatch! G-pass={}x{}, swapchain={}x{} - recreating", .{ ctx.g_pass_extent.width, ctx.g_pass_extent.height, ctx.swapchain.swapchain.extent.width, ctx.swapchain.swapchain.extent.height });
+    if (ctx.g_pass_extent.width != ctx.swapchain.getExtent().width or ctx.g_pass_extent.height != ctx.swapchain.getExtent().height) {
+        std.log.warn("beginGPass: size mismatch! G-pass={}x{}, swapchain={}x{} - recreating", .{ ctx.g_pass_extent.width, ctx.g_pass_extent.height, ctx.swapchain.getExtent().width, ctx.swapchain.getExtent().height });
         _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
         createGPassResources(ctx) catch |err| {
             std.log.err("Failed to recreate G-pass resources: {}", .{err});
@@ -3587,11 +3054,11 @@ fn beginGPassInternal(ctx: *VulkanContext) void {
     render_pass_info.renderPass = ctx.g_render_pass;
     render_pass_info.framebuffer = ctx.g_framebuffer;
     render_pass_info.renderArea.offset = .{ .x = 0, .y = 0 };
-    render_pass_info.renderArea.extent = ctx.swapchain.swapchain.extent;
+    render_pass_info.renderArea.extent = ctx.swapchain.getExtent();
 
     // Debug: log extent on first few frames
     if (ctx.frame_index < 10) {
-        std.log.debug("beginGPass frame {}: extent {}x{} (cb={}, rp={}, fb={})", .{ ctx.frame_index, ctx.swapchain.swapchain.extent.width, ctx.swapchain.swapchain.extent.height, command_buffer != null, ctx.g_render_pass != null, ctx.g_framebuffer != null });
+        std.log.debug("beginGPass frame {}: extent {}x{} (cb={}, rp={}, fb={})", .{ ctx.frame_index, ctx.swapchain.getExtent().width, ctx.swapchain.getExtent().height, command_buffer != null, ctx.g_render_pass != null, ctx.g_framebuffer != null });
     }
 
     var clear_values: [2]c.VkClearValue = undefined;
@@ -3605,9 +3072,9 @@ fn beginGPassInternal(ctx: *VulkanContext) void {
     std.log.debug("beginGPass: calling vkCmdBindPipeline", .{});
     c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.g_pipeline);
 
-    const viewport = c.VkViewport{ .x = 0, .y = 0, .width = @floatFromInt(ctx.swapchain.swapchain.extent.width), .height = @floatFromInt(ctx.swapchain.swapchain.extent.height), .minDepth = 0, .maxDepth = 1 };
+    const viewport = c.VkViewport{ .x = 0, .y = 0, .width = @floatFromInt(ctx.swapchain.getExtent().width), .height = @floatFromInt(ctx.swapchain.getExtent().height), .minDepth = 0, .maxDepth = 1 };
     c.vkCmdSetViewport(command_buffer, 0, 1, &viewport);
-    const scissor = c.VkRect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = ctx.swapchain.swapchain.extent };
+    const scissor = c.VkRect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = ctx.swapchain.getExtent() };
     c.vkCmdSetScissor(command_buffer, 0, 1, &scissor);
 
     const ds = ctx.descriptors.descriptor_sets[ctx.frames.current_frame];
@@ -3672,7 +3139,7 @@ fn computeSSAOInternal(ctx: *VulkanContext) void {
         render_pass_info.renderPass = ctx.ssao_render_pass;
         render_pass_info.framebuffer = ctx.ssao_framebuffer;
         render_pass_info.renderArea.offset = .{ .x = 0, .y = 0 };
-        render_pass_info.renderArea.extent = ctx.swapchain.swapchain.extent;
+        render_pass_info.renderArea.extent = ctx.swapchain.getExtent();
         var clear_value = c.VkClearValue{ .color = .{ .float32 = .{ 1, 1, 1, 1 } } };
         render_pass_info.clearValueCount = 1;
         render_pass_info.pClearValues = &clear_value;
@@ -3681,9 +3148,9 @@ fn computeSSAOInternal(ctx: *VulkanContext) void {
         c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.ssao_pipeline);
 
         // Set viewport and scissor for SSAO pass
-        const viewport = c.VkViewport{ .x = 0, .y = 0, .width = @floatFromInt(ctx.swapchain.swapchain.extent.width), .height = @floatFromInt(ctx.swapchain.swapchain.extent.height), .minDepth = 0, .maxDepth = 1 };
+        const viewport = c.VkViewport{ .x = 0, .y = 0, .width = @floatFromInt(ctx.swapchain.getExtent().width), .height = @floatFromInt(ctx.swapchain.getExtent().height), .minDepth = 0, .maxDepth = 1 };
         c.vkCmdSetViewport(command_buffer, 0, 1, &viewport);
-        const scissor = c.VkRect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = ctx.swapchain.swapchain.extent };
+        const scissor = c.VkRect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = ctx.swapchain.getExtent() };
         c.vkCmdSetScissor(command_buffer, 0, 1, &scissor);
 
         c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.ssao_pipeline_layout, 0, 1, &ctx.ssao_descriptor_sets[ctx.frames.current_frame], 0, null);
@@ -3698,7 +3165,7 @@ fn computeSSAOInternal(ctx: *VulkanContext) void {
         render_pass_info.renderPass = ctx.ssao_blur_render_pass;
         render_pass_info.framebuffer = ctx.ssao_blur_framebuffer;
         render_pass_info.renderArea.offset = .{ .x = 0, .y = 0 };
-        render_pass_info.renderArea.extent = ctx.swapchain.swapchain.extent;
+        render_pass_info.renderArea.extent = ctx.swapchain.getExtent();
         var clear_value = c.VkClearValue{ .color = .{ .float32 = .{ 1, 1, 1, 1 } } };
         render_pass_info.clearValueCount = 1;
         render_pass_info.pClearValues = &clear_value;
@@ -3707,9 +3174,9 @@ fn computeSSAOInternal(ctx: *VulkanContext) void {
         c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.ssao_blur_pipeline);
 
         // Set viewport and scissor for blur pass
-        const blur_viewport = c.VkViewport{ .x = 0, .y = 0, .width = @floatFromInt(ctx.swapchain.swapchain.extent.width), .height = @floatFromInt(ctx.swapchain.swapchain.extent.height), .minDepth = 0, .maxDepth = 1 };
+        const blur_viewport = c.VkViewport{ .x = 0, .y = 0, .width = @floatFromInt(ctx.swapchain.getExtent().width), .height = @floatFromInt(ctx.swapchain.getExtent().height), .minDepth = 0, .maxDepth = 1 };
         c.vkCmdSetViewport(command_buffer, 0, 1, &blur_viewport);
-        const blur_scissor = c.VkRect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = ctx.swapchain.swapchain.extent };
+        const blur_scissor = c.VkRect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = ctx.swapchain.getExtent() };
         c.vkCmdSetScissor(command_buffer, 0, 1, &blur_scissor);
 
         c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.ssao_blur_pipeline_layout, 0, 1, &ctx.ssao_blur_descriptor_sets[ctx.frames.current_frame], 0, null);
@@ -3743,7 +3210,7 @@ fn beginFXAAPassInternal(ctx: *VulkanContext) void {
     if (image_index >= ctx.fxaa.framebuffers.items.len) return;
 
     const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
-    const extent = ctx.swapchain.swapchain.extent;
+    const extent = ctx.swapchain.getExtent();
 
     // Begin FXAA render pass (outputs to swapchain)
     var clear_value = std.mem.zeroes(c.VkClearValue);
@@ -3884,8 +3351,8 @@ fn computeBloomInternal(ctx: *VulkanContext) void {
         c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.bloom.pipeline_layout, 0, 1, &ctx.bloom.descriptor_sets[frame][i], 0, null);
 
         // Source dimensions for texel size
-        const src_width: f32 = if (i == 0) @floatFromInt(ctx.swapchain.swapchain.extent.width) else @floatFromInt(ctx.bloom.mip_widths[i - 1]);
-        const src_height: f32 = if (i == 0) @floatFromInt(ctx.swapchain.swapchain.extent.height) else @floatFromInt(ctx.bloom.mip_heights[i - 1]);
+        const src_width: f32 = if (i == 0) @floatFromInt(ctx.swapchain.getExtent().width) else @floatFromInt(ctx.bloom.mip_widths[i - 1]);
+        const src_height: f32 = if (i == 0) @floatFromInt(ctx.swapchain.getExtent().height) else @floatFromInt(ctx.bloom.mip_heights[i - 1]);
 
         // Push constants with threshold only on first pass
         const push = BloomPushConstants{
@@ -4077,7 +3544,7 @@ fn transitionShadowImage(ctx: *VulkanContext, cascade_index: u32, new_layout: c.
 
 fn beginMainPassInternal(ctx: *VulkanContext) void {
     if (!ctx.frames.frame_in_progress) return;
-    if (ctx.swapchain.swapchain.extent.width == 0 or ctx.swapchain.swapchain.extent.height == 0) return;
+    if (ctx.swapchain.getExtent().width == 0 or ctx.swapchain.getExtent().height == 0) return;
 
     // Safety: Ensure render pass and framebuffer are valid
     if (ctx.hdr_render_pass == null) {
@@ -4107,7 +3574,7 @@ fn beginMainPassInternal(ctx: *VulkanContext) void {
         render_pass_info.renderPass = ctx.hdr_render_pass;
         render_pass_info.framebuffer = ctx.main_framebuffer;
         render_pass_info.renderArea.offset = .{ .x = 0, .y = 0 };
-        render_pass_info.renderArea.extent = ctx.swapchain.swapchain.extent;
+        render_pass_info.renderArea.extent = ctx.swapchain.getExtent();
 
         var clear_values: [3]c.VkClearValue = undefined;
         clear_values[0] = .{ .color = .{ .float32 = ctx.clear_color } };
@@ -4131,15 +3598,15 @@ fn beginMainPassInternal(ctx: *VulkanContext) void {
     var viewport = std.mem.zeroes(c.VkViewport);
     viewport.x = 0.0;
     viewport.y = 0.0;
-    viewport.width = @floatFromInt(ctx.swapchain.swapchain.extent.width);
-    viewport.height = @floatFromInt(ctx.swapchain.swapchain.extent.height);
+    viewport.width = @floatFromInt(ctx.swapchain.getExtent().width);
+    viewport.height = @floatFromInt(ctx.swapchain.getExtent().height);
     viewport.minDepth = 0.0;
     viewport.maxDepth = 1.0;
     c.vkCmdSetViewport(command_buffer, 0, 1, &viewport);
 
     var scissor = std.mem.zeroes(c.VkRect2D);
     scissor.offset = .{ .x = 0, .y = 0 };
-    scissor.extent = ctx.swapchain.swapchain.extent;
+    scissor.extent = ctx.swapchain.getExtent();
     c.vkCmdSetScissor(command_buffer, 0, 1, &scissor);
 }
 
@@ -4191,7 +3658,7 @@ fn beginPostProcessPassInternal(ctx: *VulkanContext) void {
         }
 
         render_pass_info.renderArea.offset = .{ .x = 0, .y = 0 };
-        render_pass_info.renderArea.extent = ctx.swapchain.swapchain.extent;
+        render_pass_info.renderArea.extent = ctx.swapchain.getExtent();
 
         var clear_value = std.mem.zeroes(c.VkClearValue);
         clear_value.color = .{ .float32 = .{ 0, 0, 0, 1 } };
@@ -4221,15 +3688,15 @@ fn beginPostProcessPassInternal(ctx: *VulkanContext) void {
         var viewport = std.mem.zeroes(c.VkViewport);
         viewport.x = 0.0;
         viewport.y = 0.0;
-        viewport.width = @floatFromInt(ctx.swapchain.swapchain.extent.width);
-        viewport.height = @floatFromInt(ctx.swapchain.swapchain.extent.height);
+        viewport.width = @floatFromInt(ctx.swapchain.getExtent().width);
+        viewport.height = @floatFromInt(ctx.swapchain.getExtent().height);
         viewport.minDepth = 0.0;
         viewport.maxDepth = 1.0;
         c.vkCmdSetViewport(command_buffer, 0, 1, &viewport);
 
         var scissor = std.mem.zeroes(c.VkRect2D);
         scissor.offset = .{ .x = 0, .y = 0 };
-        scissor.extent = ctx.swapchain.swapchain.extent;
+        scissor.extent = ctx.swapchain.getExtent();
         c.vkCmdSetScissor(command_buffer, 0, 1, &scissor);
     }
 }
@@ -4283,7 +3750,7 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
         .cloud_params = .{ cloud_params.cloud_height, @floatFromInt(cloud_params.shadow.pcf_samples), if (cloud_params.shadow.cascade_blend) 1.0 else 0.0, if (cloud_params.cloud_shadows) 1.0 else 0.0 },
         .pbr_params = .{ @floatFromInt(cloud_params.pbr_quality), cloud_params.exposure, cloud_params.saturation, if (cloud_params.ssao_enabled) 1.0 else 0.0 },
         .volumetric_params = .{ if (cloud_params.volumetric_enabled) 1.0 else 0.0, cloud_params.volumetric_density, @floatFromInt(cloud_params.volumetric_steps), cloud_params.volumetric_scattering },
-        .viewport_size = .{ @floatFromInt(ctx.swapchain.swapchain.extent.width), @floatFromInt(ctx.swapchain.swapchain.extent.height), 0, 0 },
+        .viewport_size = .{ @floatFromInt(ctx.swapchain.getExtent().width), @floatFromInt(ctx.swapchain.getExtent().height), 0, 0 },
     };
 
     if (ctx.descriptors.global_ubos_mapped[ctx.frames.current_frame]) |map_ptr| {
@@ -4437,8 +3904,8 @@ fn drawDebugShadowMap(ctx_ptr: *anyopaque, cascade_index: usize, depth_map_handl
     const debug_x: f32 = debug_spacing + @as(f32, @floatFromInt(cascade_index)) * (debug_size + debug_spacing);
     const debug_y: f32 = debug_spacing;
 
-    const width_f32 = @as(f32, @floatFromInt(ctx.swapchain.swapchain.extent.width));
-    const height_f32 = @as(f32, @floatFromInt(ctx.swapchain.swapchain.extent.height));
+    const width_f32 = @as(f32, @floatFromInt(ctx.swapchain.getExtent().width));
+    const height_f32 = @as(f32, @floatFromInt(ctx.swapchain.getExtent().height));
     const proj = Mat4.orthographic(0, width_f32, height_f32, 0, -1, 1);
     c.vkCmdPushConstants(command_buffer, ctx.debug_shadow.pipeline_layout.?, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf(Mat4), &proj.data);
 
@@ -4539,7 +4006,7 @@ fn setViewport(ctx_ptr: *anyopaque, width: u32, height: u32) void {
 
     // Check if the requested viewport size matches the current swapchain extent.
     // If not, flag a resize so the swapchain is recreated at the beginning of the next frame.
-    if (!ctx.swapchain.skip_present and (width != ctx.swapchain.swapchain.extent.width or height != ctx.swapchain.swapchain.extent.height)) {
+    if (!ctx.swapchain.skip_present and (width != ctx.swapchain.getExtent().width or height != ctx.swapchain.getExtent().height)) {
         ctx.framebuffer_resized = true;
     }
 
@@ -5447,7 +4914,7 @@ fn getNativeCommandBuffer(ctx_ptr: *anyopaque) u64 {
 }
 fn getNativeSwapchainExtent(ctx_ptr: *anyopaque) [2]u32 {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
-    return .{ ctx.swapchain.swapchain.extent.width, ctx.swapchain.swapchain.extent.height };
+    return .{ ctx.swapchain.getExtent().width, ctx.swapchain.getExtent().height };
 }
 fn getNativeSSAOFramebuffer(ctx_ptr: *anyopaque) u64 {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));

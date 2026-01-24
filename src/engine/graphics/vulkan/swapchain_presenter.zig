@@ -128,4 +128,12 @@ pub const SwapchainPresenter = struct {
     pub fn getCurrentFramebuffer(self: *SwapchainPresenter, image_index: u32) c.VkFramebuffer {
         return self.swapchain.framebuffers.items[image_index];
     }
+
+    pub fn getImageViews(self: *SwapchainPresenter) []const c.VkImageView {
+        return self.swapchain.image_views.items;
+    }
+
+    pub fn getImageFormat(self: *SwapchainPresenter) c.VkFormat {
+        return self.swapchain.image_format;
+    }
 };
