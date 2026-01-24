@@ -1,5 +1,15 @@
 <div align="center">
-  <img src="assets/screenshots/hero.png" alt="ZigCraft Hero" width="100%" />
+
+```
+████████╗██╗  ██╗██╗███╗   ██╗████████╗███████╗██████╗ 
+╚══██╔══╝██║  ██║██║████╗  ██║╚══██╔══╝██╔════╝██╔══██╗
+   ██║   ███████║██║██╔██╗ ██║   ██║   █████╗  ██████╔╝
+   ██║   ██╔══██║██║██║╚██╗██║   ██║   ██╔══╝  ██╔══██╗
+   ██║   ██║  ██║██║██║ ╚████║   ██║   ███████╗██║  ██║
+   ╚═╝   ╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝   ╚═╝   ╚══════╝╚═╝  ╚═╝
+```
+
+  <img src="https://github.com/OpenStaticFish/ZigCraft/raw/main/assets/screenshots/hero.png" alt="ZigCraft Hero" width="100%" />
 
   # ⚡ ZigCraft ⚡
 
@@ -10,6 +20,20 @@
 
   A high-performance Minecraft-style voxel engine built with **Zig**, **SDL3**, and a modern **Vulkan** graphics pipeline.
 </div>
+
+---
+
+## 💻 System Requirements
+
+| Component | Minimum | Recommended |
+|-----------|---------|-------------|
+| **OS** | Linux (NixOS), Windows (WSL2) | Linux (NixOS) |
+| **GPU** | Vulkan 1.2, 4GB VRAM | Vulkan 1.3, 8GB+ VRAM |
+| **RAM** | 8 GB | 16 GB |
+| **Storage** | 2 GB | 4 GB SSD |
+| **Build Tools** | Nix package manager | Nix (latest) |
+
+> **Note**: All builds require Nix for reproducible dependency management (SDL3, Vulkan, glslang).
 
 ---
 
@@ -40,6 +64,23 @@
 - **Job Prioritization**: Proximity-based task scheduling ensures immediate loading of local chunks.
 - **Comprehensive Testing**: 58+ unit tests covering math, worldgen, and core engine modules.
 - **Refined App Lifecycle**: Modular architecture with extracted systems for rendering, input, and world management.
+
+### 📊 Performance Benchmarks
+| Render Distance | FPS (ReleaseFast) | GPU Used |
+|-----------------|-------------------|----------|
+| 32 chunks | 120+ | RTX 3060 |
+| 64 chunks | 90+ | RTX 3060 |
+| 128 chunks | 60+ | RTX 3060 |
+
+*Benchmarks measured on RTX 3060 @ 1080p with HIGH quality preset*
+
+## 🖼️ Screenshots
+
+| PBR Materials | Cascaded Shadows | Biomes |
+|---------------|------------------|---------|
+| ![PBR](https://github.com/OpenStaticFish/ZigCraft/raw/main/assets/screenshots/hero.png) | ![Shadows](https://github.com/OpenStaticFish/ZigCraft/raw/main/assets/screenshots/hero.png) | ![Biomes](https://github.com/OpenStaticFish/ZigCraft/raw/main/assets/screenshots/hero.png) |
+
+*More screenshots coming soon!*
 
 ## ⌨️ Controls
 
@@ -91,7 +132,18 @@ To bypass in emergencies: `git push --no-verify`
 - `scripts/`: Helper scripts for asset processing.
 - `libs/`: (Planned) Extracted standalone math and noise libraries.
 
-## 🖼️ Texture Pipeline
+## 🗺️ Roadmap
+
+- [ ] **Data-driven block registry** - Decouple block behavior from `BlockType` enum
+- [ ] **Segregated render context interface** - Split fat `IRenderContext` into focused traits
+- [ ] **RHI subsystem decoupling** - Break monolithic RHI into `ResourceManager`, `RenderCommandQueue`, etc.
+- [ ] **Dynamic texture atlas loading** - Support custom texture packs without code changes
+- [ ] **VRAM optimization** - Texture streaming and compression
+- [ ] **Modding API** - Expose hooks for gameplay mods
+
+See [SOLID_ISSUES.md](SOLID_ISSUES.md) for detailed architectural improvements planned.
+
+## 🛠️ Texture Pipeline
 
 The engine supports HD texture packs with full PBR maps. To standardize high-resolution source imagery (4k JPEGs, EXRs) into engine-ready 512px PNGs, use the provided helper script:
 
@@ -101,6 +153,81 @@ The engine supports HD texture packs with full PBR maps. To standardize high-res
 ```
 
 The script automatically handles resizing and naming conventions for `_diff`, `_nor_gl`, `_rough`, and `_disp` maps.
+
+## 🤝 Contributing
+
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow.
+
+### Quick Start for Contributors
+
+```bash
+# Clone and setup
+git clone https://github.com/OpenStaticFish/ZigCraft.git
+cd ZigCraft
+./scripts/setup-hooks.sh
+
+# Enter dev environment and run tests
+nix develop --command zig build test
+```
+
+### Branch Workflow
+
+```
+main (production)
+  └─ dev (staging)
+      ├─ feature/*    # New features
+      ├─ bug/*        # Non-critical fixes
+      ├─ hotfix/*     # Critical fixes
+      └─ ci/*         # CI/workflow changes
+```
+
+All PRs target the `dev` branch. Use our PR templates (`feature.md`, `bug.md`, `hotfix.md`, `ci.md`) for best practices.
+
+## 🔧 Troubleshooting
+
+### Nix Build Failures
+```bash
+# Clean build artifacts
+rm -rf zig-out/ .zig-cache/
+
+# Update Nix channels (if using older Nix)
+nix-channel --update
+```
+
+### Vulkan Driver Issues
+- **Linux**: Ensure `vulkan-loader` and GPU drivers are installed
+- **NVIDIA**: Proprietary drivers recommended for best performance
+- **Verify**: Run `vulkaninfo` to check Vulkan support
+
+### Shader Validation Errors
+Shaders are validated during `zig build test`. If glslang fails:
+```bash
+# Install glslang via Nix
+nix develop  # glslang is included in the dev shell
+```
+
+### Performance Issues
+- Try `zig build run -Doptimize=ReleaseFast` for optimized builds
+- Reduce render distance in-game: Press `Esc` → Graphics → Render Distance
+- Disable VSync if FPS is capped at 60
+
+## 🌟 Community
+
+|  |  |
+|----------|----------|
+| **Discussions** | [GitHub Discussions](https://github.com/OpenStaticFish/ZigCraft/discussions) |
+| **Issues** | [GitHub Issues](https://github.com/OpenStaticFish/ZigCraft/issues) |
+| **License** | [MIT License](LICENSE) |
+
+---
+
+<div align="center">
+
+**[⬆ Back to Top](#-zigcraft-)**
+
+Built with ❤️ by the OpenStaticFish community
+
+</div>
 
 ## ⚖️ License
 
