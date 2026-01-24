@@ -89,15 +89,24 @@
 | Key | Action |
 |-----|--------|
 | **WASD** | Movement |
-| **Space / Shift** | Fly Up / Down |
+| **Space / Shift** | Jump / Crouch (Fly Up / Down) |
+| **Left Ctrl** | Sprint |
 | **Mouse** | Look |
-| **Tab** | Toggle Mouse Capture |
+| **Left Click / Right Click** | Mine Block / Place Block |
+| **Tab** | Toggle Mouse Capture / Menu |
+| **I** | Open Inventory |
+| **1-9** | Select Hotbar Slot |
 | **F / T** | Toggle Wireframe / Textures |
-| **V / C** | Toggle VSync / Clouds |
-| **U / M** | Toggle Shadow Debug / World Map |
-| **1-4** | Set Time (Midnight → Sunset) |
+| **V** | Toggle VSync |
+| **U / K** | Toggle Shadow Debug / Cycle Cascades |
+| **M** | Toggle World Map |
 | **N** | Freeze / Unfreeze Time |
-| **Esc** | Menu |
+| **F2** | Toggle FPS Counter |
+| **F3** | Toggle Creative Mode |
+| **F5** | Toggle Block Info |
+| **Esc** | Menu / Pause |
+
+> **Note**: Time of day can be set via the inventory screen (buttons for DAWN, NOON, DUSK, NIGHT) |
 
 ## 🏗️ Build & Run
 
