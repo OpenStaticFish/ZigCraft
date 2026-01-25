@@ -621,6 +621,8 @@ pub const ResourceManager = struct {
         };
     }
 
+    /// Registers an externally-owned texture for use in debug overlays.
+    /// Errors: InvalidImageView if view or sampler is null.
     pub fn registerExternalTexture(self: *ResourceManager, width: u32, height: u32, format: rhi.TextureFormat, view: c.VkImageView, sampler: c.VkSampler) rhi.RhiError!rhi.TextureHandle {
         if (view == null or sampler == null) return error.InvalidImageView;
         const handle = self.next_texture_handle;
