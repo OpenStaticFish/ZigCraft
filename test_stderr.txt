@@ -1,0 +1,11 @@
+warning: Git tree '/home/micqdf/github/OpenStaticFish/Smooth-LOD-Transitions' is dirty
+evaluation warning: `mesa.drivers` is deprecated, use `mesa` instead
+evaluation warning: 'system' has been renamed to/replaced by 'stdenv.hostPlatform.system'
+test
++- run test stderr
+[WARN]  AtmosphereSystem: Sky rendering skipped, native handles missing (pipeline=false, layout=false, cmd=false)
+[WARN]  AtmosphereSystem: Cloud rendering skipped, native handles missing (pipeline=false, layout=false, cmd=false)
+[INFO]  LODManager initialized with radii: LOD0=8, LOD1=16, LOD2=32, LOD3=64
+[INFO]  LODManager initialized with radii: LOD0=2, LOD1=4, LOD2=8, LOD3=16
+failed command: ./.zig-cache/o/5069a51e21ed841b233ffa01ff4b28c0/test --cache-dir=./.zig-cache --seed=0x9675918e --listen=-
+

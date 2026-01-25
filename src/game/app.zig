@@ -276,6 +276,9 @@ pub const App = struct {
         app.rhi.setBloom(settings.bloom_enabled);
         app.rhi.setBloomIntensity(settings.bloom_intensity);
 
+        // Apply all RHI settings (VSync, Wireframe, Textures, Debug Shadows, etc.)
+        settings_pkg.apply_logic.applyToRHI(&settings, &app.rhi);
+
         if (build_options.smoke_test) {
             app.rhi.timing().setTimingEnabled(true);
         }

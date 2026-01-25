@@ -210,6 +210,7 @@ const VulkanContext = struct {
     anisotropic_filtering: u8 = 1,
     msaa_samples: u8 = 1,
     safe_mode: bool = false,
+    debug_shadows_active: bool = false, // Toggle shadow debug visualization with 'O' key
 
     // SSAO resources
     g_normal_image: c.VkImage = null,
@@ -4337,7 +4338,7 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
         .cloud_params = .{ cloud_params.cloud_height, @floatFromInt(cloud_params.shadow.pcf_samples), if (cloud_params.shadow.cascade_blend) 1.0 else 0.0, if (cloud_params.cloud_shadows) 1.0 else 0.0 },
         .pbr_params = .{ @floatFromInt(cloud_params.pbr_quality), if (cloud_params.exposure == 0) 1.0 else cloud_params.exposure, if (cloud_params.saturation == 0) 1.0 else cloud_params.saturation, if (cloud_params.ssao_enabled) 1.0 else 0.0 },
         .volumetric_params = .{ if (cloud_params.volumetric_enabled) 1.0 else 0.0, cloud_params.volumetric_density, @floatFromInt(cloud_params.volumetric_steps), cloud_params.volumetric_scattering },
-        .viewport_size = .{ @floatFromInt(ctx.swapchain.getExtent().width), @floatFromInt(ctx.swapchain.getExtent().height), 0, 0 },
+        .viewport_size = .{ @floatFromInt(ctx.swapchain.getExtent().width), @floatFromInt(ctx.swapchain.getExtent().height), if (ctx.debug_shadows_active) 1.0 else 0.0, 0 },
     };
 
     if (ctx.descriptors.global_ubos_mapped[ctx.frames.current_frame]) |map_ptr| {
@@ -4699,6 +4700,12 @@ fn setTexturesEnabled(ctx_ptr: *anyopaque, enabled: bool) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.textures_enabled = enabled;
     // Texture toggle is handled in shader via UBO uniform
+}
+
+fn setDebugShadowView(ctx_ptr: *anyopaque, enabled: bool) void {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.debug_shadows_active = enabled;
+    // Debug shadow view is handled in shader via viewport_size.z uniform
 }
 
 fn setVSync(ctx_ptr: *anyopaque, enabled: bool) void {
@@ -5700,6 +5707,7 @@ const VULKAN_RHI_VTABLE = rhi.RHI.VTable{
     },
     .setWireframe = setWireframe,
     .setTexturesEnabled = setTexturesEnabled,
+    .setDebugShadowView = setDebugShadowView,
     .setVSync = setVSync,
     .setAnisotropicFiltering = setAnisotropicFiltering,
     .setVolumetricDensity = setVolumetricDensity,

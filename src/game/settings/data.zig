@@ -7,9 +7,9 @@ pub const ShadowQuality = struct {
 
 pub const SHADOW_QUALITIES = [_]ShadowQuality{
     .{ .resolution = 1024, .label = "LOW" },
-    .{ .resolution = 2048, .label = "MEDIUM" },
-    .{ .resolution = 4096, .label = "HIGH" },
-    .{ .resolution = 8192, .label = "ULTRA" },
+    .{ .resolution = 1536, .label = "MEDIUM" },
+    .{ .resolution = 2048, .label = "HIGH" },
+    .{ .resolution = 4096, .label = "ULTRA" },
 };
 
 pub const Resolution = struct {
@@ -35,6 +35,7 @@ pub const Settings = struct {
     fov: f32 = 45.0,
     textures_enabled: bool = true,
     wireframe_enabled: bool = false,
+    debug_shadows_active: bool = false, // Reverted to false for normal gameplay
     shadow_quality: u32 = 2, // 0=Low, 1=Medium, 2=High, 3=Ultra
     shadow_distance: f32 = 250.0,
     anisotropic_filtering: u8 = 16,

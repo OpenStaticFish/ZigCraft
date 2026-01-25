@@ -240,6 +240,8 @@ test "LODRenderer render draw path" {
         pub fn setModelMatrix(self: @This(), _: Mat4, _: Vec3, _: f32) void {
             self.state.set_matrix_calls += 1;
         }
+        pub fn setLODInstanceBuffer(_: @This(), _: anytype) void {}
+        pub fn setSelectionMode(_: @This(), _: bool) void {}
         pub fn draw(self: @This(), handle: u32, count: u32, _: anytype) void {
             self.state.draw_calls += 1;
             self.state.last_buffer_handle = handle;
