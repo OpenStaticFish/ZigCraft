@@ -64,18 +64,6 @@ pub const FXAASystem = struct {
         try Utils.checkVk(c.vkAllocateMemory(vk, &alloc_info, null, &self.input_memory));
         try Utils.checkVk(c.vkBindImageMemory(vk, self.input_image, self.input_memory, 0));
 
-        // Create image view
-        var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
-        view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        view_info.image = self.input_image;
-        view_info.viewType = c.VK_IMAGE_VIEW_TYPE_2D;
-        view_info.format = format;
-        view_info.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
-
-        try Utils.checkVk(c.vkCreateImageView(vk, &view_info, null, &self.input_view));
-        // Fix: Add cleanup for input_view
-        errdefer c.vkDestroyImageView(vk, self.input_view, null);
-
         // 2. Render Pass
         var color_attachment = std.mem.zeroes(c.VkAttachmentDescription);
         color_attachment.format = format;
@@ -108,6 +96,16 @@ pub const FXAASystem = struct {
         rp_info.pDependencies = &dependency;
 
         try Utils.checkVk(c.vkCreateRenderPass(vk, &rp_info, null, &self.render_pass));
+
+        // 2.2 Create image view for FXAA input
+        var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
+        view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        view_info.image = self.input_image;
+        view_info.viewType = c.VK_IMAGE_VIEW_TYPE_2D;
+        view_info.format = format;
+        view_info.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
+
+        try Utils.checkVk(c.vkCreateImageView(vk, &view_info, null, &self.input_view));
 
         // 2.5. Post-process to FXAA pass
         {
@@ -281,31 +279,61 @@ pub const FXAASystem = struct {
     }
 
     pub fn deinit(self: *FXAASystem, device: c.VkDevice, allocator: Allocator, descriptor_pool: c.VkDescriptorPool) void {
-        if (self.pipeline != null) c.vkDestroyPipeline(device, self.pipeline, null);
-        if (self.pipeline_layout != null) c.vkDestroyPipelineLayout(device, self.pipeline_layout, null);
-        if (self.descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(device, self.descriptor_set_layout, null);
+        if (self.pipeline != null) {
+            c.vkDestroyPipeline(device, self.pipeline, null);
+            self.pipeline = null;
+        }
+        if (self.pipeline_layout != null) {
+            c.vkDestroyPipelineLayout(device, self.pipeline_layout, null);
+            self.pipeline_layout = null;
+        }
+        if (self.descriptor_set_layout != null) {
+            c.vkDestroyDescriptorSetLayout(device, self.descriptor_set_layout, null);
+            self.descriptor_set_layout = null;
+        }
 
         if (descriptor_pool != null) {
             for (0..rhi.MAX_FRAMES_IN_FLIGHT) |i| {
                 if (self.descriptor_sets[i] != null) {
                     _ = c.vkFreeDescriptorSets(device, descriptor_pool, 1, &self.descriptor_sets[i]);
+                    self.descriptor_sets[i] = null;
                 }
             }
         }
 
         for (self.framebuffers.items) |fb| {
-            c.vkDestroyFramebuffer(device, fb, null);
+            if (fb != null) c.vkDestroyFramebuffer(device, fb, null);
         }
         self.framebuffers.deinit(allocator);
+        self.framebuffers = .empty;
 
-        if (self.render_pass != null) c.vkDestroyRenderPass(device, self.render_pass, null);
-        if (self.post_process_to_fxaa_render_pass != null) c.vkDestroyRenderPass(device, self.post_process_to_fxaa_render_pass, null);
-        if (self.post_process_to_fxaa_framebuffer != null) c.vkDestroyFramebuffer(device, self.post_process_to_fxaa_framebuffer, null);
+        if (self.render_pass != null) {
+            c.vkDestroyRenderPass(device, self.render_pass, null);
+            self.render_pass = null;
+        }
+        if (self.post_process_to_fxaa_render_pass != null) {
+            c.vkDestroyRenderPass(device, self.post_process_to_fxaa_render_pass, null);
+            self.post_process_to_fxaa_render_pass = null;
+        }
+        if (self.post_process_to_fxaa_framebuffer != null) {
+            c.vkDestroyFramebuffer(device, self.post_process_to_fxaa_framebuffer, null);
+            self.post_process_to_fxaa_framebuffer = null;
+        }
 
-        if (self.input_view != null) c.vkDestroyImageView(device, self.input_view, null);
-        if (self.input_image != null) c.vkDestroyImage(device, self.input_image, null);
-        if (self.input_memory != null) c.vkFreeMemory(device, self.input_memory, null);
+        if (self.input_view != null) {
+            c.vkDestroyImageView(device, self.input_view, null);
+            self.input_view = null;
+        }
+        if (self.input_image != null) {
+            c.vkDestroyImage(device, self.input_image, null);
+            self.input_image = null;
+        }
+        if (self.input_memory != null) {
+            c.vkFreeMemory(device, self.input_memory, null);
+            self.input_memory = null;
+        }
 
-        self.* = std.mem.zeroes(FXAASystem);
+        self.pass_active = false;
+        self.enabled = false;
     }
 };

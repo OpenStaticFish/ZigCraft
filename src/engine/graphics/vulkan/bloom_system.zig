@@ -386,32 +386,62 @@ pub const BloomSystem = struct {
     }
 
     pub fn deinit(self: *BloomSystem, device: c.VkDevice, _: Allocator, descriptor_pool: c.VkDescriptorPool) void {
-        if (self.downsample_pipeline != null) c.vkDestroyPipeline(device, self.downsample_pipeline, null);
-        if (self.upsample_pipeline != null) c.vkDestroyPipeline(device, self.upsample_pipeline, null);
-        if (self.pipeline_layout != null) c.vkDestroyPipelineLayout(device, self.pipeline_layout, null);
+        if (self.downsample_pipeline != null) {
+            c.vkDestroyPipeline(device, self.downsample_pipeline, null);
+            self.downsample_pipeline = null;
+        }
+        if (self.upsample_pipeline != null) {
+            c.vkDestroyPipeline(device, self.upsample_pipeline, null);
+            self.upsample_pipeline = null;
+        }
+        if (self.pipeline_layout != null) {
+            c.vkDestroyPipelineLayout(device, self.pipeline_layout, null);
+            self.pipeline_layout = null;
+        }
 
         if (descriptor_pool != null) {
             for (0..rhi.MAX_FRAMES_IN_FLIGHT) |frame| {
                 for (0..BLOOM_MIP_COUNT * 2) |i| {
                     if (self.descriptor_sets[frame][i] != null) {
                         _ = c.vkFreeDescriptorSets(device, descriptor_pool, 1, &self.descriptor_sets[frame][i]);
+                        self.descriptor_sets[frame][i] = null;
                     }
                 }
             }
         }
 
-        if (self.descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(device, self.descriptor_set_layout, null);
-        if (self.render_pass != null) c.vkDestroyRenderPass(device, self.render_pass, null);
-        if (self.sampler != null) c.vkDestroySampler(device, self.sampler, null);
-
-        for (0..BLOOM_MIP_COUNT) |i| {
-            if (self.mip_framebuffers[i] != null) c.vkDestroyFramebuffer(device, self.mip_framebuffers[i], null);
-            if (self.mip_views[i] != null) c.vkDestroyImageView(device, self.mip_views[i], null);
-            if (self.mip_images[i] != null) c.vkDestroyImage(device, self.mip_images[i], null);
-            if (self.mip_memories[i] != null) c.vkFreeMemory(device, self.mip_memories[i], null);
+        if (self.descriptor_set_layout != null) {
+            c.vkDestroyDescriptorSetLayout(device, self.descriptor_set_layout, null);
+            self.descriptor_set_layout = null;
+        }
+        if (self.render_pass != null) {
+            c.vkDestroyRenderPass(device, self.render_pass, null);
+            self.render_pass = null;
+        }
+        if (self.sampler != null) {
+            c.vkDestroySampler(device, self.sampler, null);
+            self.sampler = null;
         }
 
-        self.* = std.mem.zeroes(BloomSystem);
-        self.enabled = false; // Ensure it stays disabled after deinit
+        for (0..BLOOM_MIP_COUNT) |i| {
+            if (self.mip_framebuffers[i] != null) {
+                c.vkDestroyFramebuffer(device, self.mip_framebuffers[i], null);
+                self.mip_framebuffers[i] = null;
+            }
+            if (self.mip_views[i] != null) {
+                c.vkDestroyImageView(device, self.mip_views[i], null);
+                self.mip_views[i] = null;
+            }
+            if (self.mip_images[i] != null) {
+                c.vkDestroyImage(device, self.mip_images[i], null);
+                self.mip_images[i] = null;
+            }
+            if (self.mip_memories[i] != null) {
+                c.vkFreeMemory(device, self.mip_memories[i], null);
+                self.mip_memories[i] = null;
+            }
+        }
+
+        self.enabled = false;
     }
 };
