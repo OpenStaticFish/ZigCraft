@@ -622,7 +622,7 @@ pub const ResourceManager = struct {
     }
 
     pub fn registerExternalTexture(self: *ResourceManager, width: u32, height: u32, format: rhi.TextureFormat, view: c.VkImageView, sampler: c.VkSampler) rhi.RhiError!rhi.TextureHandle {
-        if (view == null or sampler == null) return error.VulkanError;
+        if (view == null or sampler == null) return error.InvalidImageView;
         const handle = self.next_texture_handle;
         self.next_texture_handle += 1;
         try self.textures.put(handle, .{

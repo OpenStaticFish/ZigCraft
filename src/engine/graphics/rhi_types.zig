@@ -15,6 +15,7 @@ pub const RhiError = error{
     FeatureNotPresent,
     TooManyObjects,
     FormatNotSupported,
+    InvalidImageView,
     FragmentedPool,
     NoMatchingMemoryType,
     ResourceNotReady,
