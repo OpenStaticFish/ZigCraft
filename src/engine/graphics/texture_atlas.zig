@@ -327,10 +327,12 @@ const AtlasTextures = struct {
 };
 
 fn createRhiTextures(rhi_instance: rhi.RHI, atlas_size: u32, buffers: *const AtlasBuffers) !AtlasTextures {
+    // Disable mipmaps to prevent texture atlas bleeding between adjacent tiles
+    // This is the only way to completely eliminate the "block outlines" (grid lines)
     const diffuse = try Texture.init(rhi_instance, atlas_size, atlas_size, .rgba_srgb, .{
-        .min_filter = .nearest_mipmap_linear,
+        .min_filter = .nearest,
         .mag_filter = .nearest,
-        .generate_mipmaps = true,
+        .generate_mipmaps = false,
     }, buffers.diffuse);
 
     var normal: ?Texture = null;
@@ -338,17 +340,17 @@ fn createRhiTextures(rhi_instance: rhi.RHI, atlas_size: u32, buffers: *const Atl
 
     if (buffers.normal) |np| {
         normal = try Texture.init(rhi_instance, atlas_size, atlas_size, .rgba, .{
-            .min_filter = .linear_mipmap_linear,
-            .mag_filter = .linear,
-            .generate_mipmaps = true,
+            .min_filter = .nearest,
+            .mag_filter = .nearest,
+            .generate_mipmaps = false,
         }, np);
     }
 
     if (buffers.roughness) |rp| {
         roughness = try Texture.init(rhi_instance, atlas_size, atlas_size, .rgba, .{
-            .min_filter = .linear_mipmap_linear,
-            .mag_filter = .linear,
-            .generate_mipmaps = true,
+            .min_filter = .nearest,
+            .mag_filter = .nearest,
+            .generate_mipmaps = false,
         }, rp);
     }
 

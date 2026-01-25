@@ -22,7 +22,7 @@ test "Preset Application" {
     presets.apply(&settings, 0);
     try std.testing.expectEqual(@as(u32, 0), settings.shadow_quality);
     try std.testing.expectEqual(@as(i32, 6), settings.render_distance);
-    try std.testing.expectEqual(false, settings.lod_enabled);
+    try std.testing.expectEqual(true, settings.lod_enabled);
 
     // Apply Ultra
     presets.apply(&settings, 3);

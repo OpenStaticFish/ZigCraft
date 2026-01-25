@@ -326,6 +326,7 @@ const MockContext = struct {
         },
         .setWireframe = undefined,
         .setTexturesEnabled = undefined,
+        .setDebugShadowView = undefined,
         .setVSync = undefined,
         .setAnisotropicFiltering = undefined,
         .setVolumetricDensity = undefined,
@@ -353,6 +354,7 @@ const MockContext = struct {
         .setModelMatrix = undefined,
         .setInstanceBuffer = undefined,
         .setLODInstanceBuffer = undefined,
+        .setSelectionMode = undefined,
         .updateGlobalUniforms = undefined,
         .setTextureUniforms = undefined,
     };

@@ -23,6 +23,7 @@ layout(location = 10) out vec3 vBitangent;
 layout(location = 11) out float vAO;
 layout(location = 12) out vec4 vClipPosCurrent;
 layout(location = 13) out vec4 vClipPosPrev;
+layout(location = 14) out float vMaskRadius;
 
 layout(set = 0, binding = 0) uniform GlobalUniforms {
     mat4 view_proj;
@@ -70,6 +71,7 @@ void main() {
     vFragPosWorld = worldPos.xyz;
     vViewDepth = clipPos.w;
     vAO = aAO;
+    vMaskRadius = model_data.mask_radius;
 
     // Compute tangent and bitangent from the normal for TBN matrix
     // This works for axis-aligned block faces

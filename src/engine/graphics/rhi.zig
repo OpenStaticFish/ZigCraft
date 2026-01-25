@@ -454,6 +454,7 @@ pub const RHI = struct {
         // Options
         setWireframe: *const fn (ctx: *anyopaque, enabled: bool) void,
         setTexturesEnabled: *const fn (ctx: *anyopaque, enabled: bool) void,
+        setDebugShadowView: *const fn (ctx: *anyopaque, enabled: bool) void,
         setVSync: *const fn (ctx: *anyopaque, enabled: bool) void,
         setAnisotropicFiltering: *const fn (ctx: *anyopaque, level: u8) void,
         setVolumetricDensity: *const fn (ctx: *anyopaque, density: f32) void,
@@ -657,6 +658,9 @@ pub const RHI = struct {
     }
     pub fn setTexturesEnabled(self: RHI, enabled: bool) void {
         self.vtable.setTexturesEnabled(self.ptr, enabled);
+    }
+    pub fn setDebugShadowView(self: RHI, enabled: bool) void {
+        self.vtable.setDebugShadowView(self.ptr, enabled);
     }
     pub fn setVSync(self: RHI, enabled: bool) void {
         self.vtable.setVSync(self.ptr, enabled);

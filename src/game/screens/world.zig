@@ -66,6 +66,10 @@ pub const WorldScreen = struct {
             ctx.settings.vsync = !ctx.settings.vsync;
             ctx.rhi.*.setVSync(ctx.settings.vsync);
         }
+        if (ctx.input.isKeyPressed(.g)) {
+            ctx.settings.debug_shadows_active = !ctx.settings.debug_shadows_active;
+            ctx.rhi.*.setDebugShadowView(ctx.settings.debug_shadows_active);
+        }
 
         // Update Audio Listener
         const cam = &self.session.player.camera;

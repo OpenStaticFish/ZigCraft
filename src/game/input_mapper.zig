@@ -102,6 +102,10 @@ pub const GameAction = enum(u8) {
     /// Go back in menu or close (Default: Escape)
     ui_back,
 
+    // New additions (appended to avoid breaking existing settings.json bindings)
+    /// Toggle shadow debug visualization - red/green (Default: G)
+    toggle_shadow_debug_vis,
+
     pub const count = @typeInfo(GameAction).@"enum".fields.len;
 };
 
@@ -283,6 +287,7 @@ pub const DEFAULT_BINDINGS = blk: {
     bindings[@intFromEnum(GameAction.toggle_fps)] = ActionBinding.init(.{ .key = .f2 });
     bindings[@intFromEnum(GameAction.toggle_block_info)] = ActionBinding.init(.{ .key = .f5 });
     bindings[@intFromEnum(GameAction.toggle_shadows)] = ActionBinding.init(.{ .key = .u });
+    bindings[@intFromEnum(GameAction.toggle_shadow_debug_vis)] = ActionBinding.init(.{ .key = .g });
     bindings[@intFromEnum(GameAction.cycle_cascade)] = ActionBinding.init(.{ .key = .k });
     bindings[@intFromEnum(GameAction.toggle_time_scale)] = ActionBinding.init(.{ .key = .n });
     bindings[@intFromEnum(GameAction.toggle_creative)] = ActionBinding.init(.{ .key = .f3 });
