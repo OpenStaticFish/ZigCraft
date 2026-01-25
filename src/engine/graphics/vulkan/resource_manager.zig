@@ -608,10 +608,7 @@ pub const ResourceManager = struct {
     }
 
     pub fn destroyTexture(self: *ResourceManager, handle: rhi.TextureHandle) void {
-        const tex = self.textures.get(handle) orelse {
-            std.debug.assert(handle != rhi.InvalidTextureHandle);
-            return;
-        };
+        const tex = self.textures.get(handle) orelse return;
         _ = self.textures.remove(handle);
         self.image_deletion_queue[self.current_frame_index].append(self.allocator, .{
             .image = tex.image,
