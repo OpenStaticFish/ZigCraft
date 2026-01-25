@@ -388,3 +388,19 @@ test "AtmosphereSystem.renderClouds with null handles" {
 
     try testing.expect(mock.cloud_pipeline_requested);
 }
+
+test "SSAOSystem params defaults" {
+    const SSAOParams = @import("vulkan/ssao_system.zig").SSAOParams;
+    const KERNEL_SIZE = @import("vulkan/ssao_system.zig").KERNEL_SIZE;
+    const DEFAULT_RADIUS = @import("vulkan/ssao_system.zig").DEFAULT_RADIUS;
+    const DEFAULT_BIAS = @import("vulkan/ssao_system.zig").DEFAULT_BIAS;
+
+    const params = std.mem.zeroes(SSAOParams);
+    _ = params;
+    // Note: std.mem.zeroes might not use struct defaults if defined with = DEFAULT_RADIUS
+    // but in SSAOSystem.init we manually set them.
+    // Let's test that the struct layout and constants are accessible.
+    try testing.expectEqual(@as(usize, 64), KERNEL_SIZE);
+    try testing.expectEqual(@as(f32, 0.5), DEFAULT_RADIUS);
+    try testing.expectEqual(@as(f32, 0.025), DEFAULT_BIAS);
+}

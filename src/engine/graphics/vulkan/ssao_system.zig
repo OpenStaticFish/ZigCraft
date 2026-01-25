@@ -8,12 +8,21 @@ const VulkanDevice = @import("../vulkan_device.zig").VulkanDevice;
 const resource_manager_pkg = @import("resource_manager.zig");
 const VulkanBuffer = resource_manager_pkg.VulkanBuffer;
 
+pub const KERNEL_SIZE = 64;
+pub const NOISE_SIZE = 4;
+pub const DEFAULT_RADIUS = 0.5;
+pub const DEFAULT_BIAS = 0.025;
+
+const SHADER_PATH_VERT = "assets/shaders/vulkan/ssao.vert.spv";
+const SHADER_PATH_FRAG = "assets/shaders/vulkan/ssao.frag.spv";
+const SHADER_PATH_BLUR_FRAG = "assets/shaders/vulkan/ssao_blur.frag.spv";
+
 pub const SSAOParams = extern struct {
     projection: Mat4,
     invProjection: Mat4,
-    samples: [64][4]f32,
-    radius: f32 = 0.5,
-    bias: f32 = 0.025,
+    samples: [KERNEL_SIZE][4]f32,
+    radius: f32 = DEFAULT_RADIUS,
+    bias: f32 = DEFAULT_BIAS,
     _padding: [2]f32 = undefined,
 };
 
@@ -54,21 +63,21 @@ pub const SSAOSystem = struct {
     params: SSAOParams = undefined,
     sampler: c.VkSampler = null,
 
-    pub fn init(self: *SSAOSystem, device: *const VulkanDevice, allocator: Allocator, descriptor_pool: c.VkDescriptorPool, command_pool: c.VkCommandPool, width: u32, height: u32, g_normal_view: c.VkImageView, g_depth_view: c.VkImageView) !void {
+    pub fn init(self: *SSAOSystem, device: *const VulkanDevice, allocator: Allocator, descriptor_pool: c.VkDescriptorPool, upload_cmd_pool: c.VkCommandPool, width: u32, height: u32, g_normal_view: c.VkImageView, g_depth_view: c.VkImageView) !void {
         const vk = device.vk_device;
         const ao_format = c.VK_FORMAT_R8_UNORM;
 
         // Initialize params with default values
         self.params = std.mem.zeroes(SSAOParams);
-        self.params.radius = 0.5;
-        self.params.bias = 0.025;
+        self.params.radius = DEFAULT_RADIUS;
+        self.params.bias = DEFAULT_BIAS;
 
         try self.initRenderPasses(vk, ao_format);
         errdefer self.deinit(vk, allocator);
 
         try self.initImages(device, width, height, ao_format);
         try self.initFramebuffers(vk, width, height);
-        try self.initNoiseTexture(device, command_pool);
+        try self.initNoiseTexture(device, upload_cmd_pool);
         try self.initKernelUBO(device);
         try self.initSampler(vk);
         try self.initDescriptorLayouts(vk);
@@ -190,11 +199,11 @@ pub const SSAOSystem = struct {
         try Utils.checkVk(c.vkCreateFramebuffer(vk, &fb_info, null, &self.blur_framebuffer));
     }
 
-    fn initNoiseTexture(self: *SSAOSystem, device: *const VulkanDevice, command_pool: c.VkCommandPool) !void {
+    fn initNoiseTexture(self: *SSAOSystem, device: *const VulkanDevice, upload_cmd_pool: c.VkCommandPool) !void {
         const vk = device.vk_device;
         var rng = std.Random.DefaultPrng.init(12345);
-        var noise_data: [16 * 4]u8 = undefined;
-        for (0..16) |i| {
+        var noise_data: [NOISE_SIZE * NOISE_SIZE * 4]u8 = undefined;
+        for (0..NOISE_SIZE * NOISE_SIZE) |i| {
             const x = rng.random().float(f32) * 2.0 - 1.0;
             const y = rng.random().float(f32) * 2.0 - 1.0;
             noise_data[i * 4 + 0] = @intFromFloat((x * 0.5 + 0.5) * 255.0);
@@ -206,7 +215,7 @@ pub const SSAOSystem = struct {
         var img_info = std.mem.zeroes(c.VkImageCreateInfo);
         img_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         img_info.imageType = c.VK_IMAGE_TYPE_2D;
-        img_info.extent = .{ .width = 4, .height = 4, .depth = 1 };
+        img_info.extent = .{ .width = NOISE_SIZE, .height = NOISE_SIZE, .depth = 1 };
         img_info.mipLevels = 1;
         img_info.arrayLayers = 1;
         img_info.format = c.VK_FORMAT_R8G8B8A8_UNORM;
@@ -234,16 +243,16 @@ pub const SSAOSystem = struct {
         view_info.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
         try Utils.checkVk(c.vkCreateImageView(vk, &view_info, null, &self.noise_view));
 
-        const staging = try Utils.createVulkanBuffer(device, 16 * 4, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        const staging = try Utils.createVulkanBuffer(device, NOISE_SIZE * NOISE_SIZE * 4, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         defer {
             c.vkDestroyBuffer(vk, staging.buffer, null);
             c.vkFreeMemory(vk, staging.memory, null);
         }
 
         var data: ?*anyopaque = null;
-        try Utils.checkVk(c.vkMapMemory(vk, staging.memory, 0, 16 * 4, 0, &data));
+        try Utils.checkVk(c.vkMapMemory(vk, staging.memory, 0, NOISE_SIZE * NOISE_SIZE * 4, 0, &data));
         if (data) |ptr| {
-            @memcpy(@as([*]u8, @ptrCast(ptr))[0..64], &noise_data);
+            @memcpy(@as([*]u8, @ptrCast(ptr))[0 .. NOISE_SIZE * NOISE_SIZE * 4], &noise_data);
             c.vkUnmapMemory(vk, staging.memory);
         } else {
             return error.VulkanMemoryMappingFailed;
@@ -251,7 +260,7 @@ pub const SSAOSystem = struct {
 
         var cmd_info = std.mem.zeroes(c.VkCommandBufferAllocateInfo);
         cmd_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        cmd_info.commandPool = command_pool;
+        cmd_info.commandPool = upload_cmd_pool;
         cmd_info.level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         cmd_info.commandBufferCount = 1;
         var cmd: c.VkCommandBuffer = null;
@@ -276,7 +285,7 @@ pub const SSAOSystem = struct {
 
         var region = std.mem.zeroes(c.VkBufferImageCopy);
         region.imageSubresource = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1 };
-        region.imageExtent = .{ .width = 4, .height = 4, .depth = 1 };
+        region.imageExtent = .{ .width = NOISE_SIZE, .height = NOISE_SIZE, .depth = 1 };
         c.vkCmdCopyBufferToImage(cmd, staging.buffer, self.noise_image, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
         barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -293,14 +302,14 @@ pub const SSAOSystem = struct {
         submit_info.pCommandBuffers = &cmd;
         try device.submitGuarded(submit_info, null);
         _ = c.vkQueueWaitIdle(device.queue);
-        c.vkFreeCommandBuffers(vk, command_pool, 1, &cmd);
+        c.vkFreeCommandBuffers(vk, upload_cmd_pool, 1, &cmd);
     }
 
     fn initKernelUBO(self: *SSAOSystem, device: *const VulkanDevice) !void {
         self.kernel_ubo = try Utils.createVulkanBuffer(device, @sizeOf(SSAOParams), c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
         var rng = std.Random.DefaultPrng.init(67890);
-        for (0..64) |i| {
+        for (0..KERNEL_SIZE) |i| {
             var sample: [3]f32 = .{
                 rng.random().float(f32) * 2.0 - 1.0,
                 rng.random().float(f32) * 2.0 - 1.0,
@@ -311,7 +320,7 @@ pub const SSAOSystem = struct {
             sample[1] /= len;
             sample[2] /= len;
 
-            var scale: f32 = @as(f32, @floatFromInt(i)) / 64.0;
+            var scale: f32 = @as(f32, @floatFromInt(i)) / KERNEL_SIZE;
             scale = 0.1 + scale * scale * 0.9;
             sample[0] *= scale;
             sample[1] *= scale;
@@ -319,8 +328,8 @@ pub const SSAOSystem = struct {
 
             self.params.samples[i] = .{ sample[0], sample[1], sample[2], 0.0 };
         }
-        self.params.radius = 0.5;
-        self.params.bias = 0.025;
+        self.params.radius = DEFAULT_RADIUS;
+        self.params.bias = DEFAULT_BIAS;
     }
 
     fn initSampler(self: *SSAOSystem, vk: c.VkDevice) !void {
@@ -366,11 +375,11 @@ pub const SSAOSystem = struct {
         layout_info.pSetLayouts = &self.blur_descriptor_set_layout;
         try Utils.checkVk(c.vkCreatePipelineLayout(vk, &layout_info, null, &self.blur_pipeline_layout));
 
-        const vert_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/ssao.vert.spv", allocator, @enumFromInt(1024 * 1024));
+        const vert_code = try std.fs.cwd().readFileAlloc(SHADER_PATH_VERT, allocator, @enumFromInt(1024 * 1024));
         defer allocator.free(vert_code);
-        const frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/ssao.frag.spv", allocator, @enumFromInt(1024 * 1024));
+        const frag_code = try std.fs.cwd().readFileAlloc(SHADER_PATH_FRAG, allocator, @enumFromInt(1024 * 1024));
         defer allocator.free(frag_code);
-        const blur_frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/ssao_blur.frag.spv", allocator, @enumFromInt(1024 * 1024));
+        const blur_frag_code = try std.fs.cwd().readFileAlloc(SHADER_PATH_BLUR_FRAG, allocator, @enumFromInt(1024 * 1024));
         defer allocator.free(blur_frag_code);
 
         const vert_module = try Utils.createShaderModule(vk, vert_code);
