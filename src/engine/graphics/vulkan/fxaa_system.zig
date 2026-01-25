@@ -4,6 +4,7 @@ const c = @import("../../../c.zig").c;
 const rhi = @import("../rhi.zig");
 const Utils = @import("utils.zig");
 const VulkanDevice = @import("../vulkan_device.zig").VulkanDevice;
+const shader_registry = @import("shader_registry.zig");
 
 pub const FXAAPushConstants = extern struct {
     texel_size: [2]f32,
@@ -162,9 +163,9 @@ pub const FXAASystem = struct {
         try Utils.checkVk(c.vkCreatePipelineLayout(vk, &pipe_layout_info, null, &self.pipeline_layout));
 
         // 5. Shaders & Pipeline
-        const vert_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/fxaa.vert.spv", allocator, @enumFromInt(1024 * 1024));
+        const vert_code = try std.fs.cwd().readFileAlloc(shader_registry.FXAA_VERT, allocator, @enumFromInt(1024 * 1024));
         defer allocator.free(vert_code);
-        const frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/fxaa.frag.spv", allocator, @enumFromInt(1024 * 1024));
+        const frag_code = try std.fs.cwd().readFileAlloc(shader_registry.FXAA_FRAG, allocator, @enumFromInt(1024 * 1024));
         defer allocator.free(frag_code);
         const vert_module = try Utils.createShaderModule(vk, vert_code);
         defer c.vkDestroyShaderModule(vk, vert_module, null);

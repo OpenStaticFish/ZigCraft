@@ -4,8 +4,9 @@ const c = @import("../../../c.zig").c;
 const rhi = @import("../rhi.zig");
 const Utils = @import("utils.zig");
 const VulkanDevice = @import("../vulkan_device.zig").VulkanDevice;
+const shader_registry = @import("shader_registry.zig");
 
-pub const BLOOM_MIP_COUNT = rhi.BLOOM_MIP_COUNT;
+const BLOOM_MIP_COUNT = rhi.BLOOM_MIP_COUNT;
 
 pub const BloomPushConstants = extern struct {
     texel_size: [2]f32,
@@ -169,11 +170,11 @@ pub const BloomSystem = struct {
         try Utils.checkVk(c.vkCreatePipelineLayout(vk, &pipe_layout_info, null, &self.pipeline_layout));
 
         // 6. Pipelines
-        const vert_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/bloom_downsample.vert.spv", allocator, @enumFromInt(1024 * 1024));
+        const vert_code = try std.fs.cwd().readFileAlloc(shader_registry.BLOOM_DOWNSAMPLE_VERT, allocator, @enumFromInt(1024 * 1024));
         defer allocator.free(vert_code);
-        const down_frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/bloom_downsample.frag.spv", allocator, @enumFromInt(1024 * 1024));
+        const down_frag_code = try std.fs.cwd().readFileAlloc(shader_registry.BLOOM_DOWNSAMPLE_FRAG, allocator, @enumFromInt(1024 * 1024));
         defer allocator.free(down_frag_code);
-        const up_frag_code = try std.fs.cwd().readFileAlloc("assets/shaders/vulkan/bloom_upsample.frag.spv", allocator, @enumFromInt(1024 * 1024));
+        const up_frag_code = try std.fs.cwd().readFileAlloc(shader_registry.BLOOM_UPSAMPLE_FRAG, allocator, @enumFromInt(1024 * 1024));
         defer allocator.free(up_frag_code);
 
         const vert_module = try Utils.createShaderModule(vk, vert_code);

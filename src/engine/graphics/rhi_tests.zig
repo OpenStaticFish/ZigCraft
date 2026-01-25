@@ -98,30 +98,6 @@ const MockContext = struct {
         _ = ptr;
         return 0;
     }
-    fn getNativeSSAOPipeline(ptr: *anyopaque) u64 {
-        _ = ptr;
-        return 0;
-    }
-    fn getNativeSSAOPipelineLayout(ptr: *anyopaque) u64 {
-        _ = ptr;
-        return 0;
-    }
-    fn getNativeSSAOBlurPipeline(ptr: *anyopaque) u64 {
-        _ = ptr;
-        return 0;
-    }
-    fn getNativeSSAOBlurPipelineLayout(ptr: *anyopaque) u64 {
-        _ = ptr;
-        return 0;
-    }
-    fn getNativeSSAODescriptorSet(ptr: *anyopaque) u64 {
-        _ = ptr;
-        return 0;
-    }
-    fn getNativeSSAOBlurDescriptorSet(ptr: *anyopaque) u64 {
-        _ = ptr;
-        return 0;
-    }
     fn getNativeCommandBuffer(ptr: *anyopaque) u64 {
         _ = ptr;
         return 0;
@@ -130,33 +106,15 @@ const MockContext = struct {
         _ = ptr;
         return .{ 800, 600 };
     }
-    fn getNativeSSAOFramebuffer(ptr: *anyopaque) u64 {
-        _ = ptr;
-        return 0;
-    }
-    fn getNativeSSAOBlurFramebuffer(ptr: *anyopaque) u64 {
-        _ = ptr;
-        return 0;
-    }
-    fn getNativeSSAORenderPass(ptr: *anyopaque) u64 {
-        _ = ptr;
-        return 0;
-    }
-    fn getNativeSSAOBlurRenderPass(ptr: *anyopaque) u64 {
-        _ = ptr;
-        return 0;
-    }
-    fn getNativeSSAOParamsBuffer(ptr: *anyopaque) u64 {
-        _ = ptr;
-        return 0;
-    }
-    fn getNativeSSAOParamsMemory(ptr: *anyopaque) u64 {
-        _ = ptr;
-        return 0;
-    }
     fn getNativeDevice(ptr: *anyopaque) u64 {
         _ = ptr;
         return 0;
+    }
+
+    fn computeSSAO(ptr: *anyopaque, proj: Mat4, inv_proj: Mat4) void {
+        _ = ptr;
+        _ = proj;
+        _ = inv_proj;
     }
 
     fn getEncoder(ptr: *anyopaque) rhi.IGraphicsCommandEncoder {
@@ -222,22 +180,13 @@ const MockContext = struct {
         .getNativeCloudPipeline = getNativeCloudPipeline,
         .getNativeCloudPipelineLayout = getNativeCloudPipelineLayout,
         .getNativeMainDescriptorSet = getNativeMainDescriptorSet,
-        .getNativeSSAOPipeline = getNativeSSAOPipeline,
-        .getNativeSSAOPipelineLayout = getNativeSSAOPipelineLayout,
-        .getNativeSSAOBlurPipeline = getNativeSSAOBlurPipeline,
-        .getNativeSSAOBlurPipelineLayout = getNativeSSAOBlurPipelineLayout,
-        .getNativeSSAODescriptorSet = getNativeSSAODescriptorSet,
-        .getNativeSSAOBlurDescriptorSet = getNativeSSAOBlurDescriptorSet,
         .getNativeCommandBuffer = getNativeCommandBuffer,
         .getNativeSwapchainExtent = getNativeSwapchainExtent,
-        .getNativeSSAOFramebuffer = getNativeSSAOFramebuffer,
-        .getNativeSSAOBlurFramebuffer = getNativeSSAOBlurFramebuffer,
-        .getNativeSSAORenderPass = getNativeSSAORenderPass,
-        .getNativeSSAOBlurRenderPass = getNativeSSAOBlurRenderPass,
-        .getNativeSSAOParamsBuffer = getNativeSSAOParamsBuffer,
-        .getNativeSSAOParamsMemory = getNativeSSAOParamsMemory,
         .getNativeDevice = getNativeDevice,
-        .computeSSAO = undefined,
+    };
+
+    const MOCK_SSAO_VTABLE = rhi.ISSAOContext.VTable{
+        .compute = computeSSAO,
     };
 
     const MOCK_RESOURCES_VTABLE = rhi.IResourceFactory.VTable{
@@ -344,6 +293,7 @@ const MockContext = struct {
         .deinit = undefined,
         .resources = MOCK_RESOURCES_VTABLE,
         .render = MOCK_RENDER_VTABLE,
+        .ssao = MOCK_SSAO_VTABLE,
         .shadow = MOCK_SHADOW_VTABLE,
         .ui = MOCK_UI_VTABLE,
         .query = MOCK_QUERY_VTABLE,
@@ -467,6 +417,22 @@ test "AtmosphereSystem.renderClouds with null handles" {
     }, Mat4.identity));
 
     try testing.expect(mock.cloud_pipeline_requested);
+}
+
+test "SSAOSystem params defaults" {
+    const SSAOParams = @import("vulkan/ssao_system.zig").SSAOParams;
+    const KERNEL_SIZE = @import("vulkan/ssao_system.zig").KERNEL_SIZE;
+    const DEFAULT_RADIUS = @import("vulkan/ssao_system.zig").DEFAULT_RADIUS;
+    const DEFAULT_BIAS = @import("vulkan/ssao_system.zig").DEFAULT_BIAS;
+
+    const params = std.mem.zeroes(SSAOParams);
+    _ = params;
+    // Note: std.mem.zeroes might not use struct defaults if defined with = DEFAULT_RADIUS
+    // but in SSAOSystem.init we manually set them.
+    // Let's test that the struct layout and constants are accessible.
+    try testing.expectEqual(@as(usize, 64), KERNEL_SIZE);
+    try testing.expectEqual(@as(f32, 0.5), DEFAULT_RADIUS);
+    try testing.expectEqual(@as(f32, 0.025), DEFAULT_BIAS);
 }
 
 test "ResourceManager.registerExternalTexture validation" {

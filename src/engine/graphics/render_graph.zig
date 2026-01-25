@@ -212,7 +212,9 @@ pub const SSAOPass = struct {
     fn execute(ptr: *anyopaque, ctx: SceneContext) void {
         _ = ptr;
         if (!ctx.ssao_enabled or ctx.disable_ssao) return;
-        ctx.rhi.context().computeSSAO();
+        const proj = Mat4.perspectiveReverseZ(ctx.camera.fov, ctx.aspect, ctx.camera.near, ctx.camera.far);
+        const inv_proj = proj.inverse();
+        ctx.rhi.ssao().compute(proj, inv_proj);
     }
 };
 

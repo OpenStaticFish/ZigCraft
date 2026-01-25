@@ -235,6 +235,19 @@ pub const IRenderStateContext = struct {
     }
 };
 
+pub const ISSAOContext = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        compute: *const fn (ptr: *anyopaque, proj: Mat4, inv_proj: Mat4) void,
+    };
+
+    pub fn compute(self: ISSAOContext, proj: Mat4, inv_proj: Mat4) void {
+        self.vtable.compute(self.ptr, proj, inv_proj);
+    }
+};
+
 pub const IRenderContext = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -274,40 +287,12 @@ pub const IRenderContext = struct {
         getNativeCloudPipelineLayout: *const fn (ptr: *anyopaque) u64,
         /// Returns the main native descriptor set handle (VkDescriptorSet).
         getNativeMainDescriptorSet: *const fn (ptr: *anyopaque) u64,
-        /// Returns the native SSAO pipeline handle (VkPipeline).
-        getNativeSSAOPipeline: *const fn (ptr: *anyopaque) u64,
-        /// Returns the native SSAO pipeline layout handle (VkPipelineLayout).
-        getNativeSSAOPipelineLayout: *const fn (ptr: *anyopaque) u64,
-        /// Returns the native SSAO blur pipeline handle (VkPipeline).
-        getNativeSSAOBlurPipeline: *const fn (ptr: *anyopaque) u64,
-        /// Returns the native SSAO blur pipeline layout handle (VkPipelineLayout).
-        getNativeSSAOBlurPipelineLayout: *const fn (ptr: *anyopaque) u64,
-        /// Returns the native SSAO descriptor set handle (VkDescriptorSet).
-        getNativeSSAODescriptorSet: *const fn (ptr: *anyopaque) u64,
-        /// Returns the native SSAO blur descriptor set handle (VkDescriptorSet).
-        getNativeSSAOBlurDescriptorSet: *const fn (ptr: *anyopaque) u64,
         /// Returns the native command buffer handle for the current frame (VkCommandBuffer).
         getNativeCommandBuffer: *const fn (ptr: *anyopaque) u64,
         /// Returns the current swapchain extent [width, height].
         getNativeSwapchainExtent: *const fn (ptr: *anyopaque) [2]u32,
-        /// Returns the native SSAO framebuffer handle (VkFramebuffer).
-        getNativeSSAOFramebuffer: *const fn (ptr: *anyopaque) u64,
-        /// Returns the native SSAO blur framebuffer handle (VkFramebuffer).
-        getNativeSSAOBlurFramebuffer: *const fn (ptr: *anyopaque) u64,
-        /// Returns the native SSAO render pass handle (VkRenderPass).
-        getNativeSSAORenderPass: *const fn (ptr: *anyopaque) u64,
-        /// Returns the native SSAO blur render pass handle (VkRenderPass).
-        getNativeSSAOBlurRenderPass: *const fn (ptr: *anyopaque) u64,
-        /// Returns the native buffer handle for SSAO parameters (VkBuffer).
-        getNativeSSAOParamsBuffer: *const fn (ptr: *anyopaque) u64,
-        /// Returns the native memory handle for SSAO parameters (VkDeviceMemory).
-        getNativeSSAOParamsMemory: *const fn (ptr: *anyopaque) u64,
         /// Returns the native device handle (VkDevice).
         getNativeDevice: *const fn (ptr: *anyopaque) u64,
-
-        // Specific rendering passes/techniques
-        // TODO (#189): Relocate computeSSAO to a dedicated SSAOSystem and remove from RHI.
-        computeSSAO: *const fn (ptr: *anyopaque) void,
     };
 
     pub fn beginFrame(self: IRenderContext) void {
@@ -374,11 +359,6 @@ pub const IRenderContext = struct {
     // Pass-throughs to state (convenience)
     pub fn setModelMatrix(self: IRenderContext, model: Mat4, color: Vec3, mask_radius: f32) void {
         self.getState().setModelMatrix(model, color, mask_radius);
-    }
-
-    // Legacy/Techniques (to be removed once systems are updated)
-    pub fn computeSSAO(self: IRenderContext) void {
-        self.vtable.computeSSAO(self.ptr);
     }
 };
 
@@ -452,6 +432,7 @@ pub const RHI = struct {
         // Composition of all vtables (temp)
         resources: IResourceFactory.VTable,
         render: IRenderContext.VTable,
+        ssao: ISSAOContext.VTable,
         shadow: IShadowContext.VTable,
         ui: IUIContext.VTable,
         query: IDeviceQuery.VTable,
@@ -483,6 +464,9 @@ pub const RHI = struct {
     }
     pub fn state(self: RHI) IRenderStateContext {
         return self.context().getState();
+    }
+    pub fn ssao(self: RHI) ISSAOContext {
+        return .{ .ptr = self.ptr, .vtable = &self.vtable.ssao };
     }
     pub fn shadow(self: RHI) IShadowContext {
         return .{ .ptr = self.ptr, .vtable = &self.vtable.shadow };
@@ -643,9 +627,6 @@ pub const RHI = struct {
     }
     pub fn endGPass(self: RHI) void {
         self.vtable.render.endGPass(self.ptr);
-    }
-    pub fn computeSSAO(self: RHI) void {
-        self.vtable.render.computeSSAO(self.ptr);
     }
     pub fn beginFXAAPass(self: RHI) void {
         self.vtable.render.beginFXAAPass(self.ptr);

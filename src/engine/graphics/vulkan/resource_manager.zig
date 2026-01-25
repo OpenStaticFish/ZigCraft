@@ -621,6 +621,25 @@ pub const ResourceManager = struct {
         };
     }
 
+    pub fn registerNativeTexture(self: *ResourceManager, image: c.VkImage, view: c.VkImageView, sampler: c.VkSampler, width: u32, height: u32, format: rhi.TextureFormat) rhi.RhiError!rhi.TextureHandle {
+        const handle = self.next_texture_handle;
+        self.next_texture_handle += 1;
+
+        try self.textures.put(handle, .{
+            .image = image,
+            .memory = null, // External ownership
+            .view = view,
+            .sampler = sampler,
+            .width = width,
+            .height = height,
+            .format = format,
+            .config = .{}, // Default config
+            .is_owned = false,
+        });
+
+        return handle;
+    }
+
     /// Registers an externally-owned texture for use in debug overlays.
     /// Errors: InvalidImageView if view or sampler is null.
     pub fn registerExternalTexture(self: *ResourceManager, width: u32, height: u32, format: rhi.TextureFormat, view: c.VkImageView, sampler: c.VkSampler) rhi.RhiError!rhi.TextureHandle {
