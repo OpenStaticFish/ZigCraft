@@ -1,6 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const rhi = @import("rhi.zig");
+const c = @import("../../c.zig").c;
 const Mat4 = @import("../math/mat4.zig").Mat4;
 const Vec3 = @import("../math/vec3.zig").Vec3;
 
@@ -466,4 +467,47 @@ test "AtmosphereSystem.renderClouds with null handles" {
     }, Mat4.identity));
 
     try testing.expect(mock.cloud_pipeline_requested);
+}
+
+test "ResourceManager.registerExternalTexture validation" {
+    const ResourceManager = @import("vulkan/resource_manager.zig").ResourceManager;
+    const VulkanDevice = @import("vulkan_device.zig").VulkanDevice;
+
+    // We don't need a real Vulkan device for this specific test as it only tests map insertion and validation logic
+    var dummy_device = VulkanDevice{
+        .allocator = testing.allocator,
+        .vk_device = null,
+        .queue = null,
+    };
+
+    var manager = ResourceManager{
+        .allocator = testing.allocator,
+        .vulkan_device = &dummy_device,
+        .buffers = std.AutoHashMap(rhi.BufferHandle, @import("vulkan/resource_manager.zig").VulkanBuffer).init(testing.allocator),
+        .next_buffer_handle = 1,
+        .textures = std.AutoHashMap(rhi.TextureHandle, @import("vulkan/resource_manager.zig").TextureResource).init(testing.allocator),
+        .next_texture_handle = 1,
+        .buffer_deletion_queue = undefined,
+        .image_deletion_queue = undefined,
+        .staging_buffers = undefined,
+        .transfer_command_pool = null,
+        .transfer_command_buffers = undefined,
+        .transfer_fence = null,
+    };
+    defer manager.textures.deinit();
+    defer manager.buffers.deinit();
+
+    const dummy_view: c.VkImageView = @ptrFromInt(0x1234);
+    const dummy_sampler: c.VkSampler = @ptrFromInt(0x5678);
+
+    // Test successful registration
+    const handle = try manager.registerExternalTexture(128, 128, .rgba, dummy_view, dummy_sampler);
+    try testing.expect(handle != 0);
+    try testing.expectEqual(@as(usize, 1), manager.textures.count());
+
+    // Test null view validation
+    try testing.expectError(error.InvalidImageView, manager.registerExternalTexture(128, 128, .rgba, null, dummy_sampler));
+
+    // Test null sampler validation
+    try testing.expectError(error.InvalidImageView, manager.registerExternalTexture(128, 128, .rgba, dummy_view, null));
 }

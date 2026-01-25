@@ -7,9 +7,9 @@ const IShadowContext = rhi.IShadowContext;
 pub const DebugShadowOverlay = struct {
     /// Layout configuration for the debug overlay.
     pub const Config = struct {
-        /// Size of each cascade thumbnail in pixels.
+        /// Default size of each shadow cascade thumbnail in pixels.
         size: f32 = 200.0,
-        /// Spacing between cascade thumbnails in pixels.
+        /// Default spacing between cascade thumbnails and screen edges in pixels.
         spacing: f32 = 10.0,
     };
 
