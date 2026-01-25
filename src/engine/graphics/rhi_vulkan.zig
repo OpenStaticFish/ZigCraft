@@ -261,6 +261,7 @@ const VulkanContext = struct {
     ssao_blur_descriptor_sets: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorSet = .{null} ** MAX_FRAMES_IN_FLIGHT,
 
     shadow_system: ShadowSystem,
+    shadow_map_handles: [rhi.SHADOW_CASCADE_COUNT]rhi.TextureHandle = .{0} ** rhi.SHADOW_CASCADE_COUNT,
     shadow_resolution: u32,
     memory_type_index: u32,
     framebuffer_resized: bool,
@@ -1139,14 +1140,17 @@ fn createShadowResources(ctx: *VulkanContext) !void {
     // Layered views for framebuffers (one per cascade)
     for (0..rhi.SHADOW_CASCADE_COUNT) |si| {
         var layer_view: c.VkImageView = null;
-        var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
-        view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        view_info.image = ctx.shadow_system.shadow_image;
-        view_info.viewType = c.VK_IMAGE_VIEW_TYPE_2D;
-        view_info.format = DEPTH_FORMAT;
-        view_info.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = @intCast(si), .layerCount = 1 };
-        try Utils.checkVk(c.vkCreateImageView(vk, &view_info, null, &layer_view));
+        var layer_view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
+        layer_view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        layer_view_info.image = ctx.shadow_system.shadow_image;
+        layer_view_info.viewType = c.VK_IMAGE_VIEW_TYPE_2D;
+        layer_view_info.format = DEPTH_FORMAT;
+        layer_view_info.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_DEPTH_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = @intCast(si), .layerCount = 1 };
+        try Utils.checkVk(c.vkCreateImageView(vk, &layer_view_info, null, &layer_view));
         ctx.shadow_system.shadow_image_views[si] = layer_view;
+
+        // Register shadow cascade as a texture handle for debug visualization
+        ctx.shadow_map_handles[si] = try ctx.resources.registerExternalTexture(shadow_res, shadow_res, .depth, layer_view, ctx.shadow_system.shadow_sampler_regular);
 
         var fb_info = std.mem.zeroes(c.VkFramebufferCreateInfo);
         fb_info.sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -4471,75 +4475,72 @@ fn beginCloudPass(ctx_ptr: *anyopaque, params: rhi.CloudParams) void {
     c.vkCmdPushConstants(command_buffer, ctx.cloud_pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(CloudPushConstants), &pc);
 }
 
-fn drawDebugShadowMap(ctx_ptr: *anyopaque, cascade_index: usize, depth_map_handle: rhi.TextureHandle) void {
+fn drawDepthTexture(ctx_ptr: *anyopaque, texture: rhi.TextureHandle, rect: rhi.Rect) void {
     if (comptime !build_options.debug_shadows) return;
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
-    if (!ctx.frames.frame_in_progress) return;
-
-    ctx.mutex.lock();
-    defer ctx.mutex.unlock();
-
-    if (!ctx.main_pass_active) beginMainPassInternal(ctx);
-    if (!ctx.main_pass_active) return;
+    if (!ctx.frames.frame_in_progress or !ctx.ui_in_progress) return;
 
     if (ctx.debug_shadow.pipeline == null) return;
 
+    // 1. Flush normal UI if any
+    flushUI(ctx);
+
+    const tex_opt = ctx.resources.textures.get(texture);
+    if (tex_opt == null) {
+        std.log.err("drawDepthTexture: Texture handle {} not found in textures map!", .{texture});
+        return;
+    }
+    const tex = tex_opt.?;
+
     const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
-    // ...
 
-    // Bind debug shadow pipeline
+    // 2. Bind Debug Shadow Pipeline
     c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.debug_shadow.pipeline.?);
-
     ctx.terrain_pipeline_bound = false;
 
-    // Set up orthographic projection for UI-sized quad
-    const debug_size: f32 = 200.0;
-    const debug_spacing: f32 = 10.0;
-    const debug_x: f32 = debug_spacing + @as(f32, @floatFromInt(cascade_index)) * (debug_size + debug_spacing);
-    const debug_y: f32 = debug_spacing;
-
-    const width_f32 = @as(f32, @floatFromInt(ctx.swapchain.getExtent().width));
-    const height_f32 = @as(f32, @floatFromInt(ctx.swapchain.getExtent().height));
+    // 3. Set up orthographic projection for UI-sized quad
+    const width_f32 = ctx.ui_screen_width;
+    const height_f32 = ctx.ui_screen_height;
     const proj = Mat4.orthographic(0, width_f32, height_f32, 0, -1, 1);
     c.vkCmdPushConstants(command_buffer, ctx.debug_shadow.pipeline_layout.?, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf(Mat4), &proj.data);
 
-    // Update descriptor set with the depth texture
-    const tex_entry = ctx.resources.textures.get(depth_map_handle);
+    // 4. Update & Bind Descriptor Set
+    var image_info = std.mem.zeroes(c.VkDescriptorImageInfo);
+    image_info.imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    image_info.imageView = tex.view;
+    image_info.sampler = tex.sampler;
 
-    if (tex_entry) |tex| {
-        var image_info = std.mem.zeroes(c.VkDescriptorImageInfo);
-        image_info.imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        image_info.imageView = tex.view;
-        image_info.sampler = tex.sampler;
+    const frame = ctx.frames.current_frame;
+    const idx = ctx.debug_shadow.descriptor_next[frame];
+    const pool_len = ctx.debug_shadow.descriptor_pool[frame].len;
+    ctx.debug_shadow.descriptor_next[frame] = @intCast((idx + 1) % pool_len);
+    const ds = ctx.debug_shadow.descriptor_pool[frame][idx] orelse return;
 
-        const frame = ctx.frames.current_frame;
-        const idx = ctx.debug_shadow.descriptor_next[frame];
-        const pool_len = ctx.debug_shadow.descriptor_pool[frame].len;
-        ctx.debug_shadow.descriptor_next[frame] = @intCast((idx + 1) % pool_len);
-        const ds = ctx.debug_shadow.descriptor_pool[frame][idx] orelse return;
+    var write_set = std.mem.zeroes(c.VkWriteDescriptorSet);
+    write_set.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write_set.dstSet = ds;
+    write_set.dstBinding = 0;
+    write_set.descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write_set.descriptorCount = 1;
+    write_set.pImageInfo = &image_info;
 
-        var write_set = std.mem.zeroes(c.VkWriteDescriptorSet);
-        write_set.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write_set.dstSet = ds;
-        write_set.dstBinding = 0;
-        write_set.descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        write_set.descriptorCount = 1;
-        write_set.pImageInfo = &image_info;
+    c.vkUpdateDescriptorSets(ctx.vulkan_device.vk_device, 1, &write_set, 0, null);
+    c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.debug_shadow.pipeline_layout.?, 0, 1, &ds, 0, null);
 
-        c.vkUpdateDescriptorSets(ctx.vulkan_device.vk_device, 1, &write_set, 0, null);
+    // 5. Draw Quad
+    const debug_x = rect.x;
+    const debug_y = rect.y;
+    const debug_w = rect.width;
+    const debug_h = rect.height;
 
-        c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.debug_shadow.pipeline_layout.?, 0, 1, &ds, 0, null);
-    }
-
-    // Create debug quad vertices (position + texCoord) - 4 floats per vertex
     const debug_vertices = [_]f32{
         // pos.x, pos.y, uv.x, uv.y
-        debug_x,              debug_y,              0.0, 0.0,
-        debug_x + debug_size, debug_y,              1.0, 0.0,
-        debug_x + debug_size, debug_y + debug_size, 1.0, 1.0,
-        debug_x,              debug_y,              0.0, 0.0,
-        debug_x + debug_size, debug_y + debug_size, 1.0, 1.0,
-        debug_x,              debug_y + debug_size, 0.0, 1.0,
+        debug_x,           debug_y,           0.0, 0.0,
+        debug_x + debug_w, debug_y,           1.0, 0.0,
+        debug_x + debug_w, debug_y + debug_h, 1.0, 1.0,
+        debug_x,           debug_y,           0.0, 0.0,
+        debug_x + debug_w, debug_y + debug_h, 1.0, 1.0,
+        debug_x,           debug_y + debug_h, 0.0, 1.0,
     };
 
     // Map and copy vertices to debug shadow VBO
@@ -4551,6 +4552,13 @@ fn drawDebugShadowMap(ctx_ptr: *anyopaque, cascade_index: usize, depth_map_handl
         const offset: c.VkDeviceSize = 0;
         c.vkCmdBindVertexBuffers(command_buffer, 0, 1, &ctx.debug_shadow.vbo.buffer, &offset);
         c.vkCmdDraw(command_buffer, 6, 1, 0, 0);
+    }
+
+    // 6. Restore normal UI state for subsequent calls
+    const restore_pipeline = getUIPipeline(ctx, false);
+    if (restore_pipeline != null) {
+        c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, restore_pipeline);
+        c.vkCmdPushConstants(command_buffer, ctx.ui_pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT, 0, @sizeOf(Mat4), &proj.data);
     }
 }
 
@@ -5285,6 +5293,13 @@ fn drawRect2D(ctx_ptr: *anyopaque, rect: rhi.Rect, color: rhi.Color) void {
     }
 }
 
+const VULKAN_SHADOW_CONTEXT_VTABLE = rhi.IShadowContext.VTable{
+    .beginPass = beginShadowPass,
+    .endPass = endShadowPass,
+    .updateUniforms = updateShadowUniforms,
+    .getShadowMapHandle = getShadowMapHandle,
+};
+
 fn getUIPipeline(ctx: *VulkanContext, textured: bool) c.VkPipeline {
     if (ctx.ui_using_swapchain) {
         return if (textured) ctx.ui_swapchain_tex_pipeline else ctx.ui_swapchain_pipeline;
@@ -5491,6 +5506,12 @@ fn endShadowPass(ctx_ptr: *anyopaque) void {
     endShadowPassInternal(ctx);
 }
 
+fn getShadowMapHandle(ctx_ptr: *anyopaque, cascade_index: u32) rhi.TextureHandle {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    if (cascade_index >= rhi.SHADOW_CASCADE_COUNT) return 0;
+    return ctx.shadow_map_handles[cascade_index];
+}
+
 fn updateShadowUniforms(ctx_ptr: *anyopaque, params: rhi.ShadowParams) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
 
@@ -5592,6 +5613,15 @@ fn getNativeDevice(ctx_ptr: *anyopaque) u64 {
     return @intFromPtr(ctx.vulkan_device.vk_device);
 }
 
+const VULKAN_UI_CONTEXT_VTABLE = rhi.IUIContext.VTable{
+    .beginPass = begin2DPass,
+    .endPass = end2DPass,
+    .drawRect = drawRect2D,
+    .drawTexture = drawTexture2D,
+    .drawDepthTexture = drawDepthTexture,
+    .bindPipeline = bindUIPipeline,
+};
+
 fn getStateContext(ctx_ptr: *anyopaque) rhi.IRenderStateContext {
     return .{ .ptr = ctx_ptr, .vtable = &VULKAN_STATE_CONTEXT_VTABLE };
 }
@@ -5653,6 +5683,7 @@ const VULKAN_RHI_VTABLE = rhi.RHI.VTable{
         .computeBloom = computeBloom,
         .getEncoder = getEncoder,
         .getStateContext = getStateContext,
+        .setClearColor = setClearColor,
         .getNativeSkyPipeline = getNativeSkyPipeline,
         .getNativeSkyPipelineLayout = getNativeSkyPipelineLayout,
         .getNativeCloudPipeline = getNativeCloudPipeline,
@@ -5674,21 +5705,9 @@ const VULKAN_RHI_VTABLE = rhi.RHI.VTable{
         .getNativeSSAOParamsMemory = getNativeSSAOParamsMemory,
         .getNativeDevice = getNativeDevice,
         .computeSSAO = computeSSAO,
-        .setClearColor = setClearColor,
-        .drawDebugShadowMap = drawDebugShadowMap,
     },
-    .shadow = .{
-        .beginPass = beginShadowPass,
-        .endPass = endShadowPass,
-        .updateUniforms = updateShadowUniforms,
-    },
-    .ui = .{
-        .beginPass = begin2DPass,
-        .endPass = end2DPass,
-        .drawRect = drawRect2D,
-        .drawTexture = drawTexture2D,
-        .bindPipeline = bindUIPipeline,
-    },
+    .shadow = VULKAN_SHADOW_CONTEXT_VTABLE,
+    .ui = VULKAN_UI_CONTEXT_VTABLE,
     .query = .{
         .getFrameIndex = getFrameIndex,
         .supportsIndirectFirstInstance = supportsIndirectFirstInstance,

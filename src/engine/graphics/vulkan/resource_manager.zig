@@ -9,14 +9,15 @@ pub const VulkanBuffer = Utils.VulkanBuffer;
 
 /// Vulkan texture with image, view, and sampler.
 pub const TextureResource = struct {
-    image: c.VkImage,
-    memory: c.VkDeviceMemory,
+    image: ?c.VkImage,
+    memory: ?c.VkDeviceMemory,
     view: c.VkImageView,
     sampler: c.VkSampler,
     width: u32,
     height: u32,
     format: rhi.TextureFormat,
     config: rhi.TextureConfig,
+    is_owned: bool = true,
 };
 
 const ZombieBuffer = struct {
@@ -25,10 +26,11 @@ const ZombieBuffer = struct {
 };
 
 const ZombieImage = struct {
-    image: c.VkImage,
-    memory: c.VkDeviceMemory,
+    image: ?c.VkImage,
+    memory: ?c.VkDeviceMemory,
     view: c.VkImageView,
     sampler: c.VkSampler,
+    is_owned: bool,
 };
 
 /// Per-frame linear staging buffer for async uploads.
@@ -172,10 +174,12 @@ pub const ResourceManager = struct {
             self.buffer_deletion_queue[i].deinit(self.allocator);
 
             for (self.image_deletion_queue[i].items) |img| {
-                c.vkDestroyImageView(device, img.view, null);
-                c.vkDestroyImage(device, img.image, null);
-                c.vkFreeMemory(device, img.memory, null);
-                c.vkDestroySampler(device, img.sampler, null);
+                if (img.is_owned) {
+                    c.vkDestroyImageView(device, img.view, null);
+                    if (img.image) |image| c.vkDestroyImage(device, image, null);
+                    if (img.memory) |memory| c.vkFreeMemory(device, memory, null);
+                    c.vkDestroySampler(device, img.sampler, null);
+                }
             }
             self.image_deletion_queue[i].deinit(self.allocator);
         }
@@ -189,10 +193,12 @@ pub const ResourceManager = struct {
 
         var tex_it = self.textures.valueIterator();
         while (tex_it.next()) |tex| {
-            c.vkDestroyImageView(device, tex.view, null);
-            c.vkDestroyImage(device, tex.image, null);
-            c.vkFreeMemory(device, tex.memory, null);
-            c.vkDestroySampler(device, tex.sampler, null);
+            if (tex.is_owned) {
+                c.vkDestroyImageView(device, tex.view, null);
+                if (tex.image) |image| c.vkDestroyImage(device, image, null);
+                if (tex.memory) |memory| c.vkFreeMemory(device, memory, null);
+                c.vkDestroySampler(device, tex.sampler, null);
+            }
         }
         self.textures.deinit();
 
@@ -250,10 +256,12 @@ pub const ResourceManager = struct {
         self.buffer_deletion_queue[frame_index].clearRetainingCapacity();
 
         for (self.image_deletion_queue[frame_index].items) |img| {
-            c.vkDestroyImageView(device, img.view, null);
-            c.vkDestroyImage(device, img.image, null);
-            c.vkFreeMemory(device, img.memory, null);
-            c.vkDestroySampler(device, img.sampler, null);
+            if (img.is_owned) {
+                c.vkDestroyImageView(device, img.view, null);
+                if (img.image) |image| c.vkDestroyImage(device, image, null);
+                if (img.memory) |memory| c.vkFreeMemory(device, memory, null);
+                c.vkDestroySampler(device, img.sampler, null);
+            }
         }
         self.image_deletion_queue[frame_index].clearRetainingCapacity();
     }
@@ -593,6 +601,7 @@ pub const ResourceManager = struct {
             .height = height,
             .format = format,
             .config = config,
+            .is_owned = true,
         });
 
         return handle;
@@ -609,9 +618,27 @@ pub const ResourceManager = struct {
             .memory = tex.memory,
             .view = tex.view,
             .sampler = tex.sampler,
+            .is_owned = tex.is_owned,
         }) catch |err| {
             std.log.err("Failed to queue texture deletion: {}", .{err});
         };
+    }
+
+    pub fn registerExternalTexture(self: *ResourceManager, width: u32, height: u32, format: rhi.TextureFormat, view: c.VkImageView, sampler: c.VkSampler) rhi.RhiError!rhi.TextureHandle {
+        const handle = self.next_texture_handle;
+        self.next_texture_handle += 1;
+        try self.textures.put(handle, .{
+            .image = null,
+            .memory = null,
+            .view = view,
+            .sampler = sampler,
+            .width = width,
+            .height = height,
+            .format = format,
+            .config = .{},
+            .is_owned = false,
+        });
+        return handle;
     }
 
     pub fn updateTexture(self: *ResourceManager, handle: rhi.TextureHandle, data: []const u8) rhi.RhiError!void {
@@ -632,7 +659,7 @@ pub const ResourceManager = struct {
             barrier.newLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
             barrier.srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
             barrier.dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
-            barrier.image = tex.image;
+            barrier.image = tex.image orelse return error.ExtensionNotPresent;
             barrier.subresourceRange.aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT;
             barrier.subresourceRange.baseMipLevel = 0;
             barrier.subresourceRange.levelCount = 1;
@@ -649,7 +676,7 @@ pub const ResourceManager = struct {
             region.imageSubresource.layerCount = 1;
             region.imageExtent = .{ .width = tex.width, .height = tex.height, .depth = 1 };
 
-            c.vkCmdCopyBufferToImage(transfer_cb, staging.buffer, tex.image, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            c.vkCmdCopyBufferToImage(transfer_cb, staging.buffer, tex.image.?, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
             barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
             barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;

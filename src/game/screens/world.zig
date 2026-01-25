@@ -9,6 +9,7 @@ const Vec3 = @import("../../engine/math/vec3.zig").Vec3;
 const rhi_pkg = @import("../../engine/graphics/rhi.zig");
 const render_graph_pkg = @import("../../engine/graphics/render_graph.zig");
 const PausedScreen = @import("paused.zig").PausedScreen;
+const DebugShadowOverlay = @import("../../engine/ui/debug_shadow_overlay.zig").DebugShadowOverlay;
 
 pub const WorldScreen = struct {
     context: EngineContext,
@@ -183,6 +184,10 @@ pub const WorldScreen = struct {
         const mouse_clicked = ctx.input.isMouseButtonPressed(.left);
 
         try self.session.drawHUD(ui, ctx.atlas, ctx.resource_pack_manager.active_pack, ctx.time.fps, screen_w, screen_h, mouse_x, mouse_y, mouse_clicked);
+
+        if (ctx.settings.debug_shadows_active) {
+            DebugShadowOverlay.draw(ctx.rhi, screen_w, screen_h);
+        }
     }
 
     pub fn onEnter(ptr: *anyopaque) void {

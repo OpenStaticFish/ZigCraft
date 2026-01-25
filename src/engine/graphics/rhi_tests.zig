@@ -186,6 +186,18 @@ const MockContext = struct {
         return std.mem.zeroes(rhi.GpuTimingResults);
     }
 
+    fn getShadowMapHandle(ptr: *anyopaque, cascade_index: u32) rhi.TextureHandle {
+        _ = ptr;
+        _ = cascade_index;
+        return 0;
+    }
+
+    fn drawDepthTexture(ptr: *anyopaque, texture: rhi.TextureHandle, rect: rhi.Rect) void {
+        _ = ptr;
+        _ = texture;
+        _ = rect;
+    }
+
     const MOCK_RENDER_VTABLE = rhi.IRenderContext.VTable{
         .beginFrame = undefined,
         .endFrame = undefined,
@@ -223,7 +235,6 @@ const MockContext = struct {
         .getNativeSSAOParamsMemory = getNativeSSAOParamsMemory,
         .getNativeDevice = getNativeDevice,
         .computeSSAO = undefined,
-        .drawDebugShadowMap = undefined,
     };
 
     const MOCK_RESOURCES_VTABLE = rhi.IResourceFactory.VTable{
@@ -309,13 +320,29 @@ const MockContext = struct {
         .waitIdle = undefined,
     };
 
+    const MOCK_SHADOW_VTABLE = rhi.IShadowContext.VTable{
+        .beginPass = undefined,
+        .endPass = undefined,
+        .updateUniforms = undefined,
+        .getShadowMapHandle = getShadowMapHandle,
+    };
+
+    const MOCK_UI_VTABLE = rhi.IUIContext.VTable{
+        .beginPass = undefined,
+        .endPass = undefined,
+        .drawRect = undefined,
+        .drawTexture = undefined,
+        .drawDepthTexture = drawDepthTexture,
+        .bindPipeline = undefined,
+    };
+
     const MOCK_VULKAN_RHI_VTABLE = rhi.RHI.VTable{
         .init = undefined,
         .deinit = undefined,
         .resources = MOCK_RESOURCES_VTABLE,
         .render = MOCK_RENDER_VTABLE,
-        .shadow = undefined,
-        .ui = undefined,
+        .shadow = MOCK_SHADOW_VTABLE,
+        .ui = MOCK_UI_VTABLE,
         .query = MOCK_QUERY_VTABLE,
         .timing = .{
             .beginPassTiming = beginPassTiming,
