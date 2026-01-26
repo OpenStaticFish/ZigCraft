@@ -67,7 +67,7 @@ pub const WorldScreen = struct {
             ctx.settings.vsync = !ctx.settings.vsync;
             ctx.rhi.*.setVSync(ctx.settings.vsync);
         }
-        if (ctx.input.isKeyPressed(.g)) {
+        if (ctx.input_mapper.isActionPressed(ctx.input, .toggle_shadow_debug_vis)) {
             ctx.settings.debug_shadows_active = !ctx.settings.debug_shadows_active;
             ctx.rhi.*.setDebugShadowView(ctx.settings.debug_shadows_active);
         }
