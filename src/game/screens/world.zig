@@ -70,10 +70,6 @@ pub const WorldScreen = struct {
             ctx.settings.debug_shadows_active = !ctx.settings.debug_shadows_active;
             ctx.rhi.*.setDebugShadowView(ctx.settings.debug_shadows_active);
         }
-        if (ctx.input.isKeyPressed(.g)) {
-            ctx.settings.debug_shadows_active = !ctx.settings.debug_shadows_active;
-            ctx.rhi.*.setDebugShadowView(ctx.settings.debug_shadows_active);
-        }
 
         // Update Audio Listener
         const cam = &self.session.player.camera;
