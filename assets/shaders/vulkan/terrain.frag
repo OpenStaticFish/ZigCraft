@@ -332,6 +332,21 @@ vec3 computeLOD(vec3 albedo, float nDotL, float totalShadow, float skyLightVal, 
     return ambientColor + directColor;
 }
 
+// Simple shadow sampler for volumetric points, optimized
+float getVolShadow(vec3 p, float viewDepth) {
+    int layer = 2;
+    if (viewDepth < shadows.cascade_splits[0]) layer = 0;
+    else if (viewDepth < shadows.cascade_splits[1]) layer = 1;
+
+    vec4 lightSpacePos = shadows.light_space_matrices[layer] * vec4(p, 1.0);
+    vec3 proj = lightSpacePos.xyz / lightSpacePos.w;
+    proj.xy = proj.xy * 0.5 + 0.5;
+    
+    if (proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0 || proj.z > 1.0) return 1.0;
+    
+    return texture(uShadowMaps, vec4(proj.xy, float(layer), proj.z + 0.002));
+}
+
 // Henyey-Greenstein Phase Function for Mie Scattering (Phase 4)
 float henyeyGreensteinVol(float g, float cosTheta) {
     float g2 = g * g;
