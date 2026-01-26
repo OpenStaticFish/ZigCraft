@@ -87,7 +87,7 @@ const GlobalUniforms = extern struct {
     params: [4]f32, // x = time, y = fog_density, z = fog_enabled, w = sun_intensity
     lighting: [4]f32, // x = ambient, y = use_texture, z = pbr_enabled, w = cloud_shadow_strength
     cloud_params: [4]f32, // x = cloud_height, y = pcf_samples, z = cascade_blend, w = cloud_shadows
-    pbr_params: [4]f32, // x = pbr_quality, y = exposure, z = saturation, w = unused
+    pbr_params: [4]f32, // x = pbr_quality, y = exposure, z = saturation, w = energy_conservation
     volumetric_params: [4]f32, // x = enabled, y = density, z = steps, w = scattering
     viewport_size: [4]f32, // xy = width/height, zw = unused
 };
@@ -3604,7 +3604,7 @@ fn updateGlobalUniforms(ctx_ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun
         .params = .{ time_val, fog_density, if (fog_enabled) 1.0 else 0.0, sun_intensity },
         .lighting = .{ ambient, if (use_texture) 1.0 else 0.0, if (cloud_params.pbr_enabled) 1.0 else 0.0, 0.15 },
         .cloud_params = .{ cloud_params.cloud_height, @floatFromInt(cloud_params.shadow.pcf_samples), if (cloud_params.shadow.cascade_blend) 1.0 else 0.0, if (cloud_params.cloud_shadows) 1.0 else 0.0 },
-        .pbr_params = .{ @floatFromInt(cloud_params.pbr_quality), if (cloud_params.exposure == 0) 1.0 else cloud_params.exposure, if (cloud_params.saturation == 0) 1.0 else cloud_params.saturation, if (cloud_params.ssao_enabled) 1.0 else 0.0 },
+        .pbr_params = .{ @floatFromInt(cloud_params.pbr_quality), if (cloud_params.exposure == 0) 1.0 else cloud_params.exposure, if (cloud_params.saturation == 0) 1.0 else cloud_params.saturation, 1.0 }, // Energy conservation always enabled
         .volumetric_params = .{ if (cloud_params.volumetric_enabled) 1.0 else 0.0, cloud_params.volumetric_density, @floatFromInt(cloud_params.volumetric_steps), cloud_params.volumetric_scattering },
         .viewport_size = .{ @floatFromInt(ctx.swapchain.getExtent().width), @floatFromInt(ctx.swapchain.getExtent().height), if (ctx.debug_shadows_active) 1.0 else 0.0, 0 },
     };

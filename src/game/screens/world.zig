@@ -10,6 +10,8 @@ const rhi_pkg = @import("../../engine/graphics/rhi.zig");
 const render_graph_pkg = @import("../../engine/graphics/render_graph.zig");
 const PausedScreen = @import("paused.zig").PausedScreen;
 const DebugShadowOverlay = @import("../../engine/ui/debug_shadow_overlay.zig").DebugShadowOverlay;
+const Font = @import("../../engine/ui/font.zig");
+const Color = @import("../../engine/ui/ui_system.zig").Color;
 
 pub const WorldScreen = struct {
     context: EngineContext,
@@ -65,7 +67,6 @@ pub const WorldScreen = struct {
         }
         if (ctx.input_mapper.isActionPressed(ctx.input, .toggle_vsync)) {
             ctx.settings.vsync = !ctx.settings.vsync;
-            ctx.rhi.*.setVSync(ctx.settings.vsync);
         }
         if (ctx.input.isKeyPressed(.g)) {
             ctx.settings.debug_shadows_active = !ctx.settings.debug_shadows_active;
@@ -188,6 +189,10 @@ pub const WorldScreen = struct {
         if (ctx.settings.debug_shadows_active) {
             DebugShadowOverlay.draw(ctx.rhi.ui(), ctx.rhi.shadow(), screen_w, screen_h, .{});
         }
+
+        // Energy conservation toggle notification
+        const ec_y = if (screen_h > 100) screen_h - 35 else screen_h - 10;
+        Font.drawText(ui, "ENERGY CONSERVATION: FIXED", 10, ec_y, 1.5, Color.rgba(100, 200, 255, 200));
     }
 
     pub fn onEnter(ptr: *anyopaque) void {
