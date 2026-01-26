@@ -154,32 +154,31 @@ float PCF_Filtered(vec2 uv, float zReceiver, float filterRadius, int layer) {
 
 // PBR functions
 const float PI = 3.14159265359;
-const float MAX_ENV_MIP_LEVEL = 8.0; // log2(256), the maximum mip level for the 256x256 environment maps used for IBL
-const float SUN_RADIANCE_TO_IRRADIANCE = 4.0; // Normalizes radiance to irradiance (approx PI). Accounts for the 1/PI factor in the BRDF diffuse term (albedo/PI), plus an empirical boost for atmospheric scattering.
-const float LEGACY_LIGHTING_INTENSITY = 2.5;  // Empirical radiance boost for legacy lighting path
-const float LOD_LIGHTING_INTENSITY = 1.5;     // Empirical radiance boost for LOD fallback path
-const float NON_PBR_ROUGHNESS = 0.5;          // Default roughness for non-PBR materials to ensure consistent IBL look
-const vec3 IBL_CLAMP = vec3(3.0);             // High-dynamic range clamping threshold for IBL ambient to prevent over-exposure
-const float VOLUMETRIC_DENSITY_FACTOR = 0.1;  // Scaling factor to bring volumetric fog density into world-space units
+const float MAX_ENV_MIP_LEVEL = 8.0; // log2(256), corresponding to the mip chain depth of a 256x256 environment map.
+const float SUN_RADIANCE_TO_IRRADIANCE = 4.0; // Conversion factor to treat sun radiance as irradiance. This approx PI factor compensates for the 1/PI normalization in the Lambertian diffuse term (albedo/PI).
+const float LEGACY_LIGHTING_INTENSITY = 2.5;  // Empirical radiance boost factor for legacy (PBR disabled) blocks.
+const float LOD_LIGHTING_INTENSITY = 1.5;     // Empirical radiance boost factor for distant LOD terrain.
+const float NON_PBR_ROUGHNESS = 0.5;          // Default perceptual roughness for standard (non-PBR) block textures.
+const vec3 IBL_CLAMP = vec3(3.0);             // High-dynamic range clamping threshold for IBL ambient to prevent over-exposure.
+const float VOLUMETRIC_DENSITY_FACTOR = 0.1;  // Normalization factor for raymarched fog density.
+const float DIELECTRIC_F0 = 0.04;             // Standard Fresnel reflectance for non-metallic surfaces.
+const float COOK_TORRANCE_DENOM_FACTOR = 4.0; // Denominator factor for Cook-Torrance specular BRDF.
 
-float computeShadowFactor(vec3 fragPosWorld, float nDotL, int layer) {
-    vec4 fragPosLightSpace = shadows.light_space_matrices[layer] * vec4(fragPosWorld, 1.0);
-    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
-
-    projCoords.xy = projCoords.xy * 0.5 + 0.5;
+float computeShadowCascades(vec3 fragPosWorld, float nDotL, float viewDepth, int layer) {
+    float shadow = computeShadowFactor(fragPosWorld, nDotL, layer);
     
-    if (projCoords.x < 0.0 || projCoords.x > 1.0 ||
-        projCoords.y < 0.0 || projCoords.y > 1.0 ||
-        projCoords.z > 1.0 || projCoords.z < 0.0) return 0.0;
-
-    float currentDepth = projCoords.z;
-    float bias = max(0.001 * (1.0 - nDotL), 0.0005);
-    if (vTileID < 0) bias = 0.005;
-
-    if (global.cloud_params.y < 5.0) {
-        if (global.cloud_params.y < 2.0) {
-            return 1.0 - texture(uShadowMaps, vec4(projCoords.xy, float(layer), currentDepth + bias));
+    // Cascade blending transition
+    if (layer < 2) {
+        float nextSplit = shadows.cascade_splits[layer];
+        float blendThreshold = nextSplit * 0.8;
+        if (viewDepth > blendThreshold) {
+            float blend = (viewDepth - blendThreshold) / (nextSplit - blendThreshold);
+            float nextShadow = computeShadowFactor(fragPosWorld, nDotL, layer + 1);
+            shadow = mix(shadow, nextShadow, clamp(blend, 0.0, 1.0));
         }
+    }
+    return shadow;
+}
         float shadow = 0.0;
         float radius = 0.001;
         shadow += texture(uShadowMaps, vec4(projCoords.xy + vec2(-radius, -radius), float(layer), currentDepth + bias));
@@ -269,14 +268,14 @@ vec3 computeIBLAmbient(vec3 N, float roughness) {
 
 vec3 computeBRDF(vec3 albedo, vec3 N, vec3 V, vec3 L, float roughness) {
     vec3 H = normalize(V + L);
-    vec3 F0 = mix(vec3(0.04), albedo, 0.0); // Non-metals
+    vec3 F0 = mix(vec3(DIELECTRIC_F0), albedo, 0.0); // Non-metals only for blocky terrain
 
     float NDF = DistributionGGX(N, H, roughness);
     float G = GeometrySmith(N, V, L, roughness);
     vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
     
     vec3 numerator = NDF * G * F;
-    float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.001;
+    float denominator = COOK_TORRANCE_DENOM_FACTOR * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.001;
     vec3 specular = numerator / denominator;
     
     vec3 kD = (vec3(1.0) - F);
@@ -396,7 +395,7 @@ void main() {
 
     float nDotL = max(dot(N, global.sun_dir.xyz), 0.0);
     int layer = vViewDepth < shadows.cascade_splits[0] ? 0 : (vViewDepth < shadows.cascade_splits[1] ? 1 : 2);
-    float shadowFactor = computeCascadeBlending(vFragPosWorld, nDotL, vViewDepth, layer);
+    float shadowFactor = computeShadowCascades(vFragPosWorld, nDotL, vViewDepth, layer);
     
     float cloudShadow = (global.cloud_params.w > 0.5 && global.params.w > 0.05 && global.sun_dir.y > 0.05) ? getCloudShadow(vFragPosWorld, global.sun_dir.xyz) : 0.0;
     float totalShadow = min(shadowFactor + cloudShadow, 1.0);
