@@ -103,9 +103,9 @@ pub const GameAction = enum(u8) {
     ui_back,
 
     // New additions (appended to avoid breaking existing settings.json bindings)
-    /// Toggle shadow debug visualization - red/green (Default: G)
+    /// Toggle shadow debug visualization - red/green
     toggle_shadow_debug_vis,
-    /// Toggle GPU timing/profiler overlay (Default: F4)
+    /// Toggle GPU timing/profiler overlay
     toggle_timing_overlay,
 
     pub const count = @typeInfo(GameAction).@"enum".fields.len;
