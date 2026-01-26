@@ -105,6 +105,8 @@ pub const GameAction = enum(u8) {
     // New additions (appended to avoid breaking existing settings.json bindings)
     /// Toggle shadow debug visualization - red/green (Default: G)
     toggle_shadow_debug_vis,
+    /// Toggle GPU timing/profiler overlay (Default: F4)
+    toggle_timing_overlay,
 
     pub const count = @typeInfo(GameAction).@"enum".fields.len;
 };
@@ -291,6 +293,7 @@ pub const DEFAULT_BINDINGS = blk: {
     bindings[@intFromEnum(GameAction.cycle_cascade)] = ActionBinding.init(.{ .key = .k });
     bindings[@intFromEnum(GameAction.toggle_time_scale)] = ActionBinding.init(.{ .key = .n });
     bindings[@intFromEnum(GameAction.toggle_creative)] = ActionBinding.init(.{ .key = .f3 });
+    bindings[@intFromEnum(GameAction.toggle_timing_overlay)] = ActionBinding.init(.{ .key = .f4 });
 
     // Map controls
     bindings[@intFromEnum(GameAction.toggle_map)] = ActionBinding.init(.{ .key = .m });

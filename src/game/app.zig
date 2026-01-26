@@ -381,7 +381,7 @@ pub const App = struct {
         self.input.beginFrame();
         self.input.pollEvents();
 
-        if (self.input.isKeyPressed(.f3)) {
+        if (self.input_mapper.isActionPressed(&self.input, .toggle_timing_overlay)) {
             self.timing_overlay.toggle();
             self.rhi.timing().setTimingEnabled(self.timing_overlay.enabled);
         }
