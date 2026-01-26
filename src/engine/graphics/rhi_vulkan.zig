@@ -87,7 +87,7 @@ const GlobalUniforms = extern struct {
     params: [4]f32, // x = time, y = fog_density, z = fog_enabled, w = sun_intensity
     lighting: [4]f32, // x = ambient, y = use_texture, z = pbr_enabled, w = cloud_shadow_strength
     cloud_params: [4]f32, // x = cloud_height, y = pcf_samples, z = cascade_blend, w = cloud_shadows
-    pbr_params: [4]f32, // x = pbr_quality, y = exposure, z = saturation, w = unused
+    pbr_params: [4]f32, // x = pbr_quality, y = exposure, z = saturation, w = ssao_strength
     volumetric_params: [4]f32, // x = enabled, y = density, z = steps, w = scattering
     viewport_size: [4]f32, // xy = width/height, zw = unused
 };

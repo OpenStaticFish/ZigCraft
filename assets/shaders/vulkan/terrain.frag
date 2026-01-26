@@ -152,10 +152,20 @@ float PCF_Filtered(vec2 uv, float zReceiver, float filterRadius, int layer) {
     return shadow / 9.0;
 }
 
-// DEBUG: Shadow debug visualization is now controlled by viewport_size.z uniform
-// Toggle with 'O' key in-game
+// PBR functions
+const float PI = 3.14159265359;
+const float MAX_ENV_MIP_LEVEL = 8.0; // log2(256), corresponding to the mip chain depth of a 256x256 environment map.
+const float SUN_RADIANCE_TO_IRRADIANCE = 4.0; // Conversion factor to treat sun radiance as irradiance. This approx PI factor compensates for the 1/PI normalization in the Lambertian diffuse term (albedo/PI).
+const float SUN_VOLUMETRIC_INTENSITY = 3.0;   // Radiance boost for LOD/Volumetric fallback modes (replacing SUN_LOD_MULTIPLIER)
+const float LEGACY_LIGHTING_INTENSITY = 2.5;  // Empirical radiance boost factor for legacy (PBR disabled) blocks.
+const float LOD_LIGHTING_INTENSITY = 1.5;     // Empirical radiance boost factor for distant LOD terrain.
+const float NON_PBR_ROUGHNESS = 0.5;          // Default perceptual roughness for standard (non-PBR) block textures.
+const vec3 IBL_CLAMP = vec3(3.0);             // High-dynamic range clamping threshold for IBL ambient to prevent over-exposure.
+const float VOLUMETRIC_DENSITY_FACTOR = 0.1;  // Normalization factor for raymarched fog density.
+const float DIELECTRIC_F0 = 0.04;             // Standard Fresnel reflectance for non-metallic surfaces.
+const float COOK_TORRANCE_DENOM_FACTOR = 4.0; // Denominator factor for Cook-Torrance specular BRDF.
 
-float calculateShadow(vec3 fragPosWorld, float nDotL, int layer) {
+float computeShadowFactor(vec3 fragPosWorld, float nDotL, int layer) {
     vec4 fragPosLightSpace = shadows.light_space_matrices[layer] * vec4(fragPosWorld, 1.0);
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
 
@@ -166,17 +176,13 @@ float calculateShadow(vec3 fragPosWorld, float nDotL, int layer) {
         projCoords.z > 1.0 || projCoords.z < 0.0) return 0.0;
 
     float currentDepth = projCoords.z;
-    // Slope-scaled bias for better acne prevention
     float bias = max(0.001 * (1.0 - nDotL), 0.0005);
     if (vTileID < 0) bias = 0.005;
 
-    // Performance Optimization: Skip PCSS on low sample counts
     if (global.cloud_params.y < 5.0) {
         if (global.cloud_params.y < 2.0) {
-            // Ultra-low: 1-tap hard shadow
             return 1.0 - texture(uShadowMaps, vec4(projCoords.xy, float(layer), currentDepth + bias));
         }
-        // Low: 4-tap 2x2 PCF
         float shadow = 0.0;
         float radius = 0.001;
         shadow += texture(uShadowMaps, vec4(projCoords.xy + vec2(-radius, -radius), float(layer), currentDepth + bias));
@@ -186,24 +192,144 @@ float calculateShadow(vec3 fragPosWorld, float nDotL, int layer) {
         return 1.0 - (shadow * 0.25);
     }
     
-    // High-quality PCSS logic
     float avgBlockerDepth = findBlocker(projCoords.xy, currentDepth, layer);
-    if (avgBlockerDepth == -1.0) return 0.0; // No blockers
+    if (avgBlockerDepth == -1.0) return 0.0;
     
     float penumbraSize = (avgBlockerDepth - currentDepth) / max(avgBlockerDepth, 0.0001);
-    float filterRadius = penumbraSize * 0.01; // Adjust multiplier for softness
-    filterRadius = clamp(filterRadius, 0.0005, 0.005); // Min/max blur
+    float filterRadius = penumbraSize * 0.01;
+    filterRadius = clamp(filterRadius, 0.0005, 0.005);
 
     return 1.0 - PCF_Filtered(projCoords.xy, currentDepth, filterRadius, layer);
 }
 
-// PBR functions
-const float PI = 3.14159265359;
+float computeShadowCascades(vec3 fragPosWorld, float nDotL, float viewDepth, int layer) {
+    float shadow = computeShadowFactor(fragPosWorld, nDotL, layer);
+    
+    // Cascade blending transition
+    if (layer < 2) {
+        float nextSplit = shadows.cascade_splits[layer];
+        float blendThreshold = nextSplit * 0.8;
+        if (viewDepth > blendThreshold) {
+            float blend = (viewDepth - blendThreshold) / (nextSplit - blendThreshold);
+            float nextShadow = computeShadowFactor(fragPosWorld, nDotL, layer + 1);
+            shadow = mix(shadow, nextShadow, clamp(blend, 0.0, 1.0));
+        }
+    }
+    return shadow;
+}
 
-// Henyey-Greenstein Phase Function for Mie Scattering (Phase 4)
-float henyeyGreenstein(float g, float cosTheta) {
-    float g2 = g * g;
-    return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * cosTheta, 0.01), 1.5));
+float DistributionGGX(vec3 N, vec3 H, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0);
+    float NdotH2 = NdotH * NdotH;
+    
+    float nom = a2;
+    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    denom = PI * denom * denom;
+    
+    return nom / max(denom, 0.001);
+}
+
+float GeometrySchlickGGX(float NdotV, float roughness) {
+    float r = (roughness + 1.0);
+    float k = (r * r) / 8.0;
+    
+    float nom = NdotV;
+    float denom = NdotV * (1.0 - k) + k;
+    
+    return nom / max(denom, 0.001);
+}
+
+float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
+    float ggx2 = GeometrySchlickGGX(NdotV, roughness);
+    float ggx1 = GeometrySchlickGGX(NdotL, roughness);
+    
+    return ggx1 * ggx2;
+}
+
+vec3 fresnelSchlick(float cosTheta, vec3 F0) {
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+vec2 SampleSphericalMap(vec3 v) {
+    vec3 n = normalize(v);
+    float phi = atan(n.z, n.x);
+    float theta = acos(clamp(n.y, -1.0, 1.0));
+    
+    vec2 uv;
+    uv.x = phi / (2.0 * PI) + 0.5;
+    uv.y = theta / PI;
+    return uv;
+}
+
+vec3 computeIBLAmbient(vec3 N, float roughness) {
+    float envMipLevel = roughness * MAX_ENV_MIP_LEVEL;
+    vec2 envUV = SampleSphericalMap(normalize(N));
+    return textureLod(uEnvMap, envUV, envMipLevel).rgb;
+}
+
+vec3 computeBRDF(vec3 albedo, vec3 N, vec3 V, vec3 L, float roughness) {
+    vec3 H = normalize(V + L);
+    vec3 F0 = mix(vec3(DIELECTRIC_F0), albedo, 0.0); // Non-metals only for blocky terrain
+
+    float NDF = DistributionGGX(N, H, roughness);
+    float G = GeometrySmith(N, V, L, roughness);
+    vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
+    
+    vec3 numerator = NDF * G * F;
+    float denominator = COOK_TORRANCE_DENOM_FACTOR * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.001;
+    vec3 specular = numerator / denominator;
+    
+    vec3 kD = (vec3(1.0) - F);
+    
+    return (kD * albedo / PI + specular);
+}
+
+vec3 computeLegacyDirect(vec3 albedo, float nDotL, float totalShadow, float skyLightIn, vec3 blockLightIn, float intensityFactor) {
+    float directLight = nDotL * global.params.w * (1.0 - totalShadow) * intensityFactor;
+    float skyLight = skyLightIn * (global.lighting.x + directLight * 1.0);
+    float lightLevel = max(skyLight, max(blockLightIn.r, max(blockLightIn.g, blockLightIn.b)));
+    lightLevel = max(lightLevel, global.lighting.x * 0.5);
+    
+    float shadowFactor = mix(1.0, 0.5, totalShadow);
+    lightLevel = clamp(lightLevel * shadowFactor, 0.0, 1.0);
+    return albedo * lightLevel;
+}
+
+vec3 computePBR(vec3 albedo, vec3 N, vec3 V, vec3 L, float roughness, float totalShadow, float skyLight, vec3 blockLight, float ao, float ssao) {
+    vec3 brdf = computeBRDF(albedo, N, V, L, roughness);
+    
+    float NdotL_final = max(dot(N, L), 0.0);
+    vec3 sunColor = global.sun_color.rgb * global.params.w * SUN_RADIANCE_TO_IRRADIANCE / PI;
+    vec3 Lo = brdf * sunColor * NdotL_final * (1.0 - totalShadow);
+    
+    vec3 envColor = computeIBLAmbient(N, roughness);
+    float shadowAmbientFactor = mix(1.0, 0.2, totalShadow);
+    vec3 ambientColor = albedo * (max(min(envColor, IBL_CLAMP) * skyLight * 0.8, vec3(global.lighting.x * 0.8)) + blockLight) * ao * ssao * shadowAmbientFactor;
+    
+    return ambientColor + Lo;
+}
+
+vec3 computeNonPBR(vec3 albedo, vec3 N, float nDotL, float totalShadow, float skyLight, vec3 blockLight, float ao, float ssao) {
+    vec3 envColor = computeIBLAmbient(N, NON_PBR_ROUGHNESS);
+    float shadowAmbientFactor = mix(1.0, 0.2, totalShadow);
+    vec3 ambientColor = albedo * (max(min(envColor, IBL_CLAMP) * skyLight * 0.8, vec3(global.lighting.x * 0.8)) + blockLight) * ao * ssao * shadowAmbientFactor;
+    
+    vec3 sunColor = global.sun_color.rgb * global.params.w * SUN_RADIANCE_TO_IRRADIANCE / PI;
+    vec3 directColor = albedo * sunColor * nDotL * (1.0 - totalShadow);
+    
+    return ambientColor + directColor;
+}
+
+vec3 computeLOD(vec3 albedo, float nDotL, float totalShadow, float skyLightVal, vec3 blockLight, float ao, float ssao) {
+    float shadowAmbientFactor = mix(1.0, 0.2, totalShadow);
+    vec3 ambientColor = albedo * (max(vec3(skyLightVal * 0.8), vec3(global.lighting.x * 0.4)) + blockLight) * ao * ssao * shadowAmbientFactor;
+    vec3 sunColor = global.sun_color.rgb * global.params.w * SUN_VOLUMETRIC_INTENSITY / PI;
+    vec3 directColor = albedo * sunColor * nDotL * (1.0 - totalShadow);
+    return ambientColor + directColor;
 }
 
 // Simple shadow sampler for volumetric points, optimized
@@ -221,9 +347,13 @@ float getVolShadow(vec3 p, float viewDepth) {
     return texture(uShadowMaps, vec4(proj.xy, float(layer), proj.z + 0.002));
 }
 
-// Raymarched God Rays (Phase 4)
-// Energy-conserving volumetric lighting with transmittance
-vec4 calculateVolumetric(vec3 rayStart, vec3 rayEnd, float dither) {
+// Henyey-Greenstein Phase Function for Mie Scattering (Phase 4)
+float henyeyGreensteinVol(float g, float cosTheta) {
+    float g2 = g * g;
+    return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * cosTheta, 0.01), 1.5));
+}
+
+vec4 computeVolumetric(vec3 rayStart, vec3 rayEnd, float dither) {
     if (global.volumetric_params.x < 0.5) return vec4(0.0, 0.0, 0.0, 1.0);
     
     vec3 rayDir = rayEnd - rayStart;
@@ -235,101 +365,35 @@ vec4 calculateVolumetric(vec3 rayStart, vec3 rayEnd, float dither) {
     float stepSize = maxDist / float(steps);
     
     float cosTheta = dot(rayDir, normalize(global.sun_dir.xyz));
-    float phase = henyeyGreenstein(global.volumetric_params.w, cosTheta);
+    float phase = henyeyGreensteinVol(global.volumetric_params.w, cosTheta);
     
-    // Use the actual sun color for scattering
-                vec3 sunColor = global.sun_color.rgb * global.params.w * 3.0; // Significant boost
+    vec3 sunColor = global.sun_color.rgb * global.params.w * SUN_VOLUMETRIC_INTENSITY / PI;
     vec3 accumulatedScattering = vec3(0.0);
     float transmittance = 1.0;
-    // Scale density to be more manageable (0.01 in preset = light fog)
-    float density = global.volumetric_params.y * 0.1;
+    float density = global.volumetric_params.y * VOLUMETRIC_DENSITY_FACTOR;
     
     for (int i = 0; i < steps; i++) {
         float d = (float(i) + dither) * stepSize;
         vec3 p = rayStart + rayDir * d;
-        
-        // Fix: Clamp height to avoid density explosion below sea level
         float heightFactor = exp(-max(p.y, 0.0) * 0.05);
         float stepDensity = density * heightFactor;
         
         if (stepDensity > 0.0001) {
             float shadow = getVolShadow(p, d);
             vec3 stepScattering = sunColor * phase * stepDensity * shadow * stepSize;
-            
             accumulatedScattering += stepScattering * transmittance;
             transmittance *= exp(-stepDensity * stepSize);
-            
-            // Optimization: Early exit if fully occluded
             if (transmittance < 0.01) break;
         }
     }
-    
     return vec4(accumulatedScattering, transmittance);
 }
 
-
-// Normal Distribution Function (GGX/Trowbridge-Reitz)
-float DistributionGGX(vec3 N, vec3 H, float roughness) {
-    float a = roughness * roughness;
-    float a2 = a * a;
-    float NdotH = max(dot(N, H), 0.0);
-    float NdotH2 = NdotH * NdotH;
-    
-    float nom = a2;
-    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
-    denom = PI * denom * denom;
-    
-    return nom / max(denom, 0.0001);
-}
-
-// Geometry function (Schlick-GGX)
-float GeometrySchlickGGX(float NdotV, float roughness) {
-    float r = (roughness + 1.0);
-    float k = (r * r) / 8.0;
-    
-    float nom = NdotV;
-    float denom = NdotV * (1.0 - k) + k;
-    
-    return nom / max(denom, 0.0001);
-}
-
-float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
-    float NdotV = max(dot(N, V), 0.0);
-    float NdotL = max(dot(N, L), 0.0);
-    float ggx2 = GeometrySchlickGGX(NdotV, roughness);
-    float ggx1 = GeometrySchlickGGX(NdotL, roughness);
-    
-    return ggx1 * ggx2;
-}
-
-// Fresnel (Schlick approximation)
-vec3 fresnelSchlick(float cosTheta, vec3 F0) {
-    return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
-}
-
-vec2 SampleSphericalMap(vec3 v) {
-    // Clamp the normal to avoid precision issues at poles
-    vec3 n = normalize(v);
-    // Use a more stable formula that avoids singularities
-    float phi = atan(n.z, n.x);  // Azimuth angle
-    float theta = acos(clamp(n.y, -1.0, 1.0));  // Polar angle (more stable than asin)
-    
-    vec2 uv;
-    uv.x = phi / (2.0 * PI) + 0.5;
-    uv.y = theta / PI;
-    return uv;
-}
-
 void main() {
-    // Output color - must be declared at function scope
     vec3 color;
-    
-    // Constants for visual polish
     const float LOD_TRANSITION_WIDTH = 24.0;
     const float AO_FADE_DISTANCE = 128.0;
 
-    // Dithered LOD transition - smooth crossfade between chunks and LOD terrain
-    // Only applies to LOD meshes (vTileID < 0)
     if (vTileID < 0 && vMaskRadius > 0.0) {
         float distFromMask = vDistance - vMaskRadius;
         float fade = clamp(distFromMask / LOD_TRANSITION_WIDTH, 0.0, 1.0);
@@ -337,204 +401,62 @@ void main() {
         if (fade < ditherThreshold) discard;
     }
     
-    // Calculate UV coordinates in atlas
-    vec2 atlasSize = vec2(16.0, 16.0);
-    vec2 tileSize = 1.0 / atlasSize;
-    vec2 tilePos = vec2(mod(float(vTileID), atlasSize.x), floor(float(vTileID) / atlasSize.x));
     vec2 tiledUV = fract(vTexCoord);
     tiledUV = clamp(tiledUV, 0.001, 0.999);
-    vec2 uv = (tilePos + tiledUV) * tileSize;
+    vec2 uv = (vec2(mod(float(vTileID), 16.0), floor(float(vTileID) / 16.0)) + tiledUV) * (1.0 / 16.0);
 
-    // Get normal for lighting
     vec3 N = normalize(vNormal);
-    
-    // PBR: Sample normal map and transform to world space
     vec4 normalMapSample = vec4(0.5, 0.5, 1.0, 0.0);
-    // Optimized: Only sample normal map if PBR is enabled AND quality is high enough
     if (global.lighting.z > 0.5 && global.pbr_params.x > 1.5 && vTileID >= 0) {
         normalMapSample = texture(uNormalMap, uv);
-        
-        vec3 normalMapValue = normalMapSample.rgb * 2.0 - 1.0; // Convert from [0,1] to [-1,1]
-        
-        // Build TBN matrix
-        vec3 T = normalize(vTangent);
-        vec3 B = normalize(vBitangent);
-        mat3 TBN = mat3(T, B, N);
-        
-        // Transform normal from tangent space to world space
-        N = normalize(TBN * normalMapValue);
+        mat3 TBN = mat3(normalize(vTangent), normalize(vBitangent), N);
+        N = normalize(TBN * (normalMapSample.rgb * 2.0 - 1.0));
     }
 
     float nDotL = max(dot(N, global.sun_dir.xyz), 0.0);
-
-    int layer = 2;
-    if (vViewDepth < shadows.cascade_splits[0]) layer = 0;
-    else if (vViewDepth < shadows.cascade_splits[1]) layer = 1;
-
-    float shadow = calculateShadow(vFragPosWorld, nDotL, layer);
+    int layer = vViewDepth < shadows.cascade_splits[0] ? 0 : (vViewDepth < shadows.cascade_splits[1] ? 1 : 2);
+    float shadowFactor = computeShadowCascades(vFragPosWorld, nDotL, vViewDepth, layer);
     
-    // Cascade blending
-    if (layer < 2) {
-        float nextSplit = shadows.cascade_splits[layer];
-        float blendThreshold = nextSplit * 0.8;
-        float normDist = vViewDepth;
-        if (normDist > blendThreshold) {
-            float blend = (normDist - blendThreshold) / (nextSplit - blendThreshold);
-            float nextShadow = calculateShadow(vFragPosWorld, nDotL, layer + 1);
-            shadow = mix(shadow, nextShadow, clamp(blend, 0.0, 1.0));
-        }
-    }
+    float cloudShadow = (global.cloud_params.w > 0.5 && global.params.w > 0.05 && global.sun_dir.y > 0.05) ? getCloudShadow(vFragPosWorld, global.sun_dir.xyz) : 0.0;
+    float totalShadow = min(shadowFactor + cloudShadow, 1.0);
 
-    // Cloud shadow
-    float cloudShadow = 0.0;
-    if (global.cloud_params.w > 0.5 && global.params.w > 0.05 && global.sun_dir.y > 0.05) {
-        cloudShadow = getCloudShadow(vFragPosWorld, global.sun_dir.xyz);
-    }
-    
-    float totalShadow = min(shadow + cloudShadow, 1.0);
-
-    // SSAO Sampling (reduced strength)
-    vec2 screenUV = gl_FragCoord.xy / global.viewport_size.xy;
-    float ssao = mix(1.0, texture(uSSAOMap, screenUV).r, global.pbr_params.w);
-    
-    // Distance-aware Voxel AO: Soften significantly at distance to hide chunk boundary artifacts
-    // This removes the dark rectangular patches on sand/grass
-    float aoDist = clamp(vDistance / AO_FADE_DISTANCE, 0.0, 1.0);
-    float aoStrength = mix(0.4, 0.05, aoDist);
-    float ao = mix(1.0, vAO, aoStrength);
+    float ssao = mix(1.0, texture(uSSAOMap, gl_FragCoord.xy / global.viewport_size.xy).r, global.pbr_params.w);
+    float ao = mix(1.0, vAO, mix(0.4, 0.05, clamp(vDistance / AO_FADE_DISTANCE, 0.0, 1.0)));
     
     if (global.lighting.y > 0.5 && vTileID >= 0) {
         vec4 texColor = texture(uTexture, uv);
         if (texColor.a < 0.1) discard;
-
-        // Albedo is already in linear space (VK_FORMAT_R8G8B8A8_SRGB does hardware decode)
-        // vColor is also in linear space (vertex colors)
         vec3 albedo = texColor.rgb * vColor;
 
-        // PBR lighting - Only calculate if maps are present and it's enabled
         if (global.lighting.z > 0.5 && global.pbr_params.x > 0.5) {
-            bool hasNormalMap = normalMapSample.a > 0.5;
-            
-            // Sample roughness (now packed: R=roughness, G=displacement)
-            vec4 packedPBR = texture(uRoughnessMap, uv);
-            float roughness = packedPBR.r;
-            bool hasPBR = hasNormalMap || (roughness < 0.99);
-
-            if (hasPBR) {
-                roughness = clamp(roughness, 0.05, 1.0);
-                
-                // For blocks, we use a low metallic value (non-metals)
-                float metallic = 0.0;
-                
-                // Use the normal calculated earlier (already includes normal mapping if quality > 1.5)
-                // Calculate view direction
+            float roughness = texture(uRoughnessMap, uv).r;
+            if (normalMapSample.a > 0.5 || roughness < 0.99) {
                 vec3 V = normalize(global.cam_pos.xyz - vFragPosWorld);
                 vec3 L = normalize(global.sun_dir.xyz);
-                vec3 H = normalize(V + L);
-                
-                // Calculate reflectance at normal incidence (F0)
-                vec3 F0 = vec3(0.04);
-                F0 = mix(F0, albedo, metallic);
-                
-                // Cook-Torrance BRDF
-                float NDF = DistributionGGX(N, H, roughness);
-                float G = GeometrySmith(N, V, L, roughness);
-                vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
-                
-                vec3 numerator = NDF * G * F;
-                float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
-                vec3 specular = numerator / denominator;
-                
-                vec3 kS = F;
-                vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);
-                
-                float NdotL_final = max(dot(N, L), 0.0);
-                vec3 sunColor = global.sun_color.rgb * global.params.w * 4.0;
-                vec3 Lo = (kD * albedo / PI + specular) * sunColor * NdotL_final * (1.0 - totalShadow);
-                
-                // Ambient lighting (IBL) - shadows reduce ambient slightly for more visible effect
-                vec2 envUV = SampleSphericalMap(normalize(N));
-                vec3 envColor = textureLod(uEnvMap, envUV, 8.0).rgb;
-                
-                float skyLight = vSkyLight * global.lighting.x;
-                vec3 blockLight = vBlockLight;
-                float shadowAmbientFactor = mix(1.0, 0.2, totalShadow); // Shadows darken ambient significantly (to 20%)
-                vec3 ambientColor = albedo * (max(min(envColor, vec3(3.0)) * skyLight * 0.8, vec3(global.lighting.x * 0.8)) + blockLight) * ao * ssao * shadowAmbientFactor;
-                
-                color = ambientColor + Lo;
+                color = computePBR(albedo, N, V, L, clamp(roughness, 0.05, 1.0), totalShadow, vSkyLight * global.lighting.x, vBlockLight, ao, ssao);
             } else {
-                // Non-PBR blocks with PBR enabled: use simplified IBL-aware lighting
-                float skyLight = vSkyLight * global.lighting.x;
-                vec3 blockLight = vBlockLight;
-                
-                // Sample IBL for ambient (even for non-PBR blocks)
-                vec2 envUV = SampleSphericalMap(normalize(N));
-                vec3 envColor = textureLod(uEnvMap, envUV, 8.0).rgb;
-                
-                // Shadows reduce ambient for more visible effect
-                float shadowAmbientFactor = mix(1.0, 0.2, totalShadow);
-                vec3 ambientColor = albedo * (max(min(envColor, vec3(3.0)) * skyLight * 0.8, vec3(global.lighting.x * 0.8)) + blockLight) * ao * ssao * shadowAmbientFactor;
-                
-                // Direct lighting
-                vec3 sunColor = global.sun_color.rgb * global.params.w * 4.0;
-                vec3 directColor = albedo * sunColor * nDotL * (1.0 - totalShadow);
-                
-                color = ambientColor + directColor;
+                color = computeNonPBR(albedo, N, nDotL, totalShadow, vSkyLight * global.lighting.x, vBlockLight, ao, ssao);
             }
-    } else {
-        // Legacy lighting (PBR disabled)
-        float directLight = nDotL * global.params.w * (1.0 - totalShadow) * 2.5;
-            float skyLight = vSkyLight * (global.lighting.x + directLight * 1.0);
-            vec3 blockLight = vBlockLight;
-            float lightLevel = max(skyLight, max(blockLight.r, max(blockLight.g, blockLight.b)));
-            lightLevel = max(lightLevel, global.lighting.x * 0.5);
-            
-            // Apply shadow to final light level to ensure visibility even in daylight
-            float shadowFactor = mix(1.0, 0.5, totalShadow);
-            lightLevel = clamp(lightLevel * shadowFactor, 0.0, 1.0);
-            
-            // Apply AO to legacy lighting
-            color = albedo * lightLevel * ao * ssao;
+        } else {
+            color = computeLegacyDirect(albedo, nDotL, totalShadow, vSkyLight, vBlockLight, LEGACY_LIGHTING_INTENSITY) * ao * ssao;
         }
     } else {
-        // Vertex color only mode OR LOD mode
-        float directLight = nDotL * global.params.w * (1.0 - totalShadow) * 1.5;
-        float skyLight = vSkyLight * (global.lighting.x + directLight * 1.0);
-        vec3 blockLight = vBlockLight;
-        
         if (vTileID < 0) {
-            // Special LOD lighting (always uses IBL-like fallback if in range)
-            vec3 albedo = vColor;
-            float skyLightVal = vSkyLight * global.lighting.x;
-            float shadowAmbientFactor = mix(1.0, 0.2, totalShadow);
-            vec3 ambientColor = albedo * (max(vec3(skyLightVal * 0.8), vec3(global.lighting.x * 0.4)) + blockLight) * ao * ssao * shadowAmbientFactor;
-            vec3 sunColor = global.sun_color.rgb * global.params.w * 3.0;
-            vec3 directColor = albedo * sunColor * nDotL * (1.0 - totalShadow);
-            color = ambientColor + directColor;
+            color = computeLOD(vColor, nDotL, totalShadow, vSkyLight * global.lighting.x, vBlockLight, ao, ssao);
         } else {
-            float lightLevel = max(skyLight, max(blockLight.r, max(blockLight.g, blockLight.b)));
-            lightLevel = max(lightLevel, global.lighting.x * 0.5);
-            lightLevel = clamp(lightLevel, 0.0, 1.0);
-            color = vColor * lightLevel * ao * ssao;
+            color = computeLegacyDirect(vColor, nDotL, totalShadow, vSkyLight, vBlockLight, LOD_LIGHTING_INTENSITY) * ao * ssao;
         }
     }
 
-    // Volumetric Lighting (Phase 4)
     if (global.volumetric_params.x > 0.5) {
-        float dither = cloudHash(gl_FragCoord.xy + vec2(global.params.x));
-        vec4 volumetric = calculateVolumetric(vec3(0.0), vFragPosWorld, dither);
+        vec4 volumetric = computeVolumetric(vec3(0.0), vFragPosWorld, cloudHash(gl_FragCoord.xy + vec2(global.params.x)));
         color = color * volumetric.a + volumetric.rgb;
     }
 
-    // Fog
     if (global.params.z > 0.5) {
-        float fogFactor = 1.0 - exp(-vDistance * global.params.y);
-        fogFactor = clamp(fogFactor, 0.0, 1.0);
-        color = mix(color, global.fog_color.rgb, fogFactor);
+        color = mix(color, global.fog_color.rgb, clamp(1.0 - exp(-vDistance * global.params.y), 0.0, 1.0));
     }
 
-    // Debug shadow visualization (toggle with 'O' key)
-    // viewport_size.z = 1.0 means debug mode enabled
     if (global.viewport_size.z > 0.5) {
         color = mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), totalShadow);
     }
