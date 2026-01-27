@@ -2,6 +2,10 @@
 
 const std = @import("std");
 const interfaces = @import("../core/interfaces.zig");
+const input_interfaces = @import("interfaces.zig");
+const IRawInputProvider = input_interfaces.IRawInputProvider;
+const MousePosition = input_interfaces.MousePosition;
+const ScrollDelta = input_interfaces.ScrollDelta;
 const InputEvent = interfaces.InputEvent;
 const Key = interfaces.Key;
 const MouseButton = interfaces.MouseButton;
@@ -185,6 +189,84 @@ pub const Input = struct {
         if (w > 0 and h > 0) {
             self.window_width = @intCast(w);
             self.window_height = @intCast(h);
+        }
+    }
+
+    // ========================================================================
+    // IRawInputProvider Implementation
+    // ========================================================================
+
+    pub fn interface(self: *Input) IRawInputProvider {
+        return .{
+            .ptr = self,
+            .vtable = &VTABLE,
+        };
+    }
+
+    const VTABLE = IRawInputProvider.VTable{
+        .isKeyDown = impl_isKeyDown,
+        .isKeyPressed = impl_isKeyPressed,
+        .isKeyReleased = impl_isKeyReleased,
+        .isMouseButtonDown = impl_isMouseButtonDown,
+        .isMouseButtonPressed = impl_isMouseButtonPressed,
+        .getMouseDelta = impl_getMouseDelta,
+        .getMousePosition = impl_getMousePosition,
+        .getScrollDelta = impl_getScrollDelta,
+        .isMouseCaptured = impl_isMouseCaptured,
+        .setMouseCapture = impl_setMouseCapture,
+    };
+
+    fn impl_isKeyDown(ptr: *anyopaque, key: Key) bool {
+        const self: *Input = @ptrCast(@alignCast(ptr));
+        return self.isKeyDown(key);
+    }
+
+    fn impl_isKeyPressed(ptr: *anyopaque, key: Key) bool {
+        const self: *Input = @ptrCast(@alignCast(ptr));
+        return self.isKeyPressed(key);
+    }
+
+    fn impl_isKeyReleased(ptr: *anyopaque, key: Key) bool {
+        const self: *Input = @ptrCast(@alignCast(ptr));
+        return self.isKeyReleased(key);
+    }
+
+    fn impl_isMouseButtonDown(ptr: *anyopaque, button: MouseButton) bool {
+        const self: *Input = @ptrCast(@alignCast(ptr));
+        return self.isMouseButtonDown(button);
+    }
+
+    fn impl_isMouseButtonPressed(ptr: *anyopaque, button: MouseButton) bool {
+        const self: *Input = @ptrCast(@alignCast(ptr));
+        return self.isMouseButtonPressed(button);
+    }
+
+    fn impl_getMouseDelta(ptr: *anyopaque) MousePosition {
+        const self: *Input = @ptrCast(@alignCast(ptr));
+        const res = self.getMouseDelta();
+        return .{ .x = res.x, .y = res.y };
+    }
+
+    fn impl_getMousePosition(ptr: *anyopaque) MousePosition {
+        const self: *Input = @ptrCast(@alignCast(ptr));
+        const res = self.getMousePosition();
+        return .{ .x = res.x, .y = res.y };
+    }
+
+    fn impl_getScrollDelta(ptr: *anyopaque) ScrollDelta {
+        const self: *Input = @ptrCast(@alignCast(ptr));
+        return .{ .x = self.scroll_x, .y = self.scroll_y };
+    }
+
+    fn impl_isMouseCaptured(ptr: *anyopaque) bool {
+        const self: *Input = @ptrCast(@alignCast(ptr));
+        return self.mouse_captured;
+    }
+
+    fn impl_setMouseCapture(ptr: *anyopaque, window: ?*anyopaque, captured: bool) void {
+        const self: *Input = @ptrCast(@alignCast(ptr));
+        if (window) |w| {
+            self.setMouseCapture(@as(*c.SDL_Window, @ptrCast(@alignCast(w))), captured);
         }
     }
 };

@@ -10,6 +10,7 @@ const AABB = math.AABB;
 
 const Camera = @import("../engine/graphics/camera.zig").Camera;
 const Input = @import("../engine/input/input.zig").Input;
+const IRawInputProvider = @import("../engine/input/interfaces.zig").IRawInputProvider;
 const Key = @import("../engine/core/interfaces.zig").Key;
 const MouseButton = @import("../engine/core/interfaces.zig").MouseButton;
 const World = @import("../world/world.zig").World;
@@ -151,7 +152,7 @@ pub const Player = struct {
     /// Update player physics and input. Call once per frame.
     pub fn update(
         self: *Player,
-        input: *const Input,
+        input: IRawInputProvider,
         mapper: *const InputMapper,
         world: *World,
         delta_time: f32,
@@ -180,8 +181,8 @@ pub const Player = struct {
     }
 
     /// Handle mouse look (yaw/pitch)
-    fn handleMouseLook(self: *Player, input: *const Input) void {
-        if (!input.mouse_captured) return;
+    fn handleMouseLook(self: *Player, input: IRawInputProvider) void {
+        if (!input.isMouseCaptured()) return;
 
         const mouse_delta = input.getMouseDelta();
         self.camera.yaw += @as(f32, @floatFromInt(mouse_delta.x)) * self.camera.sensitivity;
@@ -202,7 +203,7 @@ pub const Player = struct {
     }
 
     /// Handle double-tap space for fly mode toggle (creative only)
-    fn handleFlyToggle(self: *Player, input: *const Input, mapper: *const InputMapper, current_time: f32) void {
+    fn handleFlyToggle(self: *Player, input: IRawInputProvider, mapper: *const InputMapper, current_time: f32) void {
         if (!self.can_fly) return;
 
         if (mapper.isActionReleased(input, .jump)) {
@@ -224,7 +225,7 @@ pub const Player = struct {
     }
 
     /// Get horizontal movement direction from WASD input
-    fn getMovementDirection(self: *Player, input: *const Input, mapper: *const InputMapper) Vec3 {
+    fn getMovementDirection(self: *Player, input: IRawInputProvider, mapper: *const InputMapper) Vec3 {
         var move_dir = Vec3.zero;
 
         // Get horizontal forward (ignore pitch for ground movement)
@@ -255,7 +256,7 @@ pub const Player = struct {
     }
 
     /// Update player when flying (creative mode)
-    fn updateFlying(self: *Player, input: *const Input, mapper: *const InputMapper, move_dir: Vec3, delta_time: f32) void {
+    fn updateFlying(self: *Player, input: IRawInputProvider, mapper: *const InputMapper, move_dir: Vec3, delta_time: f32) void {
         var vel = move_dir.scale(FLY_SPEED);
 
         // Vertical movement
@@ -275,7 +276,7 @@ pub const Player = struct {
     /// Update player when walking (normal physics)
     fn updateWalking(
         self: *Player,
-        input: *const Input,
+        input: IRawInputProvider,
         mapper: *const InputMapper,
         move_dir: Vec3,
         world: *World,

@@ -43,7 +43,7 @@ pub const EnvironmentScreen = struct {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         _ = dt;
 
-        if (self.context.input_mapper.isActionPressed(self.context.input, .ui_back)) {
+        if (self.context.input_mapper.isActionPressed(self.context.input.interface(), .ui_back)) {
             self.context.saveSettings();
             self.context.screen_manager.popScreen();
         }

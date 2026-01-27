@@ -382,7 +382,7 @@ pub const App = struct {
         self.input.beginFrame();
         self.input.pollEvents();
 
-        if (self.input_mapper.isActionPressed(&self.input, .toggle_timing_overlay)) {
+        if (self.input_mapper.isActionPressed(self.input.interface(), .toggle_timing_overlay)) {
             const now = self.time.elapsed;
             if (now - self.last_debug_toggle_time > 0.2) {
                 self.timing_overlay.toggle();

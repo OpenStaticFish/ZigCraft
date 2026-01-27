@@ -10,96 +10,97 @@ const interfaces = @import("../engine/core/interfaces.zig");
 const Key = interfaces.Key;
 const MouseButton = interfaces.MouseButton;
 const Input = @import("../engine/input/input.zig").Input;
+const IRawInputProvider = @import("../engine/input/interfaces.zig").IRawInputProvider;
 
 /// All logical game actions that can be triggered by input.
 /// Gameplay code should query these actions instead of specific keys.
 pub const GameAction = enum(u8) {
     // Movement
-    /// Move player forward (Default: W)
+    /// Move player forward
     move_forward,
-    /// Move player backward (Default: S)
+    /// Move player backward
     move_backward,
-    /// Strafe player left (Default: A)
+    /// Strafe player left
     move_left,
-    /// Strafe player right (Default: D)
+    /// Strafe player right
     move_right,
-    /// Jump or fly up (Default: Space)
+    /// Jump or fly up
     jump,
-    /// Crouch or fly down (Default: Left Shift)
+    /// Crouch or fly down
     crouch,
-    /// Sprint (increase speed) (Default: Left Ctrl)
+    /// Sprint (increase speed)
     sprint,
     /// Toggle fly mode (detected via double-tap jump usually)
     fly,
 
     // Interaction
-    /// Primary action (e.g., mine block) (Default: Left Click)
+    /// Primary action (e.g., mine block)
     interact_primary,
-    /// Secondary action (e.g., place block) (Default: Right Click)
+    /// Secondary action (e.g., place block)
     interact_secondary,
 
     // UI/Menu toggles
-    /// Open/close inventory (Default: I)
+    /// Open/close inventory
     inventory,
-    /// Toggle mouse capture or menu (Default: Tab)
+    /// Toggle mouse capture or menu
     tab_menu,
-    /// Pause the game (Default: Escape)
+    /// Pause the game
     pause,
 
     // Hotbar slots
-    /// Select hotbar slot 1 (Default: 1)
+    /// Select hotbar slot 1
     slot_1,
-    /// Select hotbar slot 2 (Default: 2)
+    /// Select hotbar slot 2
     slot_2,
-    /// Select hotbar slot 3 (Default: 3)
+    /// Select hotbar slot 3
     slot_3,
-    /// Select hotbar slot 4 (Default: 4)
+    /// Select hotbar slot 4
     slot_4,
-    /// Select hotbar slot 5 (Default: 5)
+    /// Select hotbar slot 5
     slot_5,
-    /// Select hotbar slot 6 (Default: 6)
+    /// Select hotbar slot 6
     slot_6,
-    /// Select hotbar slot 7 (Default: 7)
+    /// Select hotbar slot 7
     slot_7,
-    /// Select hotbar slot 8 (Default: 8)
+    /// Select hotbar slot 8
     slot_8,
-    /// Select hotbar slot 9 (Default: 9)
+    /// Select hotbar slot 9
     slot_9,
 
     // Debug/toggles
-    /// Toggle wireframe rendering (Default: F)
+    /// Toggle wireframe rendering
     toggle_wireframe,
-    /// Toggle textures (Default: T)
+    /// Toggle textures
     toggle_textures,
-    /// Toggle VSync (Default: V)
+    /// Toggle VSync
     toggle_vsync,
-    /// Toggle FPS counter (Default: F2)
+    /// Toggle FPS counter
     toggle_fps,
-    /// Toggle block information overlay (Default: F5)
+    /// Toggle block information overlay
     toggle_block_info,
-    /// Toggle shadow debug view (Default: U)
+    /// Toggle shadow debug view
     toggle_shadows,
-    /// Cycle through shadow cascades (Default: K)
+    /// Cycle through shadow cascades
     cycle_cascade,
-    /// Pause/resume time (Default: N)
+    /// Pause/resume time
     toggle_time_scale,
-    /// Toggle creative mode (Default: F3)
+    /// Toggle creative mode
     toggle_creative,
 
     // Map controls
-    /// Open/close world map (Default: M)
+    /// Open/close world map
     toggle_map,
-    /// Zoom in on map (Default: + / Numpad +)
+    /// Zoom in on map
     map_zoom_in,
-    /// Zoom out on map (Default: - / Numpad -)
+    /// Zoom out on map
     map_zoom_out,
-    /// Center map on player (Default: Space)
+    /// Center map on player
     map_center,
 
     // UI navigation
-    /// Confirm menu selection (Default: Enter)
+    /// Confirm menu selection
     ui_confirm,
-    /// Go back in menu or close (Default: Escape)
+    /// Go back in menu or close
     ui_back,
 
     // New additions (appended to avoid breaking existing settings.json bindings)
@@ -308,6 +309,39 @@ pub const DEFAULT_BINDINGS = blk: {
     break :blk bindings;
 };
 
+pub const IInputMapper = struct {
+    ptr: *const anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        getBinding: *const fn (ptr: *const anyopaque, action: GameAction) ActionBinding,
+        isActionActive: *const fn (ptr: *const anyopaque, input: IRawInputProvider, action: GameAction) bool,
+        isActionPressed: *const fn (ptr: *const anyopaque, input: IRawInputProvider, action: GameAction) bool,
+        isActionReleased: *const fn (ptr: *const anyopaque, input: IRawInputProvider, action: GameAction) bool,
+        getMovementVector: *const fn (ptr: *const anyopaque, input: IRawInputProvider) struct { x: f32, z: f32 },
+    };
+
+    pub fn getBinding(self: IInputMapper, action: GameAction) ActionBinding {
+        return self.vtable.getBinding(self.ptr, action);
+    }
+
+    pub fn isActionActive(self: IInputMapper, input: IRawInputProvider, action: GameAction) bool {
+        return self.vtable.isActionActive(self.ptr, input, action);
+    }
+
+    pub fn isActionPressed(self: IInputMapper, input: IRawInputProvider, action: GameAction) bool {
+        return self.vtable.isActionPressed(self.ptr, input, action);
+    }
+
+    pub fn isActionReleased(self: IInputMapper, input: IRawInputProvider, action: GameAction) bool {
+        return self.vtable.isActionReleased(self.ptr, input, action);
+    }
+
+    pub fn getMovementVector(self: IInputMapper, input: IRawInputProvider) struct { x: f32, z: f32 } {
+        return self.vtable.getMovementVector(self.ptr, input);
+    }
+};
+
 /// Input mapper that translates physical inputs to logical game actions.
 pub const InputMapper = struct {
     /// Current bindings for all actions
@@ -346,24 +380,24 @@ pub const InputMapper = struct {
     }
 
     /// Check if a continuous/held action is currently active (e.g., movement).
-    pub fn isActionActive(self: *const InputMapper, input: *const Input, action: GameAction) bool {
+    pub fn isActionActive(self: *const InputMapper, input: IRawInputProvider, action: GameAction) bool {
         const binding = self.bindings[@intFromEnum(action)];
         return self.isBindingStateActive(input, binding.primary) or self.isBindingStateActive(input, binding.alternate);
     }
 
     /// Check if a trigger action was pressed this frame (e.g., jump, toggle).
-    pub fn isActionPressed(self: *const InputMapper, input: *const Input, action: GameAction) bool {
+    pub fn isActionPressed(self: *const InputMapper, input: IRawInputProvider, action: GameAction) bool {
         const binding = self.bindings[@intFromEnum(action)];
         return self.isBindingStatePressed(input, binding.primary) or self.isBindingStatePressed(input, binding.alternate);
     }
 
     /// Check if an action was released this frame.
-    pub fn isActionReleased(self: *const InputMapper, input: *const Input, action: GameAction) bool {
+    pub fn isActionReleased(self: *const InputMapper, input: IRawInputProvider, action: GameAction) bool {
         const binding = self.bindings[@intFromEnum(action)];
         return self.isBindingStateReleased(input, binding.primary) or self.isBindingStateReleased(input, binding.alternate);
     }
 
-    fn isBindingStateActive(self: *const InputMapper, input: *const Input, binding: InputBinding) bool {
+    fn isBindingStateActive(self: *const InputMapper, input: IRawInputProvider, binding: InputBinding) bool {
         _ = self;
         return switch (binding) {
             .key, .key_alt => |k| input.isKeyDown(k),
@@ -372,7 +406,7 @@ pub const InputMapper = struct {
         };
     }
 
-    fn isBindingStatePressed(self: *const InputMapper, input: *const Input, binding: InputBinding) bool {
+    fn isBindingStatePressed(self: *const InputMapper, input: IRawInputProvider, binding: InputBinding) bool {
         _ = self;
         return switch (binding) {
             .key, .key_alt => |k| input.isKeyPressed(k),
@@ -381,7 +415,7 @@ pub const InputMapper = struct {
         };
     }
 
-    fn isBindingStateReleased(self: *const InputMapper, input: *const Input, binding: InputBinding) bool {
+    fn isBindingStateReleased(self: *const InputMapper, input: IRawInputProvider, binding: InputBinding) bool {
         _ = self;
         return switch (binding) {
             .key, .key_alt => |k| input.isKeyReleased(k),
@@ -391,7 +425,7 @@ pub const InputMapper = struct {
     }
 
     /// Get movement vector based on current bindings.
-    pub fn getMovementVector(self: *const InputMapper, input: *const Input) struct { x: f32, z: f32 } {
+    pub fn getMovementVector(self: *const InputMapper, input: IRawInputProvider) struct { x: f32, z: f32 } {
         var x: f32 = 0;
         var z: f32 = 0;
         if (self.isActionActive(input, .move_forward)) z += 1;
@@ -423,6 +457,50 @@ pub const InputMapper = struct {
         defer parsed.deinit();
 
         @memcpy(&self.bindings, &parsed.value);
+    }
+
+    // ========================================================================
+    // IInputMapper Implementation
+    // ========================================================================
+
+    pub fn interface(self: *const InputMapper) IInputMapper {
+        return .{
+            .ptr = self,
+            .vtable = &VTABLE,
+        };
+    }
+
+    const VTABLE = IInputMapper.VTable{
+        .getBinding = impl_getBinding,
+        .isActionActive = impl_isActionActive,
+        .isActionPressed = impl_isActionPressed,
+        .isActionReleased = impl_isActionReleased,
+        .getMovementVector = impl_getMovementVector,
+    };
+
+    fn impl_getBinding(ptr: *const anyopaque, action: GameAction) ActionBinding {
+        const self: *const InputMapper = @ptrCast(@alignCast(ptr));
+        return self.getBinding(action);
+    }
+
+    fn impl_isActionActive(ptr: *const anyopaque, input: IRawInputProvider, action: GameAction) bool {
+        const self: *const InputMapper = @ptrCast(@alignCast(ptr));
+        return self.isActionActive(input, action);
+    }
+
+    fn impl_isActionPressed(ptr: *const anyopaque, input: IRawInputProvider, action: GameAction) bool {
+        const self: *const InputMapper = @ptrCast(@alignCast(ptr));
+        return self.isActionPressed(input, action);
+    }
+
+    fn impl_isActionReleased(ptr: *const anyopaque, input: IRawInputProvider, action: GameAction) bool {
+        const self: *const InputMapper = @ptrCast(@alignCast(ptr));
+        return self.isActionReleased(input, action);
+    }
+
+    fn impl_getMovementVector(ptr: *const anyopaque, input: IRawInputProvider) struct { x: f32, z: f32 } {
+        const self: *const InputMapper = @ptrCast(@alignCast(ptr));
+        return self.getMovementVector(input);
     }
 };
 

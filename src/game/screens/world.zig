@@ -49,32 +49,32 @@ pub const WorldScreen = struct {
         const now = ctx.time.elapsed;
         const can_toggle_debug = now - self.last_debug_toggle_time > 0.2;
 
-        if (ctx.input_mapper.isActionPressed(ctx.input, .ui_back)) {
+        if (ctx.input_mapper.isActionPressed(ctx.input.interface(), .ui_back)) {
             const paused_screen = try PausedScreen.init(ctx.allocator, ctx);
             errdefer paused_screen.deinit(paused_screen);
             ctx.screen_manager.pushScreen(paused_screen.screen());
             return;
         }
 
-        if (ctx.input_mapper.isActionPressed(ctx.input, .tab_menu)) {
+        if (ctx.input_mapper.isActionPressed(ctx.input.interface(), .tab_menu)) {
             ctx.input.setMouseCapture(ctx.window_manager.window, !ctx.input.mouse_captured);
         }
-        if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input, .toggle_wireframe)) {
+        if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input.interface(), .toggle_wireframe)) {
             ctx.settings.wireframe_enabled = !ctx.settings.wireframe_enabled;
             ctx.rhi.*.setWireframe(ctx.settings.wireframe_enabled);
             self.last_debug_toggle_time = now;
         }
-        if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input, .toggle_textures)) {
+        if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input.interface(), .toggle_textures)) {
             ctx.settings.textures_enabled = !ctx.settings.textures_enabled;
             ctx.rhi.*.setTexturesEnabled(ctx.settings.textures_enabled);
             self.last_debug_toggle_time = now;
         }
-        if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input, .toggle_vsync)) {
+        if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input.interface(), .toggle_vsync)) {
             ctx.settings.vsync = !ctx.settings.vsync;
             ctx.rhi.*.setVSync(ctx.settings.vsync);
             self.last_debug_toggle_time = now;
         }
-        if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input, .toggle_shadow_debug_vis)) {
+        if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input.interface(), .toggle_shadow_debug_vis)) {
             ctx.settings.debug_shadows_active = !ctx.settings.debug_shadows_active;
             ctx.rhi.*.setDebugShadowView(ctx.settings.debug_shadows_active);
             self.last_debug_toggle_time = now;
