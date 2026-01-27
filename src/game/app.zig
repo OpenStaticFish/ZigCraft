@@ -55,6 +55,7 @@ pub const App = struct {
     cloud_pass: render_graph_pkg.CloudPass,
     entity_pass: render_graph_pkg.EntityPass,
     bloom_pass: render_graph_pkg.BloomPass,
+    taa_pass: render_graph_pkg.TAAPass,
     post_process_pass: render_graph_pkg.PostProcessPass,
     fxaa_pass: render_graph_pkg.FXAAPass,
 
@@ -246,6 +247,7 @@ pub const App = struct {
             .cloud_pass = .{},
             .entity_pass = .{},
             .bloom_pass = .{ .enabled = true },
+            .taa_pass = .{ .enabled = true },
             .post_process_pass = .{},
             .fxaa_pass = .{ .enabled = true },
             .settings = settings,
@@ -295,6 +297,7 @@ pub const App = struct {
             try app.render_graph.addPass(app.opaque_pass.pass());
             try app.render_graph.addPass(app.cloud_pass.pass());
             try app.render_graph.addPass(app.entity_pass.pass());
+            try app.render_graph.addPass(app.taa_pass.pass());
             try app.render_graph.addPass(app.bloom_pass.pass());
             try app.render_graph.addPass(app.post_process_pass.pass());
             try app.render_graph.addPass(app.fxaa_pass.pass());

@@ -33,6 +33,7 @@ pub const SceneContext = struct {
     // Phase 3: FXAA and Bloom flags
     fxaa_enabled: bool = true,
     bloom_enabled: bool = true,
+    taa_enabled: bool = true,
     overlay_renderer: ?*const fn (ctx: SceneContext) void = null,
     overlay_ctx: ?*anyopaque = null,
 };
@@ -358,6 +359,28 @@ pub const BloomPass = struct {
         const self: *BloomPass = @ptrCast(@alignCast(ptr));
         if (!self.enabled or !ctx.bloom_enabled) return;
         ctx.rhi.computeBloom();
+    }
+};
+
+// TAA Pass - Temporal Anti-Aliasing
+pub const TAAPass = struct {
+    enabled: bool = true,
+    const VTABLE = IRenderPass.VTable{
+        .name = "TAAPass",
+        .needs_main_pass = false,
+        .execute = execute,
+    };
+    pub fn pass(self: *TAAPass) IRenderPass {
+        return .{
+            .ptr = self,
+            .vtable = &VTABLE,
+        };
+    }
+
+    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+        const self: *TAAPass = @ptrCast(@alignCast(ptr));
+        if (!self.enabled or !ctx.taa_enabled) return;
+        ctx.rhi.computeTAA();
     }
 };
 

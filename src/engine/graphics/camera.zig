@@ -126,6 +126,26 @@ pub const Camera = struct {
         return Mat4.perspective(self.fov, aspect_ratio, self.near, self.far);
     }
 
+    /// Get projection matrix with subpixel jitter for TAA
+    /// jitter_x, jitter_y: Normalized device coordinates offset (-1 to 1 range)
+    pub fn getProjectionMatrixJittered(self: *const Camera, aspect_ratio: f32, jitter_x: f32, jitter_y: f32) Mat4 {
+        var proj = self.getProjectionMatrix(aspect_ratio);
+        // Apply jitter to projection matrix (columns 2,0 and 2,1 in 0-based indexing)
+        // Mat4 is column-major? Let's check Mat4 implementation or assume standard OpenGL layout
+        // usually proj[2][0] and proj[2][1] correspond to X and Y shear
+        proj.data[2][0] += jitter_x;
+        proj.data[2][1] += jitter_y;
+        return proj;
+    }
+
+    /// Get projection matrix with subpixel jitter for TAA (Reverse Z)
+    pub fn getProjectionMatrixReverseZJittered(self: *const Camera, aspect_ratio: f32, jitter_x: f32, jitter_y: f32) Mat4 {
+        var proj = Mat4.perspectiveReverseZ(self.fov, aspect_ratio, self.near, self.far);
+        proj.data[2][0] += jitter_x;
+        proj.data[2][1] += jitter_y;
+        return proj;
+    }
+
     /// Get view matrix centered at origin (for floating origin rendering)
     /// Camera is conceptually at origin looking in the forward direction
     pub fn getViewMatrixOriginCentered(self: *const Camera) Mat4 {

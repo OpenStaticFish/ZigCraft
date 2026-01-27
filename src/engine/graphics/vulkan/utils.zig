@@ -141,3 +141,63 @@ pub fn createShaderModule(device: c.VkDevice, code: []const u8) !c.VkShaderModul
     try checkVk(c.vkCreateShaderModule(device, &create_info, null, &shader_module));
     return shader_module;
 }
+
+pub fn createImage(device: c.VkDevice, physical_device: c.VkPhysicalDevice, width: u32, height: u32, format: c.VkFormat, tiling: c.VkImageTiling, usage: c.VkImageUsageFlags, properties: c.VkMemoryPropertyFlags, image: *c.VkImage, image_memory: *c.VkDeviceMemory) !void {
+    var image_info = std.mem.zeroes(c.VkImageCreateInfo);
+    image_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType = c.VK_IMAGE_TYPE_2D;
+    image_info.extent.width = width;
+    image_info.extent.height = height;
+    image_info.extent.depth = 1;
+    image_info.mipLevels = 1;
+    image_info.arrayLayers = 1;
+    image_info.format = format;
+    image_info.tiling = tiling;
+    image_info.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+    image_info.usage = usage;
+    image_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
+    image_info.sharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
+
+    try checkVk(c.vkCreateImage(device, &image_info, null, image));
+
+    var mem_requirements: c.VkMemoryRequirements = undefined;
+    c.vkGetImageMemoryRequirements(device, image.*, &mem_requirements);
+
+    var alloc_info = std.mem.zeroes(c.VkMemoryAllocateInfo);
+    alloc_info.sType = c.VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    alloc_info.allocationSize = mem_requirements.size;
+    alloc_info.memoryTypeIndex = try findMemoryType(physical_device, mem_requirements.memoryTypeBits, properties);
+
+    try checkVk(c.vkAllocateMemory(device, &alloc_info, null, image_memory));
+    try checkVk(c.vkBindImageMemory(device, image.*, image_memory.*, 0));
+}
+
+pub fn createImageView(device: c.VkDevice, image: c.VkImage, format: c.VkFormat, aspect_flags: c.VkImageAspectFlags) !c.VkImageView {
+    var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
+    view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image = image;
+    view_info.viewType = c.VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = format;
+    view_info.subresourceRange.aspectMask = aspect_flags;
+    view_info.subresourceRange.baseMipLevel = 0;
+    view_info.subresourceRange.levelCount = 1;
+    view_info.subresourceRange.baseArrayLayer = 0;
+    view_info.subresourceRange.layerCount = 1;
+
+    var image_view: c.VkImageView = null;
+    try checkVk(c.vkCreateImageView(device, &view_info, null, &image_view));
+    return image_view;
+}
+
+pub fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    return std.fs.cwd().readFileAlloc(path, allocator, @enumFromInt(1024 * 1024));
+}
+
+pub fn pipelineShaderStageCreateInfo(stage: c.VkShaderStageFlagBits, module: c.VkShaderModule, name: [*c]const u8) c.VkPipelineShaderStageCreateInfo {
+    var create_info = std.mem.zeroes(c.VkPipelineShaderStageCreateInfo);
+    create_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    create_info.stage = stage;
+    create_info.module = module;
+    create_info.pName = name;
+    return create_info;
+}

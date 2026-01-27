@@ -282,6 +282,9 @@ pub const IRenderContext = struct {
         endFXAAPass: *const fn (ptr: *anyopaque) void,
         // Bloom Pass (Phase 3)
         computeBloom: *const fn (ptr: *anyopaque) void,
+        // TAA Pass
+        computeTAA: *const fn (ptr: *anyopaque) void,
+        invalidateTAA: *const fn (ptr: *anyopaque) void,
         getEncoder: *const fn (ptr: *anyopaque) IGraphicsCommandEncoder,
         getStateContext: *const fn (ptr: *anyopaque) IRenderStateContext,
 
@@ -470,6 +473,7 @@ pub const RHI = struct {
         recover: *const fn (ctx: *anyopaque) anyerror!void,
         // Phase 3: FXAA and Bloom options
         setFXAA: *const fn (ctx: *anyopaque, enabled: bool) void,
+        setTAA: *const fn (ctx: *anyopaque, enabled: bool) void,
         setBloom: *const fn (ctx: *anyopaque, enabled: bool) void,
         setBloomIntensity: *const fn (ctx: *anyopaque, intensity: f32) void,
     };
@@ -658,6 +662,12 @@ pub const RHI = struct {
     pub fn computeBloom(self: RHI) void {
         self.vtable.render.computeBloom(self.ptr);
     }
+    pub fn computeTAA(self: RHI) void {
+        self.vtable.render.computeTAA(self.ptr);
+    }
+    pub fn invalidateTAA(self: RHI) void {
+        self.vtable.render.invalidateTAA(self.ptr);
+    }
     pub fn updateShadowUniforms(self: RHI, params: ShadowParams) void {
         self.vtable.shadow.updateUniforms(self.ptr, params);
     }
@@ -698,6 +708,9 @@ pub const RHI = struct {
     // Phase 3: FXAA and Bloom controls
     pub fn setFXAA(self: RHI, enabled: bool) void {
         self.vtable.setFXAA(self.ptr, enabled);
+    }
+    pub fn setTAA(self: RHI, enabled: bool) void {
+        self.vtable.setTAA(self.ptr, enabled);
     }
     pub fn setBloom(self: RHI, enabled: bool) void {
         self.vtable.setBloom(self.ptr, enabled);

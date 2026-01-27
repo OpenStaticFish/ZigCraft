@@ -32,11 +32,11 @@ pub const BloomSystem = struct {
     mip_widths: [BLOOM_MIP_COUNT]u32 = .{0} ** BLOOM_MIP_COUNT,
     mip_heights: [BLOOM_MIP_COUNT]u32 = .{0} ** BLOOM_MIP_COUNT,
 
-    descriptor_sets: [rhi.MAX_FRAMES_IN_FLIGHT][BLOOM_MIP_COUNT * 2]c.VkDescriptorSet = .{.{null} ** (BLOOM_MIP_COUNT * 2)} ** rhi.MAX_FRAMES_IN_FLIGHT,
+    descriptor_sets: [rhi.MAX_FRAMES_IN_FLIGHT][2][BLOOM_MIP_COUNT * 2]c.VkDescriptorSet = .{.{ .{null} ** (BLOOM_MIP_COUNT * 2), .{null} ** (BLOOM_MIP_COUNT * 2) }} ** rhi.MAX_FRAMES_IN_FLIGHT,
     render_pass: c.VkRenderPass = null,
     sampler: c.VkSampler = null,
 
-    pub fn init(self: *BloomSystem, device: *const VulkanDevice, allocator: Allocator, descriptor_pool: c.VkDescriptorPool, hdr_image_view: c.VkImageView, hdr_width: u32, hdr_height: u32, format: c.VkFormat) !void {
+    pub fn init(self: *BloomSystem, device: *const VulkanDevice, allocator: Allocator, descriptor_pool: c.VkDescriptorPool, history_views: [2]c.VkImageView, hdr_width: u32, hdr_height: u32, format: c.VkFormat) !void {
         self.deinit(device.vk_device, allocator, descriptor_pool);
         const vk = device.vk_device;
 
@@ -272,115 +272,112 @@ pub const BloomSystem = struct {
         try Utils.checkVk(c.vkCreateGraphicsPipelines(vk, null, 1, &pipe_info, null, &self.upsample_pipeline));
 
         // 7. Descriptor Sets
-        // We need BLOOM_MIP_COUNT sets per frame for downsampling + BLOOM_MIP_COUNT sets for upsampling
-        // Actually, logic is:
-        // Downsample: Source is Previous Mip (or HDR for first).
-        // Upsample: Source is Next Mip.
-        // We pre-allocate all sets.
         const total_sets = BLOOM_MIP_COUNT * 2;
-        var layouts: [rhi.MAX_FRAMES_IN_FLIGHT * total_sets]c.VkDescriptorSetLayout = undefined;
+        var layouts: [rhi.MAX_FRAMES_IN_FLIGHT * 2 * total_sets]c.VkDescriptorSetLayout = undefined;
         for (0..layouts.len) |i| layouts[i] = self.descriptor_set_layout;
 
         var alloc_info_ds = std.mem.zeroes(c.VkDescriptorSetAllocateInfo);
         alloc_info_ds.sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
         alloc_info_ds.descriptorPool = descriptor_pool;
-        alloc_info_ds.descriptorSetCount = total_sets * rhi.MAX_FRAMES_IN_FLIGHT;
+        alloc_info_ds.descriptorSetCount = @intCast(layouts.len);
         alloc_info_ds.pSetLayouts = &layouts[0];
 
         // Flatten descriptor sets array for allocation
-        var flat_sets: [rhi.MAX_FRAMES_IN_FLIGHT * total_sets]c.VkDescriptorSet = undefined;
+        var flat_sets: [rhi.MAX_FRAMES_IN_FLIGHT * 2 * total_sets]c.VkDescriptorSet = undefined;
         try Utils.checkVk(c.vkAllocateDescriptorSets(vk, &alloc_info_ds, &flat_sets[0]));
 
         // Distribute back to structured array
         for (0..rhi.MAX_FRAMES_IN_FLIGHT) |frame| {
-            for (0..total_sets) |i| {
-                self.descriptor_sets[frame][i] = flat_sets[frame * total_sets + i];
+            for (0..2) |t| {
+                for (0..total_sets) |i| {
+                    self.descriptor_sets[frame][t][i] = flat_sets[frame * 2 * total_sets + t * total_sets + i];
+                }
             }
         }
 
         // Update Descriptor Sets
         for (0..rhi.MAX_FRAMES_IN_FLIGHT) |frame| {
-            // Downsample Sets (0 to BLOOM_MIP_COUNT-1)
-            for (0..BLOOM_MIP_COUNT) |i| {
-                var image_info_src = c.VkDescriptorImageInfo{
-                    .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    .imageView = if (i == 0) hdr_image_view else self.mip_views[i - 1],
-                    .sampler = self.sampler,
-                };
+            for (0..2) |t| {
+                const current_hdr_view = history_views[t];
 
-                // Add a dummy info for binding 1 (previous mip).
-                // Rationale: The descriptor set layout includes binding 1 (used by the upsample pass),
-                // but the downsample shader does not use it. We bind the HDR view as a safe placeholder
-                // to satisfy Vulkan validation without needing a separate layout.
-                var image_info_dummy = c.VkDescriptorImageInfo{
-                    .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    .imageView = if (i == 0) hdr_image_view else self.mip_views[i - 1],
-                    .sampler = self.sampler,
-                };
+                // Downsample Sets (0 to BLOOM_MIP_COUNT-1)
+                for (0..BLOOM_MIP_COUNT) |i| {
+                    var image_info_src = c.VkDescriptorImageInfo{
+                        .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        .imageView = if (i == 0) current_hdr_view else self.mip_views[i - 1],
+                        .sampler = self.sampler,
+                    };
 
-                var writes = [_]c.VkWriteDescriptorSet{
-                    .{
-                        .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                        .dstSet = self.descriptor_sets[frame][i],
-                        .dstBinding = 0,
-                        .dstArrayElement = 0,
-                        .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                        .descriptorCount = 1,
-                        .pImageInfo = &image_info_src,
-                    },
-                    .{
-                        .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                        .dstSet = self.descriptor_sets[frame][i],
-                        .dstBinding = 1,
-                        .dstArrayElement = 0,
-                        .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                        .descriptorCount = 1,
-                        .pImageInfo = &image_info_dummy,
-                    },
-                };
+                    var image_info_dummy = c.VkDescriptorImageInfo{
+                        .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        .imageView = if (i == 0) current_hdr_view else self.mip_views[i - 1],
+                        .sampler = self.sampler,
+                    };
 
-                c.vkUpdateDescriptorSets(vk, 2, &writes[0], 0, null);
-            }
+                    var writes = [_]c.VkWriteDescriptorSet{
+                        .{
+                            .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                            .dstSet = self.descriptor_sets[frame][t][i],
+                            .dstBinding = 0,
+                            .dstArrayElement = 0,
+                            .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                            .descriptorCount = 1,
+                            .pImageInfo = &image_info_src,
+                        },
+                        .{
+                            .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                            .dstSet = self.descriptor_sets[frame][t][i],
+                            .dstBinding = 1,
+                            .dstArrayElement = 0,
+                            .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                            .descriptorCount = 1,
+                            .pImageInfo = &image_info_dummy,
+                        },
+                    };
 
-            // Upsample Sets (BLOOM_MIP_COUNT to 2*BLOOM_MIP_COUNT-1)
-            for (0..BLOOM_MIP_COUNT - 1) |pass| {
-                const target_mip = (BLOOM_MIP_COUNT - 2) - pass;
-                const src_mip = target_mip + 1;
+                    c.vkUpdateDescriptorSets(vk, 2, &writes[0], 0, null);
+                }
 
-                var image_info_src = c.VkDescriptorImageInfo{
-                    .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    .imageView = self.mip_views[src_mip],
-                    .sampler = self.sampler,
-                };
+                // Upsample Sets (BLOOM_MIP_COUNT to 2*BLOOM_MIP_COUNT-1)
+                for (0..BLOOM_MIP_COUNT - 1) |pass| {
+                    const target_mip = (BLOOM_MIP_COUNT - 2) - pass;
+                    const src_mip = target_mip + 1;
 
-                var image_info_prev = c.VkDescriptorImageInfo{
-                    .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    .imageView = self.mip_views[target_mip],
-                    .sampler = self.sampler,
-                };
+                    var image_info_src = c.VkDescriptorImageInfo{
+                        .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        .imageView = self.mip_views[src_mip],
+                        .sampler = self.sampler,
+                    };
 
-                var writes = [_]c.VkWriteDescriptorSet{
-                    .{
-                        .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                        .dstSet = self.descriptor_sets[frame][BLOOM_MIP_COUNT + pass],
-                        .dstBinding = 0,
-                        .dstArrayElement = 0,
-                        .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                        .descriptorCount = 1,
-                        .pImageInfo = &image_info_src,
-                    },
-                    .{
-                        .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                        .dstSet = self.descriptor_sets[frame][BLOOM_MIP_COUNT + pass],
-                        .dstBinding = 1,
-                        .dstArrayElement = 0,
-                        .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                        .descriptorCount = 1,
-                        .pImageInfo = &image_info_prev,
-                    },
-                };
+                    var image_info_prev = c.VkDescriptorImageInfo{
+                        .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        .imageView = self.mip_views[target_mip],
+                        .sampler = self.sampler,
+                    };
 
-                c.vkUpdateDescriptorSets(vk, 2, &writes[0], 0, null);
+                    var writes = [_]c.VkWriteDescriptorSet{
+                        .{
+                            .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                            .dstSet = self.descriptor_sets[frame][t][BLOOM_MIP_COUNT + pass],
+                            .dstBinding = 0,
+                            .dstArrayElement = 0,
+                            .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                            .descriptorCount = 1,
+                            .pImageInfo = &image_info_src,
+                        },
+                        .{
+                            .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                            .dstSet = self.descriptor_sets[frame][t][BLOOM_MIP_COUNT + pass],
+                            .dstBinding = 1,
+                            .dstArrayElement = 0,
+                            .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                            .descriptorCount = 1,
+                            .pImageInfo = &image_info_prev,
+                        },
+                    };
+
+                    c.vkUpdateDescriptorSets(vk, 2, &writes[0], 0, null);
+                }
             }
         }
     }
@@ -401,10 +398,12 @@ pub const BloomSystem = struct {
 
         if (descriptor_pool != null) {
             for (0..rhi.MAX_FRAMES_IN_FLIGHT) |frame| {
-                for (0..BLOOM_MIP_COUNT * 2) |i| {
-                    if (self.descriptor_sets[frame][i] != null) {
-                        _ = c.vkFreeDescriptorSets(device, descriptor_pool, 1, &self.descriptor_sets[frame][i]);
-                        self.descriptor_sets[frame][i] = null;
+                for (0..2) |t| {
+                    for (0..BLOOM_MIP_COUNT * 2) |i| {
+                        if (self.descriptor_sets[frame][t][i] != null) {
+                            _ = c.vkFreeDescriptorSets(device, descriptor_pool, 1, &self.descriptor_sets[frame][t][i]);
+                            self.descriptor_sets[frame][t][i] = null;
+                        }
                     }
                 }
             }

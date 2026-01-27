@@ -196,6 +196,10 @@ pub const World = struct {
 
     pub fn setBlock(self: *World, world_x: i32, world_y: i32, world_z: i32, block: BlockType) !void {
         if (world_y < 0 or world_y >= 256) return;
+
+        // Invalidate TAA history when world is modified to avoid ghosting artifacts
+        self.rhi.invalidateTAA();
+
         const cp = worldToChunk(world_x, world_z);
         const data = try self.getOrCreateChunk(cp.chunk_x, cp.chunk_z);
         const local = worldToLocal(world_x, world_z);

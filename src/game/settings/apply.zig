@@ -37,4 +37,15 @@ pub fn applyToRHI(settings: *const Settings, rhi: *RHI) void {
     rhi.setDebugShadowView(settings.debug_shadows_active);
     rhi.setAnisotropicFiltering(settings.anisotropic_filtering);
     rhi.setMSAA(settings.msaa_samples);
+
+    // FXAA vs TAA conflict resolution: TAA takes precedence to avoid over-sharpening/blur
+    if (settings.taa_enabled) {
+        rhi.setTAA(true);
+        rhi.setFXAA(false);
+    } else {
+        rhi.setTAA(false);
+        rhi.setFXAA(settings.fxaa_enabled);
+    }
+    rhi.setBloom(settings.bloom_enabled);
+    rhi.setBloomIntensity(settings.bloom_intensity);
 }

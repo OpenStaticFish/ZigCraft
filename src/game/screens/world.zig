@@ -10,6 +10,8 @@ const rhi_pkg = @import("../../engine/graphics/rhi.zig");
 const render_graph_pkg = @import("../../engine/graphics/render_graph.zig");
 const PausedScreen = @import("paused.zig").PausedScreen;
 const DebugShadowOverlay = @import("../../engine/ui/debug_shadow_overlay.zig").DebugShadowOverlay;
+const Camera = @import("../../engine/graphics/camera.zig").Camera;
+const JitterGenerator = @import("../../engine/graphics/jitter.zig").JitterGenerator;
 
 pub const WorldScreen = struct {
     context: EngineContext,
@@ -100,7 +102,16 @@ pub const WorldScreen = struct {
         const screen_h: f32 = @floatFromInt(ctx.input.window_height);
         const aspect = screen_w / screen_h;
 
-        const view_proj_render = Mat4.perspectiveReverseZ(camera.fov, aspect, camera.near, camera.far).multiply(camera.getViewMatrixOriginCentered());
+        const view_proj_render = if (ctx.settings.taa_enabled) blk: {
+            const frame: u32 = @intCast(ctx.rhi.*.getFrameIndex());
+            // Use larger period (64) to avoid visible repeating patterns
+            const jitter_idx = (frame % 64) + 1;
+            const jx = JitterGenerator.halton(jitter_idx, 2);
+            const jy = JitterGenerator.halton(jitter_idx, 3);
+            const j_ndc_x = (jx - 0.5) * 2.0 / screen_w;
+            const j_ndc_y = (jy - 0.5) * 2.0 / screen_h;
+            break :blk camera.getProjectionMatrixReverseZJittered(aspect, j_ndc_x, j_ndc_y).multiply(camera.getViewMatrixOriginCentered());
+        } else Mat4.perspectiveReverseZ(camera.fov, aspect, camera.near, camera.far).multiply(camera.getViewMatrixOriginCentered());
 
         const sky_params = rhi_pkg.SkyParams{
             .cam_pos = camera.position,
@@ -175,8 +186,9 @@ pub const WorldScreen = struct {
                 .disable_gpass_draw = ctx.disable_gpass_draw,
                 .disable_ssao = ctx.disable_ssao,
                 .disable_clouds = ctx.disable_clouds,
-                .fxaa_enabled = ctx.settings.fxaa_enabled,
+                .fxaa_enabled = ctx.settings.fxaa_enabled and !ctx.settings.taa_enabled,
                 .bloom_enabled = ctx.settings.bloom_enabled,
+                .taa_enabled = ctx.settings.taa_enabled,
                 .overlay_renderer = renderOverlay,
                 .overlay_ctx = self,
             };

@@ -39,7 +39,7 @@ pub const Settings = struct {
     shadow_quality: u32 = 2, // 0=Low, 1=Medium, 2=High, 3=Ultra
     shadow_distance: f32 = 250.0,
     anisotropic_filtering: u8 = 16,
-    msaa_samples: u8 = 4,
+    msaa_samples: u8 = 2,
     ui_scale: f32 = 1.0, // Manual UI scale multiplier (0.5 to 2.0)
     window_width: u32 = 1920,
     window_height: u32 = 1080,
@@ -68,7 +68,9 @@ pub const Settings = struct {
     ssao_enabled: bool = true,
 
     // FXAA Settings (Phase 3)
-    fxaa_enabled: bool = true,
+    fxaa_enabled: bool = false, // Disabled by default as TAA provides better AA
+    taa_enabled: bool = true,
+    smaa_enabled: bool = false,
 
     // Bloom Settings (Phase 3)
     bloom_enabled: bool = true,
@@ -146,7 +148,8 @@ pub const Settings = struct {
             } },
         };
         pub const msaa_samples = SettingMetadata{
-            .label = "ANTI-ALIASING (MSAA)",
+            .label = "FOLIAGE MSAA",
+            .description = "Applies MSAA only to foliage geometry (Future)",
             .kind = .{ .choice = .{
                 .labels = &[_][]const u8{ "OFF", "2X", "4X", "8X" },
                 .values = &[_]u32{ 1, 2, 4, 8 },
@@ -175,6 +178,16 @@ pub const Settings = struct {
         pub const fxaa_enabled = SettingMetadata{
             .label = "FXAA",
             .description = "Fast Approximate Anti-Aliasing",
+            .kind = .toggle,
+        };
+        pub const taa_enabled = SettingMetadata{
+            .label = "TAA",
+            .description = "Temporal Anti-Aliasing (Recommended)",
+            .kind = .toggle,
+        };
+        pub const smaa_enabled = SettingMetadata{
+            .label = "SMAA",
+            .description = "Subpixel Morphological Anti-Aliasing",
             .kind = .toggle,
         };
         pub const bloom_enabled = SettingMetadata{
