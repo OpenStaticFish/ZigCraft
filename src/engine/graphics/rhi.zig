@@ -102,7 +102,7 @@ pub const IShadowContext = struct {
     pub const VTable = struct {
         beginPass: *const fn (ptr: *anyopaque, cascade_index: u32, light_space_matrix: Mat4) void,
         endPass: *const fn (ptr: *anyopaque) void,
-        updateUniforms: *const fn (ptr: *anyopaque, params: ShadowParams) void,
+        updateUniforms: *const fn (ptr: *anyopaque, params: ShadowParams) anyerror!void,
         getShadowMapHandle: *const fn (ptr: *anyopaque, cascade_index: u32) TextureHandle,
     };
 
@@ -112,8 +112,8 @@ pub const IShadowContext = struct {
     pub fn endPass(self: IShadowContext) void {
         self.vtable.endPass(self.ptr);
     }
-    pub fn updateUniforms(self: IShadowContext, params: ShadowParams) void {
-        self.vtable.updateUniforms(self.ptr, params);
+    pub fn updateUniforms(self: IShadowContext, params: ShadowParams) !void {
+        try self.vtable.updateUniforms(self.ptr, params);
     }
     pub fn getShadowMapHandle(self: IShadowContext, cascade_index: u32) TextureHandle {
         return self.vtable.getShadowMapHandle(self.ptr, cascade_index);
@@ -211,7 +211,7 @@ pub const IRenderStateContext = struct {
         setInstanceBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
         setLODInstanceBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
         setSelectionMode: *const fn (ptr: *anyopaque, enabled: bool) void,
-        updateGlobalUniforms: *const fn (ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, sun_color: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void,
+        updateGlobalUniforms: *const fn (ptr: *anyopaque, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, sun_color: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) anyerror!void,
         setTextureUniforms: *const fn (ptr: *anyopaque, texture_enabled: bool, shadow_map_handles: [SHADOW_CASCADE_COUNT]TextureHandle) void,
     };
 
@@ -227,8 +227,8 @@ pub const IRenderStateContext = struct {
     pub fn setSelectionMode(self: IRenderStateContext, enabled: bool) void {
         self.vtable.setSelectionMode(self.ptr, enabled);
     }
-    pub fn updateGlobalUniforms(self: IRenderStateContext, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, sun_color: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void {
-        self.vtable.updateGlobalUniforms(self.ptr, view_proj, cam_pos, sun_dir, sun_color, time, fog_color, fog_density, fog_enabled, sun_intensity, ambient, use_texture, cloud_params);
+    pub fn updateGlobalUniforms(self: IRenderStateContext, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, sun_color: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) !void {
+        try self.vtable.updateGlobalUniforms(self.ptr, view_proj, cam_pos, sun_dir, sun_color, time, fog_color, fog_density, fog_enabled, sun_intensity, ambient, use_texture, cloud_params);
     }
     pub fn setTextureUniforms(self: IRenderStateContext, texture_enabled: bool, shadow_map_handles: [SHADOW_CASCADE_COUNT]TextureHandle) void {
         self.vtable.setTextureUniforms(self.ptr, texture_enabled, shadow_map_handles);
@@ -585,8 +585,12 @@ pub const RHI = struct {
     pub fn pushConstants(self: RHI, stages: ShaderStageFlags, offset: u32, size: u32, data: *const anyopaque) void {
         self.encoder().pushConstants(stages, offset, size, data);
     }
-    pub fn updateGlobalUniforms(self: RHI, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, sun_color: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) void {
-        self.state().updateGlobalUniforms(view_proj, cam_pos, sun_dir, sun_color, time, fog_color, fog_density, fog_enabled, sun_intensity, ambient, use_texture, cloud_params);
+    pub fn updateGlobalUniforms(self: RHI, view_proj: Mat4, cam_pos: Vec3, sun_dir: Vec3, sun_color: Vec3, time: f32, fog_color: Vec3, fog_density: f32, fog_enabled: bool, sun_intensity: f32, ambient: f32, use_texture: bool, cloud_params: CloudParams) !void {
+        try self.state().updateGlobalUniforms(view_proj, cam_pos, sun_dir, sun_color, time, fog_color, fog_density, fog_enabled, sun_intensity, ambient, use_texture, cloud_params);
+    }
+
+    pub fn updateShadowUniforms(self: RHI, params: ShadowParams) !void {
+        try self.shadow().updateUniforms(params);
     }
 
     pub fn bindBuffer(self: RHI, handle: BufferHandle, usage: BufferUsage) void {
@@ -657,9 +661,6 @@ pub const RHI = struct {
     }
     pub fn computeBloom(self: RHI) void {
         self.vtable.render.computeBloom(self.ptr);
-    }
-    pub fn updateShadowUniforms(self: RHI, params: ShadowParams) void {
-        self.vtable.shadow.updateUniforms(self.ptr, params);
     }
     pub fn setTextureUniforms(self: RHI, enabled: bool, handles: [SHADOW_CASCADE_COUNT]TextureHandle) void {
         self.vtable.render.setTextureUniforms(self.ptr, enabled, handles);

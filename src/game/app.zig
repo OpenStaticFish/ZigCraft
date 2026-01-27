@@ -401,7 +401,7 @@ pub const App = struct {
         // Ensure global uniforms are always updated with sane defaults even if no world is loaded.
         // This prevents black screen in menu due to zero exposure.
         // Call this AFTER beginFrame so it writes to the correct frame's buffer.
-        self.rhi.updateGlobalUniforms(Mat4.identity, Vec3.zero, Vec3.init(0, -1, 0), Vec3.one, 0, Vec3.zero, 0, false, 1.0, 0.1, false, .{
+        try self.rhi.updateGlobalUniforms(Mat4.identity, Vec3.zero, Vec3.init(0, -1, 0), Vec3.one, 0, Vec3.zero, 0, false, 1.0, 0.1, false, .{
             .cam_pos = Vec3.zero,
             .view_proj = Mat4.identity,
             .sun_dir = Vec3.init(0, -1, 0),
