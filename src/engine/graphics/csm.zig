@@ -81,10 +81,11 @@ pub fn computeCascades(resolution: u32, camera_fov: f32, aspect: f32, near: f32,
         cascades.texel_sizes[i] = texel_size;
 
         // Stabilize ortho bounds by snapping center to texel grid
+        // ONLY snap X and Y. Snapping Z causes depth range shifts and flickering.
         const center_snapped = Vec3.init(
             @floor(center_ls.x / texel_size) * texel_size,
             @floor(center_ls.y / texel_size) * texel_size,
-            @floor(center_ls.z / texel_size) * texel_size,
+            center_ls.z,
         );
 
         // 6. Build Ortho Projection (Centered around snapped center)
@@ -94,8 +95,8 @@ pub fn computeCascades(resolution: u32, camera_fov: f32, aspect: f32, near: f32,
         const maxY = center_snapped.y + radius;
 
         // Use fixed large depth range to avoid clipping during camera motion
-        const maxZ = center_snapped.z + radius + 400.0;
-        const minZ = center_snapped.z - radius - 200.0;
+        const maxZ = center_ls.z + radius + 400.0;
+        const minZ = center_ls.z - radius - 200.0;
 
         var light_ortho = Mat4.identity;
         light_ortho.data[0][0] = 2.0 / (maxX - minX);
@@ -106,6 +107,9 @@ pub fn computeCascades(resolution: u32, camera_fov: f32, aspect: f32, near: f32,
 
         if (z_range_01) {
             // Proper Reverse-Z: map Near (maxZ) to 1.0 and Far (minZ) to 0.0
+            // Since lookAt(zero, -sun_dir, up) makes Z decrease as we move away from light,
+            // larger Light Space Z values are CLOSER to the light.
+            // minZ is Far, maxZ is Near.
             const A = 1.0 / (maxZ - minZ);
             const B = -minZ / (maxZ - minZ);
             light_ortho.data[2][2] = A;

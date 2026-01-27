@@ -144,7 +144,6 @@ float findBlocker(vec2 uv, float zReceiver, int layer) {
         for (int j = -1; j <= 1; j++) {
             vec2 offset = vec2(i, j) * searchRadius;
             float depth = texture(uShadowMapsRegular, vec3(uv + offset, float(layer))).r;
-            // Reverse-Z: blockers are CLOSER to light, so they have HIGHER depth values
             if (depth > zReceiver + 0.0001) {
                 blockerDepthSum += depth;
                 numBlockers++;
@@ -160,8 +159,8 @@ float computeShadowFactor(vec3 fragPosWorld, vec3 N, vec3 L, int layer) {
     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
     projCoords.xy = projCoords.xy * 0.5 + 0.5;
     
-    // Bounds check: if outside current cascade, treat as lit (comparison passes)
-    if (projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0 || projCoords.z < 0.0 || projCoords.z > 1.0) return 1.0;
+    // Bounds check: if outside current cascade, return lit (0.0 shadow factor)
+    if (projCoords.x < 0.0 || projCoords.x > 1.0 || projCoords.y < 0.0 || projCoords.y > 1.0 || projCoords.z < 0.0 || projCoords.z > 1.0) return 0.0;
 
     float currentDepth = projCoords.z;
     float texelSize = shadows.shadow_texel_sizes[layer];
@@ -172,14 +171,14 @@ float computeShadowFactor(vec3 fragPosWorld, vec3 N, vec3 L, int layer) {
     float sinTheta = sqrt(1.0 - NdotL * NdotL);
     float tanTheta = sinTheta / NdotL;
     
-    // Reverse-Z Bias: push currentDepth slightly CLOSER to light (higher Z)
-    const float BASE_BIAS = 0.0008;
-    const float SLOPE_BIAS = 0.0015;
-    const float MAX_BIAS = 0.008;
+    // Reverse-Z Bias: push fragment CLOSER to light (towards Near=1.0)
+    const float BASE_BIAS = 0.0015;
+    const float SLOPE_BIAS = 0.003;
+    const float MAX_BIAS = 0.012;
     
     float bias = BASE_BIAS * cascadeScale + SLOPE_BIAS * min(tanTheta, 5.0) * cascadeScale;
     bias = min(bias, MAX_BIAS);
-    if (vTileID < 0) bias = max(bias, 0.004 * cascadeScale);
+    if (vTileID < 0) bias = max(bias, 0.006 * cascadeScale);
 
     float angle = interleavedGradientNoise(gl_FragCoord.xy) * PI * 0.25;
     float s = sin(angle);
@@ -190,9 +189,10 @@ float computeShadowFactor(vec3 fragPosWorld, vec3 N, vec3 L, int layer) {
     float radius = 0.0015 * cascadeScale;
     for (int i = 0; i < 16; i++) {
         vec2 offset = (rot * poissonDisk16[i]) * radius;
-        // returns 1.0 if currentDepth + bias >= shadowMapDepth
+        // GREATER_OR_EQUAL comparison: returns 1.0 if (currentDepth + bias) >= mapDepth
         shadow += texture(uShadowMaps, vec4(projCoords.xy + offset, float(layer), currentDepth + bias));
     }
+    // shadow factor: 1.0 (Shadowed) to 0.0 (Lit)
     return 1.0 - (shadow / 16.0);
 }
 
