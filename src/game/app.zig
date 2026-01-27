@@ -67,6 +67,7 @@ pub const App = struct {
     timing_overlay: TimingOverlay,
 
     screen_manager: ScreenManager,
+    last_debug_toggle_time: f32 = 0,
     safe_render_mode: bool,
     skip_world_update: bool,
     skip_world_render: bool,
@@ -382,8 +383,12 @@ pub const App = struct {
         self.input.pollEvents();
 
         if (self.input_mapper.isActionPressed(&self.input, .toggle_timing_overlay)) {
-            self.timing_overlay.toggle();
-            self.rhi.timing().setTimingEnabled(self.timing_overlay.enabled);
+            const now = self.time.elapsed;
+            if (now - self.last_debug_toggle_time > 0.2) {
+                self.timing_overlay.toggle();
+                self.rhi.timing().setTimingEnabled(self.timing_overlay.enabled);
+                self.last_debug_toggle_time = now;
+            }
         }
 
         if (self.ui) |*u| u.resize(self.input.window_width, self.input.window_height);

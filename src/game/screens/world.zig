@@ -14,6 +14,7 @@ const DebugShadowOverlay = @import("../../engine/ui/debug_shadow_overlay.zig").D
 pub const WorldScreen = struct {
     context: EngineContext,
     session: *GameSession,
+    last_debug_toggle_time: f32 = 0,
 
     pub const vtable = IScreen.VTable{
         .deinit = deinit,
@@ -31,6 +32,7 @@ pub const WorldScreen = struct {
         self.* = .{
             .context = context,
             .session = session,
+            .last_debug_toggle_time = 0,
         };
         return self;
     }
@@ -44,6 +46,8 @@ pub const WorldScreen = struct {
     pub fn update(ptr: *anyopaque, dt: f32) !void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         const ctx = self.context;
+        const now = ctx.time.elapsed;
+        const can_toggle_debug = now - self.last_debug_toggle_time > 0.2;
 
         if (ctx.input_mapper.isActionPressed(ctx.input, .ui_back)) {
             const paused_screen = try PausedScreen.init(ctx.allocator, ctx);
@@ -55,20 +59,25 @@ pub const WorldScreen = struct {
         if (ctx.input_mapper.isActionPressed(ctx.input, .tab_menu)) {
             ctx.input.setMouseCapture(ctx.window_manager.window, !ctx.input.mouse_captured);
         }
-        if (ctx.input_mapper.isActionPressed(ctx.input, .toggle_wireframe)) {
+        if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input, .toggle_wireframe)) {
             ctx.settings.wireframe_enabled = !ctx.settings.wireframe_enabled;
             ctx.rhi.*.setWireframe(ctx.settings.wireframe_enabled);
+            self.last_debug_toggle_time = now;
         }
-        if (ctx.input_mapper.isActionPressed(ctx.input, .toggle_textures)) {
+        if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input, .toggle_textures)) {
             ctx.settings.textures_enabled = !ctx.settings.textures_enabled;
             ctx.rhi.*.setTexturesEnabled(ctx.settings.textures_enabled);
+            self.last_debug_toggle_time = now;
         }
-        if (ctx.input_mapper.isActionPressed(ctx.input, .toggle_vsync)) {
+        if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input, .toggle_vsync)) {
             ctx.settings.vsync = !ctx.settings.vsync;
+            ctx.rhi.*.setVSync(ctx.settings.vsync);
+            self.last_debug_toggle_time = now;
         }
-        if (ctx.input_mapper.isActionPressed(ctx.input, .toggle_shadow_debug_vis)) {
+        if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input, .toggle_shadow_debug_vis)) {
             ctx.settings.debug_shadows_active = !ctx.settings.debug_shadows_active;
             ctx.rhi.*.setDebugShadowView(ctx.settings.debug_shadows_active);
+            self.last_debug_toggle_time = now;
         }
 
         // Update Audio Listener

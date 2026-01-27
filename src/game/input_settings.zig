@@ -182,6 +182,12 @@ pub const InputSettings = struct {
             log.log.info("Migrating input settings from version {} (array) to {} (object)", .{ version, CURRENT_VERSION });
 
             const count = @min(array.items.len, GameAction.count);
+            if (array.items.len > GameAction.count) {
+                log.log.warn("Migration: Dropping {} unrecognized bindings (source has {}, engine supports {})", .{
+                    array.items.len - GameAction.count, array.items.len, GameAction.count,
+                });
+            }
+
             for (array.items[0..count], 0..) |item, i| {
                 const parsed_binding = try std.json.parseFromValue(ActionBinding, self.allocator, item, .{ .ignore_unknown_fields = true });
                 defer parsed_binding.deinit();
