@@ -184,10 +184,14 @@ pub const InputSettings = struct {
         const version: i64 = if (version_val) |v| (if (v == .integer) v.integer else 1) else 1;
         const bindings_val = root.object.get("bindings") orelse return error.MissingBindings;
 
+        log.log.info("InputSettings: Loading settings file (version {})", .{version});
+
         var migrated = false;
+        if (version < CURRENT_VERSION) {
+            migrated = true;
+        }
 
         if (version < 3) {
-            migrated = true;
             // Legacy array format
             if (bindings_val != .array) return error.InvalidBindingsFormat;
             const array = bindings_val.array;
