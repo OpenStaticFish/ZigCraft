@@ -45,15 +45,12 @@ const StagingBuffer = struct {
         const buf = try Utils.createVulkanBuffer(device, size, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         if (buf.buffer == null) return error.VulkanError;
 
-        var mapped: ?*anyopaque = null;
-        try Utils.checkVk(c.vkMapMemory(device.vk_device, buf.memory, 0, size, 0, &mapped));
-
         return StagingBuffer{
             .buffer = buf.buffer,
             .memory = buf.memory,
             .size = size,
             .current_offset = 0,
-            .mapped_ptr = mapped,
+            .mapped_ptr = buf.mapped_ptr,
         };
     }
 
@@ -363,18 +360,12 @@ pub const ResourceManager = struct {
 
     pub fn mapBuffer(self: *ResourceManager, handle: rhi.BufferHandle) rhi.RhiError!?*anyopaque {
         const buf = self.buffers.get(handle) orelse return null;
-        if (!buf.is_host_visible) return null;
-
-        var ptr: ?*anyopaque = null;
-        try Utils.checkVk(c.vkMapMemory(self.vulkan_device.vk_device, buf.memory, 0, buf.size, 0, &ptr));
-        return ptr;
+        return buf.mapped_ptr;
     }
 
     pub fn unmapBuffer(self: *ResourceManager, handle: rhi.BufferHandle) void {
-        const buf = self.buffers.get(handle) orelse return;
-        if (buf.is_host_visible) {
-            c.vkUnmapMemory(self.vulkan_device.vk_device, buf.memory);
-        }
+        _ = self;
+        _ = handle;
     }
 
     pub fn createTexture(self: *ResourceManager, width: u32, height: u32, format: rhi.TextureFormat, config: rhi.TextureConfig, data_opt: ?[]const u8) rhi.RhiError!rhi.TextureHandle {

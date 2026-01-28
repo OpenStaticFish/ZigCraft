@@ -10,6 +10,7 @@ const EngineContext = Screen.EngineContext;
 const seed_gen = @import("../seed.zig");
 const log = @import("../../engine/core/log.zig");
 const Key = @import("../../engine/core/interfaces.zig").Key;
+const IRawInputProvider = @import("../../engine/input/interfaces.zig").IRawInputProvider;
 const Input = @import("../../engine/input/input.zig").Input;
 const WorldScreen = @import("world.zig").WorldScreen;
 const registry = @import("../../world/worldgen/registry.zig");
@@ -77,8 +78,8 @@ pub const SingleplayerScreen = struct {
         const mouse_y: f32 = @floatFromInt(mouse_pos.y);
         const mouse_clicked = ctx.input.isMouseButtonPressed(.left);
 
-        const screen_w: f32 = @floatFromInt(ctx.input.window_width);
-        const screen_h: f32 = @floatFromInt(ctx.input.window_height);
+        const screen_w: f32 = @floatFromInt(ctx.input.getWindowWidth());
+        const screen_h: f32 = @floatFromInt(ctx.input.getWindowHeight());
 
         // Scale UI based on screen height
         const ui_scale: f32 = @max(1.0, screen_h / 720.0);
@@ -147,7 +148,7 @@ pub const SingleplayerScreen = struct {
     }
 };
 
-fn handleSeedTyping(seed_input: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, input: *const Input, max_len: usize) !void {
+fn handleSeedTyping(seed_input: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, input: IRawInputProvider, max_len: usize) !void {
     if (input.isKeyPressed(.backspace)) {
         if (seed_input.items.len > 0) _ = seed_input.pop();
     }

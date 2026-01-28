@@ -9,6 +9,7 @@ pub const VulkanBuffer = struct {
     memory: c.VkDeviceMemory = null,
     size: c.VkDeviceSize = 0,
     is_host_visible: bool = false,
+    mapped_ptr: ?*anyopaque = null,
 };
 
 pub fn checkVk(result: c.VkResult) !void {
@@ -64,11 +65,18 @@ pub fn createVulkanBuffer(device: *const VulkanDevice, size: usize, usage: c.VkB
     try checkVk(c.vkAllocateMemory(device.vk_device, &alloc_info, null, &memory));
     try checkVk(c.vkBindBufferMemory(device.vk_device, buffer, memory, 0));
 
+    const is_host_visible = (properties & c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
+    var mapped_ptr: ?*anyopaque = null;
+    if (is_host_visible) {
+        try checkVk(c.vkMapMemory(device.vk_device, memory, 0, mem_reqs.size, 0, &mapped_ptr));
+    }
+
     return .{
         .buffer = buffer,
         .memory = memory,
         .size = mem_reqs.size,
-        .is_host_visible = (properties & c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0,
+        .is_host_visible = is_host_visible,
+        .mapped_ptr = mapped_ptr,
     };
 }
 

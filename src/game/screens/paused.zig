@@ -58,8 +58,8 @@ pub const PausedScreen = struct {
         ui.begin();
         defer ui.end();
 
-        const screen_w: f32 = @floatFromInt(ctx.input.window_width);
-        const screen_h: f32 = @floatFromInt(ctx.input.window_height);
+        const screen_w: f32 = @floatFromInt(ctx.input.getWindowWidth());
+        const screen_h: f32 = @floatFromInt(ctx.input.getWindowHeight());
 
         const mouse_pos = ctx.input.getMousePosition();
         const mouse_x: f32 = @floatFromInt(mouse_pos.x);

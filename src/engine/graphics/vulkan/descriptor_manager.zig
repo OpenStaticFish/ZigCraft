@@ -75,19 +75,13 @@ pub const DescriptorManager = struct {
                 self.deinit();
                 return err;
             };
-            Utils.checkVk(c.vkMapMemory(vulkan_device.vk_device, self.global_ubos[i].memory, 0, @sizeOf(GlobalUniforms), 0, &self.global_ubos_mapped[i])) catch |err| {
-                self.deinit();
-                return err;
-            };
+            self.global_ubos_mapped[i] = self.global_ubos[i].mapped_ptr;
 
             self.shadow_ubos[i] = Utils.createVulkanBuffer(vulkan_device, @sizeOf(ShadowUniforms), c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) catch |err| {
                 self.deinit();
                 return err;
             };
-            Utils.checkVk(c.vkMapMemory(vulkan_device.vk_device, self.shadow_ubos[i].memory, 0, @sizeOf(ShadowUniforms), 0, &self.shadow_ubos_mapped[i])) catch |err| {
-                self.deinit();
-                return err;
-            };
+            self.shadow_ubos_mapped[i] = self.shadow_ubos[i].mapped_ptr;
         }
 
         // Create dummy textures at frame index 1 to isolate from frame 0's lifecycle.
@@ -243,29 +237,39 @@ pub const DescriptorManager = struct {
     pub fn deinit(self: *DescriptorManager) void {
         const device = self.vulkan_device.vk_device;
 
-        // Unmap and destroy UBOs
+        // Destroy UBOs (Persistent mapping is unmapped in deinit via destruction)
         for (0..rhi.MAX_FRAMES_IN_FLIGHT) |i| {
-            if (self.global_ubos_mapped[i] != null) c.vkUnmapMemory(device, self.global_ubos[i].memory);
-            c.vkDestroyBuffer(device, self.global_ubos[i].buffer, null);
-            c.vkFreeMemory(device, self.global_ubos[i].memory, null);
+            if (self.global_ubos[i].buffer != null) {
+                if (self.global_ubos[i].mapped_ptr != null) c.vkUnmapMemory(device, self.global_ubos[i].memory);
+                c.vkDestroyBuffer(device, self.global_ubos[i].buffer, null);
+                c.vkFreeMemory(device, self.global_ubos[i].memory, null);
+            }
 
-            if (self.shadow_ubos_mapped[i] != null) c.vkUnmapMemory(device, self.shadow_ubos[i].memory);
-            c.vkDestroyBuffer(device, self.shadow_ubos[i].buffer, null);
-            c.vkFreeMemory(device, self.shadow_ubos[i].memory, null);
+            if (self.shadow_ubos[i].buffer != null) {
+                if (self.shadow_ubos[i].mapped_ptr != null) c.vkUnmapMemory(device, self.shadow_ubos[i].memory);
+                c.vkDestroyBuffer(device, self.shadow_ubos[i].buffer, null);
+                c.vkFreeMemory(device, self.shadow_ubos[i].memory, null);
+            }
         }
 
         if (self.descriptor_set_layout != null) c.vkDestroyDescriptorSetLayout(device, self.descriptor_set_layout, null);
         if (self.descriptor_pool != null) c.vkDestroyDescriptorPool(device, self.descriptor_pool, null);
     }
 
-    pub fn updateGlobalUniforms(self: *DescriptorManager, frame_index: usize, data: *const anyopaque) void {
-        const dest = self.global_ubos_mapped[frame_index] orelse return;
+    pub fn updateGlobalUniforms(self: *DescriptorManager, frame_index: usize, data: *const anyopaque) !void {
+        const dest = self.global_ubos_mapped[frame_index] orelse {
+            std.log.err("Failed to update global uniforms: memory not mapped", .{});
+            return error.UnmappedBuffer;
+        };
         const src = @as([*]const u8, @ptrCast(data));
         @memcpy(@as([*]u8, @ptrCast(dest))[0..@sizeOf(GlobalUniforms)], src[0..@sizeOf(GlobalUniforms)]);
     }
 
-    pub fn updateShadowUniforms(self: *DescriptorManager, frame_index: usize, data: *const anyopaque) void {
-        const dest = self.shadow_ubos_mapped[frame_index] orelse return;
+    pub fn updateShadowUniforms(self: *DescriptorManager, frame_index: usize, data: *const anyopaque) !void {
+        const dest = self.shadow_ubos_mapped[frame_index] orelse {
+            std.log.err("Failed to update shadow uniforms: memory not mapped", .{});
+            return error.UnmappedBuffer;
+        };
         const src = @as([*]const u8, @ptrCast(data));
         @memcpy(@as([*]u8, @ptrCast(dest))[0..@sizeOf(ShadowUniforms)], src[0..@sizeOf(ShadowUniforms)]);
     }

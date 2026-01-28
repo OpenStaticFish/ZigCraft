@@ -69,7 +69,7 @@ void main() {
     vBlockLight = aBlockLight;
     
     vFragPosWorld = worldPos.xyz;
-    vViewDepth = clipPos.w;
+    vViewDepth = vDistance;
     vAO = aAO;
     vMaskRadius = model_data.mask_radius;
 

@@ -1,7 +1,10 @@
 const std = @import("std");
 const UISystem = @import("../engine/ui/ui_system.zig").UISystem;
 const Input = @import("../engine/input/input.zig").Input;
-const InputMapper = @import("input_mapper.zig").InputMapper;
+const IRawInputProvider = @import("../engine/input/interfaces.zig").IRawInputProvider;
+const input_mapper_pkg = @import("input_mapper.zig");
+const InputMapper = input_mapper_pkg.InputMapper;
+const IInputMapper = input_mapper_pkg.IInputMapper;
 const Time = @import("../engine/core/time.zig").Time;
 const WindowManager = @import("../engine/core/window.zig").WindowManager;
 const ResourcePackManager = @import("../engine/graphics/resource_pack.zig").ResourcePackManager;
@@ -30,8 +33,8 @@ pub const EngineContext = struct {
     shader: rhi_pkg.ShaderHandle,
 
     settings: *Settings,
-    input: *Input,
-    input_mapper: *InputMapper,
+    input: IRawInputProvider,
+    input_mapper: IInputMapper,
     time: *Time,
 
     screen_manager: *ScreenManager,
@@ -47,7 +50,7 @@ pub const EngineContext = struct {
     /// Screens should call this when settings are modified, typically on a 'Back' action.
     pub fn saveSettings(self: EngineContext) void {
         settings_pkg.persistence.save(self.settings, self.allocator);
-        @import("input_settings.zig").InputSettings.saveFromMapper(self.allocator, self.input_mapper.*) catch |err| {
+        @import("input_settings.zig").InputSettings.saveFromMapper(self.allocator, self.input_mapper) catch |err| {
             @import("../engine/core/log.zig").log.err("Failed to save input settings: {}", .{err});
         };
     }

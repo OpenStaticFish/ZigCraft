@@ -45,6 +45,7 @@ pub fn computeCascades(resolution: u32, camera_fov: f32, aspect: f32, near: f32,
 
     // Calculate matrices for each cascade
     var last_split = near;
+    const inv_cam_view = cam_view.inverse();
     for (0..CASCADE_COUNT) |i| {
         const split = cascades.cascade_splits[i];
 
@@ -65,10 +66,9 @@ pub fn computeCascades(resolution: u32, camera_fov: f32, aspect: f32, near: f32,
         radius = @ceil(radius * 16.0) / 16.0;
 
         // 2. Transform center to World Space
-        const inv_cam_view = cam_view.inverse();
         const center_world = inv_cam_view.transformPoint(center_view);
 
-        // 3. Build Light Rotation Matrix (Looking in -sun direction)
+        // 3. Build Light Rotation Matrix (Looking FROM sun TO scene)
         var up = Vec3.init(0, 1, 0);
         if (@abs(sun_dir.y) > 0.99) up = Vec3.init(0, 0, 1);
         const light_rot = Mat4.lookAt(Vec3.zero, sun_dir.scale(-1.0), up);
@@ -76,10 +76,12 @@ pub fn computeCascades(resolution: u32, camera_fov: f32, aspect: f32, near: f32,
         // 4. Transform center to Light Space
         const center_ls = light_rot.transformPoint(center_world);
 
-        // 5. Snap center to texel grid in LIGHT SPACE
+        // 5. Snap center to texel grid in LIGHT SPACE for stability
         const texel_size = (2.0 * radius) / @as(f32, @floatFromInt(resolution));
         cascades.texel_sizes[i] = texel_size;
 
+        // Stabilize ortho bounds by snapping center to texel grid
+        // ONLY snap X and Y. Snapping Z causes depth range shifts and flickering.
         const center_snapped = Vec3.init(
             @floor(center_ls.x / texel_size) * texel_size,
             @floor(center_ls.y / texel_size) * texel_size,
@@ -92,9 +94,9 @@ pub fn computeCascades(resolution: u32, camera_fov: f32, aspect: f32, near: f32,
         const minY = center_snapped.y - radius;
         const maxY = center_snapped.y + radius;
 
-        // Expand depth bounds to reduce clipping on steep angles and during movement.
-        const maxZ = center_snapped.z + radius + 300.0;
-        const minZ = center_snapped.z - radius - 100.0;
+        // Use fixed large depth range to avoid clipping during camera motion
+        const maxZ = center_ls.z + radius + 400.0;
+        const minZ = center_ls.z - radius - 200.0;
 
         var light_ortho = Mat4.identity;
         light_ortho.data[0][0] = 2.0 / (maxX - minX);
@@ -104,8 +106,12 @@ pub fn computeCascades(resolution: u32, camera_fov: f32, aspect: f32, near: f32,
         light_ortho.data[3][1] = -(maxY + minY) / (maxY - minY);
 
         if (z_range_01) {
+            // Proper Reverse-Z: map Near (maxZ) to 1.0 and Far (minZ) to 0.0
+            // Since lookAt(zero, -sun_dir, up) makes Z decrease as we move away from light,
+            // larger Light Space Z values are CLOSER to the light.
+            // minZ is Far, maxZ is Near.
             const A = 1.0 / (maxZ - minZ);
-            const B = -A * minZ;
+            const B = -minZ / (maxZ - minZ);
             light_ortho.data[2][2] = A;
             light_ortho.data[3][2] = B;
         } else {

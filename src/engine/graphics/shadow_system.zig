@@ -109,11 +109,9 @@ pub const ShadowSystem = struct {
         c.vkCmdBeginRenderPass(command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
 
         // Set depth bias for shadow mapping to prevent shadow acne.
-        // CSM uses standard depth mapping (closer to light = higher depth, 0.0 = far, 1.0 = near).
-        // We use POSITIVE bias to push rendered depth slightly higher (closer to light),
+        // We use NEGATIVE bias with Reverse-Z to push rendered depth slightly lower (further from light),
         // so fragments on the surface pass the GREATER_OR_EQUAL test and appear lit.
-        // Increased slope factor to 2.5 to reduce acne on distant terrain slopes.
-        c.vkCmdSetDepthBias(command_buffer, 1.25, 0.0, 2.5);
+        c.vkCmdSetDepthBias(command_buffer, -2.5, 0.0, -5.0);
 
         var viewport: c.VkViewport = undefined;
         @memset(std.mem.asBytes(&viewport), 0);

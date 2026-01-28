@@ -253,11 +253,8 @@ pub const SSAOSystem = struct {
             c.vkFreeMemory(vk, staging.memory, null);
         }
 
-        var data: ?*anyopaque = null;
-        try Utils.checkVk(c.vkMapMemory(vk, staging.memory, 0, NOISE_SIZE * NOISE_SIZE * 4, 0, &data));
-        if (data) |ptr| {
+        if (staging.mapped_ptr) |ptr| {
             @memcpy(@as([*]u8, @ptrCast(ptr))[0 .. NOISE_SIZE * NOISE_SIZE * 4], &noise_data);
-            c.vkUnmapMemory(vk, staging.memory);
         } else {
             return error.VulkanMemoryMappingFailed;
         }
@@ -521,16 +518,11 @@ pub const SSAOSystem = struct {
     }
 
     pub fn compute(self: *SSAOSystem, vk: c.VkDevice, cmd: c.VkCommandBuffer, frame_index: usize, extent: c.VkExtent2D, proj: Mat4, inv_proj: Mat4) void {
+        _ = vk;
         self.params.projection = proj;
         self.params.invProjection = inv_proj;
-        if (self.kernel_ubo.memory != null) {
-            var data: ?*anyopaque = null;
-            if (c.vkMapMemory(vk, self.kernel_ubo.memory, 0, @sizeOf(SSAOParams), 0, &data) == c.VK_SUCCESS) {
-                if (data) |ptr| {
-                    @memcpy(@as([*]u8, @ptrCast(ptr))[0..@sizeOf(SSAOParams)], std.mem.asBytes(&self.params));
-                    c.vkUnmapMemory(vk, self.kernel_ubo.memory);
-                }
-            }
+        if (self.kernel_ubo.mapped_ptr) |ptr| {
+            @memcpy(@as([*]u8, @ptrCast(ptr))[0..@sizeOf(SSAOParams)], std.mem.asBytes(&self.params));
         }
 
         // SSAO Pass

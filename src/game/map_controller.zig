@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("../c.zig").c;
 const Input = @import("../engine/input/input.zig").Input;
+const IRawInputProvider = @import("../engine/input/interfaces.zig").IRawInputProvider;
 const WorldMap = @import("../world/worldgen/world_map.zig").WorldMap;
 const Camera = @import("../engine/graphics/camera.zig").Camera;
 const Generator = @import("../world/worldgen/generator_interface.zig").Generator;
@@ -10,9 +11,10 @@ const Font = @import("../engine/ui/font.zig");
 const log = @import("../engine/core/log.zig");
 const Vec3 = @import("../engine/math/vec3.zig").Vec3;
 
-const input_mapper = @import("input_mapper.zig");
-const InputMapper = input_mapper.InputMapper;
-const GameAction = input_mapper.GameAction;
+const input_mapper_pkg = @import("input_mapper.zig");
+const InputMapper = input_mapper_pkg.InputMapper;
+const IInputMapper = input_mapper_pkg.IInputMapper;
+const GameAction = input_mapper_pkg.GameAction;
 
 pub const MapController = struct {
     show_map: bool = false,
@@ -24,7 +26,7 @@ pub const MapController = struct {
     last_mouse_x: f32 = 0.0,
     last_mouse_y: f32 = 0.0,
 
-    pub fn update(self: *MapController, input: *Input, mapper: *const InputMapper, camera: *const Camera, time_delta: f32, window: *c.SDL_Window, screen_w: f32, screen_h: f32, world_map_width: u32) void {
+    pub fn update(self: *MapController, input: IRawInputProvider, mapper: IInputMapper, camera: *const Camera, time_delta: f32, window: *c.SDL_Window, screen_w: f32, screen_h: f32, world_map_width: u32) void {
         if (mapper.isActionPressed(input, .toggle_map)) {
             self.show_map = !self.show_map;
             log.log.info("Toggle map: show={}", .{self.show_map});
@@ -33,9 +35,11 @@ pub const MapController = struct {
                 self.map_pos_z = camera.position.z;
                 self.map_target_zoom = self.map_zoom;
                 self.map_needs_update = true;
-                input.setMouseCapture(window, false);
+                const any_window: ?*anyopaque = @ptrCast(@alignCast(window));
+                input.setMouseCapture(any_window, false);
             } else {
-                input.setMouseCapture(window, true);
+                const any_window: ?*anyopaque = @ptrCast(@alignCast(window));
+                input.setMouseCapture(any_window, true);
             }
         }
 
@@ -50,8 +54,9 @@ pub const MapController = struct {
             self.map_target_zoom *= @exp(1.2 * dt);
             self.map_needs_update = true;
         }
-        if (input.scroll_y != 0) {
-            self.map_target_zoom *= @exp(-input.scroll_y * 0.12);
+        if (input.getScrollDelta().y != 0) {
+            const zoom_delta = input.getScrollDelta().y;
+            self.map_target_zoom *= @exp(zoom_delta * 0.2);
             self.map_needs_update = true;
         }
         self.map_target_zoom = std.math.clamp(self.map_target_zoom, 0.05, 128.0);

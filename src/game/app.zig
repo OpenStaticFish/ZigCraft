@@ -67,6 +67,7 @@ pub const App = struct {
     timing_overlay: TimingOverlay,
 
     screen_manager: ScreenManager,
+    last_debug_toggle_time: f32 = 0,
     safe_render_mode: bool,
     skip_world_update: bool,
     skip_world_render: bool,
@@ -353,8 +354,8 @@ pub const App = struct {
             .env_map_ptr = &self.env_map,
             .shader = self.shader,
             .settings = &self.settings,
-            .input = &self.input,
-            .input_mapper = &self.input_mapper,
+            .input = self.input.interface(),
+            .input_mapper = self.input_mapper.interface(),
             .time = &self.time,
             .screen_manager = &self.screen_manager,
             .safe_render_mode = self.safe_render_mode,
@@ -369,7 +370,7 @@ pub const App = struct {
 
     pub fn saveAllSettings(self: *const App) void {
         settings_pkg.persistence.save(&self.settings, self.allocator);
-        InputSettings.saveFromMapper(self.allocator, self.input_mapper) catch |err| {
+        InputSettings.saveFromMapper(self.allocator, self.input_mapper.interface()) catch |err| {
             log.log.err("Failed to save input settings: {}", .{err});
         };
     }
@@ -381,14 +382,18 @@ pub const App = struct {
         self.input.beginFrame();
         self.input.pollEvents();
 
-        if (self.input.isKeyPressed(.f3)) {
-            self.timing_overlay.toggle();
-            self.rhi.timing().setTimingEnabled(self.timing_overlay.enabled);
+        if (self.input_mapper.isActionPressed(self.input.interface(), .toggle_timing_overlay)) {
+            const now = self.time.elapsed;
+            if (now - self.last_debug_toggle_time > 0.2) {
+                self.timing_overlay.toggle();
+                self.rhi.timing().setTimingEnabled(self.timing_overlay.enabled);
+                self.last_debug_toggle_time = now;
+            }
         }
 
-        if (self.ui) |*u| u.resize(self.input.window_width, self.input.window_height);
+        if (self.ui) |*u| u.resize(self.input.interface().getWindowWidth(), self.input.interface().getWindowHeight());
 
-        self.rhi.setViewport(self.input.window_width, self.input.window_height);
+        self.rhi.setViewport(self.input.interface().getWindowWidth(), self.input.interface().getWindowHeight());
 
         self.rhi.beginFrame();
         errdefer self.rhi.endFrame();
@@ -396,7 +401,7 @@ pub const App = struct {
         // Ensure global uniforms are always updated with sane defaults even if no world is loaded.
         // This prevents black screen in menu due to zero exposure.
         // Call this AFTER beginFrame so it writes to the correct frame's buffer.
-        self.rhi.updateGlobalUniforms(Mat4.identity, Vec3.zero, Vec3.init(0, -1, 0), Vec3.one, 0, Vec3.zero, 0, false, 1.0, 0.1, false, .{
+        try self.rhi.updateGlobalUniforms(Mat4.identity, Vec3.zero, Vec3.init(0, -1, 0), Vec3.one, 0, Vec3.zero, 0, false, 1.0, 0.1, false, .{
             .cam_pos = Vec3.zero,
             .view_proj = Mat4.identity,
             .sun_dir = Vec3.init(0, -1, 0),
@@ -462,9 +467,9 @@ pub const App = struct {
     }
 
     pub fn run(self: *App) !void {
-        self.rhi.setViewport(self.input.window_width, self.input.window_height);
+        self.rhi.setViewport(self.input.interface().getWindowWidth(), self.input.interface().getWindowHeight());
         log.log.info("=== ZigCraft ===", .{});
-        while (!self.input.should_quit) {
+        while (!self.input.interface().shouldQuit()) {
             try self.runSingleFrame();
         }
     }

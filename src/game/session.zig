@@ -14,11 +14,13 @@ const Camera = @import("../engine/graphics/camera.zig").Camera;
 const RHI = @import("../engine/graphics/rhi.zig").RHI;
 const TextureAtlas = @import("../engine/graphics/texture_atlas.zig").TextureAtlas;
 const Input = @import("../engine/input/input.zig").Input;
+const IRawInputProvider = @import("../engine/input/interfaces.zig").IRawInputProvider;
 const LODConfig = @import("../world/lod_chunk.zig").LODConfig;
 const log = @import("../engine/core/log.zig");
-const input_mapper = @import("input_mapper.zig");
-const InputMapper = input_mapper.InputMapper;
-const GameAction = input_mapper.GameAction;
+const input_mapper_pkg = @import("input_mapper.zig");
+const InputMapper = input_mapper_pkg.InputMapper;
+const IInputMapper = input_mapper_pkg.IInputMapper;
+const GameAction = input_mapper_pkg.GameAction;
 
 const CSM = @import("../engine/graphics/csm.zig");
 const UISystem = @import("../engine/ui/ui_system.zig").UISystem;
@@ -187,15 +189,15 @@ pub const GameSession = struct {
         self.allocator.destroy(self);
     }
 
-    pub fn update(self: *GameSession, dt: f32, total_time: f32, input: *Input, mapper: *const InputMapper, atlas: *TextureAtlas, window: anytype, paused: bool, skip_world: bool) !void {
+    pub fn update(self: *GameSession, dt: f32, total_time: f32, input: IRawInputProvider, mapper: IInputMapper, atlas: *TextureAtlas, window: anytype, paused: bool, skip_world: bool) !void {
         self.atmosphere.update(dt);
         self.clouds.update(dt);
 
         // Update Camera from Player
         self.camera = self.player.camera;
 
-        const screen_w: f32 = @floatFromInt(input.window_width);
-        const screen_h: f32 = @floatFromInt(input.window_height);
+        const screen_w: f32 = @floatFromInt(input.getWindowWidth());
+        const screen_h: f32 = @floatFromInt(input.getWindowHeight());
 
         if (!paused) {
             if (mapper.isActionPressed(input, .toggle_fps)) self.debug_show_fps = !self.debug_show_fps;
@@ -212,7 +214,7 @@ pub const GameSession = struct {
 
             if (mapper.isActionPressed(input, .inventory)) {
                 self.inventory_ui_state.toggle();
-                input.setMouseCapture(window, !self.inventory_ui_state.visible);
+                input.setMouseCapture(@ptrCast(@alignCast(window)), !self.inventory_ui_state.visible);
             }
 
             if (!self.inventory_ui_state.visible) {
@@ -225,8 +227,9 @@ pub const GameSession = struct {
                 if (mapper.isActionPressed(input, .slot_7)) self.inventory.selectSlot(6);
                 if (mapper.isActionPressed(input, .slot_8)) self.inventory.selectSlot(7);
                 if (mapper.isActionPressed(input, .slot_9)) self.inventory.selectSlot(8);
-                if (input.scroll_y != 0) {
-                    self.inventory.scrollSelection(@intFromFloat(input.scroll_y));
+                const scroll_y = input.getScrollDelta().y;
+                if (scroll_y != 0) {
+                    self.inventory.scrollSelection(@intFromFloat(scroll_y));
                 }
             }
 

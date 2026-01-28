@@ -243,7 +243,8 @@ pub const World = struct {
         // Safe because beginFrame() has already waited for this slot's fence.
         self.renderer.vertex_allocator.tick(self.renderer.rhi.getFrameIndex());
 
-        try self.streamer.update(player_pos, dt, self.lod_manager);
+        const lod_mgr = if (self.lod_enabled) self.lod_manager else null;
+        try self.streamer.update(player_pos, dt, lod_mgr);
 
         // Process a few uploads per frame
         self.streamer.processUploads(self.renderer.vertex_allocator, self.max_uploads_per_frame);
@@ -256,18 +257,23 @@ pub const World = struct {
 
     pub fn isChunkRenderable(chunk_x: i32, chunk_z: i32, ctx: *anyopaque) bool {
         const storage: *ChunkStorage = @ptrCast(@alignCast(ctx));
+        storage.chunks_mutex.lockShared();
+        defer storage.chunks_mutex.unlockShared();
+
         if (storage.chunks.get(.{ .x = chunk_x, .z = chunk_z })) |data| {
-            return data.chunk.state == .renderable;
+            return data.chunk.state == .renderable or data.mesh.solid_allocation != null or data.mesh.fluid_allocation != null;
         }
         return false;
     }
 
-    pub fn render(self: *World, view_proj: Mat4, camera_pos: Vec3) void {
-        self.renderer.render(view_proj, camera_pos, self.render_distance, self.lod_manager);
+    pub fn render(self: *World, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void {
+        const lod_mgr = if (self.lod_enabled) self.lod_manager else null;
+        self.renderer.render(view_proj, camera_pos, self.render_distance, lod_mgr, self.lod_enabled and render_lod);
     }
 
     pub fn renderShadowPass(self: *World, light_space_matrix: Mat4, camera_pos: Vec3) void {
-        self.renderer.renderShadowPass(light_space_matrix, camera_pos, self.render_distance, self.lod_manager);
+        const lod_mgr = if (self.lod_enabled) self.lod_manager else null;
+        self.renderer.renderShadowPass(light_space_matrix, camera_pos, self.render_distance, lod_mgr);
     }
 
     pub fn shadowScene(self: *World) shadow_scene.IShadowScene {

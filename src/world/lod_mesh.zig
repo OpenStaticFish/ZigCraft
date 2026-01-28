@@ -93,6 +93,7 @@ pub const LODMesh = struct {
                 const c10 = if (gx + 1 < data.width) biome_mod.getBiomeColor(data.biomes[(gx + 1) + gz * data.width]) else c00;
                 const c01 = if (gz + 1 < data.width) biome_mod.getBiomeColor(data.biomes[gx + (gz + 1) * data.width]) else c00;
                 const c11 = if (gx + 1 < data.width and gz + 1 < data.width) biome_mod.getBiomeColor(data.biomes[(gx + 1) + (gz + 1) * data.width]) else c00;
+                const avg_color = averageColor(c00, c10, c01, c11);
 
                 // Local positions
                 const wx: f32 = @floatFromInt(gx * cell_size);
@@ -100,25 +101,25 @@ pub const LODMesh = struct {
                 const size: f32 = @floatFromInt(cell_size);
 
                 // Create 2 triangles with proper per-vertex heights
-                try addSmoothQuad(self.allocator, &vertices, wx, wz, size, h00, h10, h01, h11, c00, c10, c01, c11);
+                try addSmoothQuad(self.allocator, &vertices, wx, wz, size, h00, h10, h01, h11, avg_color, avg_color, avg_color, avg_color);
 
                 // Add skirts at edges
                 const skirt_depth: f32 = size * 4.0;
                 if (gx == 0) {
                     const avg_h = (h00 + h01) * 0.5;
-                    try addSideFaceQuad(self.allocator, &vertices, wx, avg_h, wz, size, avg_h - skirt_depth, unpackR(c00) * 0.6, unpackG(c00) * 0.6, unpackB(c00) * 0.6, .west);
+                    try addSideFaceQuad(self.allocator, &vertices, wx, avg_h, wz, size, avg_h - skirt_depth, unpackR(avg_color) * 0.6, unpackG(avg_color) * 0.6, unpackB(avg_color) * 0.6, .west);
                 }
                 if (gx == data.width - 1) {
                     const avg_h = (h10 + h11) * 0.5;
-                    try addSideFaceQuad(self.allocator, &vertices, wx, avg_h, wz, size, avg_h - skirt_depth, unpackR(c10) * 0.6, unpackG(c10) * 0.6, unpackB(c10) * 0.6, .east);
+                    try addSideFaceQuad(self.allocator, &vertices, wx, avg_h, wz, size, avg_h - skirt_depth, unpackR(avg_color) * 0.6, unpackG(avg_color) * 0.6, unpackB(avg_color) * 0.6, .east);
                 }
                 if (gz == 0) {
                     const avg_h = (h00 + h10) * 0.5;
-                    try addSideFaceQuad(self.allocator, &vertices, wx, avg_h, wz, size, avg_h - skirt_depth, unpackR(c00) * 0.7, unpackG(c00) * 0.7, unpackB(c00) * 0.7, .north);
+                    try addSideFaceQuad(self.allocator, &vertices, wx, avg_h, wz, size, avg_h - skirt_depth, unpackR(avg_color) * 0.7, unpackG(avg_color) * 0.7, unpackB(avg_color) * 0.7, .north);
                 }
                 if (gz == data.width - 1) {
                     const avg_h = (h01 + h11) * 0.5;
-                    try addSideFaceQuad(self.allocator, &vertices, wx, avg_h, wz, size, avg_h - skirt_depth, unpackR(c01) * 0.7, unpackG(c01) * 0.7, unpackB(c01) * 0.7, .south);
+                    try addSideFaceQuad(self.allocator, &vertices, wx, avg_h, wz, size, avg_h - skirt_depth, unpackR(avg_color) * 0.7, unpackG(avg_color) * 0.7, unpackB(avg_color) * 0.7, .south);
                 }
             }
         }
@@ -274,6 +275,16 @@ fn unpackG(color: u32) f32 {
 
 fn unpackB(color: u32) f32 {
     return @as(f32, @floatFromInt(color & 0xFF)) / 255.0;
+}
+
+fn averageColor(c00: u32, c10: u32, c01: u32, c11: u32) u32 {
+    const r = ((c00 >> 16) & 0xFF) + ((c10 >> 16) & 0xFF) + ((c01 >> 16) & 0xFF) + ((c11 >> 16) & 0xFF);
+    const g = ((c00 >> 8) & 0xFF) + ((c10 >> 8) & 0xFF) + ((c01 >> 8) & 0xFF) + ((c11 >> 8) & 0xFF);
+    const b = (c00 & 0xFF) + (c10 & 0xFF) + (c01 & 0xFF) + (c11 & 0xFF);
+    const r_avg: u32 = r / 4;
+    const g_avg: u32 = g / 4;
+    const b_avg: u32 = b / 4;
+    return (r_avg << 16) | (g_avg << 8) | b_avg;
 }
 
 /// Add a smooth quad with per-vertex heights and colors

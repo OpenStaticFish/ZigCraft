@@ -65,8 +65,8 @@ pub const EnvironmentScreen = struct {
         const mouse_y: f32 = @floatFromInt(mouse_pos.y);
         const mouse_clicked = ctx.input.isMouseButtonPressed(.left);
 
-        const screen_w: f32 = @floatFromInt(ctx.input.window_width);
-        const screen_h: f32 = @floatFromInt(ctx.input.window_height);
+        const screen_w: f32 = @floatFromInt(ctx.input.getWindowWidth());
+        const screen_h: f32 = @floatFromInt(ctx.input.getWindowHeight());
 
         const auto_scale: f32 = @max(1.0, screen_h / 720.0);
         const ui_scale: f32 = auto_scale * settings.ui_scale;

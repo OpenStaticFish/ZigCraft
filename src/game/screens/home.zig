@@ -50,8 +50,8 @@ pub const HomeScreen = struct {
         const mouse_y: f32 = @floatFromInt(mouse_pos.y);
         const mouse_clicked = ctx.input.isMouseButtonPressed(.left);
 
-        const screen_w: f32 = @floatFromInt(ctx.input.window_width);
-        const screen_h: f32 = @floatFromInt(ctx.input.window_height);
+        const screen_w: f32 = @floatFromInt(ctx.input.getWindowWidth());
+        const screen_h: f32 = @floatFromInt(ctx.input.getWindowHeight());
 
         // Scale UI based on screen height for better readability at high resolutions
         const auto_scale: f32 = @max(1.0, screen_h / 720.0);
@@ -91,13 +91,13 @@ pub const HomeScreen = struct {
         }
         by += btn_height + btn_spacing;
         if (Widgets.drawButton(ui, .{ .x = bx, .y = by, .width = bw, .height = btn_height }, "QUIT", btn_scale, mouse_x, mouse_y, mouse_clicked)) {
-            ctx.input.should_quit = true;
+            ctx.input.setShouldQuit(true);
         }
     }
 
     pub fn onEnter(ptr: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
-        self.context.input.setMouseCapture(self.context.window_manager.window, false);
+        self.context.input.setMouseCapture(@ptrCast(self.context.window_manager.window), false);
     }
 
     pub fn screen(self: *@This()) IScreen {

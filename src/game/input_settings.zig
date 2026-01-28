@@ -20,7 +20,8 @@ pub const InputSettings = struct {
     pub const MAX_SETTINGS_SIZE = 1024 * 1024;
     /// Current version of the settings schema.
     /// Version 2 introduced GameAction enum-based mapping.
-    pub const CURRENT_VERSION = 2;
+    /// Version 3 introduced human-readable object-based mapping with action names.
+    pub const CURRENT_VERSION = 3;
 
     /// Initialize a new InputSettings instance with default bindings.
     pub fn init(allocator: std.mem.Allocator) InputSettings {
@@ -65,11 +66,42 @@ pub const InputSettings = struct {
 
         var settings = init(allocator);
         // Parse and apply settings
-        settings.parseJson(data) catch |err| {
+        const migrated = settings.parseJson(data) catch |err| blk: {
             log.log.warn("Failed to parse settings file at {s}: {s} ({}). Custom bindings may be lost. Using defaults where necessary.", .{ path, @errorName(err), err });
             // Reset to defaults if parsing fails to ensure clean state
             settings.input_mapper.resetToDefaults();
+            break :blk false;
         };
+
+        if (migrated) {
+            log.log.info("Persisting migrated settings to {s}", .{path});
+            settings.save() catch |err| {
+                log.log.err("Failed to save migrated settings: {}", .{err});
+            };
+        }
+
+        // --- SANITY CHECK FOR BROKEN MIGRATIONS ---
+        // If critical debug actions are mapped to Escape (common symptom of shifted indices), reset them.
+        const g_bind = settings.input_mapper.getBinding(.toggle_shadow_debug_vis);
+        const f4_bind = settings.input_mapper.getBinding(.toggle_timing_overlay);
+        var healed = false;
+
+        if (g_bind.primary == .key and g_bind.primary.key == .escape) {
+            log.log.warn("InputSettings: Detected broken G-key mapping (mapped to Escape). Resetting to Default (G).", .{});
+            settings.input_mapper.resetActionToDefault(.toggle_shadow_debug_vis);
+            healed = true;
+        }
+        if (f4_bind.primary == .key and f4_bind.primary.key == .escape) {
+            log.log.warn("InputSettings: Detected broken F4-key mapping (mapped to Escape). Resetting to Default (F4).", .{});
+            settings.input_mapper.resetActionToDefault(.toggle_timing_overlay);
+            healed = true;
+        }
+
+        if (healed) {
+            settings.save() catch {};
+        }
+
+        log.log.info("InputSettings: toggle_shadow_debug_vis is bound to {s}", .{settings.input_mapper.getBinding(.toggle_shadow_debug_vis).primary.getName()});
 
         return settings;
     }
@@ -105,10 +137,17 @@ pub const InputSettings = struct {
         try file.writeAll(json);
     }
 
-    /// Helper to save bindings directly from a mapper.
-    pub fn saveFromMapper(allocator: std.mem.Allocator, mapper: InputMapper) !void {
-        var settings = InputSettings.initFromMapper(allocator, mapper);
+    /// Helper to save bindings directly from a mapper interface.
+    pub fn saveFromMapper(allocator: std.mem.Allocator, mapper: input_mapper_pkg.IInputMapper) !void {
+        var settings = InputSettings.init(allocator);
         defer settings.deinit();
+
+        // Populate settings from interface
+        inline for (std.meta.fields(GameAction)) |field| {
+            const action: GameAction = @enumFromInt(field.value);
+            settings.input_mapper.bindings[@intFromEnum(action)] = mapper.getBinding(action);
+        }
+
         try settings.save();
     }
 
@@ -140,37 +179,80 @@ pub const InputSettings = struct {
         var aw = std.Io.Writer.Allocating.fromArrayList(self.allocator, &buffer);
         defer aw.deinit();
 
-        try std.json.Stringify.value(.{
-            .version = CURRENT_VERSION,
-            .bindings = self.input_mapper.bindings,
-        }, .{ .whitespace = .indent_2 }, &aw.writer);
-
-        return aw.toOwnedSlice();
-    }
-
-    fn parseJson(self: *InputSettings, data: []const u8) !void {
-        const Schema = struct {
-            version: u32,
-            bindings: []ActionBinding,
+        var s: std.json.Stringify = .{
+            .writer = &aw.writer,
+            .options = .{ .whitespace = .indent_2 },
         };
 
-        var parsed = try std.json.parseFromSlice(Schema, self.allocator, data, .{
-            .ignore_unknown_fields = true,
-        });
-        defer parsed.deinit();
+        try s.beginObject();
+        try s.objectField("version");
+        try s.write(CURRENT_VERSION);
 
-        // Basic version migration/check
-        if (parsed.value.version < 2) {
-            log.log.info("Migrating input settings from version {} to {}", .{ parsed.value.version, CURRENT_VERSION });
-            // Version 1 might have fewer bindings. We'll only copy what we have.
+        try s.objectField("bindings");
+        try s.beginObject();
+
+        inline for (std.meta.fields(GameAction)) |field| {
+            try s.objectField(field.name);
+            const action: GameAction = @enumFromInt(field.value);
+            try s.write(self.input_mapper.bindings[@intFromEnum(action)]);
         }
 
-        if (parsed.value.bindings.len != GameAction.count) {
-            log.log.warn("Settings file has {} bindings, but engine expected {}. Only matching bindings will be applied.", .{ parsed.value.bindings.len, GameAction.count });
+        try s.endObject(); // end bindings
+        try s.endObject(); // end root
+
+        return try aw.toOwnedSlice();
+    }
+
+    fn parseJson(self: *InputSettings, data: []const u8) !bool {
+        var parsed_value = try std.json.parseFromSlice(std.json.Value, self.allocator, data, .{});
+        defer parsed_value.deinit();
+
+        const root = parsed_value.value;
+        if (root != .object) return error.InvalidFormat;
+
+        const version_val = root.object.get("version");
+        const version: i64 = if (version_val) |v| (if (v == .integer) v.integer else 1) else 1;
+        const bindings_val = root.object.get("bindings") orelse return error.MissingBindings;
+
+        log.log.info("InputSettings: Loading settings file (version {})", .{version});
+
+        var migrated = false;
+        if (version < CURRENT_VERSION) {
+            migrated = true;
         }
 
-        const count = @min(parsed.value.bindings.len, GameAction.count);
-        @memcpy(self.input_mapper.bindings[0..count], parsed.value.bindings[0..count]);
+        if (version < 3) {
+            // Legacy array format
+            if (bindings_val != .array) return error.InvalidBindingsFormat;
+            const array = bindings_val.array;
+            log.log.info("Migrating input settings from version {} (array) to {} (object)", .{ version, CURRENT_VERSION });
+
+            const count = @min(array.items.len, GameAction.count);
+            if (array.items.len > GameAction.count) {
+                log.log.warn("Migration: Dropping {} unrecognized bindings (source has {}, engine supports {})", .{
+                    array.items.len - GameAction.count, array.items.len, GameAction.count,
+                });
+            }
+
+            for (array.items[0..count], 0..) |item, i| {
+                const parsed_binding = try std.json.parseFromValue(ActionBinding, self.allocator, item, .{ .ignore_unknown_fields = true });
+                defer parsed_binding.deinit();
+                self.input_mapper.bindings[i] = parsed_binding.value;
+            }
+        } else {
+            // New object format
+            if (bindings_val != .object) return error.InvalidBindingsFormat;
+
+            inline for (std.meta.fields(GameAction)) |field| {
+                if (bindings_val.object.get(field.name)) |val| {
+                    const action: GameAction = @enumFromInt(field.value);
+                    const parsed_binding = try std.json.parseFromValue(ActionBinding, self.allocator, val, .{ .ignore_unknown_fields = true });
+                    defer parsed_binding.deinit();
+                    self.input_mapper.bindings[@intFromEnum(action)] = parsed_binding.value;
+                }
+            }
+        }
+        return migrated;
     }
 };
 
@@ -205,10 +287,37 @@ test "InputSettings version migration" {
     settings.input_mapper.resetToDefaults();
 
     // Parse V1
-    try settings.parseJson(v1_json);
+    _ = try settings.parseJson(v1_json);
 
     // Verify move_forward (index 0) was updated to W (119)
     try std.testing.expect(settings.input_mapper.getBinding(.move_forward).primary.key == .w);
     // Other bindings should still be default
+    try std.testing.expect(settings.input_mapper.getBinding(.jump).primary.key == .space);
+}
+
+test "InputSettings V3 object format" {
+    const allocator = std.testing.allocator;
+
+    const v3_json =
+        \\{
+        \\  "version": 3,
+        \\  "bindings": {
+        \\    "move_forward": { "primary": { "key": 119 }, "alternate": { "none": {} } },
+        \\    "jump": { "primary": { "key": 32 }, "alternate": { "none": {} } }
+        \\  }
+        \\}
+    ;
+
+    var settings = InputSettings.init(allocator);
+    defer settings.deinit();
+
+    // Reset to defaults first
+    settings.input_mapper.resetToDefaults();
+
+    // Parse V3
+    _ = try settings.parseJson(v3_json);
+
+    // Verify bindings
+    try std.testing.expect(settings.input_mapper.getBinding(.move_forward).primary.key == .w);
     try std.testing.expect(settings.input_mapper.getBinding(.jump).primary.key == .space);
 }

@@ -43,13 +43,12 @@ pub const IRenderPass = struct {
 
     pub const VTable = struct {
         name: []const u8,
-        /// Returns true if this pass requires the main render pass (swapchain output) to be active.
-        needs_main_pass: bool = false,
-        execute: *const fn (ptr: *anyopaque, ctx: SceneContext) void,
+        needs_main_pass: bool,
+        execute: *const fn (ptr: *anyopaque, ctx: SceneContext) anyerror!void,
     };
 
-    pub fn execute(self: IRenderPass, ctx: SceneContext) void {
-        self.vtable.execute(self.ptr, ctx);
+    pub fn execute(self: IRenderPass, ctx: SceneContext) !void {
+        try self.vtable.execute(self.ptr, ctx);
     }
 
     pub fn name(self: IRenderPass) []const u8 {
@@ -80,7 +79,7 @@ pub const RenderGraph = struct {
         try self.passes.append(self.allocator, pass);
     }
 
-    pub fn execute(self: *const RenderGraph, ctx: SceneContext) void {
+    pub fn execute(self: *const RenderGraph, ctx: SceneContext) !void {
         const timing = ctx.rhi.timing();
         var main_pass_started = false;
         for (self.passes.items) |pass| {
@@ -88,7 +87,7 @@ pub const RenderGraph = struct {
 
             const pass_name = pass.name();
             timing.beginPassTiming(pass_name);
-            pass.execute(ctx);
+            try pass.execute(ctx);
             timing.endPassTiming(pass_name);
         }
 
@@ -136,7 +135,7 @@ pub const ShadowPass = struct {
         };
     }
 
-    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+    fn execute(ptr: *anyopaque, ctx: SceneContext) anyerror!void {
         const self: *ShadowPass = @ptrCast(@alignCast(ptr));
         // Runtime verification to ensuring pointer safety in debug mode
         std.debug.assert(self.cascade_index < rhi_pkg.SHADOW_CASCADE_COUNT);
@@ -156,7 +155,7 @@ pub const ShadowPass = struct {
         );
         const light_space_matrix = cascades.light_space_matrices[cascade_idx];
 
-        rhi.updateShadowUniforms(.{
+        try rhi.updateShadowUniforms(.{
             .light_space_matrices = cascades.light_space_matrices,
             .cascade_splits = cascades.cascade_splits,
             .shadow_texel_sizes = cascades.texel_sizes,
@@ -183,7 +182,7 @@ pub const GPass = struct {
         };
     }
 
-    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+    fn execute(ptr: *anyopaque, ctx: SceneContext) anyerror!void {
         _ = ptr;
         if (!ctx.ssao_enabled or ctx.disable_gpass_draw) return;
 
@@ -191,7 +190,7 @@ pub const GPass = struct {
         const atlas = ctx.material_system.getAtlasHandles(ctx.env_map_handle);
         ctx.rhi.bindTexture(atlas.diffuse, 1);
         const view_proj = Mat4.perspectiveReverseZ(ctx.camera.fov, ctx.aspect, ctx.camera.near, ctx.camera.far).multiply(ctx.camera.getViewMatrixOriginCentered());
-        ctx.world.render(view_proj, ctx.camera.position);
+        ctx.world.render(view_proj, ctx.camera.position, false);
         ctx.rhi.endGPass();
     }
 };
@@ -209,7 +208,7 @@ pub const SSAOPass = struct {
         };
     }
 
-    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+    fn execute(ptr: *anyopaque, ctx: SceneContext) anyerror!void {
         _ = ptr;
         if (!ctx.ssao_enabled or ctx.disable_ssao) return;
         const proj = Mat4.perspectiveReverseZ(ctx.camera.fov, ctx.aspect, ctx.camera.near, ctx.camera.far);
@@ -231,7 +230,7 @@ pub const SkyPass = struct {
         };
     }
 
-    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+    fn execute(ptr: *anyopaque, ctx: SceneContext) anyerror!void {
         _ = ptr;
         ctx.atmosphere_system.renderSky(ctx.sky_params) catch |err| {
             if (err != error.ResourceNotReady and
@@ -258,13 +257,13 @@ pub const OpaquePass = struct {
         };
     }
 
-    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+    fn execute(ptr: *anyopaque, ctx: SceneContext) anyerror!void {
         _ = ptr;
         const rhi = ctx.rhi;
         rhi.bindShader(ctx.main_shader);
         ctx.material_system.bindTerrainMaterial(ctx.env_map_handle);
         const view_proj = Mat4.perspectiveReverseZ(ctx.camera.fov, ctx.aspect, ctx.camera.near, ctx.camera.far).multiply(ctx.camera.getViewMatrixOriginCentered());
-        ctx.world.render(view_proj, ctx.camera.position);
+        ctx.world.render(view_proj, ctx.camera.position, true);
     }
 };
 
@@ -281,7 +280,7 @@ pub const CloudPass = struct {
         };
     }
 
-    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+    fn execute(ptr: *anyopaque, ctx: SceneContext) anyerror!void {
         _ = ptr;
         if (ctx.disable_clouds) return;
         const view_proj = Mat4.perspectiveReverseZ(ctx.camera.fov, ctx.aspect, ctx.camera.near, ctx.camera.far).multiply(ctx.camera.getViewMatrixOriginCentered());
@@ -310,7 +309,7 @@ pub const EntityPass = struct {
         };
     }
 
-    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+    fn execute(ptr: *anyopaque, ctx: SceneContext) anyerror!void {
         _ = ptr;
         if (ctx.overlay_renderer) |render| {
             render(ctx);
@@ -331,7 +330,7 @@ pub const PostProcessPass = struct {
         };
     }
 
-    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+    fn execute(ptr: *anyopaque, ctx: SceneContext) anyerror!void {
         _ = ptr;
         ctx.rhi.beginPostProcessPass();
         ctx.rhi.draw(rhi_pkg.InvalidBufferHandle, 3, .triangles);
@@ -354,7 +353,7 @@ pub const BloomPass = struct {
         };
     }
 
-    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+    fn execute(ptr: *anyopaque, ctx: SceneContext) anyerror!void {
         const self: *BloomPass = @ptrCast(@alignCast(ptr));
         if (!self.enabled or !ctx.bloom_enabled) return;
         ctx.rhi.computeBloom();
@@ -376,7 +375,7 @@ pub const FXAAPass = struct {
         };
     }
 
-    fn execute(ptr: *anyopaque, ctx: SceneContext) void {
+    fn execute(ptr: *anyopaque, ctx: SceneContext) anyerror!void {
         const self: *FXAAPass = @ptrCast(@alignCast(ptr));
         if (!self.enabled or !ctx.fxaa_enabled) return;
         ctx.rhi.beginFXAAPass();

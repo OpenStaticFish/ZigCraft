@@ -125,10 +125,11 @@ pub const ChunkStorage = struct {
 
     pub fn isChunkRenderable(cx: i32, cz: i32, ctx: *anyopaque) bool {
         const self: *ChunkStorage = @ptrCast(@alignCast(ctx));
-        // Note: this uses an internal lock, which is safe from main thread
-        // but might be slow if called many times.
-        if (self.get(cx, cz)) |data| {
-            return data.chunk.state == .renderable;
+        self.chunks_mutex.lockShared();
+        defer self.chunks_mutex.unlockShared();
+
+        if (self.chunks.get(.{ .x = cx, .z = cz })) |data| {
+            return data.chunk.state == .renderable or data.mesh.solid_allocation != null or data.mesh.fluid_allocation != null;
         }
         return false;
     }

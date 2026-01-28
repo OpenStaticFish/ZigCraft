@@ -16,8 +16,7 @@ layout (binding = 3) uniform SSAOParams {
 } params;
 
 // Reconstruct view space position from depth
-vec3 getViewPos(vec2 uv) {
-    float depth = texture(samplerDepth, uv).r;
+vec3 getViewPos(vec2 uv, float depth) {
     // depth is in [0, 1] range (Vulkan)
     // Reconstruct NDC
     vec4 ndc = vec4(uv * 2.0 - 1.0, depth, 1.0);
@@ -26,10 +25,22 @@ vec3 getViewPos(vec2 uv) {
 }
 
 void main() {
-    vec3 fragPos = getViewPos(inUV);
+    float depth = texture(samplerDepth, inUV).r;
+    if (depth <= 0.0001) {
+        outAO = 1.0;
+        return;
+    }
+
     vec3 normal = texture(samplerNormal, inUV).rgb;
     // Normals are stored in [0, 1] range, convert to [-1, 1]
-    normal = normalize(normal * 2.0 - 1.0);
+    normal = normal * 2.0 - 1.0;
+    if (length(normal) < 0.1) {
+        outAO = 1.0;
+        return;
+    }
+    normal = normalize(normal);
+
+    vec3 fragPos = getViewPos(inUV, depth);
 
     // Get random rotation from noise texture
     ivec2 texSize = textureSize(samplerDepth, 0);
@@ -55,7 +66,7 @@ void main() {
         offset.xy = offset.xy * 0.5 + 0.5;
 
         // Get depth of sample from depth buffer
-        float sampleDepth = getViewPos(offset.xy).z;
+        float sampleDepth = getViewPos(offset.xy, texture(samplerDepth, offset.xy).r).z;
 
         // Range check to avoid occlusion from far objects
         float rangeCheck = smoothstep(0.0, 1.0, params.radius / abs(fragPos.z - sampleDepth));

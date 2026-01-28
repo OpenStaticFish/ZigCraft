@@ -1,18 +1,17 @@
 #version 450
 
 layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
 
 layout(push_constant) uniform ShadowModelUniforms {
-    mat4 light_space_matrix;
-    mat4 model;
+    mat4 mvp;
+    vec4 bias_params; // x=normalBias, y=slopeBias, z=cascadeIndex, w=texelSize
 } pc;
 
 void main() {
-    vec4 worldPos = pc.model * vec4(aPos, 1.0);
-    vec4 clipPos = pc.light_space_matrix * worldPos;
+    vec3 worldNormal = aNormal; 
+    float normalBias = pc.bias_params.x * pc.bias_params.w;
+    vec3 biasedPos = aPos + worldNormal * normalBias;
     
-    // Shadow maps: NO Y-flip here - keeps texel snapping consistent
-    // The shadow map will be "upside down" but sampling is also not flipped,
-    // so they cancel out and the CPU texel snapping works correctly.
-    gl_Position = clipPos;
+    gl_Position = pc.mvp * vec4(biasedPos, 1.0);
 }
