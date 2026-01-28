@@ -9,6 +9,7 @@ layout(location = 9) in vec3 vTangent;
 layout(location = 10) in vec3 vBitangent;
 layout(location = 12) in vec4 vClipPosCurrent;
 layout(location = 13) in vec4 vClipPosPrev;
+layout(location = 14) in float vMaskRadius;
 
 layout(location = 0) out vec3 outNormal;
 layout(location = 1) out vec2 outVelocity;
@@ -32,23 +33,47 @@ layout(set = 0, binding = 0) uniform GlobalUniforms {
     vec4 viewport_size;
 } global;
 
-void main() {
-    // Calculate UV coordinates in atlas
-    vec2 atlasSize = vec2(16.0, 16.0);
-    vec2 tileSize = 1.0 / atlasSize;
-    vec2 tilePos = vec2(mod(float(vTileID), atlasSize.x), floor(float(vTileID) / atlasSize.x));
-    vec2 tiledUV = fract(vTexCoord);
-    tiledUV = clamp(tiledUV, 0.001, 0.999);
-    vec2 uv = (tilePos + tiledUV) * tileSize;
+// 4x4 Bayer matrix for dithered LOD transitions
+float bayerDither4x4(vec2 position) {
+    const float bayerMatrix[16] = float[](
+        0.0/16.0,  8.0/16.0,  2.0/16.0, 10.0/16.0,
+        12.0/16.0, 4.0/16.0, 14.0/16.0,  6.0/16.0,
+        3.0/16.0, 11.0/16.0,  1.0/16.0,  9.0/16.0,
+        15.0/16.0, 7.0/16.0, 13.0/16.0,  5.0/16.0
+    );
+    int x = int(mod(position.x, 4.0));
+    int y = int(mod(position.y, 4.0));
+    return bayerMatrix[x + y * 4];
+}
 
-    if (texture(uTexture, uv).a < 0.1) discard;
+void main() {
+    const float LOD_TRANSITION_WIDTH = 24.0;
+    if (vTileID < 0 && vMaskRadius > 0.0) {
+        float distFromMask = length(vFragPosWorld.xz) - vMaskRadius;
+        float fade = clamp(distFromMask / LOD_TRANSITION_WIDTH, 0.0, 1.0);
+        float ditherThreshold = bayerDither4x4(gl_FragCoord.xy);
+        if (fade < ditherThreshold) discard;
+    }
 
     vec3 N = normalize(vNormal);
+    if (vTileID < 0) {
+        N = vec3(0.0, 1.0, 0.0);
+    } else {
+        // Calculate UV coordinates in atlas
+        vec2 atlasSize = vec2(16.0, 16.0);
+        vec2 tileSize = 1.0 / atlasSize;
+        vec2 tilePos = vec2(mod(float(vTileID), atlasSize.x), floor(float(vTileID) / atlasSize.x));
+        vec2 tiledUV = fract(vTexCoord);
+        tiledUV = clamp(tiledUV, 0.001, 0.999);
+        vec2 uv = (tilePos + tiledUV) * tileSize;
 
-    if (global.lighting.z > 0.5 && global.pbr_params.x > 1.5 && vTileID >= 0) {
-        vec3 normalMapValue = texture(uNormalMap, uv).rgb * 2.0 - 1.0;
-        mat3 TBN = mat3(normalize(vTangent), normalize(vBitangent), N);
-        N = normalize(TBN * normalMapValue);
+        if (texture(uTexture, uv).a < 0.1) discard;
+
+        if (global.lighting.z > 0.5 && global.pbr_params.x > 1.5) {
+            vec3 normalMapValue = texture(uNormalMap, uv).rgb * 2.0 - 1.0;
+            mat3 TBN = mat3(normalize(vTangent), normalize(vBitangent), N);
+            N = normalize(TBN * normalMapValue);
+        }
     }
 
     // Convert normal from [-1, 1] to [0, 1] for storage in UNORM texture

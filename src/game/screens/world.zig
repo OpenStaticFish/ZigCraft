@@ -81,6 +81,35 @@ pub const WorldScreen = struct {
             ctx.rhi.*.setDebugShadowView(ctx.settings.debug_shadows_active);
             self.last_debug_toggle_time = now;
         }
+        if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input, .toggle_lod_render)) {
+            if (self.session.world.lod_manager == null) {
+                log.log.warn("LOD toggle requested but LOD system is not initialized", .{});
+            } else {
+                self.session.world.lod_enabled = !self.session.world.lod_enabled;
+                log.log.info("LOD rendering {s}", .{if (self.session.world.lod_enabled) "enabled" else "disabled"});
+            }
+            self.last_debug_toggle_time = now;
+        }
+        if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input, .toggle_gpass_render)) {
+            self.context.disable_gpass_draw = !self.context.disable_gpass_draw;
+            log.log.info("G-pass rendering {s}", .{if (self.context.disable_gpass_draw) "disabled" else "enabled"});
+            self.last_debug_toggle_time = now;
+        }
+        if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input, .toggle_ssao)) {
+            self.context.disable_ssao = !self.context.disable_ssao;
+            log.log.info("SSAO {s}", .{if (self.context.disable_ssao) "disabled" else "enabled"});
+            self.last_debug_toggle_time = now;
+        }
+        if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input, .toggle_clouds)) {
+            self.context.disable_clouds = !self.context.disable_clouds;
+            log.log.info("Cloud rendering {s}", .{if (self.context.disable_clouds) "disabled" else "enabled"});
+            self.last_debug_toggle_time = now;
+        }
+        if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input, .toggle_fog)) {
+            self.session.atmosphere.fog_enabled = !self.session.atmosphere.fog_enabled;
+            log.log.info("Fog {s}", .{if (self.session.atmosphere.fog_enabled) "enabled" else "disabled"});
+            self.last_debug_toggle_time = now;
+        }
 
         // Update Audio Listener
         const cam = &self.session.player.camera;
@@ -119,6 +148,8 @@ pub const WorldScreen = struct {
             .time = self.session.atmosphere.time.time_of_day,
         };
 
+        const ssao_enabled = ctx.settings.ssao_enabled and !ctx.disable_ssao and !ctx.disable_gpass_draw;
+        const cloud_shadows_enabled = ctx.settings.cloud_shadows_enabled and !ctx.disable_clouds;
         const cloud_params: rhi_pkg.CloudParams = blk: {
             const p = self.session.clouds.getShadowParams();
             break :blk .{
@@ -141,7 +172,7 @@ pub const WorldScreen = struct {
                     .pcf_samples = ctx.settings.shadow_pcf_samples,
                     .cascade_blend = ctx.settings.shadow_cascade_blend,
                 },
-                .cloud_shadows = ctx.settings.cloud_shadows_enabled,
+                .cloud_shadows = cloud_shadows_enabled,
                 .pbr_quality = ctx.settings.pbr_quality,
                 .exposure = ctx.settings.exposure,
                 .saturation = ctx.settings.saturation,
@@ -149,7 +180,7 @@ pub const WorldScreen = struct {
                 .volumetric_density = ctx.settings.volumetric_density,
                 .volumetric_steps = ctx.settings.volumetric_steps,
                 .volumetric_scattering = ctx.settings.volumetric_scattering,
-                .ssao_enabled = ctx.settings.ssao_enabled,
+                .ssao_enabled = ssao_enabled,
             };
         };
 
@@ -158,7 +189,6 @@ pub const WorldScreen = struct {
 
             const env_map_handle = if (ctx.env_map_ptr) |e_ptr| (if (e_ptr.*) |t| t.handle else 0) else 0;
 
-            const ssao_enabled = ctx.settings.ssao_enabled and !ctx.disable_ssao and !ctx.disable_gpass_draw;
             const render_ctx = render_graph_pkg.SceneContext{
                 .rhi = ctx.rhi.*, // SceneContext expects value for now
                 .world = self.session.world,

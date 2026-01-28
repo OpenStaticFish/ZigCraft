@@ -9,6 +9,7 @@ const ILODConfig = lod_chunk.ILODConfig;
 const LODRegionKey = lod_chunk.LODRegionKey;
 const LODRegionKeyContext = lod_chunk.LODRegionKeyContext;
 const LODMesh = @import("lod_mesh.zig").LODMesh;
+const CHUNK_SIZE_X = @import("chunk.zig").CHUNK_SIZE_X;
 
 const Vec3 = @import("../engine/math/vec3.zig").Vec3;
 const Mat4 = @import("../engine/math/mat4.zig").Mat4;
@@ -162,10 +163,11 @@ pub fn LODRenderer(comptime RHI: type) type {
 
                     const model = Mat4.translate(Vec3.init(@as(f32, @floatFromInt(bounds.min_x)) - camera_pos.x, -camera_pos.y + lod_y_offset, @as(f32, @floatFromInt(bounds.min_z)) - camera_pos.z));
 
+                    const mask_radius = manager.config.calculateMaskRadius() * @as(f32, @floatFromInt(CHUNK_SIZE_X));
                     try self.instance_data.append(self.allocator, .{
                         .view_proj = view_proj,
                         .model = model,
-                        .mask_radius = manager.config.calculateMaskRadius(),
+                        .mask_radius = mask_radius,
                         .padding = .{ 0, 0, 0 },
                     });
                     try self.draw_list.append(self.allocator, mesh);

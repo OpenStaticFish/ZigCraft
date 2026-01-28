@@ -259,7 +259,7 @@ pub const DescriptorManager = struct {
     pub fn updateGlobalUniforms(self: *DescriptorManager, frame_index: usize, data: *const anyopaque) !void {
         const dest = self.global_ubos_mapped[frame_index] orelse {
             std.log.err("Failed to update global uniforms: memory not mapped", .{});
-            return error.VulkanMemoryMappingFailed;
+            return error.UnmappedBuffer;
         };
         const src = @as([*]const u8, @ptrCast(data));
         @memcpy(@as([*]u8, @ptrCast(dest))[0..@sizeOf(GlobalUniforms)], src[0..@sizeOf(GlobalUniforms)]);
@@ -268,7 +268,7 @@ pub const DescriptorManager = struct {
     pub fn updateShadowUniforms(self: *DescriptorManager, frame_index: usize, data: *const anyopaque) !void {
         const dest = self.shadow_ubos_mapped[frame_index] orelse {
             std.log.err("Failed to update shadow uniforms: memory not mapped", .{});
-            return error.VulkanMemoryMappingFailed;
+            return error.UnmappedBuffer;
         };
         const src = @as([*]const u8, @ptrCast(data));
         @memcpy(@as([*]u8, @ptrCast(dest))[0..@sizeOf(ShadowUniforms)], src[0..@sizeOf(ShadowUniforms)]);

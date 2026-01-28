@@ -190,7 +190,7 @@ pub const GPass = struct {
         const atlas = ctx.material_system.getAtlasHandles(ctx.env_map_handle);
         ctx.rhi.bindTexture(atlas.diffuse, 1);
         const view_proj = Mat4.perspectiveReverseZ(ctx.camera.fov, ctx.aspect, ctx.camera.near, ctx.camera.far).multiply(ctx.camera.getViewMatrixOriginCentered());
-        ctx.world.render(view_proj, ctx.camera.position);
+        ctx.world.render(view_proj, ctx.camera.position, false);
         ctx.rhi.endGPass();
     }
 };
@@ -263,7 +263,7 @@ pub const OpaquePass = struct {
         rhi.bindShader(ctx.main_shader);
         ctx.material_system.bindTerrainMaterial(ctx.env_map_handle);
         const view_proj = Mat4.perspectiveReverseZ(ctx.camera.fov, ctx.aspect, ctx.camera.near, ctx.camera.far).multiply(ctx.camera.getViewMatrixOriginCentered());
-        ctx.world.render(view_proj, ctx.camera.position);
+        ctx.world.render(view_proj, ctx.camera.position, true);
     }
 };
 

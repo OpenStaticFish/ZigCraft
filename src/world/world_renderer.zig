@@ -103,14 +103,16 @@ pub const WorldRenderer = struct {
         self.allocator.destroy(self);
     }
 
-    pub fn render(self: *WorldRenderer, view_proj: Mat4, camera_pos: Vec3, render_distance: i32, lod_manager: ?*LODManager) void {
+    pub fn render(self: *WorldRenderer, view_proj: Mat4, camera_pos: Vec3, render_distance: i32, lod_manager: ?*LODManager, render_lod: bool) void {
         self.last_render_stats = .{};
 
         self.storage.chunks_mutex.lockShared();
         defer self.storage.chunks_mutex.unlockShared();
 
-        if (lod_manager) |lod_mgr| {
-            lod_mgr.render(view_proj, camera_pos, ChunkStorage.isChunkRenderable, @ptrCast(self.storage), true);
+        if (render_lod) {
+            if (lod_manager) |lod_mgr| {
+                lod_mgr.render(view_proj, camera_pos, ChunkStorage.isChunkRenderable, @ptrCast(self.storage), true);
+            }
         }
 
         self.visible_chunks.clearRetainingCapacity();

@@ -144,6 +144,18 @@ pub const GameAction = enum(u8) {
     /// Toggle GPU timing/profiler overlay
     toggle_timing_overlay,
 
+    // Debug render toggles (appended to preserve settings.json compatibility)
+    /// Toggle LOD rendering
+    toggle_lod_render,
+    /// Toggle G-pass rendering
+    toggle_gpass_render,
+    /// Toggle SSAO
+    toggle_ssao,
+    /// Toggle cloud rendering
+    toggle_clouds,
+    /// Toggle fog
+    toggle_fog,
+
     pub const count = @typeInfo(GameAction).@"enum".fields.len;
 };
 
@@ -330,6 +342,11 @@ pub const DEFAULT_BINDINGS = blk: {
     bindings[@intFromEnum(GameAction.toggle_time_scale)] = ActionBinding.init(.{ .key = .n });
     bindings[@intFromEnum(GameAction.toggle_creative)] = ActionBinding.init(.{ .key = .f3 });
     bindings[@intFromEnum(GameAction.toggle_timing_overlay)] = ActionBinding.init(.{ .key = .f4 });
+    bindings[@intFromEnum(GameAction.toggle_lod_render)] = ActionBinding.init(.{ .key = .f6 });
+    bindings[@intFromEnum(GameAction.toggle_gpass_render)] = ActionBinding.init(.{ .key = .f7 });
+    bindings[@intFromEnum(GameAction.toggle_ssao)] = ActionBinding.init(.{ .key = .f8 });
+    bindings[@intFromEnum(GameAction.toggle_clouds)] = ActionBinding.init(.{ .key = .f9 });
+    bindings[@intFromEnum(GameAction.toggle_fog)] = ActionBinding.init(.{ .key = .f10 });
 
     // Map controls
     bindings[@intFromEnum(GameAction.toggle_map)] = ActionBinding.init(.{ .key = .m });

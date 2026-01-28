@@ -374,9 +374,10 @@ void main() {
     vec3 color;
     const float LOD_TRANSITION_WIDTH = 24.0;
     const float AO_FADE_DISTANCE = 128.0;
+    float viewDistance = length(vFragPosWorld);
 
     if (vTileID < 0 && vMaskRadius > 0.0) {
-        float distFromMask = vDistance - vMaskRadius;
+        float distFromMask = length(vFragPosWorld.xz) - vMaskRadius;
         float fade = clamp(distFromMask / LOD_TRANSITION_WIDTH, 0.0, 1.0);
         float ditherThreshold = bayerDither4x4(gl_FragCoord.xy);
         if (fade < ditherThreshold) discard;
@@ -387,6 +388,9 @@ void main() {
     vec2 uv = (vec2(mod(float(vTileID), 16.0), floor(float(vTileID) / 16.0)) + tiledUV) * (1.0 / 16.0);
 
     vec3 N = normalize(vNormal);
+    if (vTileID < 0) {
+        N = vec3(0.0, 1.0, 0.0);
+    }
     vec4 normalMapSample = vec4(0.5, 0.5, 1.0, 0.0);
     if (global.lighting.z > 0.5 && global.pbr_params.x > 1.5 && vTileID >= 0) {
         normalMapSample = texture(uNormalMap, uv);
@@ -396,14 +400,17 @@ void main() {
 
     vec3 L = normalize(global.sun_dir.xyz);
     float nDotL = max(dot(N, L), 0.0);
-    int layer = vDistance < shadows.cascade_splits[0] ? 0 : (vDistance < shadows.cascade_splits[1] ? 1 : 2);
-    float shadowFactor = computeShadowCascades(vFragPosWorld, N, L, vDistance, layer);
+    int layer = viewDistance < shadows.cascade_splits[0] ? 0 : (viewDistance < shadows.cascade_splits[1] ? 1 : 2);
+    float shadowFactor = computeShadowCascades(vFragPosWorld, N, L, viewDistance, layer);
     
     float cloudShadow = (global.cloud_params.w > 0.5 && global.params.w > 0.05 && global.sun_dir.y > 0.05) ? getCloudShadow(vFragPosWorld, global.sun_dir.xyz) : 0.0;
     float totalShadow = min(shadowFactor + cloudShadow, 1.0);
 
     float ssao = mix(1.0, texture(uSSAOMap, gl_FragCoord.xy / global.viewport_size.xy).r, global.pbr_params.w);
-    float ao = mix(1.0, vAO, mix(0.4, 0.05, clamp(vDistance / AO_FADE_DISTANCE, 0.0, 1.0)));
+    if (vTileID < 0) {
+        ssao = 1.0;
+    }
+    float ao = mix(1.0, vAO, mix(0.4, 0.05, clamp(viewDistance / AO_FADE_DISTANCE, 0.0, 1.0)));
     
     if (global.lighting.y > 0.5 && vTileID >= 0) {
         vec4 texColor = texture(uTexture, uv);
@@ -435,7 +442,7 @@ void main() {
     }
 
     if (global.params.z > 0.5) {
-        color = mix(color, global.fog_color.rgb, clamp(1.0 - exp(-vDistance * global.params.y), 0.0, 1.0));
+        color = mix(color, global.fog_color.rgb, clamp(1.0 - exp(-viewDistance * global.params.y), 0.0, 1.0));
     }
 
     if (global.viewport_size.z > 0.5) {
