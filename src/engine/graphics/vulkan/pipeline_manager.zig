@@ -422,9 +422,7 @@ pub const PipelineManager = struct {
 
         // G-Pass Pipeline (1-sample, 2 color attachments: normal, velocity)
         if (g_render_pass != null) {
-            const g_frag_code = try std.fs.cwd().readFileAlloc(shader_registry.G_PASS_FRAG, allocator, @enumFromInt(1024 * 1024));
-            defer allocator.free(g_frag_code);
-            const g_frag_module = try Utils.createShaderModule(vk_device, g_frag_code);
+            const g_frag_module = try loadShaderModule(allocator, vk_device, shader_registry.G_PASS_FRAG);
             defer c.vkDestroyShaderModule(vk_device, g_frag_module, null);
 
             var g_shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
@@ -542,19 +540,13 @@ pub const PipelineManager = struct {
         ui_depth_stencil.depthWriteEnable = c.VK_FALSE;
 
         // Colored UI pipeline
-        const vert_code = try std.fs.cwd().readFileAlloc(shader_registry.UI_VERT, allocator, @enumFromInt(1024 * 1024));
-        defer allocator.free(vert_code);
-        const frag_code = try std.fs.cwd().readFileAlloc(shader_registry.UI_FRAG, allocator, @enumFromInt(1024 * 1024));
-        defer allocator.free(frag_code);
-
-        const vert_module = try Utils.createShaderModule(vk_device, vert_code);
-        defer c.vkDestroyShaderModule(vk_device, vert_module, null);
-        const frag_module = try Utils.createShaderModule(vk_device, frag_code);
-        defer c.vkDestroyShaderModule(vk_device, frag_module, null);
+        const ui_shaders = try loadShaderPair(allocator, vk_device, shader_registry.UI_VERT, shader_registry.UI_FRAG);
+        defer c.vkDestroyShaderModule(vk_device, ui_shaders.vert, null);
+        defer c.vkDestroyShaderModule(vk_device, ui_shaders.frag, null);
 
         var shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
-            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main" },
-            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_module, .pName = "main" },
+            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = ui_shaders.vert, .pName = "main" },
+            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = ui_shaders.frag, .pName = "main" },
         };
 
         var pipeline_info = std.mem.zeroes(c.VkGraphicsPipelineCreateInfo);
@@ -576,19 +568,13 @@ pub const PipelineManager = struct {
         try Utils.checkVk(c.vkCreateGraphicsPipelines(vk_device, null, 1, &pipeline_info, null, &self.ui_pipeline));
 
         // Textured UI pipeline
-        const tex_vert_code = try std.fs.cwd().readFileAlloc(shader_registry.UI_TEX_VERT, allocator, @enumFromInt(1024 * 1024));
-        defer allocator.free(tex_vert_code);
-        const tex_frag_code = try std.fs.cwd().readFileAlloc(shader_registry.UI_TEX_FRAG, allocator, @enumFromInt(1024 * 1024));
-        defer allocator.free(tex_frag_code);
-
-        const tex_vert_module = try Utils.createShaderModule(vk_device, tex_vert_code);
-        defer c.vkDestroyShaderModule(vk_device, tex_vert_module, null);
-        const tex_frag_module = try Utils.createShaderModule(vk_device, tex_frag_code);
-        defer c.vkDestroyShaderModule(vk_device, tex_frag_module, null);
+        const tex_ui_shaders = try loadShaderPair(allocator, vk_device, shader_registry.UI_TEX_VERT, shader_registry.UI_TEX_FRAG);
+        defer c.vkDestroyShaderModule(vk_device, tex_ui_shaders.vert, null);
+        defer c.vkDestroyShaderModule(vk_device, tex_ui_shaders.frag, null);
 
         var tex_shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
-            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = tex_vert_module, .pName = "main" },
-            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = tex_frag_module, .pName = "main" },
+            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = tex_ui_shaders.vert, .pName = "main" },
+            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = tex_ui_shaders.frag, .pName = "main" },
         };
 
         pipeline_info.pStages = &tex_shader_stages[0];
