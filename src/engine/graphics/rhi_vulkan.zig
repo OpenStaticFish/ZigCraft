@@ -1152,9 +1152,9 @@ fn createMainRenderPass(ctx: *VulkanContext) !void {
     const depth_format = DEPTH_FORMAT;
     const hdr_format = c.VK_FORMAT_R16G16B16A16_SFLOAT;
 
-    if (ctx.hdr_render_pass != null) {
-        c.vkDestroyRenderPass(ctx.vulkan_device.vk_device, ctx.hdr_render_pass, null);
-        ctx.hdr_render_pass = null;
+    if (ctx.render_pass_manager.hdr_render_pass != null) {
+        c.vkDestroyRenderPass(ctx.vulkan_device.vk_device, ctx.render_pass_manager.hdr_render_pass, null);
+        ctx.render_pass_manager.hdr_render_pass = null;
     }
 
     if (use_msaa) {
@@ -1233,7 +1233,7 @@ fn createMainRenderPass(ctx: *VulkanContext) !void {
         render_pass_info.dependencyCount = 2;
         render_pass_info.pDependencies = &dependencies[0];
 
-        try Utils.checkVk(c.vkCreateRenderPass(ctx.vulkan_device.vk_device, &render_pass_info, null, &ctx.hdr_render_pass));
+        try Utils.checkVk(c.vkCreateRenderPass(ctx.vulkan_device.vk_device, &render_pass_info, null, &ctx.render_pass_manager.hdr_render_pass));
         std.log.info("Created HDR MSAA {}x render pass", .{ctx.msaa_samples});
     } else {
         // Non-MSAA render pass: 2 attachments (color, depth)
@@ -1302,7 +1302,7 @@ fn createMainRenderPass(ctx: *VulkanContext) !void {
         rp_info.dependencyCount = 2;
         rp_info.pDependencies = &dependencies[0];
 
-        try Utils.checkVk(c.vkCreateRenderPass(ctx.vulkan_device.vk_device, &rp_info, null, &ctx.hdr_render_pass));
+        try Utils.checkVk(c.vkCreateRenderPass(ctx.vulkan_device.vk_device, &rp_info, null, &ctx.render_pass_manager.hdr_render_pass));
     }
 }
 
@@ -1595,7 +1595,7 @@ fn createMainFramebuffers(ctx: *VulkanContext) !void {
 
     var fb_info = std.mem.zeroes(c.VkFramebufferCreateInfo);
     fb_info.sType = c.VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-    fb_info.renderPass = ctx.hdr_render_pass;
+    fb_info.renderPass = ctx.render_pass_manager.hdr_render_pass;
     fb_info.width = extent.width;
     fb_info.height = extent.height;
     fb_info.layers = 1;
@@ -1723,7 +1723,7 @@ fn createMainPipelines(ctx: *VulkanContext) !void {
         pipeline_info.pColorBlendState = &terrain_color_blending;
         pipeline_info.pDynamicState = &dynamic_state;
         pipeline_info.layout = ctx.pipeline_layout;
-        pipeline_info.renderPass = ctx.hdr_render_pass;
+        pipeline_info.renderPass = ctx.render_pass_manager.hdr_render_pass;
         pipeline_info.subpass = 0;
         try Utils.checkVk(c.vkCreateGraphicsPipelines(ctx.vulkan_device.vk_device, null, 1, &pipeline_info, null, &ctx.pipeline));
 
@@ -1816,7 +1816,7 @@ fn createMainPipelines(ctx: *VulkanContext) !void {
         pipeline_info.pColorBlendState = &terrain_color_blending;
         pipeline_info.pDynamicState = &dynamic_state;
         pipeline_info.layout = ctx.sky_pipeline_layout;
-        pipeline_info.renderPass = ctx.hdr_render_pass;
+        pipeline_info.renderPass = ctx.render_pass_manager.hdr_render_pass;
         pipeline_info.subpass = 0;
         try Utils.checkVk(c.vkCreateGraphicsPipelines(ctx.vulkan_device.vk_device, null, 1, &pipeline_info, null, &ctx.sky_pipeline));
     }
@@ -1861,7 +1861,7 @@ fn createMainPipelines(ctx: *VulkanContext) !void {
         pipeline_info.pColorBlendState = &ui_color_blending;
         pipeline_info.pDynamicState = &dynamic_state;
         pipeline_info.layout = ctx.ui_pipeline_layout;
-        pipeline_info.renderPass = ctx.hdr_render_pass;
+        pipeline_info.renderPass = ctx.render_pass_manager.hdr_render_pass;
         pipeline_info.subpass = 0;
         try Utils.checkVk(c.vkCreateGraphicsPipelines(ctx.vulkan_device.vk_device, null, 1, &pipeline_info, null, &ctx.ui_pipeline));
 
@@ -1923,7 +1923,7 @@ fn createMainPipelines(ctx: *VulkanContext) !void {
         pipeline_info.pColorBlendState = &ui_color_blending;
         pipeline_info.pDynamicState = &dynamic_state;
         pipeline_info.layout = ctx.debug_shadow.pipeline_layout orelse return error.InitializationFailed;
-        pipeline_info.renderPass = ctx.hdr_render_pass;
+        pipeline_info.renderPass = ctx.render_pass_manager.hdr_render_pass;
         pipeline_info.subpass = 0;
         try Utils.checkVk(c.vkCreateGraphicsPipelines(ctx.vulkan_device.vk_device, null, 1, &pipeline_info, null, &ctx.debug_shadow.pipeline));
     }
@@ -1968,7 +1968,7 @@ fn createMainPipelines(ctx: *VulkanContext) !void {
         pipeline_info.pColorBlendState = &ui_color_blending;
         pipeline_info.pDynamicState = &dynamic_state;
         pipeline_info.layout = ctx.cloud_pipeline_layout;
-        pipeline_info.renderPass = ctx.hdr_render_pass;
+        pipeline_info.renderPass = ctx.render_pass_manager.hdr_render_pass;
         pipeline_info.subpass = 0;
         try Utils.checkVk(c.vkCreateGraphicsPipelines(ctx.vulkan_device.vk_device, null, 1, &pipeline_info, null, &ctx.cloud_pipeline));
     }
@@ -2135,9 +2135,9 @@ fn destroyMainRenderPassAndPipelines(ctx: *VulkanContext) void {
         c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.cloud_pipeline, null);
         ctx.cloud_pipeline = null;
     }
-    if (ctx.hdr_render_pass != null) {
-        c.vkDestroyRenderPass(ctx.vulkan_device.vk_device, ctx.hdr_render_pass, null);
-        ctx.hdr_render_pass = null;
+    if (ctx.render_pass_manager.hdr_render_pass != null) {
+        c.vkDestroyRenderPass(ctx.vulkan_device.vk_device, ctx.render_pass_manager.hdr_render_pass, null);
+        ctx.render_pass_manager.hdr_render_pass = null;
     }
 }
 
@@ -3404,7 +3404,7 @@ fn beginMainPassInternal(ctx: *VulkanContext) void {
 
         var render_pass_info = std.mem.zeroes(c.VkRenderPassBeginInfo);
         render_pass_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        render_pass_info.renderPass = ctx.hdr_render_pass;
+        render_pass_info.renderPass = ctx.render_pass_manager.hdr_render_pass;
         render_pass_info.framebuffer = ctx.main_framebuffer;
         render_pass_info.renderArea.offset = .{ .x = 0, .y = 0 };
         render_pass_info.renderArea.extent = ctx.swapchain.getExtent();
@@ -3424,7 +3424,7 @@ fn beginMainPassInternal(ctx: *VulkanContext) void {
         }
         render_pass_info.pClearValues = &clear_values[0];
 
-        // std.debug.print("beginMainPass: calling vkCmdBeginRenderPass (cb={}, rp={}, fb={})\n", .{ command_buffer != null, ctx.hdr_render_pass != null, ctx.main_framebuffer != null });
+        // std.debug.print("beginMainPass: calling vkCmdBeginRenderPass (cb={}, rp={}, fb={})\n", .{ command_buffer != null, ctx.render_pass_manager.hdr_render_pass != null, ctx.main_framebuffer != null });
         c.vkCmdBeginRenderPass(command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
         ctx.main_pass_active = true;
         ctx.lod_mode = false;
