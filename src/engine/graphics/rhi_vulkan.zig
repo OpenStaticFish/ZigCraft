@@ -2328,8 +2328,12 @@ fn initContext(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device:
     try createGPassResources(ctx);
     try createSSAOResources(ctx);
 
-    // Create main render pass and framebuffers (depends on HDR views)
-    try createMainRenderPass(ctx);
+    // Create main render pass and framebuffers using manager (depends on HDR views)
+    try ctx.render_pass_manager.createMainRenderPass(
+        ctx.vulkan_device.vk_device,
+        ctx.swapchain.getExtent(),
+        ctx.msaa_samples,
+    );
 
     // Final Pipelines (depend on main_render_pass)
     try createMainPipelines(ctx);
@@ -2566,7 +2570,7 @@ fn recreateSwapchainInternal(ctx: *VulkanContext) void {
     createHDRResources(ctx) catch |err| std.log.err("Failed to recreate HDR resources: {}", .{err});
     createGPassResources(ctx) catch |err| std.log.err("Failed to recreate G-Pass resources: {}", .{err});
     createSSAOResources(ctx) catch |err| std.log.err("Failed to recreate SSAO resources: {}", .{err});
-    createMainRenderPass(ctx) catch |err| std.log.err("Failed to recreate render pass: {}", .{err});
+    ctx.render_pass_manager.createMainRenderPass(ctx.vulkan_device.vk_device, ctx.swapchain.getExtent(), ctx.msaa_samples) catch |err| std.log.err("Failed to recreate render pass: {}", .{err});
     createMainPipelines(ctx) catch |err| std.log.err("Failed to recreate pipelines: {}", .{err});
     createPostProcessResources(ctx) catch |err| std.log.err("Failed to recreate post-process resources: {}", .{err});
     createSwapchainUIResources(ctx) catch |err| std.log.err("Failed to recreate swapchain UI resources: {}", .{err});
@@ -3360,9 +3364,9 @@ fn beginMainPassInternal(ctx: *VulkanContext) void {
     if (ctx.swapchain.getExtent().width == 0 or ctx.swapchain.getExtent().height == 0) return;
 
     // Safety: Ensure render pass and framebuffer are valid
-    if (ctx.hdr_render_pass == null) {
+    if (ctx.render_pass_manager.hdr_render_pass == null) {
         std.debug.print("beginMainPass: hdr_render_pass is null, creating...\n", .{});
-        createMainRenderPass(ctx) catch |err| {
+        ctx.render_pass_manager.createMainRenderPass(ctx.vulkan_device.vk_device, ctx.swapchain.getExtent(), ctx.msaa_samples) catch |err| {
             std.log.err("beginMainPass: failed to recreate render pass: {}", .{err});
             return;
         };
