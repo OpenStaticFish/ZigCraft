@@ -19,6 +19,11 @@ const Mat4 = @import("../../math/mat4.zig").Mat4;
 /// Maximum number of frames in flight
 const MAX_FRAMES_IN_FLIGHT = rhi.MAX_FRAMES_IN_FLIGHT;
 
+/// Push constant sizes for different pipeline types
+const PUSH_CONSTANT_SIZE_MODEL: u32 = 256; // mat4 model + vec3 color + float mask
+const PUSH_CONSTANT_SIZE_SKY: u32 = 128; // mat4 view_proj + vec4 params
+const PUSH_CONSTANT_SIZE_UI: u32 = @sizeOf(Mat4); // Orthographic projection matrix
+
 /// Pipeline manager handles all pipeline-related resources
 pub const PipelineManager = struct {
     // Main pipelines
@@ -68,6 +73,18 @@ pub const PipelineManager = struct {
         self.destroyPipelineLayouts(vk_device);
     }
 
+    /// Load shader from file and create shader module
+    /// Caller must destroy the returned module with vkDestroyShaderModule
+    fn loadShaderModule(
+        allocator: std.mem.Allocator,
+        vk_device: c.VkDevice,
+        path: []const u8,
+    ) !c.VkShaderModule {
+        const code = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+        defer allocator.free(code);
+        return try Utils.createShaderModule(vk_device, code);
+    }
+
     /// Create all pipeline layouts
     fn createPipelineLayouts(
         self: *PipelineManager,
@@ -80,7 +97,7 @@ pub const PipelineManager = struct {
         // Main pipeline layout with model push constants
         var model_push_constant = std.mem.zeroes(c.VkPushConstantRange);
         model_push_constant.stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT;
-        model_push_constant.size = 256;
+        model_push_constant.size = PUSH_CONSTANT_SIZE_MODEL;
 
         var pipeline_layout_info = std.mem.zeroes(c.VkPipelineLayoutCreateInfo);
         pipeline_layout_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -94,7 +111,7 @@ pub const PipelineManager = struct {
         // Sky pipeline layout
         var sky_push_constant = std.mem.zeroes(c.VkPushConstantRange);
         sky_push_constant.stageFlags = c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT;
-        sky_push_constant.size = 128;
+        sky_push_constant.size = PUSH_CONSTANT_SIZE_SKY;
 
         var sky_layout_info = std.mem.zeroes(c.VkPipelineLayoutCreateInfo);
         sky_layout_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -317,14 +334,9 @@ pub const PipelineManager = struct {
         g_render_pass: c.VkRenderPass,
     ) !void {
         _ = _sample_count; // Used in future MSAA variants
-        const vert_code = try std.fs.cwd().readFileAlloc(shader_registry.TERRAIN_VERT, allocator, @enumFromInt(1024 * 1024));
-        defer allocator.free(vert_code);
-        const frag_code = try std.fs.cwd().readFileAlloc(shader_registry.TERRAIN_FRAG, allocator, @enumFromInt(1024 * 1024));
-        defer allocator.free(frag_code);
-
-        const vert_module = try Utils.createShaderModule(vk_device, vert_code);
+        const vert_module = try loadShaderModule(allocator, vk_device, shader_registry.TERRAIN_VERT);
         defer c.vkDestroyShaderModule(vk_device, vert_module, null);
-        const frag_module = try Utils.createShaderModule(vk_device, frag_code);
+        const frag_module = try loadShaderModule(allocator, vk_device, shader_registry.TERRAIN_FRAG);
         defer c.vkDestroyShaderModule(vk_device, frag_module, null);
 
         var shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
