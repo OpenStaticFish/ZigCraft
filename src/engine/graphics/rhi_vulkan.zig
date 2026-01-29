@@ -1383,357 +1383,6 @@ fn createMainFramebuffers(ctx: *VulkanContext) !void {
     }
 }
 
-fn createMainPipelines(ctx: *VulkanContext) !void {
-    // Use common multisampling and viewport state
-    const sample_count = getMSAASampleCountFlag(ctx.msaa_samples);
-
-    var viewport_state = std.mem.zeroes(c.VkPipelineViewportStateCreateInfo);
-    viewport_state.sType = c.VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-    viewport_state.viewportCount = 1;
-    viewport_state.scissorCount = 1;
-
-    const dynamic_states = [_]c.VkDynamicState{ c.VK_DYNAMIC_STATE_VIEWPORT, c.VK_DYNAMIC_STATE_SCISSOR };
-    var dynamic_state = std.mem.zeroes(c.VkPipelineDynamicStateCreateInfo);
-    dynamic_state.sType = c.VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    dynamic_state.dynamicStateCount = 2;
-    dynamic_state.pDynamicStates = &dynamic_states;
-
-    var input_assembly = std.mem.zeroes(c.VkPipelineInputAssemblyStateCreateInfo);
-    input_assembly.sType = c.VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    input_assembly.topology = c.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-
-    var rasterizer = std.mem.zeroes(c.VkPipelineRasterizationStateCreateInfo);
-    rasterizer.sType = c.VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-    rasterizer.lineWidth = 1.0;
-    rasterizer.cullMode = c.VK_CULL_MODE_NONE;
-    rasterizer.frontFace = c.VK_FRONT_FACE_CLOCKWISE;
-
-    var multisampling = std.mem.zeroes(c.VkPipelineMultisampleStateCreateInfo);
-
-    multisampling.sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    multisampling.rasterizationSamples = sample_count;
-
-    var depth_stencil = std.mem.zeroes(c.VkPipelineDepthStencilStateCreateInfo);
-    depth_stencil.sType = c.VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    depth_stencil.depthTestEnable = c.VK_TRUE;
-    depth_stencil.depthWriteEnable = c.VK_TRUE;
-    depth_stencil.depthCompareOp = c.VK_COMPARE_OP_GREATER_OR_EQUAL;
-
-    var color_blend_attachment = std.mem.zeroes(c.VkPipelineColorBlendAttachmentState);
-    color_blend_attachment.colorWriteMask = c.VK_COLOR_COMPONENT_R_BIT | c.VK_COLOR_COMPONENT_G_BIT | c.VK_COLOR_COMPONENT_B_BIT | c.VK_COLOR_COMPONENT_A_BIT;
-
-    var ui_color_blend_attachment = color_blend_attachment;
-    ui_color_blend_attachment.blendEnable = c.VK_TRUE;
-    ui_color_blend_attachment.srcColorBlendFactor = c.VK_BLEND_FACTOR_SRC_ALPHA;
-    ui_color_blend_attachment.dstColorBlendFactor = c.VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-    ui_color_blend_attachment.colorBlendOp = c.VK_BLEND_OP_ADD;
-    ui_color_blend_attachment.srcAlphaBlendFactor = c.VK_BLEND_FACTOR_ONE;
-    ui_color_blend_attachment.dstAlphaBlendFactor = c.VK_BLEND_FACTOR_ZERO;
-    ui_color_blend_attachment.alphaBlendOp = c.VK_BLEND_OP_ADD;
-
-    var ui_color_blending = std.mem.zeroes(c.VkPipelineColorBlendStateCreateInfo);
-    ui_color_blending.sType = c.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    ui_color_blending.attachmentCount = 1;
-    ui_color_blending.pAttachments = &ui_color_blend_attachment;
-
-    var terrain_color_blending = std.mem.zeroes(c.VkPipelineColorBlendStateCreateInfo);
-    terrain_color_blending.sType = c.VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    terrain_color_blending.attachmentCount = 1;
-    terrain_color_blending.pAttachments = &color_blend_attachment;
-
-    // Terrain Pipeline
-    {
-        const vert_code = try std.fs.cwd().readFileAlloc(shader_registry.TERRAIN_VERT, ctx.allocator, @enumFromInt(1024 * 1024));
-        defer ctx.allocator.free(vert_code);
-        const frag_code = try std.fs.cwd().readFileAlloc(shader_registry.TERRAIN_FRAG, ctx.allocator, @enumFromInt(1024 * 1024));
-        defer ctx.allocator.free(frag_code);
-        const vert_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, vert_code);
-        defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, vert_module, null);
-        const frag_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, frag_code);
-        defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, frag_module, null);
-        var shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
-            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main" },
-            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_module, .pName = "main" },
-        };
-        const binding_description = c.VkVertexInputBindingDescription{ .binding = 0, .stride = @sizeOf(rhi.Vertex), .inputRate = c.VK_VERTEX_INPUT_RATE_VERTEX };
-        var attribute_descriptions: [8]c.VkVertexInputAttributeDescription = undefined;
-        attribute_descriptions[0] = .{ .binding = 0, .location = 0, .format = c.VK_FORMAT_R32G32B32_SFLOAT, .offset = 0 };
-        attribute_descriptions[1] = .{ .binding = 0, .location = 1, .format = c.VK_FORMAT_R32G32B32_SFLOAT, .offset = 3 * 4 };
-        attribute_descriptions[2] = .{ .binding = 0, .location = 2, .format = c.VK_FORMAT_R32G32B32_SFLOAT, .offset = 6 * 4 };
-        attribute_descriptions[3] = .{ .binding = 0, .location = 3, .format = c.VK_FORMAT_R32G32_SFLOAT, .offset = 9 * 4 };
-        attribute_descriptions[4] = .{ .binding = 0, .location = 4, .format = c.VK_FORMAT_R32_SFLOAT, .offset = 11 * 4 };
-        attribute_descriptions[5] = .{ .binding = 0, .location = 5, .format = c.VK_FORMAT_R32_SFLOAT, .offset = 12 * 4 };
-        attribute_descriptions[6] = .{ .binding = 0, .location = 6, .format = c.VK_FORMAT_R32G32B32_SFLOAT, .offset = 13 * 4 };
-        attribute_descriptions[7] = .{ .binding = 0, .location = 7, .format = c.VK_FORMAT_R32_SFLOAT, .offset = 16 * 4 }; // AO
-        var vertex_input_info = std.mem.zeroes(c.VkPipelineVertexInputStateCreateInfo);
-        vertex_input_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertex_input_info.vertexBindingDescriptionCount = 1;
-        vertex_input_info.pVertexBindingDescriptions = &binding_description;
-        vertex_input_info.vertexAttributeDescriptionCount = 8;
-        vertex_input_info.pVertexAttributeDescriptions = &attribute_descriptions[0];
-        var pipeline_info = std.mem.zeroes(c.VkGraphicsPipelineCreateInfo);
-        pipeline_info.sType = c.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-        pipeline_info.stageCount = 2;
-        pipeline_info.pStages = &shader_stages[0];
-        pipeline_info.pVertexInputState = &vertex_input_info;
-        pipeline_info.pInputAssemblyState = &input_assembly;
-        pipeline_info.pViewportState = &viewport_state;
-        pipeline_info.pRasterizationState = &rasterizer;
-        pipeline_info.pMultisampleState = &multisampling;
-        pipeline_info.pDepthStencilState = &depth_stencil;
-        pipeline_info.pColorBlendState = &terrain_color_blending;
-        pipeline_info.pDynamicState = &dynamic_state;
-        pipeline_info.layout = ctx.pipeline_layout;
-        pipeline_info.renderPass = ctx.render_pass_manager.hdr_render_pass;
-        pipeline_info.subpass = 0;
-        try Utils.checkVk(c.vkCreateGraphicsPipelines(ctx.vulkan_device.vk_device, null, 1, &pipeline_info, null, &ctx.pipeline));
-
-        // Wireframe (No culling)
-        var wireframe_rasterizer = rasterizer;
-        wireframe_rasterizer.cullMode = c.VK_CULL_MODE_NONE;
-        wireframe_rasterizer.polygonMode = c.VK_POLYGON_MODE_LINE;
-        pipeline_info.pRasterizationState = &wireframe_rasterizer;
-        try Utils.checkVk(c.vkCreateGraphicsPipelines(ctx.vulkan_device.vk_device, null, 1, &pipeline_info, null, &ctx.wireframe_pipeline));
-
-        // Selection (Wireframe on HDR pass)
-        var selection_rasterizer = rasterizer;
-        selection_rasterizer.cullMode = c.VK_CULL_MODE_NONE;
-        selection_rasterizer.polygonMode = c.VK_POLYGON_MODE_FILL; // Use fill since vertices are quads
-        var selection_pipeline_info = pipeline_info;
-        selection_pipeline_info.pRasterizationState = &selection_rasterizer;
-        try Utils.checkVk(c.vkCreateGraphicsPipelines(ctx.vulkan_device.vk_device, null, 1, &selection_pipeline_info, null, &ctx.selection_pipeline));
-
-        // Line Pipeline
-        var line_input_assembly = input_assembly;
-        line_input_assembly.topology = c.VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
-        var line_pipeline_info = pipeline_info;
-        line_pipeline_info.pInputAssemblyState = &line_input_assembly;
-        try Utils.checkVk(c.vkCreateGraphicsPipelines(ctx.vulkan_device.vk_device, null, 1, &line_pipeline_info, null, &ctx.line_pipeline));
-
-        // 1.5 G-Pass Pipeline (1-sample, 2 color attachments: normal, velocity)
-        {
-            const g_frag_code = try std.fs.cwd().readFileAlloc(shader_registry.G_PASS_FRAG, ctx.allocator, @enumFromInt(1024 * 1024));
-            defer ctx.allocator.free(g_frag_code);
-            const g_frag_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, g_frag_code);
-            defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, g_frag_module, null);
-
-            var g_shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
-                .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main" },
-                .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = g_frag_module, .pName = "main" },
-            };
-
-            var g_color_blend_attachments = [_]c.VkPipelineColorBlendAttachmentState{
-                color_blend_attachment, // Normal
-                color_blend_attachment, // Velocity
-            };
-            var g_color_blending = terrain_color_blending;
-            g_color_blending.attachmentCount = 2;
-            g_color_blending.pAttachments = &g_color_blend_attachments[0];
-
-            var g_multisampling = multisampling;
-            g_multisampling.rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT;
-
-            var g_pipeline_info = pipeline_info;
-            g_pipeline_info.stageCount = 2;
-            g_pipeline_info.pStages = &g_shader_stages[0];
-            g_pipeline_info.pMultisampleState = &g_multisampling;
-            g_pipeline_info.pColorBlendState = &g_color_blending;
-            g_pipeline_info.renderPass = ctx.render_pass_manager.g_render_pass;
-            g_pipeline_info.subpass = 0;
-
-            try Utils.checkVk(c.vkCreateGraphicsPipelines(ctx.vulkan_device.vk_device, null, 1, &g_pipeline_info, null, &ctx.g_pipeline));
-        }
-    }
-
-    // Sky
-    {
-        rasterizer.cullMode = c.VK_CULL_MODE_NONE;
-        const vert_code = try std.fs.cwd().readFileAlloc(shader_registry.SKY_VERT, ctx.allocator, @enumFromInt(1024 * 1024));
-        defer ctx.allocator.free(vert_code);
-        const frag_code = try std.fs.cwd().readFileAlloc(shader_registry.SKY_FRAG, ctx.allocator, @enumFromInt(1024 * 1024));
-        defer ctx.allocator.free(frag_code);
-        const vert_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, vert_code);
-        defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, vert_module, null);
-        const frag_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, frag_code);
-        defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, frag_module, null);
-        var shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
-            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main" },
-            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_module, .pName = "main" },
-        };
-        var vertex_input_info = std.mem.zeroes(c.VkPipelineVertexInputStateCreateInfo);
-        vertex_input_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        var sky_depth_stencil = depth_stencil;
-        sky_depth_stencil.depthWriteEnable = c.VK_FALSE;
-        var pipeline_info = std.mem.zeroes(c.VkGraphicsPipelineCreateInfo);
-        pipeline_info.sType = c.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-        pipeline_info.stageCount = 2;
-        pipeline_info.pStages = &shader_stages[0];
-        pipeline_info.pVertexInputState = &vertex_input_info;
-        pipeline_info.pInputAssemblyState = &input_assembly;
-        pipeline_info.pViewportState = &viewport_state;
-        pipeline_info.pRasterizationState = &rasterizer;
-        pipeline_info.pMultisampleState = &multisampling;
-        pipeline_info.pDepthStencilState = &sky_depth_stencil;
-        pipeline_info.pColorBlendState = &terrain_color_blending;
-        pipeline_info.pDynamicState = &dynamic_state;
-        pipeline_info.layout = ctx.sky_pipeline_layout;
-        pipeline_info.renderPass = ctx.render_pass_manager.hdr_render_pass;
-        pipeline_info.subpass = 0;
-        try Utils.checkVk(c.vkCreateGraphicsPipelines(ctx.vulkan_device.vk_device, null, 1, &pipeline_info, null, &ctx.sky_pipeline));
-    }
-
-    // UI
-    {
-        const vert_code = try std.fs.cwd().readFileAlloc(shader_registry.UI_VERT, ctx.allocator, @enumFromInt(1024 * 1024));
-        defer ctx.allocator.free(vert_code);
-        const frag_code = try std.fs.cwd().readFileAlloc(shader_registry.UI_FRAG, ctx.allocator, @enumFromInt(1024 * 1024));
-        defer ctx.allocator.free(frag_code);
-        const vert_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, vert_code);
-        defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, vert_module, null);
-        const frag_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, frag_code);
-        defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, frag_module, null);
-        var shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
-            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main" },
-            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_module, .pName = "main" },
-        };
-        const binding_description = c.VkVertexInputBindingDescription{ .binding = 0, .stride = 6 * @sizeOf(f32), .inputRate = c.VK_VERTEX_INPUT_RATE_VERTEX };
-        var attribute_descriptions: [2]c.VkVertexInputAttributeDescription = undefined;
-        attribute_descriptions[0] = .{ .binding = 0, .location = 0, .format = c.VK_FORMAT_R32G32_SFLOAT, .offset = 0 };
-        attribute_descriptions[1] = .{ .binding = 0, .location = 1, .format = c.VK_FORMAT_R32G32B32A32_SFLOAT, .offset = 2 * 4 };
-        var vertex_input_info = std.mem.zeroes(c.VkPipelineVertexInputStateCreateInfo);
-        vertex_input_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertex_input_info.vertexBindingDescriptionCount = 1;
-        vertex_input_info.pVertexBindingDescriptions = &binding_description;
-        vertex_input_info.vertexAttributeDescriptionCount = 2;
-        vertex_input_info.pVertexAttributeDescriptions = &attribute_descriptions[0];
-        var ui_depth_stencil = depth_stencil;
-        ui_depth_stencil.depthTestEnable = c.VK_FALSE;
-        ui_depth_stencil.depthWriteEnable = c.VK_FALSE;
-        var pipeline_info = std.mem.zeroes(c.VkGraphicsPipelineCreateInfo);
-        pipeline_info.sType = c.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-        pipeline_info.stageCount = 2;
-        pipeline_info.pStages = &shader_stages[0];
-        pipeline_info.pVertexInputState = &vertex_input_info;
-        pipeline_info.pInputAssemblyState = &input_assembly;
-        pipeline_info.pViewportState = &viewport_state;
-        pipeline_info.pRasterizationState = &rasterizer;
-        pipeline_info.pMultisampleState = &multisampling;
-        pipeline_info.pDepthStencilState = &ui_depth_stencil;
-        pipeline_info.pColorBlendState = &ui_color_blending;
-        pipeline_info.pDynamicState = &dynamic_state;
-        pipeline_info.layout = ctx.ui_pipeline_layout;
-        pipeline_info.renderPass = ctx.render_pass_manager.hdr_render_pass;
-        pipeline_info.subpass = 0;
-        try Utils.checkVk(c.vkCreateGraphicsPipelines(ctx.vulkan_device.vk_device, null, 1, &pipeline_info, null, &ctx.ui_pipeline));
-
-        // Textured UI
-        const tex_vert_code = try std.fs.cwd().readFileAlloc(shader_registry.UI_TEX_VERT, ctx.allocator, @enumFromInt(1024 * 1024));
-        defer ctx.allocator.free(tex_vert_code);
-        const tex_frag_code = try std.fs.cwd().readFileAlloc(shader_registry.UI_TEX_FRAG, ctx.allocator, @enumFromInt(1024 * 1024));
-        defer ctx.allocator.free(tex_frag_code);
-        const tex_vert_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, tex_vert_code);
-        defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, tex_vert_module, null);
-        const tex_frag_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, tex_frag_code);
-        defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, tex_frag_module, null);
-        var tex_shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
-            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = tex_vert_module, .pName = "main" },
-            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = tex_frag_module, .pName = "main" },
-        };
-        pipeline_info.pStages = &tex_shader_stages[0];
-        pipeline_info.layout = ctx.ui_tex_pipeline_layout;
-        try Utils.checkVk(c.vkCreateGraphicsPipelines(ctx.vulkan_device.vk_device, null, 1, &pipeline_info, null, &ctx.ui_tex_pipeline));
-    }
-
-    // Debug Shadow
-    if (comptime build_options.debug_shadows) {
-        const vert_code = try std.fs.cwd().readFileAlloc(shader_registry.DEBUG_SHADOW_VERT, ctx.allocator, @enumFromInt(1024 * 1024));
-        defer ctx.allocator.free(vert_code);
-        const frag_code = try std.fs.cwd().readFileAlloc(shader_registry.DEBUG_SHADOW_FRAG, ctx.allocator, @enumFromInt(1024 * 1024));
-        defer ctx.allocator.free(frag_code);
-        const vert_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, vert_code);
-        defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, vert_module, null);
-        const frag_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, frag_code);
-        defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, frag_module, null);
-        var shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
-            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main" },
-            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_module, .pName = "main" },
-        };
-        const binding_description = c.VkVertexInputBindingDescription{ .binding = 0, .stride = 4 * @sizeOf(f32), .inputRate = c.VK_VERTEX_INPUT_RATE_VERTEX };
-        var attribute_descriptions: [2]c.VkVertexInputAttributeDescription = undefined;
-        attribute_descriptions[0] = .{ .binding = 0, .location = 0, .format = c.VK_FORMAT_R32G32_SFLOAT, .offset = 0 };
-        attribute_descriptions[1] = .{ .binding = 0, .location = 1, .format = c.VK_FORMAT_R32G32_SFLOAT, .offset = 2 * 4 };
-        var vertex_input_info = std.mem.zeroes(c.VkPipelineVertexInputStateCreateInfo);
-        vertex_input_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertex_input_info.vertexBindingDescriptionCount = 1;
-        vertex_input_info.pVertexBindingDescriptions = &binding_description;
-        vertex_input_info.vertexAttributeDescriptionCount = 2;
-        vertex_input_info.pVertexAttributeDescriptions = &attribute_descriptions[0];
-        var ui_depth_stencil = depth_stencil;
-        ui_depth_stencil.depthTestEnable = c.VK_FALSE;
-        ui_depth_stencil.depthWriteEnable = c.VK_FALSE;
-        var pipeline_info = std.mem.zeroes(c.VkGraphicsPipelineCreateInfo);
-        pipeline_info.sType = c.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-        pipeline_info.stageCount = 2;
-        pipeline_info.pStages = &shader_stages[0];
-        pipeline_info.pVertexInputState = &vertex_input_info;
-        pipeline_info.pInputAssemblyState = &input_assembly;
-        pipeline_info.pViewportState = &viewport_state;
-        pipeline_info.pRasterizationState = &rasterizer;
-        pipeline_info.pMultisampleState = &multisampling;
-        pipeline_info.pDepthStencilState = &ui_depth_stencil;
-        pipeline_info.pColorBlendState = &ui_color_blending;
-        pipeline_info.pDynamicState = &dynamic_state;
-        pipeline_info.layout = ctx.debug_shadow.pipeline_layout orelse return error.InitializationFailed;
-        pipeline_info.renderPass = ctx.render_pass_manager.hdr_render_pass;
-        pipeline_info.subpass = 0;
-        try Utils.checkVk(c.vkCreateGraphicsPipelines(ctx.vulkan_device.vk_device, null, 1, &pipeline_info, null, &ctx.debug_shadow.pipeline));
-    }
-
-    // Cloud
-    {
-        const vert_code = try std.fs.cwd().readFileAlloc(shader_registry.CLOUD_VERT, ctx.allocator, @enumFromInt(1024 * 1024));
-        defer ctx.allocator.free(vert_code);
-        const frag_code = try std.fs.cwd().readFileAlloc(shader_registry.CLOUD_FRAG, ctx.allocator, @enumFromInt(1024 * 1024));
-        defer ctx.allocator.free(frag_code);
-        const vert_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, vert_code);
-        defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, vert_module, null);
-        const frag_module = try Utils.createShaderModule(ctx.vulkan_device.vk_device, frag_code);
-        defer c.vkDestroyShaderModule(ctx.vulkan_device.vk_device, frag_module, null);
-        var shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
-            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main" },
-            .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_module, .pName = "main" },
-        };
-        const binding_description = c.VkVertexInputBindingDescription{ .binding = 0, .stride = 2 * @sizeOf(f32), .inputRate = c.VK_VERTEX_INPUT_RATE_VERTEX };
-        var attribute_descriptions: [1]c.VkVertexInputAttributeDescription = undefined;
-        attribute_descriptions[0] = .{ .binding = 0, .location = 0, .format = c.VK_FORMAT_R32G32_SFLOAT, .offset = 0 };
-        var vertex_input_info = std.mem.zeroes(c.VkPipelineVertexInputStateCreateInfo);
-        vertex_input_info.sType = c.VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertex_input_info.vertexBindingDescriptionCount = 1;
-        vertex_input_info.pVertexBindingDescriptions = &binding_description;
-        vertex_input_info.vertexAttributeDescriptionCount = 1;
-        vertex_input_info.pVertexAttributeDescriptions = &attribute_descriptions[0];
-        var cloud_depth_stencil = depth_stencil;
-        cloud_depth_stencil.depthWriteEnable = c.VK_FALSE;
-        var cloud_rasterizer = rasterizer;
-        cloud_rasterizer.frontFace = c.VK_FRONT_FACE_COUNTER_CLOCKWISE;
-        var pipeline_info = std.mem.zeroes(c.VkGraphicsPipelineCreateInfo);
-        pipeline_info.sType = c.VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-        pipeline_info.stageCount = 2;
-        pipeline_info.pStages = &shader_stages[0];
-        pipeline_info.pVertexInputState = &vertex_input_info;
-        pipeline_info.pInputAssemblyState = &input_assembly;
-        pipeline_info.pViewportState = &viewport_state;
-        pipeline_info.pRasterizationState = &cloud_rasterizer;
-        pipeline_info.pMultisampleState = &multisampling;
-        pipeline_info.pDepthStencilState = &cloud_depth_stencil;
-        pipeline_info.pColorBlendState = &ui_color_blending;
-        pipeline_info.pDynamicState = &dynamic_state;
-        pipeline_info.layout = ctx.cloud_pipeline_layout;
-        pipeline_info.renderPass = ctx.render_pass_manager.hdr_render_pass;
-        pipeline_info.subpass = 0;
-        try Utils.checkVk(c.vkCreateGraphicsPipelines(ctx.vulkan_device.vk_device, null, 1, &pipeline_info, null, &ctx.cloud_pipeline));
-    }
-}
 
 fn createSwapchainUIPipelines(ctx: *VulkanContext) !void {
     if (ctx.ui_swapchain_render_pass == null) return error.InitializationFailed;
@@ -1856,9 +1505,9 @@ fn destroyMainRenderPassAndPipelines(ctx: *VulkanContext) void {
         ctx.main_framebuffer = null;
     }
 
-    if (ctx.pipeline != null) {
-        c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.pipeline, null);
-        ctx.pipeline = null;
+    if (ctx.pipeline_manager.terrain_pipeline != null) {
+        c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.pipeline_manager.terrain_pipeline, null);
+        ctx.pipeline_manager.terrain_pipeline = null;
     }
     if (ctx.wireframe_pipeline != null) {
         c.vkDestroyPipeline(ctx.vulkan_device.vk_device, ctx.wireframe_pipeline, null);
@@ -3843,7 +3492,7 @@ fn drawIndexed(ctx_ptr: *anyopaque, vbo_handle: rhi.BufferHandle, ebo_handle: rh
                 const selected_pipeline = if (ctx.wireframe_enabled and ctx.wireframe_pipeline != null)
                     ctx.wireframe_pipeline
                 else
-                    ctx.pipeline;
+                    ctx.pipeline_manager.terrain_pipeline;
                 if (selected_pipeline == null) return;
                 c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, selected_pipeline);
                 ctx.terrain_pipeline_bound = true;
@@ -3899,7 +3548,7 @@ fn drawIndirect(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, command_buffer: r
                     const selected_pipeline = if (ctx.wireframe_enabled and ctx.wireframe_pipeline != null)
                         ctx.wireframe_pipeline
                     else
-                        ctx.pipeline;
+                        ctx.pipeline_manager.terrain_pipeline;
                     if (selected_pipeline == null) {
                         std.log.warn("drawIndirect: main pipeline (selected_pipeline) is null - cannot draw terrain", .{});
                         return;
@@ -4003,7 +3652,7 @@ fn drawInstance(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, insta
                 const selected_pipeline = if (ctx.wireframe_enabled and ctx.wireframe_pipeline != null)
                     ctx.wireframe_pipeline
                 else
-                    ctx.pipeline;
+                    ctx.pipeline_manager.terrain_pipeline;
                 if (selected_pipeline == null) return;
                 c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, selected_pipeline);
                 ctx.terrain_pipeline_bound = true;
@@ -4107,11 +3756,11 @@ fn drawOffset(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: r
                 else if (ctx.wireframe_enabled and ctx.wireframe_pipeline != null)
                     ctx.wireframe_pipeline
                 else
-                    ctx.pipeline;
+                    ctx.pipeline_manager.terrain_pipeline;
                 if (selected_pipeline == null) return;
                 c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, selected_pipeline);
                 // Mark bound only if it's the main terrain pipeline
-                ctx.terrain_pipeline_bound = (selected_pipeline == ctx.pipeline);
+                ctx.terrain_pipeline_bound = (selected_pipeline == ctx.pipeline_manager.terrain_pipeline);
             }
 
             const descriptor_set = if (ctx.lod_mode)
@@ -4917,7 +4566,7 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_dev
     ctx.swapchain.swapchain.msaa_color_image = null;
     ctx.swapchain.swapchain.msaa_color_view = null;
     ctx.swapchain.swapchain.msaa_color_memory = null;
-    ctx.pipeline = null;
+    ctx.pipeline_manager.terrain_pipeline = null;
     ctx.pipeline_layout = null;
     ctx.wireframe_pipeline = null;
     ctx.sky_pipeline = null;
