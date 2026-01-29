@@ -2096,8 +2096,14 @@ fn initContext(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device:
         ctx.msaa_samples,
     );
 
-    // Final Pipelines (depend on main_render_pass)
-    try createMainPipelines(ctx);
+    // Final Pipelines using manager (depend on main_render_pass)
+    try ctx.pipeline_manager.createMainPipelines(
+        ctx.allocator,
+        ctx.vulkan_device.vk_device,
+        ctx.render_pass_manager.hdr_render_pass,
+        ctx.render_pass_manager.g_render_pass,
+        ctx.msaa_samples,
+    );
 
     // Post-process resources (depend on HDR views and post-process render pass)
     try createPostProcessResources(ctx);
@@ -2332,7 +2338,7 @@ fn recreateSwapchainInternal(ctx: *VulkanContext) void {
     createGPassResources(ctx) catch |err| std.log.err("Failed to recreate G-Pass resources: {}", .{err});
     createSSAOResources(ctx) catch |err| std.log.err("Failed to recreate SSAO resources: {}", .{err});
     ctx.render_pass_manager.createMainRenderPass(ctx.vulkan_device.vk_device, ctx.swapchain.getExtent(), ctx.msaa_samples) catch |err| std.log.err("Failed to recreate render pass: {}", .{err});
-    createMainPipelines(ctx) catch |err| std.log.err("Failed to recreate pipelines: {}", .{err});
+    ctx.pipeline_manager.createMainPipelines(ctx.allocator, ctx.vulkan_device.vk_device, ctx.render_pass_manager.hdr_render_pass, ctx.render_pass_manager.g_render_pass, ctx.msaa_samples) catch |err| std.log.err("Failed to recreate pipelines: {}", .{err});
     createPostProcessResources(ctx) catch |err| std.log.err("Failed to recreate post-process resources: {}", .{err});
     createSwapchainUIResources(ctx) catch |err| std.log.err("Failed to recreate swapchain UI resources: {}", .{err});
     ctx.fxaa.init(&ctx.vulkan_device, ctx.allocator, ctx.descriptors.descriptor_pool, ctx.swapchain.getExtent(), ctx.swapchain.getImageFormat(), ctx.post_process_sampler, ctx.swapchain.getImageViews()) catch |err| std.log.err("Failed to recreate FXAA resources: {}", .{err});

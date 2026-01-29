@@ -80,7 +80,7 @@ pub const PipelineManager = struct {
         vk_device: c.VkDevice,
         path: []const u8,
     ) !c.VkShaderModule {
-        const code = try std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024);
+        const code = try std.fs.cwd().readFileAlloc(path, allocator, @enumFromInt(1024 * 1024));
         defer allocator.free(code);
         return try Utils.createShaderModule(vk_device, code);
     }
