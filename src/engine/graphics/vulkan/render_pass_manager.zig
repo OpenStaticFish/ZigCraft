@@ -36,10 +36,7 @@ pub const RenderPassManager = struct {
     ui_swapchain_framebuffers: std.ArrayListUnmanaged(c.VkFramebuffer) = .empty,
 
     /// Initialize the render pass manager
-    /// Note: allocator parameter reserved for future use (e.g., caching)
-    pub fn init(_allocator: std.mem.Allocator) RenderPassManager {
-        // Allocator currently unused but reserved for future extensions
-        _ = _allocator;
+    pub fn init() RenderPassManager {
         return .{
             .post_process_framebuffers = .empty,
             .ui_swapchain_framebuffers = .empty,

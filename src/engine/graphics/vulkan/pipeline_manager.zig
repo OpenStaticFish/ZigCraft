@@ -85,6 +85,20 @@ pub const PipelineManager = struct {
         return try Utils.createShaderModule(vk_device, code);
     }
 
+    /// Load vertex and fragment shader pair
+    /// Returns both modules - caller must destroy both
+    fn loadShaderPair(
+        allocator: std.mem.Allocator,
+        vk_device: c.VkDevice,
+        vert_path: []const u8,
+        frag_path: []const u8,
+    ) !struct { vert: c.VkShaderModule, frag: c.VkShaderModule } {
+        const vert = try loadShaderModule(allocator, vk_device, vert_path);
+        errdefer c.vkDestroyShaderModule(vk_device, vert, null);
+        const frag = try loadShaderModule(allocator, vk_device, frag_path);
+        return .{ .vert = vert, .frag = frag };
+    }
+
     /// Create all pipeline layouts
     fn createPipelineLayouts(
         self: *PipelineManager,
@@ -238,6 +252,9 @@ pub const PipelineManager = struct {
         g_render_pass: c.VkRenderPass,
         msaa_samples: u8,
     ) !void {
+        // Validate required render passes
+        if (hdr_render_pass == null) return error.InvalidRenderPass;
+
         // Destroy existing pipelines first
         self.destroyPipelines(vk_device);
 
