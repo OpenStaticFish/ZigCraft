@@ -47,6 +47,8 @@ const FXAAPushConstants = fxaa_system_pkg.FXAAPushConstants;
 const ssao_system_pkg = @import("vulkan/ssao_system.zig");
 const SSAOSystem = ssao_system_pkg.SSAOSystem;
 const SSAOParams = ssao_system_pkg.SSAOParams;
+const PipelineManager = @import("vulkan/pipeline_manager.zig").PipelineManager;
+const RenderPassManager = @import("vulkan/render_pass_manager.zig").RenderPassManager;
 
 /// GPU Render Passes for profiling
 const GpuPass = enum {
@@ -155,6 +157,10 @@ const VulkanContext = struct {
     frames: FrameManager,
     swapchain: SwapchainPresenter,
     descriptors: DescriptorManager,
+
+    // PR1: Pipeline and Render Pass Managers
+    pipeline_manager: PipelineManager = .{},
+    render_pass_manager: RenderPassManager = .{},
 
     // Legacy / Feature State
 
@@ -2149,6 +2155,10 @@ fn initContext(ctx_ptr: *anyopaque, allocator: std.mem.Allocator, render_device:
     ctx.frames = try FrameManager.init(&ctx.vulkan_device);
     ctx.swapchain = try SwapchainPresenter.init(allocator, &ctx.vulkan_device, ctx.window, ctx.msaa_samples);
     ctx.descriptors = try DescriptorManager.init(allocator, &ctx.vulkan_device, &ctx.resources);
+
+    // PR1: Initialize PipelineManager and RenderPassManager
+    ctx.pipeline_manager = try PipelineManager.init(&ctx.vulkan_device, &ctx.descriptors, null);
+    ctx.render_pass_manager = RenderPassManager.init();
 
     ctx.shadow_system = try ShadowSystem.init(allocator, ctx.shadow_resolution);
 
