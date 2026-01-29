@@ -276,7 +276,7 @@ const VulkanContext = struct {
     ui_swapchain_tex_pipeline: c.VkPipeline = null,
     ui_swapchain_render_pass: c.VkRenderPass = null,
     ui_swapchain_framebuffers: std.ArrayListUnmanaged(c.VkFramebuffer) = .empty,
-    ui_tex_descriptor_set_layout: c.VkDescriptorSetLayout = null,
+
     ui_tex_descriptor_sets: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorSet = .{null} ** MAX_FRAMES_IN_FLIGHT,
     ui_tex_descriptor_pool: [MAX_FRAMES_IN_FLIGHT][64]c.VkDescriptorSet = .{.{null} ** 64} ** MAX_FRAMES_IN_FLIGHT,
     ui_tex_descriptor_next: [MAX_FRAMES_IN_FLIGHT]u32 = .{0} ** MAX_FRAMES_IN_FLIGHT,
@@ -1105,7 +1105,7 @@ fn createShadowResources(ctx: *VulkanContext) !void {
     shadow_pipeline_info.pDepthStencilState = &shadow_depth_stencil;
     shadow_pipeline_info.pColorBlendState = &shadow_color_blend;
     shadow_pipeline_info.pDynamicState = &shadow_dynamic_state;
-    shadow_pipeline_info.layout = ctx.pipeline_layout;
+    shadow_pipeline_info.layout = ctx.pipeline_manager.pipeline_layout;
     shadow_pipeline_info.renderPass = ctx.shadow_system.shadow_render_pass;
     shadow_pipeline_info.subpass = 0;
 
@@ -4342,7 +4342,6 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_dev
     ctx.ui_pipeline_layout = null;
     ctx.ui_tex_pipeline = null;
     ctx.ui_tex_pipeline_layout = null;
-    ctx.ui_tex_descriptor_set_layout = null;
     ctx.ui_swapchain_pipeline = null;
     ctx.ui_swapchain_tex_pipeline = null;
     ctx.ui_swapchain_render_pass = null;
