@@ -33,6 +33,98 @@ const log = @import("engine-core").log;
 pub fn canBuildColumnSpans(data: *const LODSimplifiedData) bool {
     return data.hasVerticalSpans() and !data.hasNonWorldgenColumns();
 }
+
+test "setPendingFromIndexed resets stale LOD draw ranges" {
+    var mesh = LODMesh.init(std.testing.allocator, .lod2);
+    defer if (mesh.pending_vertices) |pending| std.testing.allocator.free(pending);
+    mesh.opaque_vertex_count = 24;
+    mesh.water_vertex_offset = 24 * @sizeOf(Vertex);
+    mesh.water_vertex_count = 6;
+    const source = [_]Vertex{
+        geom.makeLODVertex(.{ 0, 1, 0 }, .{ 1, 1, 1 }, .{ 0, 1, 0 }, .{ 0, 0 }, Vertex.LOD_TILE_ID),
+        geom.makeLODVertex(.{ 1, 1, 0 }, .{ 1, 1, 1 }, .{ 0, 1, 0 }, .{ 1, 0 }, Vertex.LOD_TILE_ID),
+        geom.makeLODVertex(.{ 0, 1, 1 }, .{ 1, 1, 1 }, .{ 0, 1, 0 }, .{ 0, 1 }, Vertex.LOD_TILE_ID),
+    };
+    try mesh.setPendingFromIndexed(&source, &.{ 0, 1, 2 });
+    try std.testing.expectEqualSlices(Vertex, &source, mesh.pending_vertices.?);
+    try std.testing.expectEqual(@as(u32, 3), mesh.opaque_vertex_count);
+    try std.testing.expectEqual(@as(usize, 3 * @sizeOf(Vertex)), mesh.water_vertex_offset);
+    try std.testing.expectEqual(@as(u32, 0), mesh.water_vertex_count);
+}
+
+/// Only the near one-block source contract carries measured vegetation envelopes.
+fn isNearSourceGrid(data: *const LODSimplifiedData, lod: LODLevel) bool {
+    return (lod == .lod0 or lod == .lod1) and
+        data.width == lod_chunk.regionSizeBlocks(lod) + 1 and data.hasVerticalSpans();
+}
+
+fn isNearVegetation(block: BlockType) bool {
+    return isLeafBlock(block) or switch (block) {
+        .wood,
+        .mangrove_log,
+        .jungle_log,
+        .acacia_log,
+        .birch_log,
+        .spruce_log,
+        .mangrove_roots,
+        .mushroom_stem,
+        .red_mushroom_block,
+        .brown_mushroom_block,
+        => true,
+        else => false,
+    };
+}
+
+const NearColumnSpan = struct {
+    min_height: f32,
+    max_height: f32,
+    block: BlockType,
+    color: u32,
+    lighting: world_core.LODLightingHint,
+};
+
+/// Ignore underground source intervals: terrain remains a scalar heightfield.
+fn collectNearSolidSpans(data: *const LODSimplifiedData, gx: u32, gz: u32, out: *[world_core.MAX_LOD_VERTICAL_SPANS + 1]NearColumnSpan) usize {
+    const idx = gx + gz * data.width;
+    var count: usize = 0;
+    const ground = data.material_layers[idx].surface;
+    if (ground != .air) {
+        out[count] = .{
+            .min_height = 0,
+            .max_height = data.heightmap[idx],
+            .block = ground,
+            .color = data.colors[idx],
+            .lighting = data.lighting[idx],
+        };
+        count += 1;
+    }
+    var i: u8 = 0;
+    while (i < data.verticalSpanCount(gx, gz)) : (i += 1) {
+        const raw = data.getVerticalSpan(gx, gz, i) orelse continue;
+        const block = geom.representativeSpanBlock(raw.material_layers);
+        if (!isNearVegetation(block) or raw.max_height <= raw.min_height) continue;
+        out[count] = .{
+            .min_height = raw.min_height,
+            .max_height = raw.max_height,
+            .block = block,
+            .color = raw.color,
+            .lighting = raw.lighting,
+        };
+        count += 1;
+    }
+    return count;
+}
+
+fn applyNearLighting(vertices: []Vertex, lighting: world_core.LODLightingHint) void {
+    const skylight = @as(f32, @floatFromInt(lighting.sky_light)) / 15.0;
+    // The source hint retains intensity only, not RGB block-light channels.
+    const blocklight = @as(f32, @floatFromInt(lighting.block_light)) / 15.0;
+    const packed_blocklight = rhi_types.encodeBlocklight(.{ blocklight, blocklight, blocklight }, false);
+    for (vertices) |*vertex| {
+        vertex.packed_meta = rhi_types.encodeMeta(@truncate(vertex.packed_meta), skylight, lighting.ambient_occlusion);
+        vertex.blocklight = packed_blocklight;
+    }
+}
 const lod_seam = @import("lod_seam.zig");
 const resources_mod = @import("lod_mesh_resources.zig");
 const geom = @import("lod_geometry.zig");
@@ -590,7 +682,18 @@ pub const LODMesh = struct {
 
     /// Build mesh from simplified LOD data (heightmap-based)
     pub fn buildFromSimplifiedData(self: *LODMesh, data: *const LODSimplifiedData, world_x: i32, world_z: i32, atlas: *const TextureAtlas) !void {
+        return self.buildSimplifiedData(data, world_x, world_z, atlas, @import("engine-core").envFlag("ZIGCRAFT_LOD_NEAR_SOURCE", false));
+    }
+
+    /// Explicit opt-in for the near1-block source contract, without process env.
+    /// Worldgen columns and grids other than one-block LOD0/1 retain legacy behavior.
+    pub fn buildFromNearSimplifiedData(self: *LODMesh, data: *const LODSimplifiedData, world_x: i32, world_z: i32, atlas: *const TextureAtlas) !void {
+        return self.buildSimplifiedData(data, world_x, world_z, atlas, true);
+    }
+
+    fn buildSimplifiedData(self: *LODMesh, data: *const LODSimplifiedData, world_x: i32, world_z: i32, atlas: *const TextureAtlas, enable_near_source: bool) !void {
         if (data.width < 2) return error.EmptyData;
+        const near_source = enable_near_source and isNearSourceGrid(data, self.lod_level);
 
         const region_size: f32 = @floatFromInt(lod_chunk.regionSizeBlocks(self.lod_level));
         const cell_size = region_size / @as(f32, @floatFromInt(data.width - 1));
@@ -604,6 +707,10 @@ pub const LODMesh = struct {
         while (gz + 1 < data.width) : (gz += 1) {
             var gx: u32 = 0;
             while (gx + 1 < data.width) : (gx += 1) {
+                if (near_source and data.getColumnProvenance(gx, gz) != .worldgen) {
+                    try self.addNearSourceColumn(&vertices, &water_vertices, data, gx, gz, atlas, world_x, world_z);
+                    continue;
+                }
                 const cell_color = cellColorForLOD(data, gx, gz, self.lod_level);
                 const lit_cell_color = applyColorBrightness(cell_color, ambientOcclusionForLOD(data, gx, gz, self.lod_level));
                 const wx = @as(f32, @floatFromInt(gx)) * cell_size;
@@ -650,7 +757,8 @@ pub const LODMesh = struct {
         const water_count = water_vertices.items.len;
         const total_count = opaque_count + water_count;
         var pending: ?[]Vertex = null;
-        if (total_count > 0) {
+        // A zero-length payload explicitly clears an uploaded mesh on upload.
+        if (total_count > 0 or near_source) {
             const allocated = try self.allocator.alloc(Vertex, total_count);
             pending = allocated;
             errdefer self.allocator.free(allocated);
@@ -667,6 +775,103 @@ pub const LODMesh = struct {
         self.water_vertex_offset = opaque_count * @sizeOf(Vertex);
         self.water_vertex_count = @intCast(water_count);
         self.pending_vertices = pending;
+    }
+
+    fn addNearSourceColumn(self: *LODMesh, vertices: *std.ArrayListUnmanaged(Vertex), water_vertices: *std.ArrayListUnmanaged(Vertex), data: *const LODSimplifiedData, gx: u32, gz: u32, atlas: *const TextureAtlas, world_x: i32, world_z: i32) !void {
+        const wx: f32 = @floatFromInt(gx);
+        const wz: f32 = @floatFromInt(gz);
+        const idx = gx + gz * data.width;
+        var spans: [world_core.MAX_LOD_VERTICAL_SPANS + 1]NearColumnSpan = undefined;
+        const count = collectNearSolidSpans(data, gx, gz, &spans);
+        const neighbors = [_]struct { x: i32, z: i32, dir: geom.FaceDir }{
+            .{ .x = @as(i32, @intCast(gx)) - 1, .z = @intCast(gz), .dir = .west },
+            .{ .x = @as(i32, @intCast(gx)) + 1, .z = @intCast(gz), .dir = .east },
+            .{ .x = @intCast(gx), .z = @as(i32, @intCast(gz)) - 1, .dir = .north },
+            .{ .x = @intCast(gx), .z = @as(i32, @intCast(gz)) + 1, .dir = .south },
+        };
+        for (spans[0..count], 0..) |span, span_index| {
+            const vertex_start = vertices.items.len;
+            const terrain = span_index == 0 and data.material_layers[idx].surface != .air;
+            const top_tile = getLodTopTile(span.block, atlas);
+            const side_tile = getLodSideTile(span.block, atlas);
+            const atlas_bottom_tile = atlas.getTilesForBlock(@intFromEnum(span.block)).bottom;
+            const bottom_tile = if (isLeafBlock(span.block) or atlas_bottom_tile == 0) Vertex.LOD_TILE_ID else atlas_bottom_tile;
+            // AO is encoded in metadata below, not baked into albedo as well.
+            const top_color = applyTextureLuminance(tintColorForLodFace(data, gx, gz, self.lod_level, span.block, .top, getLodTopColor(span.block, top_tile, span.color)), span.block, .top, atlas);
+            const side_color = applyTextureLuminance(tintColorForLodFace(data, gx, gz, self.lod_level, span.block, .side, span.color), span.block, .side, atlas);
+            const bottom_color = applyTextureLuminance(tintColorForLodFace(data, gx, gz, self.lod_level, span.block, .bottom, span.color), span.block, .bottom, atlas);
+            var covered_top = false;
+            var covered_bottom = terrain or span.min_height <= 0;
+            for (spans[0..count], 0..) |other, other_index| {
+                if (other_index == span_index) continue;
+                const other_wins_tie = (other_index == 0 and data.material_layers[idx].surface != .air) or
+                    (isLeafBlock(span.block) and !isLeafBlock(other.block)) or
+                    (isLeafBlock(span.block) == isLeafBlock(other.block) and other_index < span_index);
+                covered_top = covered_top or (other.min_height <= span.max_height and other.max_height > span.max_height) or
+                    (other_wins_tie and other.max_height == span.max_height and other.min_height < span.max_height);
+                covered_bottom = covered_bottom or (other.min_height < span.min_height and other.max_height >= span.min_height) or
+                    (other_wins_tie and other.min_height == span.min_height and other.max_height > span.min_height);
+            }
+            if (!covered_top) try addTopFaceQuad(self.allocator, vertices, wx, span.max_height, wz, 1, unpackR(top_color), unpackG(top_color), unpackB(top_color), top_tile, world_x, world_z);
+            if (!covered_bottom) try addBottomFaceQuad(self.allocator, vertices, wx, span.min_height, wz, 1, unpackR(bottom_color) * 0.5, unpackG(bottom_color) * 0.5, unpackB(bottom_color) * 0.5, bottom_tile, world_x, world_z);
+
+            for (neighbors) |neighbor| {
+                // The positive edge is a real sample, even when still advisory;
+                // it is excluded from emitted cells, not neighbor heights.
+                const in_bounds = neighbor.x >= 0 and neighbor.z >= 0 and neighbor.x < data.width and neighbor.z < data.width;
+                var neighbor_height: ?f32 = null;
+                var neighbor_spans: [world_core.MAX_LOD_VERTICAL_SPANS + 1]NearColumnSpan = undefined;
+                var neighbor_count: usize = 0;
+                if (in_bounds) {
+                    const nx: u32 = @intCast(neighbor.x);
+                    const nz: u32 = @intCast(neighbor.z);
+                    if (data.getColumnProvenance(nx, nz) != .worldgen) {
+                        const ni = nx + nz * data.width;
+                        neighbor_height = if (data.material_layers[ni].surface == .air) 0 else data.heightmap[ni];
+                        neighbor_count = collectNearSolidSpans(data, nx, nz, &neighbor_spans);
+                    } else {
+                        neighbor_height = geom.quantizedVisualColumnHeightForLOD(data, nx, nz, self.lod_level);
+                    }
+                }
+                if (terrain) {
+                    // Source layers have no thicknesses; retain the surface
+                    // material on cliffs rather than inventing layer depths.
+                    // Without a negative-edge apron, cover only the one-block
+                    // top-face handoff mismatch, never a deep cross-section.
+                    const bottom = neighbor_height orelse @max(0, span.max_height - 1);
+                    try geom.addHeightfieldSide(self.allocator, vertices, wx, wz, 1, span.max_height, bottom, side_color, side_tile, neighbor.dir, world_x, world_z);
+                    continue;
+                }
+                var exposed: [world_core.MAX_LOD_VERTICAL_SPANS + 1]geom.HeightInterval = undefined;
+                var exposed_count: usize = 1;
+                exposed[0] = .{ .min_height = span.min_height, .max_height = span.max_height };
+                // Envelopes can overlap within one column. Ground and logs
+                // take precedence over leaves to avoid coplanar side faces.
+                for (spans[0..count], 0..) |other, other_index| {
+                    if (other_index == span_index) continue;
+                    const other_terrain = other_index == 0 and data.material_layers[idx].surface != .air;
+                    if (other_terrain or (isLeafBlock(span.block) and !isLeafBlock(other.block))) {
+                        geom.subtractCoveredInterval(&exposed, &exposed_count, other.min_height, other.max_height);
+                    }
+                }
+                if (neighbor_height) |height| geom.subtractCoveredInterval(&exposed, &exposed_count, 0, height);
+                for (neighbor_spans[0..neighbor_count]) |other| {
+                    geom.subtractCoveredInterval(&exposed, &exposed_count, other.min_height, other.max_height);
+                }
+                const brightness = geom.heightfieldSideBrightness(neighbor.dir);
+                for (exposed[0..exposed_count]) |interval| {
+                    try addSideFaceQuad(self.allocator, vertices, wx, interval.max_height, wz, 1, interval.min_height, unpackR(side_color) * brightness, unpackG(side_color) * brightness, unpackB(side_color) * brightness, neighbor.dir, side_tile, world_x, world_z);
+                }
+            }
+            applyNearLighting(vertices.items[vertex_start..], span.lighting);
+        }
+        const water = data.water[idx];
+        if (water.is_surface and water.coverage > 0 and (data.material_layers[idx].surface == .air or water.surface_height > data.heightmap[idx])) {
+            const vertex_start = water_vertices.items.len;
+            const color = tintColorForLodFace(data, gx, gz, self.lod_level, .water, .top, packBlockDefaultColor(.water, 0x3366CC));
+            try addTopFaceQuad(self.allocator, water_vertices, wx, water.surface_height, wz, 1, unpackR(color), unpackG(color), unpackB(color), getLodTopTile(.water, atlas), world_x, world_z);
+            applyNearLighting(water_vertices.items[vertex_start..], data.lighting[idx]);
+        }
     }
 
     /// Build mesh from rich LOD column/span data, falling back to the stable heightfield path
@@ -968,7 +1173,7 @@ pub const LODMesh = struct {
         if (self.pooled) return error.InvalidState;
 
         const pending = self.pending_vertices orelse {
-            self.ready = self.buffer_handle != 0;
+            self.ready = self.ready or self.buffer_handle != 0;
             return;
         };
 
@@ -1040,6 +1245,10 @@ test "chunk-derived span sources use the stable heightfield fallback" {
     try std.testing.expect(canBuildColumnSpans(&data));
     data.setColumnProvenance(0, 0, .chunk_derived);
     try std.testing.expect(!canBuildColumnSpans(&data));
+}
+
+test {
+    _ = @import("lod_near_mesh_tests.zig");
 }
 
 /// LOD Mesh Builder - builds meshes for LOD regions

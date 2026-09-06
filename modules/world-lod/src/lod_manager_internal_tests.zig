@@ -481,6 +481,8 @@ fn deinitEvictionTestManager(manager: *LODManager) void {
     }
     manager.mesh_disposal.queue.deinit(manager.allocator);
     manager.ingestion_queue.edit_dirty.deinit();
+    manager.near_sources.deinit(manager.allocator);
+    manager.near_source_retries.deinit(manager.allocator);
     manager.generation_tokens.deinit(manager.allocator);
     manager.transition_tokens.deinit(manager.allocator);
     manager.fade_tokens.deinit(manager.allocator);
@@ -934,6 +936,365 @@ fn putTestRegion(manager: *LODManager, key: LODRegionKey, state: LODState) !*LOD
     chunk.state = state;
     try manager.regions[@intFromEnum(key.lod)].put(key, chunk);
     return chunk;
+}
+
+test "near source survives chunk unload and covered region deletion before generation" {
+    var config = LODConfig{ .mesh_path = .heightfield, .vertical_span_budget = 0, .sample_density = @splat(0.25) };
+    var manager = try initEvictionTestManager(testing.allocator, &config);
+    defer deinitEvictionTestManager(&manager);
+    manager.near_source_enabled = true;
+    manager.generator.ptr = &config;
+    manager.generator.generate_heightmap_only = struct {
+        fn generate(_: *anyopaque, data: *LODSimplifiedData, _: i32, _: i32, _: LODLevel, _: ?*const std.atomic.Value(bool)) void {
+            for (0..data.width) |z| for (0..data.width) |x| {
+                data.setGeneratedColumn(@intCast(x), @intCast(z), 20, .plains, .{ .surface = .grass, .subsurface = .dirt, .foundation = .stone }, 0x808080, .empty, .daylight, .empty);
+            };
+        }
+    }.generate;
+    // Destroy the full-detail allocation before the first LOD region exists.
+    {
+        const chunk = try testing.allocator.create(world_core.Chunk);
+        defer testing.allocator.destroy(chunk);
+        chunk.* = world_core.Chunk.init(-1, -1);
+        chunk.setBlock(0, 63, 0, .stone);
+        try testing.expect(manager.submitNearChunk(-1, -1, manager.captureNearChunk(chunk, .generated).?));
+        try testing.expect(!chunk.isPinned());
+    }
+    var checker_context: u8 = 0;
+    const checker = struct {
+        fn loaded(_: i32, _: i32, _: *anyopaque) bool {
+            return true;
+        }
+    }.loaded;
+    // Run the real generation publication path twice, with covered-region
+    // cleanup between runs. No resolver or Chunk pointer remains available.
+    for (0..2) |_| {
+        for ([_]LODLevel{ .lod0, .lod1 }) |lod| {
+            const key = LODRegionKey.fromChunkCoords(-1, -1, lod);
+            const region = try putTestRegion(&manager, key, .generating);
+            region.job_token = 1;
+            generation_ops.processLODJob(&manager, .{ .type = .chunk_generation, .data = .{ .chunk = .{
+                .x = key.rx,
+                .z = key.rz,
+                .job_token = 1,
+                .lod_level = @intFromEnum(lod),
+                .lod_radius = 4096,
+            } } });
+            const size = world_core.regionSizeBlocks(lod);
+            const gx = size - world_core.CHUNK_SIZE_X;
+            const gz = size - world_core.CHUNK_SIZE_Z;
+            try testing.expectEqual(LODState.generated, region.getState());
+            try testing.expectEqual(size + 1, region.data.simplified.width);
+            try testing.expect(region.data.simplified.hasVerticalSpans());
+            try testing.expectEqual(@as(f32, 64), region.data.simplified.getHeight(gx, gz));
+            try testing.expectEqual(LODColumnProvenance.chunk_derived, region.data.simplified.getColumnProvenance(gx, gz));
+            try testing.expectEqual(@as(f32, 0), region.data.simplified.getHeight(gx + 1, gz));
+            try testing.expectEqual(@as(u8, 0), region.data.simplified.verticalSpanCount(gx + 1, gz));
+            _ = try putTestMesh(&manager, key, 0);
+        }
+        manager.unloadLODWhereChunksLoaded(checker, &checker_context);
+        try testing.expectEqual(@as(u32, 0), manager.regions[0].count());
+        try testing.expectEqual(@as(u32, 0), manager.regions[1].count());
+        try testing.expectEqual(@as(usize, 1), manager.near_sources.count());
+    }
+    // The experiment never expands coarse source grids or enables their spans.
+    try testing.expectEqual(@as(f32, 0.25), manager.sourceSampleDensity(.lod2));
+    try testing.expect(!manager.sourceRequiresSpans(.lod2));
+}
+
+test "near source replays in flight edits once and rejects stale generated loaded and edited captures" {
+    const near_ops = @import("lod_manager_near_source_ops.zig");
+    var config = LODConfig{};
+    var manager = try initEvictionTestManager(testing.allocator, &config);
+    defer deinitEvictionTestManager(&manager);
+    manager.near_source_enabled = true;
+    var chunk = world_core.Chunk.init(0, 0);
+    chunk.setBlock(0, 10, 0, .stone);
+    const generated = manager.captureNearChunk(&chunk, .generated).?;
+    const loaded = manager.captureNearChunk(&chunk, .loaded).?;
+    chunk.setBlock(0, 20, 0, .dirt);
+    const older_edit = manager.captureNearChunk(&chunk, .edited).?;
+    chunk.setBlock(0, 30, 0, .grass);
+    const edit = manager.captureNearChunk(&chunk, .edited).?;
+    for ([_]LODLevel{ .lod0, .lod1, .lod2 }) |lod| {
+        const region = try putTestRegion(&manager, .{ .rx = 0, .rz = 0, .lod = lod }, .meshing);
+        region.data = .{ .simplified = try LODSimplifiedData.initWithVerticalSpans(testing.allocator, lod) };
+        region.pin();
+    }
+    try testing.expect(manager.submitNearChunk(0, 0, edit));
+    try testing.expect(manager.submitNearChunk(0, 0, generated));
+    try testing.expect(manager.submitNearChunk(0, 0, loaded));
+    try testing.expect(manager.submitNearChunk(0, 0, older_edit));
+    // A freshly captured procedural snapshot is still weaker than an edit.
+    try testing.expect(manager.submitNearChunk(0, 0, manager.captureNearChunk(&chunk, .generated).?));
+    for ([_]LODLevel{ .lod0, .lod1, .lod2 }) |lod| {
+        const region = manager.regions[@intFromEnum(lod)].get(.{ .rx = 0, .rz = 0, .lod = lod }).?;
+        try testing.expectEqual(@as(f32, 0), region.data.simplified.getHeight(0, 0));
+        region.unpin();
+        region.setState(.mesh_ready);
+    }
+    near_ops.replay(&manager, 32);
+    for ([_]LODLevel{ .lod0, .lod1 }) |lod| {
+        const region = manager.regions[@intFromEnum(lod)].get(.{ .rx = 0, .rz = 0, .lod = lod }).?;
+        try testing.expectEqual(@as(f32, 31), region.data.simplified.getHeight(0, 0));
+        try testing.expectEqual(LODColumnProvenance.edited, region.data.simplified.getColumnProvenance(0, 0));
+        try testing.expectEqual(LODState.generated, region.getState());
+        const revision = region.source_revision;
+        const token = region.job_token;
+        const queued = manager.transition_tokens.count();
+        near_ops.replay(&manager, 32);
+        try testing.expectEqual(revision, region.source_revision);
+        try testing.expectEqual(token, region.job_token);
+        try testing.expectEqual(queued, manager.transition_tokens.count());
+    }
+    const coarse = manager.regions[2].get(.{ .rx = 0, .rz = 0, .lod = .lod2 }).?;
+    try testing.expectEqual(LODState.mesh_ready, coarse.getState());
+    try testing.expectEqual(@as(f32, 0), coarse.data.simplified.getHeight(0, 0));
+}
+
+test "near source cache namespace and memory-only levels leave shipped edited summaries untouched" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const dir = fs.Dir{ .inner = tmp_dir.dir };
+    var path_buf: [fs.max_path_bytes]u8 = undefined;
+    const path = try dir.realpath(".", &path_buf);
+    var config = LODConfig{ .mesh_path = .heightfield, .vertical_span_budget = 0 };
+    var shipped = try initEvictionTestManager(testing.allocator, &config);
+    defer deinitEvictionTestManager(&shipped);
+    try shipped.enableCache(path);
+    defer testing.allocator.free(shipped.cache_store.cache_dir_path.?);
+    for ([_]LODLevel{ .lod0, .lod1, .lod2 }) |lod| {
+        var source = try LODSimplifiedData.initWithVerticalSpans(testing.allocator, lod);
+        defer source.deinit();
+        source.setColumn(0, 0, 90, .plains, .{ .surface = .sand, .subsurface = .sand, .foundation = .stone }, 0, .empty, .daylight, .empty);
+        source.setColumnProvenance(0, 0, .edited);
+        shipped.saveCachedSourceData(.{ .rx = 0, .rz = 0, .lod = lod }, &source);
+    }
+    shipped.flushCacheIO();
+
+    var manager = try initEvictionTestManager(testing.allocator, &config);
+    defer deinitEvictionTestManager(&manager);
+    defer manager.ingestion_queue.pending_ingestions.deinit(testing.allocator);
+    manager.near_source_enabled = true;
+    // A version mismatch used to delete the shipped cache in enableCache.
+    manager.generator.version += 1;
+    try manager.enableCache(path);
+    defer testing.allocator.free(manager.cache_store.cache_dir_path.?);
+    const experiment_path = try fs.path.join(testing.allocator, &.{ path, "near-source-v1" });
+    defer testing.allocator.free(experiment_path);
+    try testing.expectEqualStrings(experiment_path, manager.cache_store.cache_dir_path.?);
+    for ([_]LODLevel{ .lod0, .lod1, .lod2 }) |lod| {
+        const key = LODRegionKey{ .rx = 0, .rz = 0, .lod = lod };
+        const region = try putTestRegion(&manager, key, .generated);
+        region.data = .{ .simplified = try LODSimplifiedData.initWithVerticalSpans(testing.allocator, lod) };
+        region.data.simplified.setColumn(0, 0, 40, .plains, .{ .surface = .stone, .subsurface = .stone, .foundation = .stone }, 0, .empty, .daylight, .empty);
+        region.data.simplified.setColumnProvenance(0, 0, .edited);
+        region.markSourceDirty();
+        manager.saveCachedSourceData(key, &region.data.simplified);
+    }
+    manager.flushDirtyStoresNow();
+    for ([_]LODLevel{ .lod0, .lod1 }) |lod| {
+        const key = LODRegionKey{ .rx = 0, .rz = 0, .lod = lod };
+        try testing.expect(manager.loadCachedSourceData(key) == null);
+        try testing.expect((try lod_store.readPayload(testing.allocator, experiment_path, manager.cacheKey(key))) == null);
+    }
+    const coarse_key = LODRegionKey{ .rx = 0, .rz = 0, .lod = .lod2 };
+    var coarse = manager.loadCachedSourceData(coarse_key) orelse return error.ExpectedCacheHit;
+    defer coarse.deinit();
+    try testing.expectEqual(@as(f32, 40), coarse.getHeight(0, 0));
+    try testing.expectEqual(LODColumnProvenance.edited, coarse.getColumnProvenance(0, 0));
+
+    var chunk = world_core.Chunk.init(0, 0);
+    chunk.setBlock(0, 12, 0, .dirt);
+    try testing.expect(manager.submitNearChunk(0, 0, manager.captureNearChunk(&chunk, .edited).?));
+    manager.storePlayerChunkPos(10000, 10000);
+    @import("lod_manager_near_source_ops.zig").prune(&manager);
+    manager.requestIngestion(0, 0, .edited);
+    manager.invalidatePendingEditedStoresNow();
+    // Neither pruning an edit nor invalidation is allowed into the old store.
+    for ([_]LODLevel{ .lod0, .lod1, .lod2 }) |lod| {
+        var original = shipped.loadCachedSourceData(.{ .rx = 0, .rz = 0, .lod = lod }) orelse return error.ExpectedCacheHit;
+        defer original.deinit();
+        try testing.expectEqual(@as(f32, 90), original.getHeight(0, 0));
+        try testing.expectEqual(LODColumnProvenance.edited, original.getColumnProvenance(0, 0));
+    }
+    const header = (try lod_store.readHeader(testing.allocator, path)).?;
+    try testing.expectEqual(shipped.generator.version, header.generator_version);
+}
+
+test "near source bypasses disk read admission and rejects injected cache hits without reclassifying columns" {
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const dir = fs.Dir{ .inner = tmp_dir.dir };
+    var path_buf: [fs.max_path_bytes]u8 = undefined;
+    const path = try dir.realpath(".", &path_buf);
+    var config = LODConfig{};
+    var manager = try initEvictionTestManager(testing.allocator, &config);
+    defer deinitEvictionTestManager(&manager);
+    manager.near_source_enabled = true;
+    try manager.enableCache(path);
+    defer testing.allocator.free(manager.cache_store.cache_dir_path.?);
+    const key = LODRegionKey{ .rx = 0, .rz = 0, .lod = .lod0 };
+    var stale = try LODSimplifiedData.initWithVerticalSpans(testing.allocator, key.lod);
+    defer stale.deinit();
+    stale.setColumn(0, 0, 90, .plains, .{ .surface = .sand, .subsurface = .sand, .foundation = .stone }, 0, .empty, .daylight, .empty);
+    stale.setColumnProvenance(0, 0, .edited);
+    const bytes = try lod_cache.serialize(&stale, manager.cacheKey(key), testing.allocator);
+    defer testing.allocator.free(bytes);
+    const cache_path = manager.cache_store.cache_dir_path.?;
+    try lod_store.writePayload(testing.allocator, cache_path, manager.cacheKey(key), bytes, lod_store.DEFAULT_STORE_SIZE_CAP_MB);
+    try testing.expect(manager.loadCachedSourceData(key) == null);
+
+    const region = try putTestRegion(&manager, key, .queued_for_generation);
+    region.job_token = 7;
+    manager.enqueueTransition(key, region, .generation);
+    try manager.processQueuedGenerations(Vec3.zero);
+    try testing.expectEqual(LODState.generating, region.getState());
+    try testing.expect(!region.cache_read_queued);
+    try testing.expectEqual(@as(u32, 0), manager.cache_hits);
+    try testing.expectEqual(@as(u32, 0), manager.cache_misses);
+    _ = manager.job_dispatcher.queues[LODLevel.count - 1].pop().?;
+
+    // Even an old/already queued cache completion cannot seed near authority.
+    region.setState(.queued_for_generation);
+    region.cache_read_queued = true;
+    try testing.expect(try manager.cache_io.enqueueRead(cache_path, key, manager.cacheKey(key), 7));
+    manager.flushCacheIO();
+    try testing.expectEqual(LODState.generating, region.getState());
+    try testing.expect(region.data == .empty);
+    try testing.expectEqual(@as(u32, 0), manager.cache_hits);
+    try testing.expectEqual(@as(u32, 1), manager.cache_misses);
+
+    manager.saveCachedSourceData(key, &stale);
+    manager.flushDirtyStoresNow();
+    try manager.ingestion_queue.edit_dirty.put(.{ .cx = 0, .cz = 0 }, {});
+    manager.invalidatePendingEditedStoresNow();
+    const untouched = (try lod_store.readPayload(testing.allocator, cache_path, manager.cacheKey(key))).?;
+    defer testing.allocator.free(untouched);
+    try testing.expectEqualSlices(u8, bytes, untouched);
+}
+
+test "near source disabled keeps capture and source policy inert" {
+    var config = LODConfig{ .mesh_path = .heightfield, .vertical_span_budget = 0, .sample_density = @splat(0.25) };
+    var manager = try initEvictionTestManager(testing.allocator, &config);
+    defer deinitEvictionTestManager(&manager);
+    const chunk = world_core.Chunk.init(0, 0);
+    try testing.expect(manager.captureNearChunk(&chunk, .generated) == null);
+    for ([_]LODLevel{ .lod0, .lod1, .lod2 }) |lod| {
+        try testing.expectEqual(@as(f32, 0.25), manager.sourceSampleDensity(lod));
+        try testing.expect(!manager.sourceRequiresSpans(lod));
+    }
+    const region = try putTestRegion(&manager, .{ .rx = 0, .rz = 0, .lod = .lod0 }, .generated);
+    region.data = .{ .simplified = try LODSimplifiedData.initWithVerticalSpans(testing.allocator, .lod0) };
+    const revision = region.source_revision;
+    const capture = LODManager.NearSourceCapture{ .summary = LODManager.NearChunkSummary.capture(&chunk), .kind = .edited, .sequence = 1 };
+    try testing.expect(!manager.submitNearChunk(0, 0, capture));
+    try testing.expectEqual(@as(u32, 0), manager.overlayNearSourcesLocked(region));
+    try testing.expectEqual(revision, region.source_revision);
+    try testing.expectEqual(@as(usize, 0), manager.near_sources.count());
+}
+
+test "near source cap prefers nearby summaries and accounts retained capacity after distance pruning" {
+    const near_ops = @import("lod_manager_near_source_ops.zig");
+    var config = LODConfig{ .memory_budget_mb = 0 };
+    var manager = try initEvictionTestManager(testing.allocator, &config);
+    defer deinitEvictionTestManager(&manager);
+    manager.near_source_enabled = true;
+    manager.near_source_limit = 2;
+    const chunk = world_core.Chunk.init(0, 0);
+    const capture = manager.captureNearChunk(&chunk, .generated).?;
+    try testing.expect(manager.submitNearChunk(1, 0, capture));
+    try testing.expect(manager.submitNearChunk(2, 0, capture));
+    try testing.expect(!manager.submitNearChunk(3, 0, capture));
+    try testing.expect(manager.submitNearChunk(0, 0, capture));
+    try testing.expectEqual(@as(usize, 2), manager.near_sources.count());
+    try testing.expect(manager.near_sources.contains(.{ .cx = 0, .cz = 0 }));
+    try testing.expect(!manager.near_sources.contains(.{ .cx = 2, .cz = 0 }));
+    const bytes = near_ops.memoryBytes(&manager);
+    try testing.expect(bytes >= 2 * @sizeOf(LODManager.NearSourceCapture));
+    try testing.expectEqual(bytes, manager.memory_governor.logical_admission_bytes);
+    manager.storePlayerChunkPos(10000, 10000);
+    near_ops.prune(&manager);
+    try testing.expectEqual(@as(usize, 0), manager.near_sources.count());
+    try testing.expectEqual(bytes, near_ops.memoryBytes(&manager));
+}
+
+test "near source value retries preserve load kind after unload and rotate within a bounded near-only queue" {
+    const near_ops = @import("lod_manager_near_source_ops.zig");
+    var config = LODConfig{ .memory_budget_mb = 0 };
+    var manager = try initEvictionTestManager(testing.allocator, &config);
+    defer deinitEvictionTestManager(&manager);
+    manager.near_source_enabled = true;
+    manager.near_source_limit = 0;
+    {
+        const chunk = try testing.allocator.create(world_core.Chunk);
+        defer testing.allocator.destroy(chunk);
+        chunk.* = world_core.Chunk.init(0, 0);
+        chunk.setBlock(0, 10, 0, .stone);
+        const far = manager.captureNearChunk(chunk, .generated).?;
+        try testing.expect(!manager.submitNearChunk(500, 0, far));
+        manager.deferNearChunk(500, 0, far);
+        const loaded = manager.captureNearChunk(chunk, .loaded).?;
+        try testing.expect(!manager.submitNearChunk(1, 0, loaded));
+        manager.deferNearChunk(1, 0, loaded);
+        try testing.expect(!chunk.isPinned());
+    }
+    const empty = world_core.Chunk.init(0, 0);
+    manager.near_source_limit = 1;
+    try testing.expect(manager.submitNearChunk(0, 0, manager.captureNearChunk(&empty, .generated).?));
+    near_ops.replay(&manager, 1);
+    try testing.expectEqual(@as(usize, 2), manager.near_source_retries.items.len);
+    try testing.expectEqual(@as(i32, 1), manager.near_source_retries.items[0].cx);
+    try testing.expectEqual(LODManager.NearSourceKind.loaded, manager.near_source_retries.items[0].capture.kind);
+    manager.near_source_limit = 2;
+    near_ops.replay(&manager, 1);
+    try testing.expectEqual(LODManager.NearSourceKind.loaded, manager.near_sources.get(.{ .cx = 1, .cz = 0 }).?.kind);
+    const near = try putTestRegion(&manager, .{ .rx = 0, .rz = 0, .lod = .lod0 }, .generated);
+    near.data = .{ .simplified = try LODSimplifiedData.initWithVerticalSpans(testing.allocator, .lod0) };
+    try testing.expect(manager.overlayNearSourcesLocked(near) > 0);
+    try testing.expectEqual(@as(f32, 11), near.data.simplified.getHeight(16, 0));
+    try testing.expectEqual(LODColumnProvenance.edited, near.data.simplified.getColumnProvenance(16, 0));
+    try testing.expectEqual(@as(usize, 0), manager.ingestion_queue.pending_ingestions.items.len);
+    try testing.expectEqual(@as(u32, 0), manager.regions[2].count());
+
+    const capture = manager.captureNearChunk(&empty, .generated).?;
+    for (0..near_ops.MAX_NEAR_SOURCE_RETRIES) |i| manager.deferNearChunk(@intCast(i + 1000), 0, capture);
+    try testing.expectEqual(near_ops.MAX_NEAR_SOURCE_RETRIES, manager.near_source_retries.items.len);
+    try testing.expectEqual(near_ops.memoryBytes(&manager), manager.memory_governor.logical_admission_bytes);
+}
+
+test "near source retirement floor rejects delayed captures and retries after cap eviction and pruning" {
+    const near_ops = @import("lod_manager_near_source_ops.zig");
+    var config = LODConfig{ .memory_budget_mb = 0 };
+    var manager = try initEvictionTestManager(testing.allocator, &config);
+    defer deinitEvictionTestManager(&manager);
+    manager.near_source_enabled = true;
+    manager.near_source_limit = 1;
+    const chunk = world_core.Chunk.init(0, 0);
+    const generated = manager.captureNearChunk(&chunk, .generated).?;
+    const edit = manager.captureNearChunk(&chunk, .edited).?;
+    try testing.expect(manager.submitNearChunk(10, 0, edit));
+    const delayed_load = manager.captureNearChunk(&chunk, .loaded).?;
+    manager.deferNearChunk(10, 0, delayed_load);
+    try testing.expect(manager.submitNearChunk(0, 0, manager.captureNearChunk(&chunk, .generated).?));
+    try testing.expect(!manager.near_sources.contains(.{ .cx = 10, .cz = 0 }));
+    for ([_]LODManager.NearSourceCapture{ generated, edit, delayed_load }) |stale| {
+        // Obsolete captures are consumed, never retried or reinserted.
+        try testing.expect(manager.submitNearChunk(10, 0, stale));
+    }
+    near_ops.replay(&manager, 32);
+    try testing.expectEqual(@as(usize, 0), manager.near_source_retries.items.len);
+    try testing.expect(!manager.near_sources.contains(.{ .cx = 10, .cz = 0 }));
+
+    const before_prune = manager.captureNearChunk(&chunk, .edited).?;
+    manager.storePlayerChunkPos(10000, 10000);
+    near_ops.prune(&manager);
+    try testing.expect(manager.submitNearChunk(0, 0, before_prune));
+    try testing.expectEqual(@as(usize, 0), manager.near_sources.count());
+    // A genuinely new, trusted capture can seed the coordinate again.
+    try testing.expect(manager.submitNearChunk(0, 0, manager.captureNearChunk(&chunk, .loaded).?));
+    try testing.expect(manager.submitNearChunk(0, 0, before_prune));
+    try testing.expectEqual(LODManager.NearSourceKind.loaded, manager.near_sources.get(.{ .cx = 0, .cz = 0 }).?.kind);
 }
 
 fn putTestMesh(manager: *LODManager, key: LODRegionKey, capacity: u32) !*LODMesh {

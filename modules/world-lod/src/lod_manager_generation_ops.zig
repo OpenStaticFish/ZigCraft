@@ -76,7 +76,7 @@ pub fn queueLODRegions(self: *Self, lod: LODLevel, velocity: Vec3, chunk_checker
     self.mutex.lock();
     const radii = self.config.getRadii();
     const active_lod_count = lod_chunk.activeLODCount(self.config);
-    const use_vertical_spans = self.config.getVerticalSpanBudget() > 0 and self.effectiveMeshPath(lod) == .column_spans;
+    const use_vertical_spans = self.sourceRequiresSpans(lod);
     const memory_budget_bytes = @as(usize, self.config.getMemoryBudgetMB()) * 1024 * 1024;
     self.mutex.unlock();
 
@@ -126,7 +126,7 @@ pub fn processQueuedGenerations(self: *Self, velocity: Vec3) !void {
         const token = self.generation_tokens.pop() orelse break;
         const candidate = generationCandidateFromToken(self, token, velocity) orelse continue;
         if (cache_path) |path| {
-            if (cache_reads < MAX_CACHE_LOADS_PER_UPDATE) {
+            if (!self.usesNearSource(candidate.key.lod) and cache_reads < MAX_CACHE_LOADS_PER_UPDATE) {
                 cache_reads += 1;
                 self.mutex.lock();
                 if (candidate.chunk.getState() == .queued_for_generation and candidate.chunk.job_token == candidate.job_token and candidate.chunk.source_revision == token.source_revision and !candidate.chunk.cache_read_queued) {
@@ -166,7 +166,7 @@ pub fn dispatchCacheMiss(self: *Self, key: LODRegionKey, token: u32) void {
         .coord_scale = scale,
         .job_token = token,
         .lod_radius = self.config.getRadii()[lod_idx],
-        .want_spans = self.config.getVerticalSpanBudget() > 0 and self.effectiveMeshPath(key.lod) == .column_spans,
+        .want_spans = self.sourceRequiresSpans(key.lod),
     };
     self.mutex.unlock();
     dispatchGenerationCandidate(self, candidate) catch |err| {
@@ -191,7 +191,7 @@ fn generationCandidateFromToken(self: *Self, token: LifecycleToken, velocity: Ve
         .coord_scale = scale,
         .job_token = token.job_token,
         .lod_radius = self.config.getRadii()[lod_idx],
-        .want_spans = self.config.getVerticalSpanBudget() > 0 and self.effectiveMeshPath(token.key.lod) == .column_spans,
+        .want_spans = self.sourceRequiresSpans(token.key.lod),
     };
 }
 
@@ -268,6 +268,9 @@ pub fn processStateTransitions(self: *Self, velocity: Vec3) !void {
             continue;
         }
         const scale: i32 = @intCast(token.key.lod.chunksPerSide());
+        // Captures may have arrived after generation/cache publication. Apply
+        // once more before any worker can observe the first mesh input.
+        _ = self.overlayNearSourcesLocked(chunk);
         chunk.setState(.meshing);
         chunk.resetCancellation();
         self.job_dispatcher.queues[LODLevel.count - 1].push(.{
@@ -417,6 +420,10 @@ pub fn buildMeshForChunk(self: *Self, chunk: *LODChunk) !void {
     switch (chunk.data) {
         .simplified => |*data| {
             const bounds = chunk.worldBounds();
+            if (self.usesNearSource(chunk.lodLevel())) {
+                try mesh.buildFromNearSimplifiedData(data, bounds.min_x, bounds.min_z, self.atlas);
+                return;
+            }
             // Compact tiles carry water samples too. Unsupported mixed-shore
             // topology is rejected by `buildCompactTile` and immediately uses
             // the maintained expanded CPU fallback.
@@ -548,7 +555,7 @@ pub fn processLODJob(ctx: *anyopaque, job: Job) void {
     // Stale job check (too far from player)
     const player = self.loadPlayerChunkPos();
     const radius = job.data.chunk.lod_radius;
-    const use_vertical_spans = job.data.chunk.use_vertical_spans;
+    const use_vertical_spans = self.usesNearSource(lod_level) or job.data.chunk.use_vertical_spans;
     const job_key = LODRegionKey{
         .rx = job.data.chunk.x,
         .rz = job.data.chunk.z,
@@ -601,7 +608,7 @@ pub fn processLODJob(ctx: *anyopaque, job: Job) void {
             // Initialize simplified data if needed
             if (needs_data_init) {
                 var data = if (use_vertical_spans)
-                    LODSimplifiedData.initWithVerticalSpansSampleDensity(self.allocator, lod_level, self.config.getSampleDensity(lod_level)) catch {
+                    LODSimplifiedData.initWithVerticalSpansSampleDensity(self.allocator, lod_level, self.sourceSampleDensity(lod_level)) catch {
                         new_state = .missing;
                         self.mutex.lock();
                         if (chunk.job_token == job.data.chunk.job_token) {
@@ -613,7 +620,7 @@ pub fn processLODJob(ctx: *anyopaque, job: Job) void {
                         return;
                     }
                 else
-                    LODSimplifiedData.initWithSampleDensity(self.allocator, lod_level, self.config.getSampleDensity(lod_level)) catch {
+                    LODSimplifiedData.initWithSampleDensity(self.allocator, lod_level, self.sourceSampleDensity(lod_level)) catch {
                         new_state = .missing;
                         self.mutex.lock();
                         if (chunk.job_token == job.data.chunk.job_token) {
@@ -635,7 +642,7 @@ pub fn processLODJob(ctx: *anyopaque, job: Job) void {
                 // matches this child. This preserves seam samples and avoids
                 // copying a different coarse footprint into refinement data.
                 self.mutex.lock();
-                if (key.parentKey()) |parent_key| {
+                if (if (self.usesNearSource(lod_level)) null else key.parentKey()) |parent_key| {
                     if (self.regions[@intFromEnum(parent_key.lod)].get(parent_key)) |parent| switch (parent.data) {
                         .simplified => |*parent_data| {
                             const child_x: u1 = @intCast(@mod(chunk.region_x, 2));
@@ -671,6 +678,7 @@ pub fn processLODJob(ctx: *anyopaque, job: Job) void {
                     data.deinit();
                 } else {
                     chunk.data = .{ .simplified = data };
+                    _ = self.overlayNearSourcesLocked(chunk);
                     chunk.updateHeightBoundsFromData();
                     chunk.markSourceDirty();
                 }

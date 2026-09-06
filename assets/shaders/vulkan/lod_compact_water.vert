@@ -143,7 +143,8 @@ void main() {
     gl_Position.y = -gl_Position.y;
 
     uint color = sampleColor(packed);
-    vColor = vec3(color & 0xffu, (color >> 8u) & 0xffu, (color >> 16u) & 0xffu) / 255.0;
+    // Compact samples retain source 0xRRGGBB, unlike packed Vertex colors.
+    vColor = vec3((color >> 16u) & 0xffu, (color >> 8u) & 0xffu, color & 0xffu) / 255.0;
     vNormal = vec3(0.0, 1.0, 0.0);
     vTexCoord = vec2(float(x), float(z)) * params.z;
     vTileID = -1;

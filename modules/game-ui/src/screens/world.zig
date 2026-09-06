@@ -181,7 +181,7 @@ pub const WorldScreen = struct {
         }
 
         const cam = &self.session.player.camera;
-        if (!self.menu_preview) {
+        if (!self.menu_preview and @import("game-core").session.localCaptureHorizonDistance(ctx.build_config.phase5_visual_scene) == null) {
             // Keep persisted/manual values aligned with the supported UI range
             // so the displayed Distant LOD Limit matches the runtime radius.
             const diagnostic_horizon = benchmark_mode or ctx.build_config.phase5_visual_scene.len > 0 or ctx.build_config.benchmark_fixture.len > 0;

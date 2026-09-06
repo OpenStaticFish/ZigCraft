@@ -720,6 +720,16 @@ pub const ChunkQueueCoordinator = struct {
             else
                 0;
 
+            // Snapshot while the generation job still owns and pins this
+            // chunk. lighting_mutex also excludes the runtime mutation path,
+            // which can see generated=true before state publication.
+            const near_capture = if (self.lod_manager) |mgr| capture: {
+                if (!mgr.near_source_enabled or !chunk_data.chunk.generated) break :capture null;
+                self.storage.lighting_mutex.lock();
+                defer self.storage.lighting_mutex.unlock();
+                break :capture mgr.captureNearChunk(&chunk_data.chunk, if (generated_new) .generated else .loaded);
+            } else null;
+
             self.storage.chunks_mutex.lock();
             const publishable = if (self.storage.chunks.get(ChunkKey{ .x = cx, .z = cz })) |data|
                 data == chunk_data and data.chunk.state == .generating and data.chunk.job_token == job.data.chunk.job_token
@@ -743,7 +753,15 @@ pub const ChunkQueueCoordinator = struct {
                     _ = self.chunks_generated_total.fetchAdd(1, .monotonic);
                 }
             }
+            const published = chunk_data.chunk.state == .generated;
             self.storage.chunks_mutex.unlock();
+            if (published) {
+                if (near_capture) |capture| {
+                    if (self.lod_manager) |mgr| {
+                        if (!mgr.submitNearChunk(cx, cz, capture)) mgr.deferNearChunk(cx, cz, capture);
+                    }
+                }
+            }
             if (chunk_data.chunk.state == .generated and chunk_data.chunk.job_token == job.data.chunk.job_token) {
                 self.markNeighborsForRemesh(cx, cz);
                 self.enqueueReadyNeighborhood(cx, cz);
@@ -751,7 +769,7 @@ pub const ChunkQueueCoordinator = struct {
                 // generated chunks keep the separately qualified opt-in path.
                 if (self.lod_manager) |mgr| {
                     if (lodIngestionProvenance(load_result, engine_core.envFlag("ZIGCRAFT_LOD_CHUNK_INGEST", false))) |provenance| {
-                        mgr.ingestChunk(cx, cz, &chunk_data.chunk, provenance);
+                        mgr.ingestCoarseChunk(cx, cz, &chunk_data.chunk, provenance);
                     }
                 }
             }

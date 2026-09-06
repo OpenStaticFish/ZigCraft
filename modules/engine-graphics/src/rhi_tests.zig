@@ -511,17 +511,17 @@ const MockContext = struct {
     const MOCK_VULKAN_RHI_VTABLE = rhi.RHI.VTable{
         .init = undefined,
         .deinit = undefined,
-        .resources = MOCK_RESOURCES_VTABLE,
-        .render = MOCK_RENDER_VTABLE,
-        .passes = MOCK_PASSES_VTABLE,
-        .post_process = MOCK_POST_PROCESS_VTABLE,
-        .effects = MOCK_EFFECTS_VTABLE,
-        .vulkan = MOCK_NATIVE_VTABLE,
-        .ssao = MOCK_SSAO_VTABLE,
-        .debug_overlay = MOCK_DEBUG_OVERLAY_VTABLE,
-        .shadow = MOCK_SHADOW_VTABLE,
-        .water = MOCK_WATER_VTABLE,
-        .compute = .{
+        .resources = &MOCK_RESOURCES_VTABLE,
+        .render = &MOCK_RENDER_VTABLE,
+        .passes = &MOCK_PASSES_VTABLE,
+        .post_process = &MOCK_POST_PROCESS_VTABLE,
+        .effects = &MOCK_EFFECTS_VTABLE,
+        .vulkan = &MOCK_NATIVE_VTABLE,
+        .ssao = &MOCK_SSAO_VTABLE,
+        .debug_overlay = &MOCK_DEBUG_OVERLAY_VTABLE,
+        .shadow = &MOCK_SHADOW_VTABLE,
+        .water = &MOCK_WATER_VTABLE,
+        .compute = &.{
             .bindComputePipeline = bindComputePipeline,
             .bindDescriptorSet = bindDescriptorSet,
             .createComputeBuffer = createComputeBuffer,
@@ -538,16 +538,16 @@ const MockContext = struct {
             .waitForFrameFence = waitForFrameFence,
             .hasCommandBuffer = hasCommandBuffer,
         },
-        .ui = MOCK_UI_VTABLE,
-        .query = MOCK_QUERY_VTABLE,
-        .timing = .{
+        .ui = &MOCK_UI_VTABLE,
+        .query = &MOCK_QUERY_VTABLE,
+        .timing = &.{
             .beginPassTiming = beginPassTiming,
             .endPassTiming = endPassTiming,
             .getTimingResults = getTimingResults,
             .isTimingEnabled = isTimingEnabled,
             .setTimingEnabled = setTimingEnabled,
         },
-        .quality = .{
+        .quality = &.{
             .setWireframe = undefined,
             .setTexturesEnabled = undefined,
             .setDebugShadowView = undefined,
@@ -571,14 +571,14 @@ const MockContext = struct {
             .setDynamicResolution = MockContext.setDynamicResolution,
             .getResolutionScale = MockContext.getResolutionScale,
         },
-        .recovery = .{
+        .recovery = &.{
             .recover = undefined,
         },
-        .culling_factory = .{
+        .culling_factory = &.{
             .createCullingSystem = MockContext.createCullingSystem,
             .createLODCullingSystem = MockContext.createLODCullingSystem,
         },
-        .screenshot = .{
+        .screenshot = &.{
             .captureFrame = undefined,
         },
     };
@@ -641,6 +641,216 @@ test "indirect model uniforms use alpha sentinel without consuming mask sign" {
 
     try testing.expect(uniforms.color[3] < 0.0);
     try testing.expectEqual(@as(f32, 0.0), uniforms.mask_radius);
+}
+
+const compact_submission = @import("vulkan/rhi_draw_submission.zig");
+
+const CompactSubmissionContext = struct {
+    frames: struct {
+        current_frame: usize = 0,
+        command_buffers: [1]c.VkCommandBuffer = .{null},
+    } = .{},
+    draw: struct {
+        lod_descriptor_stream: rhi.LODDescriptorStream = .water_compact_gpu,
+        lod_descriptor_stream_valid: bool = true,
+        terrain_pipeline_bound: bool = true,
+    } = .{},
+    runtime: struct { draw_call_count: u32 = 0 } = .{},
+    water_system: struct {
+        pass_active: bool = false,
+        water_pipeline: c.VkPipeline = @ptrFromInt(0x3000),
+    } = .{},
+    pipeline_manager: struct {
+        compact_lod_terrain_pipeline: c.VkPipeline = @ptrFromInt(0x1000),
+        compact_lod_water_pipeline: c.VkPipeline = @ptrFromInt(0x2000),
+        pipeline_layout: c.VkPipelineLayout = null,
+    } = .{},
+    descriptors: struct {
+        pub fn lodDescriptorSet(_: @This(), _: usize, stream: rhi.LODDescriptorStream) c.VkDescriptorSet {
+            return @ptrFromInt(0x4000 + @as(usize, @intFromEnum(stream)) * 0x100);
+        }
+    } = .{},
+};
+
+// Only the command sink is mocked; selection, preflight, recording order, and
+// cached pipeline state all run through the helper used by both backend draws.
+const CompactCommandRecorder = struct {
+    const Event = enum { pipeline, descriptors, constants, index, direct, indirect };
+    ctx: *CompactSubmissionContext,
+    events: [8]Event = undefined,
+    event_count: usize = 0,
+    pipelines: [2]c.VkPipeline = undefined,
+    bound_at_bind: [2]bool = undefined,
+    pipeline_count: usize = 0,
+    descriptor: c.VkDescriptorSet = null,
+    params: rhi.CompactLODDraw = undefined,
+    index_type: c.VkIndexType = undefined,
+    draw_count: u32 = 0,
+    command_buffer: c.VkBuffer = null,
+    command_offset: c.VkDeviceSize = 0,
+    command_stride: u32 = 0,
+
+    fn append(self: *@This(), event: Event) void {
+        self.events[self.event_count] = event;
+        self.event_count += 1;
+    }
+
+    pub fn vkCmdBindPipeline(self: *@This(), _: c.VkCommandBuffer, _: c.VkPipelineBindPoint, pipeline: c.VkPipeline) void {
+        self.append(.pipeline);
+        self.pipelines[self.pipeline_count] = pipeline;
+        self.bound_at_bind[self.pipeline_count] = self.ctx.draw.terrain_pipeline_bound;
+        self.pipeline_count += 1;
+    }
+
+    pub fn vkCmdBindDescriptorSets(self: *@This(), _: c.VkCommandBuffer, _: c.VkPipelineBindPoint, _: c.VkPipelineLayout, _: u32, _: u32, sets: [*c]const c.VkDescriptorSet, _: u32, _: ?*const u32) void {
+        self.append(.descriptors);
+        self.descriptor = sets[0];
+    }
+
+    pub fn vkCmdPushConstants(self: *@This(), _: c.VkCommandBuffer, _: c.VkPipelineLayout, _: c.VkShaderStageFlags, _: u32, _: u32, params: *const rhi.CompactLODDraw) void {
+        self.append(.constants);
+        self.params = params.*;
+    }
+
+    pub fn vkCmdBindIndexBuffer(self: *@This(), _: c.VkCommandBuffer, _: c.VkBuffer, _: c.VkDeviceSize, index_type: c.VkIndexType) void {
+        self.append(.index);
+        self.index_type = index_type;
+    }
+
+    pub fn vkCmdDrawIndexed(self: *@This(), _: c.VkCommandBuffer, count: u32, _: u32, _: u32, _: i32, _: u32) void {
+        self.append(.direct);
+        self.draw_count = count;
+    }
+
+    pub fn vkCmdDrawIndexedIndirect(self: *@This(), _: c.VkCommandBuffer, buffer: c.VkBuffer, offset: c.VkDeviceSize, count: u32, stride: u32) void {
+        self.append(.indirect);
+        self.command_buffer = buffer;
+        self.command_offset = offset;
+        self.draw_count = count;
+        self.command_stride = stride;
+    }
+};
+
+const compact_water_params = rhi.CompactLODDraw{
+    .model = Mat4.identity,
+    .mask_radius = -32,
+    .lod_fade = 0.5,
+    .sample_offset = 16,
+    .width = 4,
+    .cell_size = 8,
+    .layer = 1,
+    .skirt_depth = 4,
+};
+const compact_indirect_submission = compact_submission.CompactLODSubmission{ .indirect = .{
+    .buffer = @ptrFromInt(0x5000),
+    .offset = 40,
+    .capacity = 128,
+} };
+
+test "compact main-pass water indirect selects stream and restores water after fixed-capacity draw" {
+    var ctx = CompactSubmissionContext{};
+    var recorder = CompactCommandRecorder{ .ctx = &ctx };
+    var sentinel = compact_water_params;
+    sentinel.layer = 2;
+    sentinel.width = 0;
+
+    try testing.expect(compact_submission.recordCompactLOD(&ctx, &recorder, null, sentinel, compact_indirect_submission));
+    try testing.expectEqualSlices(CompactCommandRecorder.Event, &.{ .pipeline, .descriptors, .constants, .index, .indirect, .pipeline }, recorder.events[0..recorder.event_count]);
+    try testing.expectEqual(ctx.pipeline_manager.compact_lod_water_pipeline, recorder.pipelines[0]);
+    try testing.expectEqual(ctx.water_system.water_pipeline, recorder.pipelines[1]);
+    try testing.expect(!recorder.bound_at_bind[1]);
+    try testing.expect(ctx.draw.terrain_pipeline_bound);
+    try testing.expectEqual(@as(u32, 1), ctx.runtime.draw_call_count);
+    try testing.expectEqual(ctx.descriptors.lodDescriptorSet(0, .water_compact_gpu), recorder.descriptor);
+    try testing.expectEqualDeep(sentinel, recorder.params);
+    try testing.expectEqual(@as(c.VkIndexType, c.VK_INDEX_TYPE_UINT32), recorder.index_type);
+    try testing.expectEqual(compact_indirect_submission.indirect.buffer, recorder.command_buffer);
+    try testing.expectEqual(@as(c.VkDeviceSize, 40), recorder.command_offset);
+    try testing.expectEqual(@as(u32, 128), recorder.draw_count);
+    try testing.expectEqual(@as(u32, @sizeOf(@import("engine-rhi").rhi_types.DrawIndexedIndirectCommand)), recorder.command_stride);
+}
+
+test "compact direct water restores expanded water pipeline and preserves direct parameters" {
+    var ctx = CompactSubmissionContext{};
+    ctx.draw.lod_descriptor_stream = .water_compact_direct;
+    var recorder = CompactCommandRecorder{ .ctx = &ctx };
+
+    try testing.expect(compact_submission.recordCompactLOD(&ctx, &recorder, null, compact_water_params, .{ .direct = 96 }));
+    try testing.expectEqualSlices(CompactCommandRecorder.Event, &.{ .pipeline, .descriptors, .constants, .index, .direct, .pipeline }, recorder.events[0..recorder.event_count]);
+    try testing.expectEqual(ctx.pipeline_manager.compact_lod_water_pipeline, recorder.pipelines[0]);
+    try testing.expectEqual(ctx.water_system.water_pipeline, recorder.pipelines[1]);
+    try testing.expect(!recorder.bound_at_bind[1]);
+    try testing.expect(ctx.draw.terrain_pipeline_bound);
+    try testing.expectEqual(@as(u32, 1), ctx.runtime.draw_call_count);
+    try testing.expectEqual(ctx.descriptors.lodDescriptorSet(0, .water_compact_direct), recorder.descriptor);
+    try testing.expectEqualDeep(compact_water_params, recorder.params);
+    try testing.expectEqual(@as(u32, 96), recorder.draw_count);
+}
+
+test "compact terrain leaves ordinary pipeline invalidated regardless of reflection flag" {
+    for ([_]bool{ false, true }) |reflection| {
+        for ([_]bool{ false, true }) |indirect| {
+            var ctx = CompactSubmissionContext{};
+            ctx.water_system.pass_active = reflection;
+            ctx.water_system.water_pipeline = null;
+            ctx.draw.lod_descriptor_stream = if (indirect) .terrain_compact_gpu else .terrain_compact_direct;
+            var recorder = CompactCommandRecorder{ .ctx = &ctx };
+            var params = compact_water_params;
+            params.layer = if (indirect) 2 else 0;
+
+            try testing.expect(compact_submission.recordCompactLOD(&ctx, &recorder, null, params, if (indirect) compact_indirect_submission else .{ .direct = 96 }));
+            try testing.expectEqual(@as(usize, 1), recorder.pipeline_count);
+            try testing.expectEqual(ctx.pipeline_manager.compact_lod_terrain_pipeline, recorder.pipelines[0]);
+            try testing.expectEqual(@as(usize, 5), recorder.event_count);
+            try testing.expectEqual(if (indirect) CompactCommandRecorder.Event.indirect else .direct, recorder.events[4]);
+            try testing.expect(!ctx.draw.terrain_pipeline_bound);
+            try testing.expectEqual(@as(u32, 1), ctx.runtime.draw_call_count);
+        }
+    }
+}
+
+test "compact indirect rejects non-GPU-compact descriptor streams without recording" {
+    for ([_]rhi.LODDescriptorStream{
+        .terrain_standard_direct,
+        .water_standard_direct,
+        .terrain_standard_gpu,
+        .water_standard_gpu,
+        .terrain_compact_direct,
+        .water_compact_direct,
+    }) |stream| {
+        var ctx = CompactSubmissionContext{};
+        ctx.draw.lod_descriptor_stream = stream;
+        var recorder = CompactCommandRecorder{ .ctx = &ctx };
+
+        try testing.expect(!compact_submission.recordCompactLOD(&ctx, &recorder, null, compact_water_params, compact_indirect_submission));
+        try testing.expectEqual(@as(usize, 0), recorder.event_count);
+        try testing.expectEqual(@as(u32, 0), ctx.runtime.draw_call_count);
+        try testing.expect(ctx.draw.terrain_pipeline_bound);
+    }
+}
+
+test "compact water preflight failures preserve bindings and draw count" {
+    for ([_]bool{ false, true }) |indirect| {
+        for (0..3) |failure| {
+            for ([_]bool{ false, true }) |bound| {
+                var ctx = CompactSubmissionContext{};
+                ctx.draw.lod_descriptor_stream = if (indirect) .water_compact_gpu else .water_compact_direct;
+                ctx.draw.terrain_pipeline_bound = bound;
+                switch (failure) {
+                    0 => ctx.water_system.water_pipeline = null,
+                    1 => ctx.pipeline_manager.compact_lod_water_pipeline = null,
+                    2 => ctx.draw.lod_descriptor_stream_valid = false,
+                    else => unreachable,
+                }
+                var recorder = CompactCommandRecorder{ .ctx = &ctx };
+
+                try testing.expect(!compact_submission.recordCompactLOD(&ctx, &recorder, null, compact_water_params, if (indirect) compact_indirect_submission else .{ .direct = 96 }));
+                try testing.expectEqual(@as(usize, 0), recorder.event_count);
+                try testing.expectEqual(@as(u32, 0), ctx.runtime.draw_call_count);
+                try testing.expectEqual(bound, ctx.draw.terrain_pipeline_bound);
+            }
+        }
+    }
 }
 
 test "AtmosphereSystem.renderSky with null handles" {

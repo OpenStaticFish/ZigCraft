@@ -199,7 +199,8 @@ void main() {
     vClipPosPrev = vec4(previous_clip_pos.x, -previous_clip_pos.y, previous_clip_pos.z, previous_clip_pos.w);
 
     uint color = sampleColor(packed);
-    vColor = vec3(color & 0xffu, (color >> 8u) & 0xffu, (color >> 16u) & 0xffu) / 255.0;
+    // Compact samples retain source 0xRRGGBB, unlike packed Vertex colors.
+    vColor = vec3((color >> 16u) & 0xffu, (color >> 8u) & 0xffu, color & 0xffu) / 255.0;
     if (color == 0u) vColor = fallbackMaterialColor(surfaceMaterial(packed));
     if (is_skirt && !hasAuthoritativeApron(words, skirtTileEdge(skirt_edge))) vColor *= 0.82;
     vNormal = normal;

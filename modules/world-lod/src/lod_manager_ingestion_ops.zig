@@ -74,9 +74,17 @@ pub fn setChunkResolver(self: *Self, resolver: ChunkResolver) void {
 /// provenance; higher provenance always wins. Regions that are missing or
 /// currently in-flight are recorded as pending and replayed from
 /// `update()`. Safe to call from the generation worker thread; the caller
-/// must pin the chunk for the duration of the call.
+/// must pin the chunk and synchronize block mutations for the call.
 pub fn ingestChunk(self: *Self, cx: i32, cz: i32, chunk: *const Chunk, provenance: LODColumnProvenance) void {
-    const pending_mask = applyIngestionToRegionsMask(self, cx, cz, chunk, provenance, activeIngestionMask(self));
+    if (self.captureNearChunk(chunk, if (provenance == .edited) .edited else .generated)) |capture| {
+        if (!self.submitNearChunk(cx, cz, capture)) self.deferNearChunk(cx, cz, capture);
+    }
+    ingestCoarseChunk(self, cx, cz, chunk, provenance);
+}
+
+pub fn ingestCoarseChunk(self: *Self, cx: i32, cz: i32, chunk: *const Chunk, provenance: LODColumnProvenance) void {
+    const mask = activeIngestionMask(self) & (if (self.near_source_enabled) @as(u8, 0xfc) else @as(u8, 0xff));
+    const pending_mask = applyIngestionToRegionsMask(self, cx, cz, chunk, provenance, mask);
     if (pending_mask != 0) {
         self.ingestion_queue.mutex.lock();
         const recorded = self.recordPendingLocked(cx, cz, provenance, pending_mask);
@@ -105,6 +113,9 @@ pub fn requestIngestion(self: *Self, cx: i32, cz: i32, provenance: LODColumnProv
 /// Coalesced on a short cooldown and re-ingested with the `edited`
 /// provenance so distant terrain reflects player changes after teleport.
 pub fn markChunkEdited(self: *Self, cx: i32, cz: i32) void {
+    // Runtime calls this on the main thread after releasing mutation locks.
+    // Retain near edits immediately; debounce only the existing coarse work.
+    if (self.near_source_enabled) _ = self.captureResolvedNearChunk(cx, cz, .edited);
     self.ingestion_queue.mutex.lock();
     defer self.ingestion_queue.mutex.unlock();
     self.ingestion_queue.edit_dirty.put(.{ .cx = cx, .cz = cz }, {}) catch |err| {
@@ -135,6 +146,9 @@ pub fn flushEditedChunkForUnload(self: *Self, cx: i32, cz: i32, chunk: *const Ch
     }
     self.ingestion_queue.mutex.unlock();
 
+    if (self.near_source_enabled and requested_mask != 0) {
+        if (self.captureResolvedNearChunk(cx, cz, .edited)) requested_mask &= 0xfc;
+    }
     if (requested_mask == 0) return 0;
     const pending_mask = applyIngestionToRegionsMask(self, cx, cz, chunk, .edited, requested_mask);
     if (pending_mask != 0 and retain_pending) {
@@ -153,17 +167,21 @@ pub fn flushEditedChunkForUnload(self: *Self, cx: i32, cz: i32, chunk: *const Ch
 /// could not be applied (region missing, not yet generated, or meshing)
 /// so the caller can record them as pending.
 pub fn applyIngestionToRegions(self: *Self, cx: i32, cz: i32, chunk: *const Chunk, provenance: LODColumnProvenance) u8 {
-    return applyIngestionToRegionsMask(self, cx, cz, chunk, provenance, activeIngestionMask(self));
+    var mask = activeIngestionMask(self);
+    if (self.captureNearChunk(chunk, if (provenance == .edited) .edited else .generated)) |capture| {
+        if (self.submitNearChunk(cx, cz, capture)) mask &= 0xfc;
+    }
+    return applyIngestionToRegionsMask(self, cx, cz, chunk, provenance, mask);
 }
 
 fn applyIngestionToRegionsMask(self: *Self, cx: i32, cz: i32, chunk: *const Chunk, provenance: LODColumnProvenance, requested_mask: u8) u8 {
-    var pending_mask: u8 = 0;
+    var pending_mask: u8 = if (self.near_source_enabled) requested_mask & 3 else 0;
     const active = lod_chunk.activeLODCount(self.config);
 
     self.mutex.lock();
     defer self.mutex.unlock();
 
-    var i: usize = 1;
+    var i: usize = if (self.near_source_enabled) 2 else 1;
     while (i < active) : (i += 1) {
         const level_mask = @as(u8, 1) << @intCast(i);
         if (requested_mask & level_mask == 0) continue;
@@ -209,7 +227,7 @@ fn applyIngestionToRegionsMask(self: *Self, cx: i32, cz: i32, chunk: *const Chun
 fn activeIngestionMask(self: *Self) u8 {
     var mask: u8 = 0;
     const active = lod_chunk.activeLODCount(self.config);
-    var i: usize = 1;
+    var i: usize = if (self.near_source_enabled) 0 else 1;
     while (i < active) : (i += 1) mask |= @as(u8, 1) << @intCast(i);
     return mask;
 }
@@ -314,22 +332,30 @@ fn drainPendingIngestionsWithLimit(self: *Self, max_count: usize) void {
     const limit = @min(snapshot.items.len, max_count);
 
     // Process the head of the snapshot and retain the tail for a later frame.
-    var i: usize = 0;
-    while (i < snapshot.items.len) : (i += 1) {
+    var offset: usize = 0;
+    while (offset < snapshot.items.len) : (offset += 1) {
+        // Keep untouched entries ahead of retried unavailable chunks. The
+        // experimental queue must not starve edits behind missing coarse LODs.
+        const i = if (self.near_source_enabled) (offset + limit) % snapshot.items.len else offset;
         const entry = snapshot.items[i];
         if (entry.pending_levels == 0) continue;
         if (i >= limit) {
             self.rerecordPending(entry.cx, entry.cz, entry.provenance, entry.pending_levels, 0);
             continue;
         }
+        var requested = entry.pending_levels;
+        if (self.near_source_enabled and requested & 3 != 0) {
+            if (self.captureResolvedNearChunk(entry.cx, entry.cz, if (entry.provenance == .edited) .edited else .generated)) requested &= 0xfc;
+        }
+        if (requested == 0) continue;
         const chunk = if (resolver) |r| r.resolve(entry.cx, entry.cz) else null;
         if (chunk) |c| {
-            const remaining = applyIngestionToRegionsMask(self, entry.cx, entry.cz, c, entry.provenance, entry.pending_levels);
+            const remaining = applyIngestionToRegionsMask(self, entry.cx, entry.cz, c, entry.provenance, requested);
             if (remaining != 0) {
                 self.rerecordPending(entry.cx, entry.cz, entry.provenance, remaining, 0);
             }
         } else {
-            self.rerecordPending(entry.cx, entry.cz, entry.provenance, entry.pending_levels, 0);
+            self.rerecordPending(entry.cx, entry.cz, entry.provenance, requested, 0);
         }
     }
 }
@@ -393,9 +419,11 @@ fn flushEditedChunksWithLimit(self: *Self, max_count: usize) void {
 
     const resolver = self.ingestion_queue.chunk_resolver;
     for (snapshot.items) |k| {
+        const near_captured = !self.near_source_enabled or self.captureResolvedNearChunk(k.cx, k.cz, .edited);
+        if (!near_captured) self.requestIngestion(k.cx, k.cz, .edited);
         if (resolver) |r| {
             if (r.resolve(k.cx, k.cz)) |chunk| {
-                self.ingestChunk(k.cx, k.cz, chunk, .edited);
+                self.ingestCoarseChunk(k.cx, k.cz, chunk, .edited);
                 continue;
             }
         }

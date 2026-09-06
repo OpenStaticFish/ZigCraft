@@ -1260,8 +1260,8 @@ pub fn averageBiomeBlockTint(data: *const LODSimplifiedData, gx: u32, gz: u32, l
     return averageColor(c00, c10, c01, c11);
 }
 
-/// Modulates a material color by the average texture luminance for a block face.
-/// This keeps LOD fallback colors closer to the atlas texture brightness.
+/// Matches chunk albedo with linear atlas average * biome tint for tinted faces.
+/// Falls back to texture luminance when atlas color statistics are unavailable.
 pub fn applyTextureLuminance(color: u32, block: BlockType, face: LODTextureFace, atlas: *const TextureAtlas) u32 {
     if (block == .air or block == .water) return color;
     const texture_color = averageTextureColorForFace(block, face, atlas) orelse {
@@ -1275,7 +1275,7 @@ pub fn applyTextureLuminance(color: u32, block: BlockType, face: LODTextureFace,
     };
 
     if (!shouldTintLodFace(block, face)) return texture_color;
-    return multiplyColors(texture_color, shaderLikeTintColor(color));
+    return multiplyColors(texture_color, color);
 }
 
 /// Returns the average atlas color for a block face when texture statistics are available.
@@ -1315,39 +1315,6 @@ pub fn multiplyColors(base: u32, tint: u32) u32 {
     const gg: u32 = @min(g, 255);
     const bb: u32 = @min(b, 255);
     return (rr << 16) | (gg << 8) | bb;
-}
-
-/// Approximates the runtime shader tint result for an LOD block face.
-/// It blends biome tint, texture luminance, and fallback color without sampling shaders at runtime.
-pub fn shaderLikeTintColor(color: u32) u32 {
-    const r: u32 = (color >> 16) & 0xFF;
-    const g: u32 = (color >> 8) & 0xFF;
-    const b: u32 = color & 0xFF;
-    const max_channel = @max(r, @max(g, b));
-    if (max_channel == 0) return 0xFFFFFF;
-
-    const min_channel = @min(r, @min(g, b));
-    const chroma = @as(f32, @floatFromInt(max_channel - min_channel)) / @as(f32, @floatFromInt(max_channel));
-    const tint_strength = smoothstep(0.05, 0.2, chroma);
-
-    const max_f = @as(f32, @floatFromInt(max_channel));
-    const nr = @as(f32, @floatFromInt(r)) / max_f;
-    const ng = @as(f32, @floatFromInt(g)) / max_f;
-    const nb = @as(f32, @floatFromInt(b)) / max_f;
-    const out_r: u32 = @intFromFloat(@round((1.0 + (nr - 1.0) * tint_strength) * 255.0));
-    const out_g: u32 = @intFromFloat(@round((1.0 + (ng - 1.0) * tint_strength) * 255.0));
-    const out_b: u32 = @intFromFloat(@round((1.0 + (nb - 1.0) * tint_strength) * 255.0));
-    const rr: u32 = @min(out_r, 255);
-    const gg: u32 = @min(out_g, 255);
-    const bb: u32 = @min(out_b, 255);
-    return (rr << 16) | (gg << 8) | bb;
-}
-
-/// Applies cubic Hermite interpolation between two edges.
-/// Returns 0 below `edge0`, 1 above `edge1`, and a smooth transition between them.
-pub fn smoothstep(edge0: f32, edge1: f32, x: f32) f32 {
-    const t = std.math.clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
-    return t * t * (3.0 - 2.0 * t);
 }
 
 /// Scales a packed RGB color by a floating-point factor.

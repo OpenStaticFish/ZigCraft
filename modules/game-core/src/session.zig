@@ -97,6 +97,25 @@ pub fn cameraFarPlaneForDistances(render_distance_chunks: i32, horizon_distance_
     return cameraFarPlaneForHorizon(@max(render_distance_chunks, horizon_distance_chunks));
 }
 
+/// Local M1 capture override, never a persisted user horizon. Callers syncing
+/// live settings must leave this session's distances alone when non-null.
+pub fn localCaptureHorizonDistance(scene: []const u8) ?i32 {
+    return if (std.ascii.eqlIgnoreCase(scene, "lod-forest")) 24 else null;
+}
+
+fn applyLocalCaptureProfile(scene: []const u8, config: *LODConfig) ?i32 {
+    const horizon = localCaptureHorizonDistance(scene) orelse return null;
+    config.chunk_render_radius = 6;
+    config.radii = .{ 6, 16, horizon, horizon, horizon };
+    config.active_lod_count = 3;
+    // Isolate visual fidelity from the existing non-shrinking pool governor.
+    // This reference profile is not a production memory-budget qualification.
+    config.memory_budget_mb = 1024;
+    // The outer band is coverage only; reserve detailed geometry for LOD1.
+    config.sample_density = .{ 1.0, 1.0, 0.25, 0.5, 0.5 };
+    return horizon;
+}
+
 pub const GameSession = struct {
     allocator: std.mem.Allocator,
     world: *World,
@@ -138,6 +157,8 @@ pub const GameSession = struct {
     phase5_motion_frames: u32 = 0,
     phase5_motion_complete: bool = false,
     phase5_motion_evidence_emitted: bool = false,
+    lod_forest_evidence: LodForestEvidence = .{},
+    lod_forest_probe_frames: u32 = 0,
     gpu_culling_scale_fixture_installed: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, rhi: *RHI, atlas: *const TextureAtlas, seed: u64, render_distance: i32, horizon_distance: i32, lod_enabled: bool, compact_tiles_enabled: bool, generator_index: usize, render_distance_preset: RenderDistancePreset, build_config: BuildConfig) !*GameSession {
@@ -147,7 +168,7 @@ pub const GameSession = struct {
 
         const safe_mode = runtime_env.safeModeEnabled();
         const strict_safe_mode = runtime_env.strictSafeModeEnabled();
-        const effective_render_distance: i32 = render_distance;
+        var effective_render_distance: i32 = render_distance;
         const chunk_debug_restore_lod = chunkDebugRestoreEnabled(build_config, "lod");
         const effective_lod_enabled = if (build_config.chunk_debug_mode)
             chunk_debug_restore_lod
@@ -165,7 +186,7 @@ pub const GameSession = struct {
 
         const preset_cfg = render_settings.getPresetConfig(render_distance_preset);
 
-        const effective_horizon_distance = LODConfig.normalizeHorizonDistance(effective_render_distance, horizon_distance);
+        var effective_horizon_distance = LODConfig.normalizeHorizonDistance(effective_render_distance, horizon_distance);
         const manual_distance_expanded = effective_render_distance > preset_cfg.lod_radii[0] or effective_horizon_distance != preset_cfg.horizon_radius;
         const chunk_render_radius = if (strict_safe_mode)
             @min(effective_render_distance, 8)
@@ -218,6 +239,13 @@ pub const GameSession = struct {
         if (build_config.benchmark_lod_memory_budget_mb > 0) {
             lod_config.memory_budget_mb = build_config.benchmark_lod_memory_budget_mb;
             log.log.info("BENCHMARK: overriding LOD memory budget to {} MiB", .{lod_config.memory_budget_mb});
+        }
+        if (applyLocalCaptureProfile(build_config.phase5_visual_scene, &lod_config)) |capture_horizon| {
+            // Bound both comparisons identically without changing production
+            // admission/scheduling policy or claiming full-horizon qualification.
+            effective_render_distance = lod_config.chunk_render_radius;
+            effective_horizon_distance = capture_horizon;
+            std.debug.print("LOD_FIDELITY_CONFIG: run={s} scene=lod-forest local_reference=1 qualified=0 capture_horizon={} horizon_chunks={} detail_radius_chunks={} radii_chunks={any} active_lod_count={} memory_budget_mb={} seed={} auto_world={s} near_source={s}\n", .{ build_config.phase5_visual_run_id, capture_horizon * 16, capture_horizon, lod_config.chunk_render_radius, lod_config.radii, lod_config.active_lod_count, lod_config.memory_budget_mb, seed, build_config.auto_world, getenv("ZIGCRAFT_LOD_NEAR_SOURCE") orelse "unset" });
         }
 
         session.* = undefined;
@@ -415,12 +443,15 @@ pub const GameSession = struct {
                     self.gpu_culling_scale_fixture_installed = true;
                 }
                 if (phase5VisualScene(self.build_config.phase5_visual_scene)) |scene| {
-                    // This is a production flat-world launch, not the shadow
+                    // This is a production-world launch, not the shadow
                     // test renderer. Reapply the deterministic pose because
                     // normal player simulation is still active in captures.
                     // Motion scenes advance a bounded frame-script here rather
                     // than being static labels passed to the capture runner.
                     self.applyPhase5VisualPose(scene);
+                    // Forest readiness consumes the last rendered projection
+                    // before World.update resets its submission statistics.
+                    if (scene.motion == .forest_retreat) self.updatePhase5CaptureReadiness();
                 }
                 const world_sim = self.world.interface().simulation();
                 try world_sim.update(self.player.camera.position, dt);
@@ -493,7 +524,7 @@ pub const GameSession = struct {
                     }
                 }
 
-                self.updatePhase5CaptureReadiness();
+                if (!std.ascii.eqlIgnoreCase(self.build_config.phase5_visual_scene, "lod-forest")) self.updatePhase5CaptureReadiness();
 
                 // ECS Updates
                 ECSPhysicsSystem.update(&self.ecs_registry, world_sim.collisionWorld(), dt);
@@ -515,6 +546,9 @@ pub const GameSession = struct {
 
     fn applyPhase5VisualFixture(self: *GameSession, world_sim: IWorldSimulation) !void {
         const scene = if (self.build_config.phase5_visual_scene.len > 0) self.build_config.phase5_visual_scene else self.build_config.benchmark_fixture;
+        // Camera-only generated-world scene. Residency is observed below;
+        // never route it through the authored flat-world mutations.
+        if (std.ascii.eqlIgnoreCase(scene, "lod-forest")) return;
         // Mutations are deliberately small, local, and above the flat-world
         // grass. They make the production launch visually identifiable while
         // retaining the normal generator, streamer, mesher, and LOD pipeline.
@@ -600,6 +634,10 @@ pub const GameSession = struct {
             self.phase5_settle_frames = 0;
             return;
         };
+        if (scene.motion == .forest_retreat) {
+            self.updateLodForestReadiness(scene);
+            return;
+        }
 
         const world_stats = self.world.getStats();
         const render_stats = self.world.getRenderStats();
@@ -635,7 +673,125 @@ pub const GameSession = struct {
         }
     }
 
+    fn updateLodForestReadiness(self: *GameSession, scene: Phase5VisualScene) void {
+        const diagnostic_tick = self.lod_forest_probe_frames == 0;
+        if (diagnostic_tick) {
+            self.observeLodForest(scene);
+            self.lod_forest_probe_frames = 60;
+        }
+        self.lod_forest_probe_frames -= 1;
+        const world_stats = self.world.getStats();
+        const render_stats = self.world.getRenderStats();
+        const target = self.lodForestTargetEvidence(scene);
+        const ready = lodForestLocallyReady(self.lod_forest_evidence, self.phase5_motion_complete, render_stats.chunks_rendered, target);
+        if (ready) self.phase5_settle_frames +|= 1 else self.phase5_settle_frames = 0;
+        const settled = self.phase5_settle_frames >= 180;
+        phase5_capture_ready.store(settled, .release);
+        if (phase5EvidenceEnabled(self.build_config) and (diagnostic_tick or (settled and !self.phase5_ready_evidence_emitted))) {
+            const key = lodForestTargetKey(scene);
+            std.debug.print("LOD_FIDELITY_READINESS: run={s} scene=lod-forest stage={s} ready={} stable_frames={} required_frames=180 chunks_rendered={} world_queues={},{},{} target_lod={} target={},{} state={s} pinned={} dirty={} mesh_ready={} projected={} drawn={} source_current={} near_enabled={} captured_summaries={} target_summaries={} provenance_worldgen={} provenance_chunk_derived={} provenance_edited={} source_revision={} mesh_revision={} retained_leaves={}\n", .{ self.build_config.phase5_visual_run_id, if (!self.phase5_fixture_applied) @as([]const u8, "warmup") else if (!self.phase5_motion_complete) "motion" else "settle", @intFromBool(ready), self.phase5_settle_frames, render_stats.chunks_rendered, world_stats.gen_queue, world_stats.mesh_queue, world_stats.upload_queue, @intFromEnum(key.lod), key.rx, key.rz, @tagName(target.state), target.pinned, target.dirty, target.mesh_ready, target.projected, target.drawn, target.source_current, target.near_enabled, target.captured_summaries, target.target_summaries, target.provenance[0], target.provenance[1], target.provenance[2], target.source_revision, target.mesh_revision, self.lod_forest_evidence.leaves });
+            if (self.world.lod) |lod| {
+                const manager = lod.manager;
+                manager.mutex.lockShared();
+                defer manager.mutex.unlockShared();
+                std.debug.print("LOD_FIDELITY_RESIDENCY: run={s} scene=lod-forest detail_radius_chunks={} configured_radii_chunks={any} loaded={any} drawn={any} generating={any} meshing={any} gen_queue={any} upload_queue={any} memory_used_bytes={} memory_budget_mb={} logical_admission_bytes={} pending_upload_bytes={} pending_regions={}\n", .{ self.build_config.phase5_visual_run_id, manager.config.getChunkRenderRadius(), manager.config.getRadii(), manager.stats.loaded, manager.stats.drawn, manager.stats.generating, manager.stats.meshing, manager.stats.gen_queue_depth, manager.stats.upload_queue_depth, manager.stats.memory_used_bytes, manager.config.getMemoryBudgetMB(), manager.stats.logical_admission_bytes, manager.stats.pending_cpu_upload_bytes, manager.pending_region_count });
+            }
+            if (settled and !self.phase5_ready_evidence_emitted) {
+                std.debug.print("LOD_FIDELITY_READY: run={s} scene=lod-forest qualified=0 motion=forest-retreat completed=1 stable_frames={} player={d:.1},{d:.1},{d:.1} yaw={d:.6} pitch={d:.6} target_lod={} target={},{} drawn=1 leaves={} logs={} water={}\n", .{ self.build_config.phase5_visual_run_id, self.phase5_settle_frames, self.player.position.x, self.player.position.y, self.player.position.z, self.player.camera.yaw, self.player.camera.pitch, @intFromEnum(key.lod), key.rx, key.rz, self.lod_forest_evidence.leaves, self.lod_forest_evidence.logs, self.lod_forest_evidence.water });
+                self.phase5_ready_evidence_emitted = true;
+            }
+        }
+    }
+
+    fn lodForestTargetEvidence(self: *GameSession, scene: Phase5VisualScene) LodForestTargetEvidence {
+        var result: LodForestTargetEvidence = .{};
+        const lod = self.world.lod orelse return result;
+        const manager = lod.manager;
+        const key = lodForestTargetKey(scene);
+        const target_index = @intFromEnum(key.lod);
+        manager.mutex.lockShared();
+        defer manager.mutex.unlockShared();
+        result.near_enabled = manager.near_source_enabled;
+        result.captured_summaries = manager.near_sources.count();
+        const bounds = key.chunkBounds();
+        for (manager.near_sources.keys()) |coordinate| {
+            if (coordinate.cx >= bounds.min_x and coordinate.cx <= bounds.max_x and coordinate.cz >= bounds.min_z and coordinate.cz <= bounds.max_z) result.target_summaries += 1;
+        }
+        const region = manager.regions[target_index].get(key) orelse return result;
+        result.state = region.getState();
+        result.pinned = region.isPinned();
+        result.dirty = region.dirty;
+        result.source_revision = region.source_revision;
+        // A pin may belong to a worker modifying source data without this lock.
+        if (result.state != .renderable or result.pinned) return result;
+        switch (region.data) {
+            .simplified => |data| for (data.provenance) |provenance| {
+                result.provenance[@intFromEnum(provenance)] += 1;
+            },
+            else => return result,
+        }
+        const mesh = manager.meshes[target_index].get(key) orelse return result;
+        {
+            mesh.mutex.lock();
+            defer mesh.mutex.unlock();
+            result.mesh_revision = mesh.source_revision;
+            result.source_current = mesh.source_revision == region.source_revision and mesh.source_job_token == region.job_token;
+            result.mesh_ready = mesh.isReady() and mesh.drawRange(.terrain) != null and !mesh.isCompact();
+        }
+        // Inspect the previous completed CPU visibility projection, not a
+        // horizon-wide count. With compact/GPU culling off, every projected
+        // terrain mesh must be accounted for by that level's submission count.
+        if (lod.renderer.gpu_culling_requested or lod.renderer.projection_frame == null or lod.renderer.projection_frame.? != lod.renderer.frame_serial) return result;
+        var projected_terrain: u32 = 0;
+        for (lod.renderer.projection_regions.items) |visible| {
+            if (visible.key.lod != key.lod) continue;
+            const projected_mesh = manager.meshes[target_index].get(visible.key) orelse continue;
+            projected_mesh.mutex.lock();
+            const has_terrain = projected_mesh.isReady() and projected_mesh.drawRange(.terrain) != null;
+            projected_mesh.mutex.unlock();
+            if (!has_terrain) continue;
+            projected_terrain += 1;
+            if (visible.key.eql(key) and visible.lod_fade > 0) result.projected = true;
+        }
+        result.drawn = result.projected and projected_terrain > 0 and manager.stats.drawn[target_index] >= projected_terrain;
+        return result;
+    }
+
+    fn observeLodForest(self: *GameSession, scene: Phase5VisualScene) void {
+        // Once warmup succeeds, retain the initial evidence through eviction.
+        if (self.phase5_fixture_applied) return;
+        const world_core = @import("world-core");
+        const center = world_core.worldToChunk(@intFromFloat(@floor(scene.position.x)), @intFromFloat(@floor(scene.position.z)));
+        var evidence: LodForestEvidence = .{};
+        {
+            // Match the runtime's resident surface snapshot lock order. Only
+            // published generation is read; no generator fallback or mutations.
+            self.world.storage.lighting_mutex.lock();
+            defer self.world.storage.lighting_mutex.unlock();
+            self.world.storage.chunks_mutex.lockShared();
+            defer self.world.storage.chunks_mutex.unlockShared();
+            var iterator = self.world.storage.iteratorUnsafe();
+            while (iterator.next()) |entry| {
+                const key = entry.key_ptr.*;
+                if (key.x < center.chunk_x - 2 or key.x >= center.chunk_x + 2 or key.z < center.chunk_z - 2 or key.z >= center.chunk_z + 2) continue;
+                const chunk = &entry.value_ptr.*.chunk;
+                if (chunk.state != .renderable or !chunk.generated or !entry.value_ptr.*.render.mesh.ready) continue;
+                evidence.resident_chunks += 1;
+                for (chunk.blocks) |block| evidence.observe(block);
+            }
+        }
+        self.lod_forest_evidence = evidence;
+        self.phase5_fixture_applied = lodForestWarmupReady(evidence);
+        if (phase5EvidenceEnabled(self.build_config)) {
+            const telemetry = self.world.interface().telemetry();
+            std.debug.print("LOD_FIDELITY_WARMUP: run={s} scene=lod-forest qualified=0 completed={} generator={s} seed={} player={d:.1},{d:.1},{d:.1} eye={d:.1},{d:.1},{d:.1} yaw={d:.6} pitch={d:.6} noon=0.5 near_source={s} chunk_min={},{} chunk_max={},{} y=0..255 renderable_chunks={} required_chunks=16 ground={} leaves={} required_leaves=500 logs={} water={} retained={}\n", .{ self.build_config.phase5_visual_run_id, @intFromBool(self.phase5_fixture_applied), telemetry.getGeneratorName(), telemetry.getGenerator().getSeed(), self.player.position.x, self.player.position.y, self.player.position.z, self.player.camera.position.x, self.player.camera.position.y, self.player.camera.position.z, self.player.camera.yaw, self.player.camera.pitch, getenv("ZIGCRAFT_LOD_NEAR_SOURCE") orelse "unset", center.chunk_x - 2, center.chunk_z - 2, center.chunk_x + 1, center.chunk_z + 1, evidence.resident_chunks, evidence.ground, evidence.leaves, evidence.logs, evidence.water, self.phase5_fixture_applied });
+        }
+    }
+
     fn applyPhase5VisualPose(self: *GameSession, scene: Phase5VisualScene) void {
+        // Retreat begins only after warmup. Advance before applying the pose so
+        // completed=1 describes the exact final position, not frame 179's pose.
+        if (scene.motion == .forest_retreat and self.phase5_fixture_applied and !self.phase5_motion_complete) self.phase5_motion_frames +|= 1;
         const pose = phase5VisualPoseAtFrame(scene, self.phase5_motion_frames);
         self.player.position = pose.position;
         self.player.camera.position = self.player.getEyePosition();
@@ -648,7 +804,10 @@ pub const GameSession = struct {
         // matter how long the screenshot waits.
         if (scene.motion == .fixed or self.phase5_motion_complete or !self.phase5_fixture_applied) return;
 
-        self.phase5_motion_frames +|= 1;
+        if (scene.motion != .forest_retreat) self.phase5_motion_frames +|= 1;
+        if (scene.motion == .forest_retreat and phase5EvidenceEnabled(self.build_config) and (self.phase5_motion_frames == 1 or self.phase5_motion_frames % 60 == 0)) {
+            std.debug.print("LOD_FIDELITY_MOTION: run={s} scene=lod-forest kind=forest-retreat frame={} target_frames=180 completed={} player={d:.1},{d:.1},{d:.1} yaw={d:.6} pitch={d:.6} retained_leaves={}\n", .{ self.build_config.phase5_visual_run_id, self.phase5_motion_frames, @intFromBool(self.phase5_motion_frames >= phase5MotionFrameTarget(scene.motion)), pose.position.x, pose.position.y, pose.position.z, pose.yaw, pose.pitch, self.lod_forest_evidence.leaves });
+        }
         if (self.phase5_motion_frames < phase5MotionFrameTarget(scene.motion)) return;
 
         self.phase5_motion_complete = true;
@@ -660,6 +819,60 @@ pub const GameSession = struct {
         }
     }
 };
+
+const LodForestEvidence = struct {
+    resident_chunks: u32 = 0,
+    ground: u32 = 0,
+    leaves: u32 = 0,
+    logs: u32 = 0,
+    water: u32 = 0,
+
+    fn observe(self: *LodForestEvidence, block: BlockType) void {
+        switch (block) {
+            .leaves, .mangrove_leaves, .jungle_leaves, .acacia_leaves, .birch_leaves, .spruce_leaves => self.leaves += 1,
+            .wood, .mangrove_log, .jungle_log, .acacia_log, .birch_log, .spruce_log => self.logs += 1,
+            .water => self.water += 1,
+            .stone, .dirt, .grass, .sand, .gravel, .clay, .mud, .red_sand, .terracotta, .mycelium, .coarse_dirt, .rooted_dirt, .podzol, .snow_block => self.ground += 1,
+            else => {},
+        }
+    }
+};
+
+const LodForestTargetEvidence = struct {
+    state: @import("world-lod").lod_chunk.LODState = .missing,
+    pinned: bool = false,
+    dirty: bool = false,
+    mesh_ready: bool = false,
+    projected: bool = false,
+    drawn: bool = false,
+    source_current: bool = false,
+    near_enabled: bool = false,
+    captured_summaries: usize = 0,
+    target_summaries: usize = 0,
+    provenance: [3]u32 = .{ 0, 0, 0 },
+    source_revision: u32 = 0,
+    mesh_revision: u32 = 0,
+};
+
+fn lodForestTargetKey(scene: Phase5VisualScene) @import("world-lod").lod_chunk.LODRegionKey {
+    const center = @import("world-core").worldToChunk(@intFromFloat(@floor(scene.position.x)), @intFromFloat(@floor(scene.position.z)));
+    // The M1 profile keeps LOD0 at six chunks; the retreated site is in LOD1.
+    return @import("world-lod").lod_chunk.LODRegionKey.fromChunkCoords(center.chunk_x, center.chunk_z, .lod1);
+}
+
+fn lodForestWarmupReady(evidence: LodForestEvidence) bool {
+    return evidence.resident_chunks == 16 and evidence.ground > 0 and evidence.leaves >= 500;
+}
+
+fn lodForestLocallyReady(evidence: LodForestEvidence, motion_complete: bool, chunks_rendered: u32, target: LodForestTargetEvidence) bool {
+    if (!lodForestWarmupReady(evidence) or !motion_complete or chunks_rendered < 4) return false;
+    if (target.state != .renderable or target.pinned or !target.mesh_ready or !target.projected or !target.drawn or !target.source_current) return false;
+    // `dirty` is sticky source telemetry; matching the uploaded mesh revision,
+    // not that flag, proves no unapplied source change remains.
+    // No global queue drain: unrelated horizon jobs may continue. The enabled
+    // comparison must actually have captured and applied source at this target.
+    return !target.near_enabled or (target.captured_summaries > 0 and target.target_summaries > 0 and target.provenance[1] > 0);
+}
 
 fn allZero(values: anytype) bool {
     for (values) |value| if (value != 0) return false;
@@ -697,6 +910,7 @@ fn isSavedWorldReloadScene(scene: []const u8) bool {
 }
 
 fn phase5SceneRequiresGpuValidation(scene: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(scene, "lod-forest")) return false;
     if (std.ascii.eqlIgnoreCase(scene, "lod-handoff") or isSavedWorldReloadScene(scene)) return true;
     if (phase5VisualScene(scene)) |visual_scene| return visual_scene.motion != .fixed;
     return false;
@@ -730,6 +944,7 @@ pub const Phase5VisualMotion = enum {
     lod_handoff_traversal,
     fog_rapid_turn,
     teleport_handoff,
+    forest_retreat,
 
     pub fn name(self: Phase5VisualMotion) []const u8 {
         return switch (self) {
@@ -737,6 +952,7 @@ pub const Phase5VisualMotion = enum {
             .lod_handoff_traversal => "traversal",
             .fog_rapid_turn => "rapid-turn",
             .teleport_handoff => "teleport",
+            .forest_retreat => "forest-retreat",
         };
     }
 };
@@ -753,6 +969,9 @@ pub fn parsePhase5VisualScene(name: []const u8) ?Phase5VisualScene {
     if (std.ascii.eqlIgnoreCase(name, "seam")) return .{ .position = Vec3.init(16.0, 74.0, -18.0), .yaw = forward_z, .pitch = -std.math.degreesToRadians(15.0) };
     if (std.ascii.eqlIgnoreCase(name, "water")) return .{ .position = Vec3.init(25.0, 75.0, -16.0), .yaw = forward_z, .pitch = -std.math.degreesToRadians(17.0) };
     if (std.ascii.eqlIgnoreCase(name, "lod-handoff")) return .{ .position = Vec3.init(0.0, 110.0, -80.0), .yaw = forward_z, .pitch = -std.math.degreesToRadians(13.0) };
+    // CPU-probed birch forest, seed 12345 normal. Visual handoff still requires
+    // capture qualification; the fixture never fabricates terrain or foliage.
+    if (std.ascii.eqlIgnoreCase(name, "lod-forest")) return .{ .position = Vec3.init(896.0, 84.0, -1152.0), .yaw = -3.0 * std.math.pi / 4.0, .pitch = -std.math.degreesToRadians(10.0), .motion = .forest_retreat };
     if (std.ascii.eqlIgnoreCase(name, "lod-aerial")) return .{ .position = Vec3.init(0.0, 900.0, -100.0), .yaw = forward_z, .pitch = -std.math.degreesToRadians(60.0) };
     if (std.ascii.eqlIgnoreCase(name, "saved-world-create") or std.ascii.eqlIgnoreCase(name, "saved-world-reload")) return .{ .position = Vec3.init(8.0, 78.0, -88.0), .yaw = forward_z, .pitch = -std.math.degreesToRadians(18.0) };
     if (std.ascii.eqlIgnoreCase(name, "lod-handoff-traversal")) return .{ .position = Vec3.init(-128.0, 110.0, -32.0), .yaw = 0.0, .pitch = -std.math.degreesToRadians(13.0), .motion = .lod_handoff_traversal };
@@ -777,6 +996,11 @@ fn phase5VisualPoseAtFrame(scene: Phase5VisualScene, frame: u32) Phase5VisualSce
         .teleport_handoff => {
             if (frame >= 60) pose.position = Vec3.init(128.0, 110.0, 32.0);
         },
+        .forest_retreat => {
+            pose.position.x += 128.0 * progress;
+            pose.position.y += 22.0 * progress;
+            pose.position.z += 128.0 * progress;
+        },
     }
     return pose;
 }
@@ -787,6 +1011,7 @@ fn phase5MotionFrameTarget(motion: Phase5VisualMotion) u32 {
         .lod_handoff_traversal => 180,
         .fog_rapid_turn => 160,
         .teleport_handoff => 120,
+        .forest_retreat => 180,
     };
 }
 
@@ -796,6 +1021,7 @@ fn phase5MotionEvidence(motion: Phase5VisualMotion) struct { distance: f32, yaw_
         .lod_handoff_traversal => .{ .distance = 256.0, .yaw_degrees = 0.0 },
         .fog_rapid_turn => .{ .distance = 0.0, .yaw_degrees = 720.0 },
         .teleport_handoff => .{ .distance = 262.9, .yaw_degrees = 0.0 },
+        .forest_retreat => .{ .distance = @sqrt(128.0 * 128.0 * 2.0 + 22.0 * 22.0), .yaw_degrees = 0.0 },
     };
 }
 
@@ -816,6 +1042,143 @@ test "Phase 5 visual scene parser exposes bounded motion poses" {
     try std.testing.expect(turn_end.yaw > turn.yaw);
     const teleport_end = phase5VisualPoseAtFrame(teleport, phase5MotionFrameTarget(teleport.motion));
     try std.testing.expect(teleport_end.position.x != teleport.position.x);
+}
+
+test "local capture profile scopes horizon and memory to lod-forest only" {
+    const original = LODConfig{ .chunk_render_radius = 12, .radii = .{ 12, 64, 156, 256, 256 }, .memory_budget_mb = 128, .max_uploads_per_frame = 7, .compact_tiles_enabled = false };
+    for ([_][]const u8{ "", "seam", "water", "lod-handoff", "lod-aerial", "lod-handoff-traversal", "fog-rapid-turn", "teleport-handoff", "saved-world-create", "saved-world-reload", "lod-forest-unknown" }) |scene| {
+        var config = original;
+        try std.testing.expect(localCaptureHorizonDistance(scene) == null);
+        try std.testing.expect(applyLocalCaptureProfile(scene, &config) == null);
+        try std.testing.expectEqualDeep(original, config);
+    }
+    var config = original;
+    try std.testing.expectEqual(@as(?i32, 24), applyLocalCaptureProfile("LOD-FOREST", &config));
+    try std.testing.expectEqual(@as(?i32, 24), localCaptureHorizonDistance("lod-forest"));
+    try std.testing.expectEqual(@as(i32, 6), config.chunk_render_radius);
+    try std.testing.expectEqual([LODLevel.count]i32{ 6, 16, 24, 24, 24 }, config.radii);
+    try std.testing.expectEqual(@as(u32, 3), config.active_lod_count);
+    try std.testing.expectEqual(@as(u32, 1024), config.memory_budget_mb);
+    try std.testing.expectEqual(@as(usize, 3), @import("world-lod").lod_chunk.activeLODCount(config.interface()));
+    try std.testing.expectEqual(original.max_uploads_per_frame, config.max_uploads_per_frame);
+    try std.testing.expectEqual(original.compact_tiles_enabled, config.compact_tiles_enabled);
+    try std.testing.expectEqual(original.mesh_path, config.mesh_path);
+    try std.testing.expectEqual(original.horizontal_detail, config.horizontal_detail);
+}
+
+test "lod-forest parser retreats from verified forest to exact final pose without GPU qualification" {
+    const scene = parsePhase5VisualScene("LOD-FOREST").?;
+    try std.testing.expectEqual(Phase5VisualMotion.forest_retreat, scene.motion);
+    try std.testing.expectEqual(Vec3.init(896.0, 84.0, -1152.0), scene.position);
+    try std.testing.expectApproxEqAbs(@as(f32, -3.0 * std.math.pi / 4.0), scene.yaw, 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, -std.math.degreesToRadians(10.0)), scene.pitch, 0.00001);
+    try std.testing.expectEqualDeep(scene, phase5VisualPoseAtFrame(scene, 0));
+    try std.testing.expectEqual(Vec3.init(960.0, 95.0, -1088.0), phase5VisualPoseAtFrame(scene, 90).position);
+    const final = phase5VisualPoseAtFrame(scene, phase5MotionFrameTarget(scene.motion));
+    try std.testing.expectEqual(Vec3.init(1024.0, 106.0, -1024.0), final.position);
+    try std.testing.expectEqual(scene.yaw, final.yaw);
+    try std.testing.expectEqual(scene.pitch, final.pitch);
+    try std.testing.expectEqualDeep(final, phase5VisualPoseAtFrame(scene, 10_000));
+    const key = lodForestTargetKey(scene);
+    try std.testing.expectEqual(@as(i32, 14), key.rx);
+    try std.testing.expectEqual(@as(i32, -18), key.rz);
+    try std.testing.expectEqual(LODLevel.lod1, key.lod);
+    const bounds = key.chunkBounds();
+    try std.testing.expectEqual(@as(i32, 56), bounds.min_x);
+    try std.testing.expectEqual(@as(i32, 59), bounds.max_x);
+    try std.testing.expectEqual(@as(i32, -72), bounds.min_z);
+    try std.testing.expectEqual(@as(i32, -69), bounds.max_z);
+    try std.testing.expect(!phase5SceneRequiresGpuValidation("lod-forest"));
+    try std.testing.expect(phase5SceneRequiresGpuValidation("lod-handoff"));
+    try std.testing.expect(phase5SceneRequiresGpuValidation("saved-world-reload"));
+    try std.testing.expect(parsePhase5VisualScene("lod-forest-unknown") == null);
+}
+
+test "lod-forest natural evidence distinguishes leaves logs water and ground" {
+    var evidence: LodForestEvidence = .{};
+    for ([_]BlockType{ .air, .tall_grass, .flower_red, .vine, .mushroom_stem }) |block| evidence.observe(block);
+    try std.testing.expectEqualDeep(LodForestEvidence{}, evidence);
+    for ([_]BlockType{ .leaves, .mangrove_leaves, .jungle_leaves, .acacia_leaves, .birch_leaves, .spruce_leaves }) |block| evidence.observe(block);
+    for ([_]BlockType{ .wood, .mangrove_log, .jungle_log, .acacia_log, .birch_log, .spruce_log }) |block| evidence.observe(block);
+    evidence.observe(.water);
+    evidence.observe(.grass);
+    try std.testing.expectEqualDeep(LodForestEvidence{ .leaves = 6, .logs = 6, .water = 1, .ground = 1 }, evidence);
+}
+
+test "lod-forest holds until warmup then completes exactly 180 motion frames and retains evidence" {
+    const scene = parsePhase5VisualScene("lod-forest").?;
+    // Only pose/evidence methods are called; no world, window, or RHI access.
+    var session: GameSession = undefined;
+    session.player = Player.init(scene.position, true);
+    session.build_config = .{};
+    session.phase5_fixture_applied = false;
+    session.phase5_motion_complete = false;
+    session.phase5_motion_evidence_emitted = false;
+    session.phase5_motion_frames = 0;
+    const initial = LodForestEvidence{ .resident_chunks = 16, .ground = 1, .leaves = 778, .logs = 244 };
+    session.lod_forest_evidence = initial;
+    for (0..5) |_| session.applyPhase5VisualPose(scene);
+    try std.testing.expectEqual(@as(u32, 0), session.phase5_motion_frames);
+    try std.testing.expectEqual(scene.position, session.player.position);
+    session.phase5_fixture_applied = true;
+    for (0..179) |_| session.applyPhase5VisualPose(scene);
+    try std.testing.expect(!session.phase5_motion_complete);
+    session.applyPhase5VisualPose(scene);
+    try std.testing.expect(session.phase5_motion_complete);
+    try std.testing.expectEqual(@as(u32, 180), session.phase5_motion_frames);
+    try std.testing.expectEqual(Vec3.init(1024.0, 106.0, -1024.0), session.player.position);
+    session.applyPhase5VisualPose(scene);
+    try std.testing.expectEqual(@as(u32, 180), session.phase5_motion_frames);
+    // Departure must not reprobe the now-unloaded initial source footprint.
+    session.observeLodForest(scene);
+    try std.testing.expectEqualDeep(initial, session.lod_forest_evidence);
+}
+
+test "lod-forest warmup requires all sixteen chunks and at least five hundred leaves" {
+    var evidence = LodForestEvidence{ .resident_chunks = 16, .ground = 1, .leaves = 499, .logs = 244 };
+    try std.testing.expect(!lodForestWarmupReady(evidence));
+    evidence.leaves = 500;
+    try std.testing.expect(lodForestWarmupReady(evidence));
+    evidence.resident_chunks = 15;
+    try std.testing.expect(!lodForestWarmupReady(evidence));
+    evidence.resident_chunks = 16;
+    evidence.ground = 0;
+    try std.testing.expect(!lodForestWarmupReady(evidence));
+}
+
+test "lod-forest readiness requires completed retreat and current drawn target with enabled provenance" {
+    const evidence = LodForestEvidence{ .resident_chunks = 16, .ground = 1, .leaves = 778, .logs = 244 };
+    const target = LodForestTargetEvidence{ .state = .renderable, .mesh_ready = true, .projected = true, .drawn = true, .source_current = true, .dirty = true };
+    try std.testing.expect(lodForestLocallyReady(evidence, true, 4, target));
+    try std.testing.expect(!lodForestLocallyReady(evidence, false, 4, target));
+    try std.testing.expect(!lodForestLocallyReady(evidence, true, 3, target));
+    try std.testing.expect(!lodForestLocallyReady(.{}, true, 4, target));
+    inline for (.{ "mesh_ready", "projected", "drawn", "source_current" }) |field| {
+        var missing = target;
+        @field(missing, field) = false;
+        try std.testing.expect(!lodForestLocallyReady(evidence, true, 4, missing));
+    }
+    var busy = target;
+    busy.pinned = true;
+    try std.testing.expect(!lodForestLocallyReady(evidence, true, 4, busy));
+    busy.pinned = false;
+    for ([_]@import("world-lod").lod_chunk.LODState{ .missing, .generating, .generated, .meshing, .mesh_ready, .uploading }) |state| {
+        busy.state = state;
+        try std.testing.expect(!lodForestLocallyReady(evidence, true, 4, busy));
+    }
+    var enabled = target;
+    enabled.near_enabled = true;
+    try std.testing.expect(!lodForestLocallyReady(evidence, true, 4, enabled));
+    enabled.captured_summaries = 16;
+    enabled.target_summaries = 4;
+    try std.testing.expect(!lodForestLocallyReady(evidence, true, 4, enabled));
+    enabled.provenance[1] = 1;
+    try std.testing.expect(lodForestLocallyReady(evidence, true, 4, enabled));
+    enabled.captured_summaries = 0;
+    try std.testing.expect(!lodForestLocallyReady(evidence, true, 4, enabled));
+    enabled.captured_summaries = 16;
+    enabled.target_summaries = 0;
+    try std.testing.expect(!lodForestLocallyReady(evidence, true, 4, enabled));
 }
 
 fn lightingBaselineScene(name: []const u8) LightingBaselineScene {

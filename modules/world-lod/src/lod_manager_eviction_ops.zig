@@ -314,6 +314,7 @@ pub fn updateStats(self: *Self) void {
     defer self.profiling.end(.manager_lock_hold, lock_hold_timer);
     defer self.mutex.unlockShared();
 
+    source_data_cpu_bytes += @import("lod_manager_near_source_ops.zig").memoryBytes(self);
     for (0..LODLevel.count) |i| {
         var iter = self.regions[i].iterator();
         while (iter.next()) |entry| {

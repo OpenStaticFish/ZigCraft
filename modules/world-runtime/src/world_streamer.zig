@@ -336,7 +336,10 @@ pub const WorldStreamer = struct {
             mgr.setChunkResolver(.{
                 .ptr = self.storage,
                 .resolve_fn = resolveChunkFromStorage,
+                .capture_near_fn = captureNearChunkFromStorage,
             });
+            // Warmup predates SaveManager attachment and has not checked disk.
+            // Do not promote its origin chunk to authoritative near source.
         }
     }
 
@@ -841,6 +844,79 @@ fn resolveChunkFromStorage(ptr: *anyopaque, cx: i32, cz: i32) ?*const world_core
     storage.chunks_mutex.lockShared();
     defer storage.chunks_mutex.unlockShared();
     const entry = storage.chunks.get(ChunkKey{ .x = cx, .z = cz }) orelse return null;
+    switch (entry.chunk.state) {
+        .missing, .queued_for_generation, .generating => return null,
+        else => {},
+    }
     if (!entry.chunk.generated) return null;
     return &entry.chunk;
+}
+
+/// Value-only callback for near replay. Follow mutation's lighting -> storage
+/// order; the shared storage lock supplies lifetime, lighting_mutex excludes
+/// block edits. Neither lock is held when the manager receives the summary.
+fn captureNearChunkFromStorage(ptr: *anyopaque, cx: i32, cz: i32) ?LODManager.NearChunkSummary {
+    const storage: *ChunkStorage = @ptrCast(@alignCast(ptr));
+    storage.lighting_mutex.lock();
+    defer storage.lighting_mutex.unlock();
+    storage.chunks_mutex.lockShared();
+    defer storage.chunks_mutex.unlockShared();
+    const entry = storage.chunks.get(ChunkKey{ .x = cx, .z = cz }) orelse return null;
+    switch (entry.chunk.state) {
+        .missing, .queued_for_generation, .generating => return null,
+        else => {},
+    }
+    if (!entry.chunk.generated) return null;
+    return LODManager.NearChunkSummary.capture(&entry.chunk);
+}
+
+test "near source resolver rejects generating chunks and returns value ownership after unload" {
+    const testing = std.testing;
+    const summary = capture: {
+        var storage = ChunkStorage.init(testing.allocator);
+        defer storage.deinitWithoutRHI();
+        const data = try storage.getOrCreate(0, 0);
+        data.chunk.generated = true;
+        data.chunk.setBlock(0, 10, 0, .stone);
+        for ([_]Chunk.State{ .missing, .queued_for_generation, .generating }) |state| {
+            data.chunk.state = state;
+            try testing.expect(captureNearChunkFromStorage(&storage, 0, 0) == null);
+            try testing.expect(resolveChunkFromStorage(&storage, 0, 0) == null);
+        }
+        data.chunk.state = .unloading;
+        const captured = captureNearChunkFromStorage(&storage, 0, 0).?;
+        try testing.expect(!data.chunk.isPinned());
+        break :capture captured;
+    };
+    var source = try world_core.LODSimplifiedData.initWithVerticalSpans(testing.allocator, .lod0);
+    defer source.deinit();
+    try testing.expectEqual(@as(u32, 256), summary.apply(&source, 0, 0, 0, 0, 32, .edited));
+    try testing.expectEqual(@as(f32, 11), source.getHeight(0, 0));
+}
+
+test "near source manager attachment does not capture warmup before save lookup" {
+    const testing = std.testing;
+    var storage = ChunkStorage.init(testing.allocator);
+    defer storage.deinitWithoutRHI();
+    const origin = try storage.getOrCreate(0, 0);
+    origin.chunk.generated = true;
+    origin.chunk.state = .renderable;
+    origin.chunk.setBlock(0, 10, 0, .stone);
+    var config = @import("world-lod").lod_chunk.LODConfig{ .memory_budget_mb = 0 };
+    var manager = try LODManager.initCacheTestManager(testing.allocator, "");
+    defer manager.cache_io.deinit();
+    defer manager.ingestion_queue.deinit(testing.allocator);
+    defer manager.near_sources.deinit(testing.allocator);
+    defer manager.near_source_retries.deinit(testing.allocator);
+    manager.config = config.interface();
+    manager.near_source_enabled = true;
+    manager.near_source_limit = 0;
+    var streamer: WorldStreamer = undefined;
+    streamer.storage = &storage;
+    streamer.lod_coordinator = .init(16);
+    streamer.setLODManager(&manager);
+    try testing.expectEqual(@as(u64, 1), manager.near_source_sequence.load(.monotonic));
+    try testing.expectEqual(@as(usize, 0), manager.near_sources.count());
+    try testing.expectEqual(@as(usize, 0), manager.near_source_retries.items.len);
+    try testing.expect(manager.ingestion_queue.chunk_resolver != null);
 }

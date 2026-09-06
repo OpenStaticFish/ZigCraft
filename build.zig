@@ -705,6 +705,44 @@ fn defineBuildSteps(
     run_exe_tests.step.dependOn(&shader_cmd.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    // Imported production modules do not contribute their test blocks to the
+    // aggregate root. Keep these roots focused on the regression coverage.
+    inline for (.{
+        .{ "engine-graphics", "modules/engine-graphics/src/tests.zig", engine_graphics },
+        .{ "game-core", "modules/game-core/src/tests.zig", game_core },
+    }) |entry| {
+        const module_test_root = b.createModule(.{
+            .root_source_file = b.path(entry[1]),
+            .target = target,
+            .optimize = optimize,
+            .sanitize_c = sanitize_c,
+        });
+        var imports = entry[2].import_table.iterator();
+        while (imports.next()) |import| {
+            module_test_root.addImport(import.key_ptr.*, import.value_ptr.*);
+        }
+        const module_tests = b.addTest(.{
+            .name = entry[0] ++ "-tests",
+            .root_module = module_test_root,
+            .filters = test_filters,
+        });
+        module_test_root.link_libc = true;
+        module_test_root.addCSourceFile(.{
+            .file = b.path("libs/stb/stb_truetype_impl.c"),
+            .flags = &.{"-std=c99"},
+        });
+        module_test_root.addIncludePath(b.path("libs/stb"));
+        module_test_root.linkSystemLibrary("sdl3", .{});
+        module_test_root.linkSystemLibrary("vulkan", .{});
+        if (enable_imgui) addCimgui(b, module_tests);
+        if (enable_rmlui) addRmlUi(module_tests);
+
+        const run_module_tests = addRunArtifact(b, module_tests);
+        run_module_tests.setEnvironmentVariable("ZIGCRAFT_LOG_LEVEL", "fatal");
+        run_module_tests.step.dependOn(&shader_cmd.step);
+        test_step.dependOn(&run_module_tests.step);
+    }
+
     // world-lod gates its dedicated test modules on builtin.is_test. Importing
     // the production module into src/tests.zig leaves that module compiled with
     // is_test=false, so run it as a test root as well.
@@ -1071,7 +1109,7 @@ fn defineBuildOptions(b: *std.Build, optimize: std.builtin.OptimizeMode) BuildOp
     const screenshot_delay_seconds = b.option(u32, "screenshot-delay-seconds", "Seconds to wait after screenshot target is ready before capture") orelse 0;
     options.addOption(u32, "screenshot_delay_seconds", screenshot_delay_seconds);
 
-    const phase5_visual_scene = b.option([]const u8, "phase5-visual-scene", "Deterministic production-world fixture/camera for the Phase 5 visual gate (seam, water, lod-handoff, lod-aerial, lod-handoff-traversal, fog-rapid-turn, teleport-handoff, saved-world-create, saved-world-reload)") orelse "";
+    const phase5_visual_scene = b.option([]const u8, "phase5-visual-scene", "Deterministic production-world fixture/camera (seam, water, lod-handoff, lod-aerial, lod-handoff-traversal, fog-rapid-turn, teleport-handoff, saved-world-create, saved-world-reload; lod-forest is provisional camera-only capture, not a Phase 5 qualification)") orelse "";
     options.addOption([]const u8, "phase5_visual_scene", phase5_visual_scene);
     const phase5_visual_run_id = b.option([]const u8, "phase5-visual-run-id", "Fresh evidence scope identifier for a Phase 5 visual-gate invocation") orelse "";
     options.addOption([]const u8, "phase5_visual_run_id", phase5_visual_run_id);

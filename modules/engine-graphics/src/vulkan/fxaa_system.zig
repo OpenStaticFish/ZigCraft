@@ -86,6 +86,8 @@ pub const FXAASystem = struct {
         dependency.srcSubpass = c.VK_SUBPASS_EXTERNAL;
         dependency.dstSubpass = 0;
         dependency.srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        // The intermediate pass reuses the display post-process pipeline.
+        dependency.srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
         dependency.dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         dependency.dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 

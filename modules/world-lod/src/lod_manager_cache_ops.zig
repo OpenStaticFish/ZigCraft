@@ -15,7 +15,12 @@ const log = @import("engine-core").log;
 /// filesystem maintenance, unlike the frame/update path.
 pub fn enableCache(self: *Self, save_dir_path: []const u8) !void {
     self.flushCacheIO();
-    const cache_dir_path = try self.allocator.dupe(u8, save_dir_path);
+    // Experimental source/header maintenance must never touch shipped caches.
+    // LOD0/1 are memory-only; coarse caches use an isolated derived namespace.
+    const cache_dir_path = if (self.near_source_enabled)
+        try fs.path.join(self.allocator, &.{ save_dir_path, "near-source-v1" })
+    else
+        try self.allocator.dupe(u8, save_dir_path);
     errdefer self.allocator.free(cache_dir_path);
 
     const live_header = lod_store.StoreHeader{
@@ -23,17 +28,17 @@ pub fn enableCache(self: *Self, save_dir_path: []const u8) !void {
         .generator_identity_hash = self.generator.identity_hash,
         .generator_version = self.generator.version,
     };
-    if (try lod_store.readHeader(self.allocator, save_dir_path)) |stored_header| {
+    if (try lod_store.readHeader(self.allocator, cache_dir_path)) |stored_header| {
         if (stored_header.seed != live_header.seed or
             stored_header.lod_data_version != live_header.lod_data_version or
             stored_header.generator_identity_hash != live_header.generator_identity_hash or
             stored_header.generator_version != live_header.generator_version)
         {
             log.log.warn("LOD store identity changed; discarding stale LOD source store", .{});
-            try lod_store.deleteStore(self.allocator, save_dir_path);
+            try lod_store.deleteStore(self.allocator, cache_dir_path);
         }
     }
-    try lod_store.writeHeader(self.allocator, save_dir_path, live_header);
+    try lod_store.writeHeader(self.allocator, cache_dir_path, live_header);
 
     self.mutex.lock();
     defer self.mutex.unlock();
@@ -70,7 +75,7 @@ pub fn invalidatePendingEditedStoresNow(self: *Self) void {
     self.ingestion_queue.mutex.lock();
     for (self.ingestion_queue.pending_ingestions.items) |pending| {
         if (pending.provenance != .edited) continue;
-        var level: usize = 1;
+        var level: usize = if (self.near_source_enabled) 2 else 1;
         while (level < lod_chunk.LODLevel.count) : (level += 1) {
             const level_mask = @as(u8, 1) << @intCast(level);
             if (pending.pending_levels & level_mask == 0) continue;
@@ -84,7 +89,7 @@ pub fn invalidatePendingEditedStoresNow(self: *Self) void {
     // than `pending_ingestions`. Its full active LOD ladder is equally stale.
     var dirty_iter = self.ingestion_queue.edit_dirty.keyIterator();
     while (dirty_iter.next()) |dirty| {
-        var level: usize = 1;
+        var level: usize = if (self.near_source_enabled) 2 else 1;
         while (level < lod_chunk.activeLODCount(self.config)) : (level += 1) {
             const lod: lod_chunk.LODLevel = @enumFromInt(@as(u3, @intCast(level)));
             stale_keys.put(LODRegionKey.fromChunkCoords(dirty.cx, dirty.cz, lod), {}) catch {
@@ -158,8 +163,9 @@ pub fn drainCacheCompletions(self: *Self) void {
                     log_legacy_notice = read.used_legacy;
                     switch (read.result) {
                         .hit => |*data| {
-                            if ((regionRequiresSpans(self, read.key) and !data.hasVerticalSpans()) or
-                                data.width != LODSimplifiedData.getGridSizeForDensity(read.key.lod, self.config.getSampleDensity(read.key.lod)))
+                            if (self.usesNearSource(read.key.lod) or
+                                (regionRequiresSpans(self, read.key) and !data.hasVerticalSpans()) or
+                                data.width != LODSimplifiedData.getGridSizeForDensity(read.key.lod, self.sourceSampleDensity(read.key.lod)))
                             {
                                 data.deinit();
                                 read.result = .miss;
@@ -219,7 +225,7 @@ fn queueDirtyStores(self: *Self, max_count: usize) usize {
     self.mutex.lock();
     defer self.mutex.unlock();
     const active = lod_chunk.activeLODCount(self.config);
-    var level: usize = 1;
+    var level: usize = if (self.near_source_enabled) 2 else 1;
     while (level < active and queued < max_count) : (level += 1) {
         var iter = self.regions[level].iterator();
         while (iter.next()) |entry| {
@@ -255,7 +261,7 @@ fn queueDirtyStores(self: *Self, max_count: usize) usize {
 }
 
 fn regionRequiresSpans(self: *Self, key: LODRegionKey) bool {
-    return self.config.getVerticalSpanBudget() > 0 and self.effectiveMeshPath(key.lod) == .column_spans;
+    return self.sourceRequiresSpans(key.lod);
 }
 
 pub fn cacheKey(self: *const Self, key: LODRegionKey) lod_cache.Key {
@@ -293,12 +299,14 @@ pub fn cacheEnabled(self: *Self) bool {
 // Synchronous helpers remain explicit setup/diagnostic APIs. Update and
 // generation paths use CacheIoPipeline exclusively.
 pub fn readStorePayload(self: *Self, save_dir_path: []const u8, cache_key: lod_cache.Key) !?[]u8 {
+    if (self.usesNearSource(cache_key.lod)) return null;
     self.cache_store.store_mutex.lock();
     defer self.cache_store.store_mutex.unlock();
     return lod_store.readPayload(self.allocator, save_dir_path, cache_key);
 }
 
 pub fn writeStorePayload(self: *Self, save_dir_path: []const u8, cache_key: lod_cache.Key, bytes: []const u8) !void {
+    if (self.usesNearSource(cache_key.lod)) return;
     self.cache_store.store_mutex.lock();
     defer self.cache_store.store_mutex.unlock();
     const store_size_cap_mb = if (self.cache_store.use_config_store_size_cap) self.config.getLODStoreSizeCapMB() else self.cache_store.store_size_cap_mb;
@@ -306,6 +314,7 @@ pub fn writeStorePayload(self: *Self, save_dir_path: []const u8, cache_key: lod_
 }
 
 pub fn deleteStorePayload(self: *Self, save_dir_path: []const u8, cache_key: lod_cache.Key) void {
+    if (self.usesNearSource(cache_key.lod)) return;
     self.cache_store.store_mutex.lock();
     defer self.cache_store.store_mutex.unlock();
     lod_store.deletePayload(self.allocator, save_dir_path, cache_key);
@@ -320,6 +329,7 @@ pub fn deleteStoreContainer(self: *Self, path: []const u8) void {
 }
 
 pub fn loadCachedSourceData(self: *Self, key: LODRegionKey) ?LODSimplifiedData {
+    if (self.usesNearSource(key.lod)) return null;
     const path = self.cacheDirPathSnapshot() orelse return null;
     defer self.allocator.free(path);
     const cache_key = self.cacheKey(key);
@@ -378,6 +388,7 @@ pub fn recordCacheMiss(self: *Self) void {
 /// Explicit API used by tools/tests. Like frame writes, it snapshots then
 /// serializes on the cache worker; callers may use flushCacheIO to wait.
 pub fn saveCachedSourceData(self: *Self, key: LODRegionKey, data: *const LODSimplifiedData) void {
+    if (self.usesNearSource(key.lod)) return;
     const path = self.cacheDirPathSnapshot() orelse return;
     defer self.allocator.free(path);
     const snapshot = lod_cache.cloneSourceData(data, key.lod, self.allocator) catch |err| {

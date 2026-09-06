@@ -152,6 +152,7 @@ pub fn init(allocator: std.mem.Allocator, config: ILODConfig, gpu_bridge: LODGPU
         .cache_store = .{ .store_size_cap_mb = config.getLODStoreSizeCapMB(), .use_config_store_size_cap = true },
         .cache_io = undefined,
         .ingestion_queue = LODIngestionQueue.init(allocator),
+        .near_source_enabled = engine_core.envFlag("ZIGCRAFT_LOD_NEAR_SOURCE", false),
     };
 
     mgr.cache_io = try @import("lod_cache_io.zig").CacheIoPipeline.init(allocator, &mgr.profiling);
@@ -251,6 +252,8 @@ pub fn deinit(self: *Self) void {
     }
 
     self.ingestion_queue.deinit(self.allocator);
+    self.near_sources.deinit(self.allocator);
+    self.near_source_retries.deinit(self.allocator);
     self.generation_tokens.deinit(self.allocator);
     self.transition_tokens.deinit(self.allocator);
     self.fade_tokens.deinit(self.allocator);
@@ -296,6 +299,7 @@ pub fn update(self: *Self, player_pos: Vec3, player_velocity: Vec3, chunk_checke
     const pc = worldToChunkFromFloat(player_pos.x, player_pos.z);
     const previous_pc = self.loadPlayerChunkPos();
     self.storePlayerChunkPos(pc.chunk_x, pc.chunk_z);
+    if (pc.chunk_x != previous_pc.cx or pc.chunk_z != previous_pc.cz) @import("lod_manager_near_source_ops.zig").prune(self);
     const moved_x = @abs(@as(i64, pc.chunk_x) - @as(i64, previous_pc.cx));
     const moved_z = @abs(@as(i64, pc.chunk_z) - @as(i64, previous_pc.cz));
     const teleport_distance_sq = @as(i64, TELEPORT_CANCEL_DISTANCE_CHUNKS) * TELEPORT_CANCEL_DISTANCE_CHUNKS;
@@ -353,6 +357,7 @@ pub fn update(self: *Self, player_pos: Vec3, player_velocity: Vec3, chunk_checke
     };
 
     // Process state transitions
+    @import("lod_manager_near_source_ops.zig").replay(self, 32);
     const transitions_timer = self.profiling.begin();
     self.processStateTransitions(player_velocity) catch |err| {
         log.log.warn("LOD state transitions error: {} (non-fatal)", .{err});

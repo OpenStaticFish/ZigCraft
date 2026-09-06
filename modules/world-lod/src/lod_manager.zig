@@ -149,6 +149,29 @@ pub const LODJobDispatcher = struct {
 pub const LODManager = struct {
     const Self = @This();
 
+    pub const NearChunkSummary = @import("lod_near_source.zig").NearChunkSummary;
+    pub const NearSourceKind = enum(u8) { generated, loaded, edited };
+    pub const NearSourceCapture = struct {
+        summary: NearChunkSummary,
+        kind: NearSourceKind,
+        sequence: u64,
+    };
+    pub const NearSourceRetry = struct {
+        cx: i32,
+        cz: i32,
+        capture: NearSourceCapture,
+    };
+
+    // The experiment flag is immutable after initialization. The map uses the manager mutex,
+    // never the ingestion or storage locks, and retains no full-detail pins.
+    near_source_enabled: bool = false,
+    near_sources: std.AutoArrayHashMapUnmanaged(ChunkCoordKey, NearSourceCapture) = .empty,
+    near_source_sequence: std.atomic.Value(u64) = .init(1),
+    near_source_sequence_floor: u64 = 0,
+    near_source_retries: std.ArrayListUnmanaged(NearSourceRetry) = .empty,
+    near_source_cursor: usize = 0,
+    near_source_limit: usize = 4096,
+
     allocator: std.mem.Allocator,
     config: ILODConfig,
 
@@ -367,6 +390,8 @@ pub const LODManager = struct {
 
     /// Enables persistent source-data caching for LOD regions below `save_dir_path`.
     /// Allocates and stores the cache path; errors indicate allocation or filesystem setup failure.
+    /// The near-source experiment isolates coarse caching in `near-source-v1`
+    /// and keeps LOD0/1 source entirely memory-only, including explicit saves.
     pub fn enableCache(self: *Self, save_dir_path: []const u8) !void {
         return lod_manager_cache_ops.enableCache(self, save_dir_path);
     }
@@ -497,6 +522,49 @@ pub const LODManager = struct {
         return lod_manager_ingestion_ops.setChunkResolver(self, resolver);
     }
 
+    pub fn usesNearSource(self: *const Self, lod: LODLevel) bool {
+        return self.near_source_enabled and @intFromEnum(lod) <= 1;
+    }
+
+    pub fn sourceSampleDensity(self: *const Self, lod: LODLevel) f32 {
+        return if (self.usesNearSource(lod)) 1.0 else self.config.getSampleDensity(lod);
+    }
+
+    pub fn sourceRequiresSpans(self: *Self, lod: LODLevel) bool {
+        return self.usesNearSource(lod) or (self.config.getVerticalSpanBudget() > 0 and self.effectiveMeshPath(lod) == .column_spans);
+    }
+
+    /// Caller owns block mutation synchronization and chunk lifetime. Scans
+    /// outside the manager lock; submit only after generation is publishable.
+    pub fn captureNearChunk(self: *Self, chunk: *const Chunk, kind: NearSourceKind) ?NearSourceCapture {
+        if (!self.near_source_enabled or self.benchmark_fixture_active) return null;
+        const sequence = self.near_source_sequence.fetchAdd(1, .monotonic);
+        return .{ .summary = NearChunkSummary.capture(chunk), .kind = kind, .sequence = sequence };
+    }
+
+    /// True means accepted or consumed as obsolete. False requests a bounded
+    /// retry; callers must not reinterpret an old capture with a new sequence.
+    pub fn submitNearChunk(self: *Self, cx: i32, cz: i32, capture: NearSourceCapture) bool {
+        return @import("lod_manager_near_source_ops.zig").submit(self, cx, cz, capture);
+    }
+
+    /// Bounded value-only retry, independent of coarse ingestion and residency.
+    /// Queue saturation/allocation failure is logged; no chunk pins are retained.
+    pub fn deferNearChunk(self: *Self, cx: i32, cz: i32, capture: NearSourceCapture) void {
+        return @import("lod_manager_near_source_ops.zig").deferCapture(self, cx, cz, capture);
+    }
+
+    /// Main-thread resolver capture. Callback locks mutation/storage itself;
+    /// no manager or ingestion lock is held while calling into the runtime.
+    pub fn captureResolvedNearChunk(self: *Self, cx: i32, cz: i32, kind: NearSourceKind) bool {
+        return @import("lod_manager_near_source_ops.zig").captureResolved(self, cx, cz, kind);
+    }
+
+    /// Caller holds manager mutex and owns mutable region source data.
+    pub fn overlayNearSourcesLocked(self: *Self, region: *LODChunk) u32 {
+        return @import("lod_manager_near_source_ops.zig").overlayRegionLocked(self, region);
+    }
+
     /// Folds one full-detail chunk into every matching LOD region's simplified source data.
     /// Marks affected source data dirty so meshes and cache payloads can be refreshed.
     pub fn ingestChunk(self: *Self, cx: i32, cz: i32, chunk: *const Chunk, provenance: LODColumnProvenance) void {
@@ -504,6 +572,14 @@ pub const LODManager = struct {
         // run. Full-detail streamer arrivals must not remesh a fixture tile.
         if (self.benchmark_fixture_active) return;
         return lod_manager_ingestion_ops.ingestChunk(self, cx, cz, chunk, provenance);
+    }
+
+    /// Legacy downsampling only (LOD2+ with the experiment, LOD1+ otherwise).
+    /// Near snapshots are captured before publication and submitted separately,
+    /// even when fresh coarse ingestion is off.
+    pub fn ingestCoarseChunk(self: *Self, cx: i32, cz: i32, chunk: *const Chunk, provenance: LODColumnProvenance) void {
+        if (self.benchmark_fixture_active) return;
+        return lod_manager_ingestion_ops.ingestCoarseChunk(self, cx, cz, chunk, provenance);
     }
 
     /// Queues ingestion for a chunk whose target LOD regions may not exist yet.

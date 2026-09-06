@@ -154,7 +154,8 @@ test "getCellSize" {
     try std.testing.expectEqual(@as(u32, 1), getCellSize(.lod1));
     try std.testing.expectEqual(@as(u32, 2), getCellSize(.lod2));
     try std.testing.expectEqual(@as(u32, 2), getCellSize(.lod3));
-    try std.testing.expectEqual(@as(u32, 4), getCellSize(.lod4));
+    // The 512-block horizon region uses 65 samples (64 cells).
+    try std.testing.expectEqual(@as(u32, 8), getCellSize(.lod4));
 }
 
 test "buildFromSimplifiedData keeps distant heightfields voxel stepped" {
@@ -221,31 +222,6 @@ test "buildFullDetailHeightmapMesh spans full LOD region" {
     try std.testing.expectEqual(@as(f32, 256.0), max_z);
     try std.testing.expectEqual(@as(f32, 32.0), @as(f32, mesh.vertices[0].uv[0]));
     try std.testing.expectEqual(@as(f32, 64.0), @as(f32, mesh.vertices[0].uv[1]));
-}
-
-test "setPendingFromIndexed resets stale LOD draw ranges" {
-    const allocator = std.testing.allocator;
-    var mesh = LODMesh.init(allocator, .lod2);
-    defer mesh.deinit(testResources());
-
-    mesh.opaque_vertex_count = 24;
-    mesh.water_vertex_offset = 24 * @sizeOf(Vertex);
-    mesh.water_vertex_count = 6;
-
-    const source = [_]Vertex{
-        makeLODVertex(.{ 0.0, 1.0, 0.0 }, .{ 1.0, 1.0, 1.0 }, .{ 0.0, 1.0, 0.0 }, .{ 0.0, 0.0 }, Vertex.LOD_TILE_ID),
-        makeLODVertex(.{ 1.0, 1.0, 0.0 }, .{ 1.0, 1.0, 1.0 }, .{ 0.0, 1.0, 0.0 }, .{ 1.0, 0.0 }, Vertex.LOD_TILE_ID),
-        makeLODVertex(.{ 0.0, 1.0, 1.0 }, .{ 1.0, 1.0, 1.0 }, .{ 0.0, 1.0, 0.0 }, .{ 0.0, 1.0 }, Vertex.LOD_TILE_ID),
-    };
-    const indices = [_]u32{ 0, 1, 2 };
-
-    try mesh.setPendingFromIndexed(&source, &indices);
-
-    const pending = mesh.pending_vertices orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(usize, 3), pending.len);
-    try std.testing.expectEqual(@as(u32, 3), mesh.opaque_vertex_count);
-    try std.testing.expectEqual(@as(usize, 3 * @sizeOf(Vertex)), mesh.water_vertex_offset);
-    try std.testing.expectEqual(@as(u32, 0), mesh.water_vertex_count);
 }
 
 fn vertexTileId(v: Vertex) u16 {
@@ -460,7 +436,10 @@ test "buildFromColumnSpans adds water as a separate span" {
     fillColumnSpanData(&data, .sand, 60.0, 0xD8C76D);
     data.clearVerticalSpans(0, 0);
     try std.testing.expect(data.setVerticalSpan(0, 0, 0, testSpan(45.0, 60.0, .sand, 0xD8C76D)));
-    data.water[0] = .{ .is_surface = true, .surface_height = 63.0, .depth = 3.0, .coverage = 1.0 };
+    // Two wet corners qualify cell (0, 0); the neighboring cell has only one.
+    for ([_]usize{ 0, 1 }) |idx| {
+        data.water[idx] = .{ .is_surface = true, .surface_height = 63.0, .depth = 3.0, .coverage = 1.0 };
+    }
 
     var mesh = LODMesh.init(allocator, .lod2);
     defer mesh.deinit(testResources());
@@ -954,7 +933,7 @@ test "buildFromSimplifiedData falls back to LOD tile for unmapped top blocks" {
     for (verts) |v| try std.testing.expectEqual(@as(u16, Vertex.LOD_TILE_ID), vertexTileId(v));
 }
 
-test "buildFromSimplifiedData promotes mixed water cells to water material" {
+test "buildFromSimplifiedData separates sufficiently covered mixed water cells from seafloor" {
     const allocator = std.testing.allocator;
     const MAX_BLOCK_TYPES = world_core.MAX_BLOCK_TYPES;
 
@@ -988,17 +967,22 @@ test "buildFromSimplifiedData promotes mixed water cells to water material" {
             .foundation = .stone,
         };
     }
-    data.water[0] = .{
-        .is_surface = true,
-        .surface_height = 63.0,
-        .depth = 8.0,
-        .coverage = 1.0,
-    };
-    data.material_layers[0] = .{
-        .surface = .water,
-        .subsurface = .sand,
-        .foundation = .stone,
-    };
+    // Half of the first coarse cell is wet. A single wet corner must not flood it.
+    for ([_]usize{ 0, 1 }) |idx| {
+        data.heightmap[idx] = 55.0;
+        data.top_blocks[idx] = .water;
+        data.water[idx] = .{
+            .is_surface = true,
+            .surface_height = 63.0,
+            .depth = 8.0,
+            .coverage = 1.0,
+        };
+        data.material_layers[idx] = .{
+            .surface = .water,
+            .subsurface = .sand,
+            .foundation = .stone,
+        };
+    }
 
     var mesh = LODMesh.init(allocator, .lod2);
     defer mesh.deinit(testResources());
@@ -1011,10 +995,11 @@ test "buildFromSimplifiedData promotes mixed water cells to water material" {
     var found_seafloor_top = false;
     const water_start: usize = @intCast(mesh.opaque_vertex_count);
     for (verts[0..mesh.opaque_vertex_count]) |v| {
-        if (vertexTileId(v) == 51) found_seafloor_top = true;
+        if (vertexTileId(v) == 51 and v.pos[1] == 55.0) found_seafloor_top = true;
         try std.testing.expect(vertexTileId(v) != 41);
     }
     try std.testing.expect(found_seafloor_top);
+    try std.testing.expectEqual(@as(u32, 6), mesh.water_vertex_count);
 
     var found_water_top = false;
     for (verts[water_start..]) |v| {
@@ -1109,7 +1094,7 @@ test "representativeVegetationForLOD suppresses subpixel horizon foliage" {
     try std.testing.expectEqual(BlockType.air, vegetation.leaves);
 }
 
-test "buildFromSimplifiedData uses averaged color tile for far LOD tops" {
+test "buildFromSimplifiedData retains atlas material with averaged color for far LOD tops" {
     const allocator = std.testing.allocator;
     const MAX_BLOCK_TYPES = world_core.MAX_BLOCK_TYPES;
 
@@ -1150,8 +1135,69 @@ test "buildFromSimplifiedData uses averaged color tile for far LOD tops" {
 
     const verts = mesh.pending_vertices orelse return error.TestExpectedEqual;
     try std.testing.expect(verts.len > 0);
-    try std.testing.expectEqual(@as(u16, Vertex.LOD_TILE_ID), vertexTileId(verts[0]));
-    try std.testing.expect(vertexRgb(verts[0]) != 0x3A7D42);
+    // Terrain retains its atlas material; the draw mask selects color-only LOD shading.
+    try std.testing.expectEqual(@as(u16, 23), vertexTileId(verts[0]));
+    // Linear atlas (55, 134, 30) * packed plains tint (56, 184, 41) / 255.
+    try std.testing.expectEqual(@as(u32, 0x0C6105), vertexRgb(verts[0]));
+}
+
+test "CompactLODTile preserves source RGB channel order for expanded vertex parity" {
+    const allocator = std.testing.allocator;
+    var data = try LODSimplifiedData.init(allocator, .lod3);
+    defer data.deinit();
+
+    const cases = [_]struct { source: u32, rgb: u32, channels: [3]f32 }{
+        .{ .source = 0xFF0000, .rgb = 0xFF0000, .channels = .{ 1.0, 0.0, 0.0 } },
+        .{ .source = 0x0000FF, .rgb = 0x0000FF, .channels = .{ 0.0, 0.0, 1.0 } },
+        .{ .source = 0xA5123456, .rgb = 0x123456, .channels = .{ 18.0 / 255.0, 52.0 / 255.0, 86.0 / 255.0 } },
+    };
+    for (cases, 0..) |case, i| data.colors[i] = case.source;
+
+    var tile = try @import("lod_tile.zig").CompactLODTile.initFromSimplified(allocator, .lod3, &data);
+    defer tile.deinit();
+    for (cases, 0..) |case, i| {
+        const sample = tile.sample(@intCast(i), 0) orelse return error.TestExpectedEqual;
+        // GLSL's third uvec4 lane holds source RGB at bits 5..28, not Vertex ABGR.
+        const word = std.mem.readInt(u32, sample.bytes[8..12], .little);
+        try std.testing.expectEqual(case.rgb, (word >> 5) & 0xFFFFFF);
+        const color = sample.decode().color;
+        const channels = [3]f32{ geom.unpackR(color), geom.unpackG(color), geom.unpackB(color) };
+        try std.testing.expectEqualDeep(case.channels, channels);
+        const vertex = makeLODVertex(.{ 0, 0, 0 }, channels, .{ 0, 1, 0 }, .{ 0, 0 }, Vertex.LOD_TILE_ID);
+        try std.testing.expectEqual(case.rgb, vertexRgb(vertex));
+    }
+}
+
+test "applyTextureLuminance preserves tint magnitude including black and neutral tints" {
+    var atlas = testAtlas(std.testing.allocator);
+    atlas.tile_colors[@intFromEnum(BlockType.grass)] = TextureAtlas.BlockTileColor.uniform(0x804020);
+
+    // Expected channels are round(atlas_byte * tint_byte / 255), independently
+    // of biome selection, sRGB conversion, or the production multiply helper.
+    const cases = [_]struct { tint: u32, expected: u32 }{
+        .{ .tint = 0x000000, .expected = 0x000000 },
+        .{ .tint = 0x808080, .expected = 0x402010 },
+        .{ .tint = 0x808078, .expected = 0x40200F },
+        .{ .tint = 0x4080C0, .expected = 0x202018 },
+        .{ .tint = 0xFFFFFF, .expected = 0x804020 },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(case.expected, applyTextureLuminance(case.tint, .grass, .top, &atlas));
+    }
+}
+
+test "applyTextureLuminance leaves untinted atlas faces and water unchanged" {
+    var atlas = testAtlas(std.testing.allocator);
+    atlas.tile_colors[@intFromEnum(BlockType.grass)] = .{ .top = 0x804020, .side = 0x123456, .bottom = 0x654321 };
+    atlas.tile_colors[@intFromEnum(BlockType.stone)] = TextureAtlas.BlockTileColor.uniform(0x2468AC);
+    atlas.tile_colors[@intFromEnum(BlockType.water)] = TextureAtlas.BlockTileColor.uniform(0x804020);
+
+    try std.testing.expectEqual(@as(u32, 0x123456), applyTextureLuminance(0x4080C0, .grass, .side, &atlas));
+    try std.testing.expectEqual(@as(u32, 0x654321), applyTextureLuminance(0x4080C0, .grass, .bottom, &atlas));
+    for ([_]LODTextureFace{ .top, .side, .bottom }) |face| {
+        try std.testing.expectEqual(@as(u32, 0x2468AC), applyTextureLuminance(0x4080C0, .stone, face, &atlas));
+        try std.testing.expectEqual(@as(u32, 0x4080C0), applyTextureLuminance(0x4080C0, .water, face, &atlas));
+    }
 }
 
 test "buildFromSimplifiedData tints atlas average for grass tops" {
@@ -1179,9 +1225,8 @@ test "buildFromSimplifiedData tints atlas average for grass tops" {
     try mesh.buildFromSimplifiedData(&data, 0, 0, &atlas);
 
     const verts = mesh.pending_vertices orelse return error.TestExpectedEqual;
-    const rgb = vertexRgb(verts[0]);
-    try std.testing.expect(rgb != 0x3A7D42);
-    try std.testing.expect(((rgb >> 8) & 0xFF) > ((rgb >> 16) & 0xFF));
+    // round((55, 134, 30) * (56, 184, 41) / 255), without tint normalization.
+    try std.testing.expectEqual(@as(u32, 0x0C6105), vertexRgb(verts[0]));
 }
 
 test "buildFromSimplifiedData uses chunk grass tint for grass tops" {
@@ -1209,8 +1254,9 @@ test "buildFromSimplifiedData uses chunk grass tint for grass tops" {
     try mesh.buildFromSimplifiedData(&data, 0, 0, &atlas);
 
     const verts = mesh.pending_vertices orelse return error.TestExpectedEqual;
-    const expected = applyTextureLuminance(biome_mod.getGrassTintColor(.plains), .grass, .top, &atlas);
-    try std.testing.expectEqual(expected, vertexRgb(verts[0]));
+    // Chunk plains grass is (0.22, 0.72, 0.16), packed as (56, 184, 41).
+    // Linear atlas (55, 134, 30) times that tint rounds to (12, 97, 5).
+    try std.testing.expectEqual(@as(u32, 0x0C6105), vertexRgb(verts[0]));
 }
 
 test "addTreeCanopyColumn uses chunk foliage tint" {
@@ -1239,9 +1285,10 @@ test "addTreeCanopyColumn uses chunk foliage tint" {
     try addTreeCanopyColumn(allocator, &vertices, &data, 0, 0, .lod2, 0.0, 0.0, 8.0, 64.0, 67.0, 72.0, vegetation, &atlas, 0, 0);
 
     try std.testing.expect(vertices.items.len >= 6);
-    const expected = applyTextureLuminance(biome_mod.getFoliageTintColor(.forest), .leaves, .top, &atlas);
+    // Chunk forest foliage (0.12, 0.52, 0.12) packs to (31, 133, 31).
+    // Linear atlas (18, 70, 10) times that tint rounds to (2, 37, 1).
     for (vertices.items[0..6]) |v| {
-        try std.testing.expectEqual(expected, vertexRgb(v));
+        try std.testing.expectEqual(@as(u32, 0x022501), vertexRgb(v));
     }
 }
 
@@ -1288,8 +1335,8 @@ test "buildFromSimplifiedData uses single source sample for fine LOD tops" {
     const verts = mesh.pending_vertices orelse return error.TestExpectedEqual;
     try std.testing.expect(verts.len > 0);
     try std.testing.expectEqual(@as(f32, 64.0), verts[0].pos[1]);
-    const expected = applyTextureLuminance(biome_mod.getGrassTintColor(.plains), .grass, .top, &atlas);
-    try std.testing.expectEqual(expected, vertexRgb(verts[0]));
+    // The white atlas preserves the packed chunk plains grass tint.
+    try std.testing.expectEqual(@as(u32, 0x38B829), vertexRgb(verts[0]));
 }
 
 test "buildFromSimplifiedData keeps mixed water cells on one flat surface" {
@@ -1447,9 +1494,11 @@ test "buildFromSimplifiedData renders far vegetation as separate tree silhouette
     var found_ground_top = false;
     var found_canopy_top = false;
     var found_compact_canopy = false;
+    // Linear grass atlas (54, 133, 26) * forest grass tint (46, 163, 41) / 255.
+    // Linear leaf atlas (18, 70, 10) * forest foliage tint (31, 133, 31) / 255.
     for (verts) |v| {
-        if (v.pos[1] == 64.0 and vertexRgb(v) == 0x2D591A) found_ground_top = true;
-        if (v.pos[1] == 71.0 and vertexTileId(v) == Vertex.LOD_TILE_ID and vertexRgb(v) != 0x2D591A) found_canopy_top = true;
+        if (v.pos[1] == 64.0 and vertexTileId(v) == 23 and vertexRgb(v) == 0x0A5504) found_ground_top = true;
+        if (v.pos[1] == 71.0 and vertexTileId(v) == Vertex.LOD_TILE_ID and vertexRgb(v) == 0x022501) found_canopy_top = true;
         if (v.pos[1] == 71.0 and vertexTileId(v) == Vertex.LOD_TILE_ID and v.pos[0] > 0.0 and v.pos[0] < 8.0) found_compact_canopy = true;
     }
     try std.testing.expect(found_ground_top);

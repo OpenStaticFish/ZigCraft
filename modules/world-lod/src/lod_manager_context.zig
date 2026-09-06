@@ -176,6 +176,7 @@ pub const LODScanState = struct {
 pub const ChunkResolver = struct {
     ptr: *anyopaque,
     resolve_fn: *const fn (ptr: *anyopaque, cx: i32, cz: i32) ?*const Chunk,
+    capture_near_fn: ?*const fn (ptr: *anyopaque, cx: i32, cz: i32) ?@import("lod_near_source.zig").NearChunkSummary = null,
 
     pub fn resolve(self: ChunkResolver, cx: i32, cz: i32) ?*const Chunk {
         return self.resolve_fn(self.ptr, cx, cz);

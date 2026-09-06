@@ -84,7 +84,7 @@ pub fn drawIndexed(ctx: anytype, vbo_handle: rhi.BufferHandle, ebo_handle: rhi.B
 /// deliberately no vertex buffer binding: the static index grid provides the
 /// vertex id and binding 16 supplies the packed 16-byte samples.
 pub fn drawCompactLOD(ctx: anytype, index_handle: rhi.BufferHandle, index_count: u32, params: rhi.CompactLODDraw) bool {
-    if (!ctx.frames.frame_in_progress or index_count == 0 or params.width < 2 or params.layer > 1) return false;
+    if (!ctx.frames.frame_in_progress or index_count == 0 or params.width < 2 or params.layer > 1 or !ctx.draw.lod_descriptor_stream_valid) return false;
     if (!ctx.runtime.main_pass_active and !ctx.water_system.pass_active) pass_orchestration.beginMainPassInternal(ctx);
     if (!ctx.runtime.main_pass_active and !ctx.water_system.pass_active) return false;
     const index = ctx.resources.buffers.get(index_handle) orelse return false;
@@ -102,18 +102,7 @@ pub fn drawCompactLOD(ctx: anytype, index_handle: rhi.BufferHandle, index_count:
     const sample_end = std.math.add(u64, @as(u64, params.sample_offset), sample_count) catch return false;
     const sample_bytes = std.math.mul(u64, sample_end, @sizeOf(rhi.CompactLODSampleWords)) catch return false;
     if (sample_bytes > samples.size) return false;
-    const cb = ctx.frames.command_buffers[ctx.frames.current_frame];
-    const pipeline = if (params.layer == 1) ctx.pipeline_manager.compact_lod_water_pipeline else ctx.pipeline_manager.compact_lod_terrain_pipeline;
-    if (pipeline == null) return false;
-    c.vkCmdBindPipeline(cb, c.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    ctx.draw.terrain_pipeline_bound = false;
-    const descriptor_set = lodDescriptorSet(ctx);
-    c.vkCmdBindDescriptorSets(cb, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_manager.pipeline_layout, 0, 1, &descriptor_set, 0, null);
-    c.vkCmdPushConstants(cb, ctx.pipeline_manager.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(rhi.CompactLODDraw), &params);
-    c.vkCmdBindIndexBuffer(cb, index.buffer, 0, c.VK_INDEX_TYPE_UINT32);
-    c.vkCmdDrawIndexed(cb, index_count, 1, 0, 0, 0);
-    ctx.runtime.draw_call_count += 1;
-    return true;
+    return recordCompactLOD(ctx, c, index.buffer, params, .{ .direct = index_count });
 }
 
 /// Compatibility-named fixed-capacity indexed submission for compact far LOD.
@@ -140,24 +129,57 @@ pub fn drawCompactLODIndirectCount(ctx: anytype, index_handle: rhi.BufferHandle,
     const command_bytes = std.math.mul(usize, max_draw_count, @sizeOf(rhi_types.DrawIndexedIndirectCommand)) catch return false;
     const command_end = std.math.add(usize, offset, command_bytes) catch return false;
     if (command_end > commands.size) return false;
-    const cb = ctx.frames.command_buffers[fi];
-    const pipeline = if (ctx.water_system.pass_active) ctx.pipeline_manager.compact_lod_water_pipeline else ctx.pipeline_manager.compact_lod_terrain_pipeline;
-    if (pipeline == null) return false;
-    c.vkCmdBindPipeline(cb, c.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    const sentinel = rhi.CompactLODDraw{ .model = Mat4.identity, .mask_radius = 0, .lod_fade = 0, .sample_offset = 0, .width = 0, .cell_size = 0, .layer = 2, .skirt_depth = 0 };
+    return recordCompactLOD(ctx, c, index.buffer, sentinel, .{ .indirect = .{
+        .buffer = commands.buffer,
+        .offset = @intCast(offset),
+        .capacity = max_draw_count,
+    } });
+}
+
+pub const CompactLODSubmission = union(enum) {
+    direct: u32,
+    indirect: struct { buffer: c.VkBuffer, offset: c.VkDeviceSize, capacity: u32 },
+};
+
+/// Shared recording policy after buffer validation. The Vulkan command sink is
+/// injectable so pipeline ordering can be checked without a device.
+pub fn recordCompactLOD(ctx: anytype, vk: anytype, index: c.VkBuffer, params: rhi.CompactLODDraw, submission: CompactLODSubmission) bool {
+    if (!ctx.draw.lod_descriptor_stream_valid) return false;
+    const layer: u32 = switch (submission) {
+        .direct => params.layer,
+        // pass_active denotes reflection rendering, not the main-pass water scope.
+        .indirect => switch (ctx.draw.lod_descriptor_stream) {
+            .terrain_compact_gpu => 0,
+            .water_compact_gpu => 1,
+            else => return false,
+        },
+    };
+    if (layer > 1) return false;
+    const pipeline = if (layer == 1) ctx.pipeline_manager.compact_lod_water_pipeline else ctx.pipeline_manager.compact_lod_terrain_pipeline;
+    const restore_pipeline = if (layer == 1) ctx.water_system.water_pipeline else null;
+    // Do not partially record water if expanded/full chunk water cannot resume.
+    if (pipeline == null or (layer == 1 and restore_pipeline == null)) return false;
+
+    const cb = ctx.frames.command_buffers[ctx.frames.current_frame];
+    vk.vkCmdBindPipeline(cb, c.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     ctx.draw.terrain_pipeline_bound = false;
     const descriptor_set = lodDescriptorSet(ctx);
-    c.vkCmdBindDescriptorSets(cb, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_manager.pipeline_layout, 0, 1, &descriptor_set, 0, null);
-    const sentinel = rhi.CompactLODDraw{ .model = Mat4.identity, .mask_radius = 0, .lod_fade = 0, .sample_offset = 0, .width = 0, .cell_size = 0, .layer = 2, .skirt_depth = 0 };
-    c.vkCmdPushConstants(cb, ctx.pipeline_manager.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(rhi.CompactLODDraw), &sentinel);
-    c.vkCmdBindIndexBuffer(cb, index.buffer, 0, c.VK_INDEX_TYPE_UINT32);
-    // RADV consumes correct compute output when copied for validation, yet its
-    // indexed indirect-count execution can corrupt this vertex-pulling stream.
-    // The culler clears every unused command before dispatch, so submitting the
-    // fixed-capacity stream is equivalent: zero indexCount entries are no-ops.
-    // This remains entirely GPU driven; the count buffer is intentionally not
-    // mapped or read back on the CPU.
-    c.vkCmdDrawIndexedIndirect(cb, commands.buffer, @intCast(offset), max_draw_count, @sizeOf(rhi_types.DrawIndexedIndirectCommand));
+    vk.vkCmdBindDescriptorSets(cb, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_manager.pipeline_layout, 0, 1, &descriptor_set, 0, null);
+    vk.vkCmdPushConstants(cb, ctx.pipeline_manager.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(rhi.CompactLODDraw), &params);
+    vk.vkCmdBindIndexBuffer(cb, index, 0, c.VK_INDEX_TYPE_UINT32);
+    switch (submission) {
+        .direct => |count| vk.vkCmdDrawIndexed(cb, count, 1, 0, 0, 0),
+        // Preserve the RADV workaround: the culler zero-fills unused commands,
+        // so fixed-capacity indexed MDI needs neither indirect-count nor readback.
+        .indirect => |commands| vk.vkCmdDrawIndexedIndirect(cb, commands.buffer, commands.offset, commands.capacity, @sizeOf(rhi_types.DrawIndexedIndirectCommand)),
+    }
     ctx.runtime.draw_call_count += 1;
+    if (restore_pipeline != null) {
+        vk.vkCmdBindPipeline(cb, c.VK_PIPELINE_BIND_POINT_GRAPHICS, restore_pipeline);
+        // beginWaterDraw uses this flag to suppress ordinary terrain rebinding.
+        ctx.draw.terrain_pipeline_bound = true;
+    }
     return true;
 }
 

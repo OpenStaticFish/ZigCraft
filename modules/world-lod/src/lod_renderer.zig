@@ -8,7 +8,7 @@
 //!
 //! The renderer uses instance buffers to batch-draw multiple LOD regions:
 //! - Per-frame instance data (position, color, mask radius) is accumulated
-//! - Data is uploaded to GPU storage buffers (double-buffered per frame)
+//! - Data is uploaded to separate per-layer, per-frame GPU storage buffers
 //! - RHI renders all visible regions in minimal draw calls
 //!
 //! ## GPU Data Flow
@@ -268,8 +268,10 @@ pub fn LODRenderer(comptime RHI: type) type {
         cached_ready_disk_checker_ctx: ?*anyopaque,
         projection_frame: ?u64,
         draw_commands: [LODLevel.count]std.ArrayListUnmanaged(rhi_types.DrawIndirectCommand),
-        instance_buffers: [rhi_types.MAX_FRAMES_IN_FLIGHT]rhi_types.BufferHandle,
-        indirect_buffers: [rhi_types.MAX_FRAMES_IN_FLIGHT]rhi_types.BufferHandle,
+        // Descriptor streams do not snapshot bytes. Terrain and fluid uploads
+        // must remain disjoint until the frame slot's graphics work completes.
+        instance_buffers: [2][rhi_types.MAX_FRAMES_IN_FLIGHT]rhi_types.BufferHandle,
+        indirect_buffers: [2][rhi_types.MAX_FRAMES_IN_FLIGHT]rhi_types.BufferHandle,
         vertex_pools: [LODLevel.count]LODVertexPool,
         compact_pool: CompactLODPool,
         /// Per compact LOD: terrain grid with edge skirts, then water top grid.
@@ -343,18 +345,22 @@ pub fn LODRenderer(comptime RHI: type) type {
             const renderer = try allocator.create(Self);
             errdefer allocator.destroy(renderer);
 
-            var instance_buffers = [_]rhi_types.BufferHandle{0} ** rhi_types.MAX_FRAMES_IN_FLIGHT;
-            var indirect_buffers = [_]rhi_types.BufferHandle{0} ** rhi_types.MAX_FRAMES_IN_FLIGHT;
+            var instance_buffers = std.mem.zeroes([2][rhi_types.MAX_FRAMES_IN_FLIGHT]rhi_types.BufferHandle);
+            var indirect_buffers = std.mem.zeroes([2][rhi_types.MAX_FRAMES_IN_FLIGHT]rhi_types.BufferHandle);
             const resources = if (@hasDecl(RHI, "resourceManager")) rhi.resourceManager() else rhi;
             errdefer {
-                for (0..rhi_types.MAX_FRAMES_IN_FLIGHT) |i| {
-                    if (instance_buffers[i] != 0) resources.destroyBuffer(instance_buffers[i]);
-                    if (indirect_buffers[i] != 0) resources.destroyBuffer(indirect_buffers[i]);
+                for (instance_buffers, indirect_buffers) |instances, commands| {
+                    for (instances, commands) |instance, command| {
+                        if (instance != 0) resources.destroyBuffer(instance);
+                        if (command != 0) resources.destroyBuffer(command);
+                    }
                 }
             }
-            for (0..rhi_types.MAX_FRAMES_IN_FLIGHT) |i| {
-                instance_buffers[i] = try resources.createBuffer(MAX_LOD_MDI_REGIONS * @sizeOf(rhi_types.InstanceData), .storage);
-                indirect_buffers[i] = try resources.createBuffer(MAX_LOD_MDI_REGIONS * @sizeOf(rhi_types.DrawIndirectCommand), .indirect);
+            for (&instance_buffers, &indirect_buffers) |*instances, *commands| {
+                for (instances, commands) |*instance, *command| {
+                    instance.* = try resources.createBuffer(MAX_LOD_MDI_REGIONS * @sizeOf(rhi_types.InstanceData), .storage);
+                    command.* = try resources.createBuffer(MAX_LOD_MDI_REGIONS * @sizeOf(rhi_types.DrawIndirectCommand), .indirect);
+                }
             }
 
             var draw_commands: [LODLevel.count]std.ArrayListUnmanaged(rhi_types.DrawIndirectCommand) = undefined;
@@ -436,12 +442,10 @@ pub fn LODRenderer(comptime RHI: type) type {
         pub fn deinit(self: *Self) void {
             self.rhi.waitIdle();
             const resources = if (@hasDecl(RHI, "resourceManager")) self.rhi.resourceManager() else self.rhi;
-            for (0..rhi_types.MAX_FRAMES_IN_FLIGHT) |i| {
-                if (self.instance_buffers[i] != 0) {
-                    resources.destroyBuffer(self.instance_buffers[i]);
-                }
-                if (self.indirect_buffers[i] != 0) {
-                    resources.destroyBuffer(self.indirect_buffers[i]);
+            for (self.instance_buffers, self.indirect_buffers) |instances, commands| {
+                for (instances, commands) |instance, command| {
+                    if (instance != 0) resources.destroyBuffer(instance);
+                    if (command != 0) resources.destroyBuffer(command);
                 }
             }
             const mesh_resources = LODMeshResources.fromProvider(RHI, &self.rhi);
@@ -635,7 +639,7 @@ pub fn LODRenderer(comptime RHI: type) type {
             // normal terrain descriptor mode so the chunk pass keeps its textures.
             defer if (@hasDecl(@TypeOf(render_ctx), "setInstanceBuffer")) render_ctx.setInstanceBuffer(0);
             selectLODDescriptorStream(render_ctx, layer, false, false);
-            render_ctx.setLODInstanceBuffer(self.instance_buffers[self.frame_index]);
+            render_ctx.setLODInstanceBuffer(self.instance_buffers[@intFromEnum(layer)][self.frame_index]);
 
             const frustum = Frustum.fromViewProj(view_proj);
             // Keep opaque LOD terrain just below full chunks during the masked
@@ -668,7 +672,7 @@ pub fn LODRenderer(comptime RHI: type) type {
 
             if (self.instance_data.items.len == 0) return;
 
-            const indirect_drawn = self.enable_mdi and self.renderIndirectBatches(render_ctx, query);
+            const indirect_drawn = self.enable_mdi and self.renderIndirectBatches(render_ctx, query, layer);
 
             const compact_timing_name = if (layer == .terrain) "LODCompactTerrainPass" else "LODCompactWaterPass";
             if (comptime @hasDecl(RHI, "timing")) self.rhi.timing().beginPassTiming(compact_timing_name);
@@ -699,8 +703,8 @@ pub fn LODRenderer(comptime RHI: type) type {
             }
         }
 
-        fn renderIndirectBatches(self: *Self, render_ctx: anytype, query: anytype) bool {
-            if (!supports_lod_indirect(@TypeOf(render_ctx), @TypeOf(query), @TypeOf(self.rhi))) return false;
+        fn renderIndirectBatches(self: *Self, render_ctx: anytype, query: anytype, layer: LODRenderLayer) bool {
+            if (comptime !supports_lod_indirect(@TypeOf(render_ctx), @TypeOf(query), @TypeOf(self.rhi))) return false;
             if (!query.supportsIndirectFirstInstance()) return false;
             if (self.instance_data.items.len == 0) return false;
 
@@ -708,6 +712,8 @@ pub fn LODRenderer(comptime RHI: type) type {
             if (!@hasDecl(@TypeOf(resources), "updateBuffer")) return false;
 
             const fi = self.frame_index;
+            const instance_buffer = self.instance_buffers[@intFromEnum(layer)][fi];
+            const indirect_buffer = self.indirect_buffers[@intFromEnum(layer)][fi];
             if (self.instance_data.items.len > MAX_LOD_MDI_REGIONS) {
                 log.log.warn("LOD MDI: instance overflow ({} > {}), falling back to CPU draw", .{ self.instance_data.items.len, MAX_LOD_MDI_REGIONS });
                 return false;
@@ -725,7 +731,7 @@ pub fn LODRenderer(comptime RHI: type) type {
                 if (self.draw_commands[lod_idx].items.len > 0 and self.vertex_pools[lod_idx].buffer_handle == 0) return false;
             }
 
-            resources.updateBuffer(self.instance_buffers[fi], 0, std.mem.sliceAsBytes(self.instance_data.items)) catch |err| {
+            resources.updateBuffer(instance_buffer, 0, std.mem.sliceAsBytes(self.instance_data.items)) catch |err| {
                 log.log.err("LOD MDI: failed to update instance buffer: {}", .{err});
                 return false;
             };
@@ -745,17 +751,18 @@ pub fn LODRenderer(comptime RHI: type) type {
                 merged_commands.appendSliceAssumeCapacity(self.draw_commands[lod_idx].items);
             }
 
-            resources.updateBuffer(self.indirect_buffers[fi], 0, std.mem.sliceAsBytes(merged_commands.items)) catch |err| {
+            resources.updateBuffer(indirect_buffer, 0, std.mem.sliceAsBytes(merged_commands.items)) catch |err| {
                 log.log.err("LOD MDI: failed to update indirect buffer: {}", .{err});
                 return false;
             };
 
-            render_ctx.setLODInstanceBuffer(self.instance_buffers[fi]);
+            selectLODDescriptorStream(render_ctx, layer, false, false);
+            render_ctx.setLODInstanceBuffer(instance_buffer);
             const stride = @sizeOf(rhi_types.DrawIndirectCommand);
             for (0..LODLevel.count) |lod_idx| {
                 if (lod_counts[lod_idx] == 0) continue;
                 const pool_buffer = self.vertex_pools[lod_idx].buffer_handle;
-                render_ctx.drawIndirect(pool_buffer, self.indirect_buffers[fi], lod_offsets[lod_idx] * stride, lod_counts[lod_idx], stride);
+                render_ctx.drawIndirect(pool_buffer, indirect_buffer, lod_offsets[lod_idx] * stride, lod_counts[lod_idx], stride);
             }
             return true;
         }
@@ -916,7 +923,7 @@ pub fn LODRenderer(comptime RHI: type) type {
             self.frame_index = query.getFrameIndex();
             defer if (@hasDecl(@TypeOf(render_ctx), "setInstanceBuffer")) render_ctx.setInstanceBuffer(0);
             selectLODDescriptorStream(render_ctx, layer, false, false);
-            render_ctx.setLODInstanceBuffer(self.instance_buffers[self.frame_index]);
+            render_ctx.setLODInstanceBuffer(self.instance_buffers[@intFromEnum(layer)][self.frame_index]);
             self.instance_data.clearRetainingCapacity();
             self.draw_list.clearRetainingCapacity();
             self.compact_fallback_regions.clearRetainingCapacity();
@@ -943,7 +950,7 @@ pub fn LODRenderer(comptime RHI: type) type {
             // GPU and CPU fallbacks use distinct immutable descriptor streams.
             // Re-select direct before any fallback binding or draw is recorded.
             selectLODDescriptorStream(render_ctx, layer, false, false);
-            render_ctx.setLODInstanceBuffer(self.instance_buffers[self.frame_index]);
+            render_ctx.setLODInstanceBuffer(self.instance_buffers[@intFromEnum(layer)][self.frame_index]);
 
             {
                 var compact_timing_started = false;
@@ -1014,7 +1021,9 @@ pub fn LODRenderer(comptime RHI: type) type {
                 _ = self.renderParentFallback(all_meshes, visible, layer, render_ctx, profiling);
             }
             if (self.instance_data.items.len == 0) return true;
-            const indirect_drawn = self.enable_mdi and self.renderIndirectBatches(render_ctx, query);
+            selectLODDescriptorStream(render_ctx, layer, false, false);
+            render_ctx.setLODInstanceBuffer(self.instance_buffers[@intFromEnum(layer)][self.frame_index]);
+            const indirect_drawn = self.enable_mdi and self.renderIndirectBatches(render_ctx, query, layer);
             for (self.draw_list.items, 0..) |mesh, index| {
                 if (indirect_drawn and mesh.isPooled()) continue;
                 const instance = self.instance_data.items[index];
@@ -1079,7 +1088,7 @@ pub fn LODRenderer(comptime RHI: type) type {
                     continue;
                 }
                 selectLODDescriptorStream(render_ctx, layer, false, false);
-                render_ctx.setLODInstanceBuffer(self.instance_buffers[self.frame_index]);
+                render_ctx.setLODInstanceBuffer(self.instance_buffers[@intFromEnum(layer)][self.frame_index]);
                 render_ctx.setModelMatrix(child_model, Vec3.one, child.mask_radius);
                 if (@hasDecl(@TypeOf(render_ctx), "drawOffset")) {
                     render_ctx.drawOffset(mesh.bufferHandle(), range.count, .triangles, mesh.vertexOffset() + range.offset);
@@ -1855,7 +1864,7 @@ test "compact index topology uploads in the first render frame before becoming d
             return handle;
         }
         pub fn uploadBuffer(self: @This(), _: u32, data: []const u8) !void {
-            try std.testing.expect(data.len > 0);
+            std.debug.assert(data.len > 0);
             self.state.uploads += 1;
         }
         pub fn destroyBuffer(self: @This(), _: u32) void {
@@ -1911,6 +1920,266 @@ test "ready detail disk mask uses sign encoding" {
     try std.testing.expectEqual(@as(f32, -64.0), readyDiskMaskRadius(4));
 }
 
+const ExpandedMDIMock = struct {
+    const Buffer = struct {
+        bytes: ?[]u8 = null,
+        usage: rhi_types.BufferUsage = .storage,
+        updated_len: usize = 0,
+        updates: usize = 0,
+    };
+    const Draw = struct {
+        stream: rhi_types.LODDescriptorStream,
+        instances: u32,
+        indirect: u32,
+        vertex: u32,
+        offset: usize,
+        count: u32,
+        instance_bytes: [4 * @sizeOf(rhi_types.InstanceData)]u8,
+        command_bytes: [4 * @sizeOf(rhi_types.DrawIndirectCommand)]u8,
+        instance_len: usize,
+        command_len: usize,
+    };
+    const State = struct {
+        buffers: [64]Buffer = @splat(.{}),
+        next_handle: u32 = 1,
+        fail_create_at: ?u32 = null,
+        fail_update_usage: ?rhi_types.BufferUsage = null,
+        destroyed: usize = 0,
+        live_bytes: usize = 0,
+        waits: usize = 0,
+        frame_index: usize = 0,
+        supports_mdi: bool = true,
+        stream: rhi_types.LODDescriptorStream = .terrain_standard_direct,
+        instance_buffer: u32 = 0,
+        resets: usize = 0,
+        direct_draws: usize = 0,
+        draws: [32]Draw = undefined,
+        draw_count: usize = 0,
+
+        fn expectUnchanged(self: *const @This()) !void {
+            // Read the destination bytes after ALL uploads, as deferred graphics
+            // would. A recorded descriptor/command only preserves its handles.
+            for (self.draws[0..self.draw_count]) |draw| {
+                try std.testing.expectEqualSlices(u8, draw.instance_bytes[0..draw.instance_len], self.buffers[draw.instances].bytes.?[0..draw.instance_len]);
+                try std.testing.expectEqualSlices(u8, draw.command_bytes[0..draw.command_len], self.buffers[draw.indirect].bytes.?[0..draw.command_len]);
+            }
+        }
+    };
+    state: *State,
+
+    pub fn createBuffer(self: @This(), size: usize, usage: rhi_types.BufferUsage) rhi_types.RhiError!u32 {
+        const handle = self.state.next_handle;
+        if (self.state.fail_create_at == handle) return error.OutOfMemory;
+        const bytes = try std.testing.allocator.alloc(u8, size);
+        @memset(bytes, 0);
+        self.state.buffers[handle] = .{ .bytes = bytes, .usage = usage };
+        self.state.next_handle += 1;
+        self.state.live_bytes += size;
+        return handle;
+    }
+    pub fn destroyBuffer(self: @This(), handle: u32) void {
+        const buffer = &self.state.buffers[handle];
+        const bytes = buffer.bytes orelse unreachable; // Reject double destruction.
+        self.state.live_bytes -= bytes.len;
+        std.testing.allocator.free(bytes);
+        buffer.bytes = null;
+        self.state.destroyed += 1;
+    }
+    pub fn updateBuffer(self: @This(), handle: u32, offset: usize, data: []const u8) rhi_types.RhiError!void {
+        const buffer = &self.state.buffers[handle];
+        if (self.state.fail_update_usage == buffer.usage) return error.OutOfMemory;
+        @memcpy(buffer.bytes.?[offset .. offset + data.len], data);
+        buffer.updated_len = offset + data.len;
+        buffer.updates += 1;
+    }
+    pub fn uploadBuffer(self: @This(), handle: u32, data: []const u8) rhi_types.RhiError!void {
+        try self.updateBuffer(handle, 0, data);
+    }
+    pub fn waitIdle(self: @This()) void {
+        self.state.waits += 1;
+    }
+    pub fn getFrameIndex(self: @This()) usize {
+        return self.state.frame_index;
+    }
+    pub fn supportsIndirectFirstInstance(self: @This()) bool {
+        return self.state.supports_mdi;
+    }
+    pub fn setLODDescriptorStream(self: @This(), stream: rhi_types.LODDescriptorStream) void {
+        self.state.stream = stream;
+    }
+    pub fn setLODInstanceBuffer(self: @This(), handle: u32) void {
+        self.state.instance_buffer = handle;
+    }
+    pub fn setInstanceBuffer(self: @This(), handle: u32) void {
+        std.debug.assert(handle == 0);
+        self.state.instance_buffer = 0;
+        self.state.resets += 1;
+    }
+    pub fn setModelMatrix(_: @This(), _: Mat4, _: Vec3, _: f32) void {}
+    pub fn drawOffset(self: @This(), _: u32, _: u32, _: anytype, _: usize) void {
+        self.state.direct_draws += 1;
+    }
+    pub fn drawIndirect(self: @This(), vertex: u32, indirect: u32, offset: usize, count: u32, stride: u32) void {
+        std.debug.assert(stride == @sizeOf(rhi_types.DrawIndirectCommand));
+        const instances = self.state.buffers[self.state.instance_buffer];
+        const commands = self.state.buffers[indirect];
+        const draw = &self.state.draws[self.state.draw_count];
+        draw.* = .{
+            .stream = self.state.stream,
+            .instances = self.state.instance_buffer,
+            .indirect = indirect,
+            .vertex = vertex,
+            .offset = offset,
+            .count = count,
+            .instance_bytes = undefined,
+            .command_bytes = undefined,
+            .instance_len = instances.updated_len,
+            .command_len = commands.updated_len,
+        };
+        @memcpy(draw.instance_bytes[0..draw.instance_len], instances.bytes.?[0..draw.instance_len]);
+        @memcpy(draw.command_bytes[0..draw.command_len], commands.bytes.?[0..draw.command_len]);
+        self.state.draw_count += 1;
+    }
+};
+
+test "expanded MDI terrain and fluid preserve submitted bytes across layers and frame retirement" {
+    const allocator = std.testing.allocator;
+    var state = ExpandedMDIMock.State{};
+    const renderer = try LODRenderer(ExpandedMDIMock).init(allocator, .{ .state = &state });
+    defer {
+        renderer.deinit();
+        std.testing.expectEqual(@as(usize, 0), state.live_bytes) catch unreachable;
+        std.testing.expectEqual(state.next_handle - 1, state.destroyed) catch unreachable;
+        std.testing.expectEqual(@as(usize, 1), state.waits) catch unreachable;
+    }
+    renderer.enable_mdi = true;
+    renderer.gpu_culling_requested = false;
+    const bridge = renderer.createGPUBridge();
+    var meshes: [LODLevel.count]MeshMap = undefined;
+    var regions: [LODLevel.count]RegionMap = undefined;
+    for (0..LODLevel.count) |i| {
+        meshes[i] = MeshMap.init(allocator);
+        regions[i] = RegionMap.init(allocator);
+    }
+    defer for (0..LODLevel.count) |i| {
+        meshes[i].deinit();
+        regions[i].deinit();
+    };
+    var dry = LODMesh.init(allocator, .lod1);
+    var wet = LODMesh.init(allocator, .lod2);
+    var dry_chunk = LODChunk.init(4, 0, .lod1);
+    var wet_chunk = LODChunk.init(8, 0, .lod2);
+    dry_chunk.state = .renderable;
+    wet_chunk.state = .renderable;
+    for ([_]*LODMesh{ &dry, &wet }, [_]*LODChunk{ &dry_chunk, &wet_chunk }) |mesh, chunk| {
+        const lod = mesh.lodLevel();
+        const index = @intFromEnum(lod);
+        renderer.vertex_pools[index].initial_capacity_bytes = 4096;
+        mesh.pending_vertices = try allocator.alloc(rhi_types.Vertex, 18);
+        @memset(mesh.pending_vertices.?, std.mem.zeroes(rhi_types.Vertex));
+        mesh.opaque_vertex_count = if (mesh == &wet) 12 else 18;
+        mesh.water_vertex_offset = 12 * @sizeOf(rhi_types.Vertex);
+        mesh.water_vertex_count = if (mesh == &wet) 6 else 0;
+        try bridge.upload(mesh);
+        const key = LODRegionKey{ .rx = if (mesh == &wet) 8 else 4, .rz = 0, .lod = lod };
+        try meshes[index].put(key, mesh);
+        try regions[index].put(key, chunk);
+    }
+    var config = LODConfig{ .radii = .{ 16, 128, 256, 512, 1024 } };
+    // Every in-flight slot gets different camera-relative instance bytes.
+    for (0..rhi_types.MAX_FRAMES_IN_FLIGHT) |fi| {
+        state.frame_index = fi;
+        const camera = Vec3.init(@floatFromInt(fi), 0, 0);
+        const first_draw = state.draw_count;
+        renderer.renderFrame(fi + 1, &meshes, &regions, config.interface(), Mat4.identity, camera, null, null, false, null, 16, .terrain, null, null);
+        renderer.renderFrame(fi + 1, &meshes, &regions, config.interface(), Mat4.identity, camera, null, null, false, null, 16, .fluid, null, null);
+        try std.testing.expectEqual(first_draw + 3, state.draw_count);
+        const terrain = state.draws[first_draw];
+        const terrain_wet = state.draws[first_draw + 1];
+        const fluid = state.draws[first_draw + 2];
+        try std.testing.expectEqual(rhi_types.LODDescriptorStream.terrain_standard_direct, terrain.stream);
+        try std.testing.expectEqual(terrain.stream, terrain_wet.stream);
+        try std.testing.expectEqual(rhi_types.LODDescriptorStream.water_standard_direct, fluid.stream);
+        try std.testing.expect(terrain.instances != fluid.instances);
+        try std.testing.expect(terrain.indirect != fluid.indirect);
+        try std.testing.expectEqual(dry.bufferHandle(), terrain.vertex);
+        try std.testing.expectEqual(wet.bufferHandle(), terrain_wet.vertex);
+        try std.testing.expectEqual(wet.bufferHandle(), fluid.vertex);
+        try std.testing.expectEqual(@as(u32, 1), fluid.count);
+        try std.testing.expectEqual(@as(usize, 0), fluid.offset);
+        try std.testing.expectEqual(@sizeOf(rhi_types.DrawIndirectCommand), terrain_wet.offset);
+        const water_command = std.mem.bytesToValue(rhi_types.DrawIndirectCommand, fluid.command_bytes[0..@sizeOf(rhi_types.DrawIndirectCommand)]);
+        try std.testing.expectEqual(@as(u32, 6), water_command.vertexCount);
+        try std.testing.expectEqual(wet.firstVertex(wet.drawRange(.fluid).?), water_command.firstVertex);
+        try std.testing.expectEqual(@as(u32, 0), water_command.firstInstance);
+        const water_instance = std.mem.bytesToValue(rhi_types.InstanceData, fluid.instance_bytes[0..@sizeOf(rhi_types.InstanceData)]);
+        try std.testing.expectEqual(@as(f32, @floatFromInt(wet_chunk.worldBounds().min_x)) - camera.x, water_instance.model.data[3][0]);
+        try std.testing.expectEqual(@as(f32, 0), water_instance.model.data[3][1]);
+        for ([_]u32{ terrain.instances, terrain.indirect, fluid.instances, fluid.indirect }) |handle| {
+            try std.testing.expectEqual(@as(usize, 1), state.buffers[handle].updates);
+        }
+        try state.expectUnchanged();
+        try std.testing.expectEqual(@as(u32, 0), state.instance_buffer);
+        try std.testing.expectEqual((fi + 1) * 2, state.resets);
+    }
+    try std.testing.expectEqual(@as(usize, 0), state.direct_draws);
+    // Eviction clears future mesh draw state, not already-recorded MDI bytes.
+    bridge.destroy(&wet);
+    try state.expectUnchanged();
+    try std.testing.expect(!wet.isReady());
+    try std.testing.expectEqual(@as(usize, 1), renderer.vertex_pools[2].retired_ranges.items.len);
+    _ = renderer.renderProjectedLayer(&meshes, .fluid, null, null);
+    try state.expectUnchanged();
+    try std.testing.expectEqual(@as(usize, 1), renderer.vertex_pools[2].retired_ranges.items.len);
+    // The RHI fence has now completed the last slot. Discard completed draws
+    // before reusing that slot and let renderFrame collect its retired ranges.
+    state.draw_count = 0;
+    renderer.renderFrame(rhi_types.MAX_FRAMES_IN_FLIGHT + 1, &meshes, &regions, config.interface(), Mat4.identity, Vec3.zero, null, null, false, null, 16, .terrain, null, null);
+    try std.testing.expectEqual(@as(usize, 0), renderer.vertex_pools[2].retired_ranges.items.len);
+    try std.testing.expectEqual(@as(usize, 1), state.draw_count);
+    try std.testing.expectEqual(@as(usize, 2), state.buffers[state.draws[0].instances].updates);
+    try std.testing.expectEqual(@as(usize, 2), state.buffers[state.draws[0].indirect].updates);
+    try state.expectUnchanged();
+
+    // Capability and either upload failure still fall back to direct draws.
+    state.draw_count = 0;
+    state.supports_mdi = false;
+    _ = renderer.renderProjectedLayer(&meshes, .terrain, null, null);
+    state.supports_mdi = true;
+    for ([_]rhi_types.BufferUsage{ .storage, .indirect }) |usage| {
+        state.fail_update_usage = usage;
+        _ = renderer.renderProjectedLayer(&meshes, .terrain, null, null);
+    }
+    try std.testing.expectEqual(@as(usize, 3), state.direct_draws);
+    try std.testing.expectEqual(@as(usize, 0), state.draw_count);
+    try std.testing.expectEqual(rhi_types.LODDescriptorStream.terrain_standard_direct, state.stream);
+    try std.testing.expectEqual(@as(u32, 0), state.instance_buffer);
+    bridge.destroy(&dry);
+}
+
+test "expanded MDI allocation failure cleans up every layer and frame handle exactly once" {
+    var successful = ExpandedMDIMock.State{};
+    const Renderer = LODRenderer(ExpandedMDIMock);
+    const renderer = try Renderer.init(std.testing.allocator, .{ .state = &successful });
+    var mdi_bytes: usize = 0;
+    for (successful.buffers) |buffer| {
+        if (buffer.usage == .storage or buffer.usage == .indirect) {
+            if (buffer.bytes) |bytes| mdi_bytes += bytes.len;
+        }
+    }
+    try std.testing.expectEqual(2 * rhi_types.MAX_FRAMES_IN_FLIGHT * MAX_LOD_MDI_REGIONS * (@sizeOf(rhi_types.InstanceData) + @sizeOf(rhi_types.DrawIndirectCommand)), mdi_bytes);
+    renderer.deinit();
+    try std.testing.expectEqual(@as(usize, 0), successful.live_bytes);
+    try std.testing.expectEqual(successful.next_handle - 1, successful.destroyed);
+    // Include failures after all MDI allocations, during compact topology init.
+    for (1..successful.next_handle) |fail_at| {
+        var state = ExpandedMDIMock.State{ .fail_create_at = @intCast(fail_at) };
+        try std.testing.expectError(error.OutOfMemory, Renderer.init(std.testing.allocator, .{ .state = &state }));
+        try std.testing.expectEqual(fail_at - 1, state.destroyed);
+        try std.testing.expectEqual(@as(usize, 0), state.live_bytes);
+    }
+}
+
 test "LODRenderer init/deinit lifecycle" {
     const allocator = std.testing.allocator;
 
@@ -1920,6 +2189,8 @@ test "LODRenderer init/deinit lifecycle" {
     };
 
     const MockRHI = struct {
+        pub fn waitIdle(_: @This()) void {}
+
         state: *MockRHIState,
 
         pub fn createBuffer(self: @This(), _: usize, _: anytype) !u32 {
@@ -1942,8 +2213,8 @@ test "LODRenderer init/deinit lifecycle" {
     const Renderer = LODRenderer(MockRHI);
     const renderer = try Renderer.init(allocator, mock_rhi);
 
-    // Verify init created instance + indirect buffers for each frame in flight.
-    try std.testing.expectEqual(@as(u32, rhi_types.MAX_FRAMES_IN_FLIGHT * 2), mock_state.buffers_created);
+    // Verify init created instance + indirect buffers for each layer and frame.
+    try std.testing.expectEqual(@as(u32, rhi_types.MAX_FRAMES_IN_FLIGHT * 4), mock_state.buffers_created);
     try std.testing.expectEqual(@as(u32, 0), mock_state.buffers_destroyed);
 
     renderer.compact_pool.buffer_handle = 999;
@@ -1957,7 +2228,7 @@ test "LODRenderer init/deinit lifecycle" {
     renderer.deinit();
 
     // Verify deinit destroyed all buffers
-    try std.testing.expectEqual(@as(u32, rhi_types.MAX_FRAMES_IN_FLIGHT * 2), mock_state.buffers_destroyed);
+    try std.testing.expectEqual(@as(u32, rhi_types.MAX_FRAMES_IN_FLIGHT * 4), mock_state.buffers_destroyed);
 }
 
 test "LODRenderer batches pooled meshes into per-LOD indirect draws" {
@@ -1973,6 +2244,9 @@ test "LODRenderer batches pooled meshes into per-LOD indirect draws" {
     };
 
     const MockRHI = struct {
+        pub fn waitIdle(_: @This()) void {}
+        pub fn uploadBuffer(_: @This(), _: u32, _: []const u8) !void {}
+
         state: *MockRHIState,
 
         pub fn createBuffer(self: @This(), _: usize, usage: anytype) !u32 {
@@ -2067,8 +2341,10 @@ test "LODRenderer batches pooled meshes into per-LOD indirect draws" {
 
     // Water reuses the pooled indirect path rather than falling back to one
     // direct submission per region.
+    mesh_lod1.opaque_vertex_count = 12;
     mesh_lod1.water_vertex_offset = 12 * @sizeOf(rhi_types.Vertex);
     mesh_lod1.water_vertex_count = 6;
+    mesh_lod2.opaque_vertex_count = 18;
     mesh_lod2.water_vertex_offset = 18 * @sizeOf(rhi_types.Vertex);
     mesh_lod2.water_vertex_count = 9;
     renderer.renderFrame(99, &meshes, &regions, mock_config.interface(), Mat4.identity, Vec3.zero, null, null, false, null, mock_config.chunk_render_radius, .fluid, null, &profiling);
@@ -2132,6 +2408,8 @@ test "LODRenderer render draw path" {
     };
 
     const MockRHI = struct {
+        pub fn waitIdle(_: @This()) void {}
+
         state: *MockRHIState,
 
         pub fn createBuffer(_: @This(), _: usize, _: anytype) !u32 {
@@ -2232,6 +2510,8 @@ test "LODRenderer keeps coarse LOD visible while finer bands stream" {
     };
 
     const MockRHI = struct {
+        pub fn waitIdle(_: @This()) void {}
+
         state: *MockRHIState,
 
         pub fn createBuffer(_: @This(), _: usize, _: anytype) !u32 {
@@ -2304,6 +2584,8 @@ test "LODRenderer disables mask when chunks are missing inside chunk render radi
     };
 
     const MockRHI = struct {
+        pub fn waitIdle(_: @This()) void {}
+
         state: *MockRHIState,
 
         pub fn createBuffer(_: @This(), _: usize, _: anytype) !u32 {
@@ -2378,6 +2660,8 @@ test "LODRenderer chunk mask uses chunk render radius instead of LOD0 radius" {
     };
 
     const MockRHI = struct {
+        pub fn waitIdle(_: @This()) void {}
+
         state: *MockRHIState,
 
         pub fn createBuffer(_: @This(), _: usize, _: anytype) !u32 {
@@ -2458,6 +2742,8 @@ test "LODRenderer keeps mask when only outside-radius chunks are uncovered" {
     };
 
     const MockRHI = struct {
+        pub fn waitIdle(_: @This()) void {}
+
         state: *MockRHIState,
 
         pub fn createBuffer(_: @This(), _: usize, _: anytype) !u32 {
@@ -2532,6 +2818,9 @@ test "LODRenderer keeps mask for partially covered chunk regions" {
     };
 
     const MockRHI = struct {
+        pub fn waitIdle(_: @This()) void {}
+        pub fn uploadBuffer(_: @This(), _: u32, _: []const u8) !void {}
+
         state: *MockRHIState,
 
         pub fn createBuffer(_: @This(), _: usize, _: anytype) !u32 {
@@ -2605,6 +2894,8 @@ test "LODRenderer skips coarse LOD when finer coverage is ready" {
     };
 
     const MockRHI = struct {
+        pub fn waitIdle(_: @This()) void {}
+
         state: *MockRHIState,
 
         pub fn createBuffer(_: @This(), _: usize, _: anytype) !u32 {
@@ -2690,6 +2981,8 @@ test "LODRenderer always renders ready LOD0 regions" {
     };
 
     const MockRHI = struct {
+        pub fn waitIdle(_: @This()) void {}
+
         state: *MockRHIState,
 
         pub fn createBuffer(_: @This(), _: usize, _: anytype) !u32 {
@@ -2758,6 +3051,8 @@ test "LODRenderer keeps coarse LOD when a finer child is missing" {
     };
 
     const MockRHI = struct {
+        pub fn waitIdle(_: @This()) void {}
+
         state: *MockRHIState,
 
         pub fn createBuffer(_: @This(), _: usize, _: anytype) !u32 {
@@ -2842,6 +3137,8 @@ test "LODRenderer resolves finer coverage across negative region boundaries" {
     };
 
     const MockRHI = struct {
+        pub fn waitIdle(_: @This()) void {}
+
         state: *MockRHIState,
 
         pub fn createBuffer(_: @This(), _: usize, _: anytype) !u32 {
@@ -2925,6 +3222,8 @@ test "LODRenderer counts only consecutive compact backend draw failures" {
         draw_calls: u32 = 0,
     };
     const MockRHI = struct {
+        pub fn waitIdle(_: @This()) void {}
+
         state: *MockState,
 
         pub fn createBuffer(_: @This(), _: usize, _: anytype) !u32 {
@@ -2938,7 +3237,7 @@ test "LODRenderer counts only consecutive compact backend draw failures" {
         pub fn setLODInstanceBuffer(_: @This(), _: anytype) void {}
         pub fn setLODDescriptorStream(_: @This(), _: rhi_types.LODDescriptorStream) void {}
         pub fn setLODCompactSampleBuffer(_: @This(), _: u32) void {}
-        pub fn drawCompactLOD(self: @This(), _: u32, _: u32, _: anytype) bool {
+        pub fn drawCompactLOD(self: @This(), _: u32, _: u32, _: rhi_types.CompactLODDraw) bool {
             self.state.draw_calls += 1;
             return self.state.draw_available;
         }
@@ -2948,13 +3247,15 @@ test "LODRenderer counts only consecutive compact backend draw failures" {
     const Renderer = LODRenderer(MockRHI);
     const renderer = try Renderer.init(allocator, .{ .state = &state });
     defer renderer.deinit();
+    try std.testing.expect(!renderer.ensureCompactIndexBuffers(0));
+    renderer.frame_serial = 1;
 
     var mesh = LODMesh.init(allocator, .lod3);
     mesh.compact = true;
-    mesh.compact_tile_width = 3;
-    mesh.compact_index_count = 24;
+    mesh.compact_tile_width = 5;
+    mesh.compact_index_count = 192;
     mesh.ready = true;
-    mesh.vertex_count = 24;
+    mesh.vertex_count = 192;
     const visible = VisibleRegion{ .key = .{ .rx = 0, .rz = 0, .lod = .lod3 }, .model = Mat4.identity, .mask_radius = 1, .lod_fade = 1 };
 
     // A first frame without a ready compact sample buffer is retryable. It
@@ -3010,6 +3311,11 @@ test "LODRenderer renderFrame times confirmed compact direct terrain and water s
         water_timing_ends: u32 = 0,
     };
     const MockRHI = struct {
+        pub fn setModelMatrix(_: @This(), _: Mat4, _: Vec3, _: f32) void {}
+        pub fn draw(_: @This(), _: u32, _: u32, _: anytype) void {
+            unreachable;
+        }
+
         state: *State,
 
         const Timing = struct {
@@ -3040,7 +3346,7 @@ test "LODRenderer renderFrame times confirmed compact direct terrain and water s
         pub fn setLODInstanceBuffer(_: @This(), _: anytype) void {}
         pub fn setLODDescriptorStream(_: @This(), _: rhi_types.LODDescriptorStream) void {}
         pub fn setLODCompactSampleBuffer(_: @This(), _: u32) void {}
-        pub fn drawCompactLOD(self: @This(), _: u32, _: u32, _: anytype) bool {
+        pub fn drawCompactLOD(self: @This(), _: u32, _: u32, _: rhi_types.CompactLODDraw) bool {
             self.state.compact_draws += 1;
             return self.state.compact_draw_succeeds;
         }
@@ -3053,14 +3359,15 @@ test "LODRenderer renderFrame times confirmed compact direct terrain and water s
     const Renderer = LODRenderer(MockRHI);
     const renderer = try Renderer.init(allocator, .{ .state = &state });
     defer renderer.deinit();
+    try std.testing.expect(!renderer.ensureCompactIndexBuffers(0));
     renderer.compact_pool.buffer_handle = 99;
 
     var mesh = LODMesh.init(allocator, .lod3);
     mesh.compact = true;
-    mesh.compact_tile_width = 3;
-    mesh.compact_index_count = 24;
+    mesh.compact_tile_width = 5;
+    mesh.compact_index_count = 192;
     mesh.compact_has_water = true;
-    mesh.vertex_count = 24;
+    mesh.vertex_count = 192;
     mesh.ready = true;
     var chunk = LODChunk.init(0, 0, .lod3);
     chunk.state = .renderable;
@@ -3142,7 +3449,7 @@ test "LODRenderer submits fixed-capacity compact streams without indirect-count 
         pub fn setLODDescriptorStream(_: @This(), _: rhi_types.LODDescriptorStream) void {}
         pub fn setLODCompactSampleBuffer(_: @This(), _: u32) void {}
         pub fn setLODCompactInstanceBuffer(_: @This(), _: u32) void {}
-        pub fn drawIndirectCount(_: @This(), _: u32, _: u32, _: usize, _: u32, _: u32, _: u32, _: u32) bool {
+        pub fn drawIndirectCount(_: @This(), _: u32, _: u32, _: usize, _: u32, _: usize, _: u32, _: u32) bool {
             return true;
         }
         pub fn drawCompactLODIndirectCount(self: @This(), _: u32, _: u32, _: usize, _: u32, _: usize, _: u32) bool {
@@ -3184,6 +3491,8 @@ test "LODRenderer submits fixed-capacity compact streams without indirect-count 
     const Renderer = LODRenderer(MockRHI);
     const renderer = try Renderer.init(allocator, .{ .state = &state });
     defer renderer.deinit();
+    try std.testing.expect(!renderer.ensureCompactIndexBuffers(0));
+    renderer.frame_serial = 1;
     renderer.compact_pool.buffer_handle = 99;
     renderer.gpu_culling_threshold = 1;
     renderer.projection_frame = 1;
@@ -3231,6 +3540,10 @@ test "LODRenderer createGPUBridge and toInterface round-trip" {
     };
 
     const MockRHI = struct {
+        pub fn supportsIndirectFirstInstance(_: @This()) bool {
+            return false;
+        }
+
         state: *MockRHIState,
 
         pub fn createBuffer(self: @This(), _: usize, _: anytype) !u32 {
