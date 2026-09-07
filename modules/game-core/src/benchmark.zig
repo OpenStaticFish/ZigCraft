@@ -339,7 +339,27 @@ pub fn validateResults(results: BenchmarkResults) !void {
     }
     if (completion.evidence_mode and !validProvenance(results.provenance)) return error.MissingBenchmarkProvenance;
     const thresholds = thresholdsForResults(results);
-    if (results.fps.p1 < thresholds.fps_p1_min or results.max_frame_ms > thresholds.max_frame_ms or results.draw_calls_avg > thresholds.draw_calls_max or results.vertices_avg > thresholds.vertices_max or results.gpu_memory_mb_max > thresholds.gpu_memory_mb_max) return error.BenchmarkSloBreach;
+    const breached = results.fps.p1 < thresholds.fps_p1_min or
+        results.max_frame_ms > thresholds.max_frame_ms or
+        results.draw_calls_avg > thresholds.draw_calls_max or
+        results.vertices_avg > thresholds.vertices_max or
+        results.gpu_memory_mb_max > thresholds.gpu_memory_mb_max;
+    if (breached) {
+        std.log.err("benchmark SLO breach for {s}: p1 FPS {d:.2}/{d:.2}, max frame {d:.2}/{d:.2}ms, draw calls {d:.2}/{d:.2}, vertices {d:.2}/{d:.2}, GPU memory {d:.2}/{d:.2}MiB", .{
+            results.preset,
+            results.fps.p1,
+            thresholds.fps_p1_min,
+            results.max_frame_ms,
+            thresholds.max_frame_ms,
+            results.draw_calls_avg,
+            thresholds.draw_calls_max,
+            results.vertices_avg,
+            thresholds.vertices_max,
+            results.gpu_memory_mb_max,
+            thresholds.gpu_memory_mb_max,
+        });
+        return error.BenchmarkSloBreach;
+    }
 }
 
 fn baselineRenderDistanceForPreset(preset: []const u8) i32 {
