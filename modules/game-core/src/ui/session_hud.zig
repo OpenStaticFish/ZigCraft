@@ -16,7 +16,6 @@ const TelemetryRow = enum(u8) {
     position,
     chunks,
     visible,
-    lods,
     queued_gen,
     queued_mesh,
     pending_upload,
@@ -58,7 +57,7 @@ pub fn draw(session: anytype, ui: *UISystem, atlas: *const TextureAtlas, active_
         const rs = telemetry.getRenderStats();
         const pc = worldToChunkFromFloat(session.camera.position.x, session.camera.position.z);
         const fault_count = session.rhi.query().getFaultCount();
-        const hud_h: f32 = if (fault_count > 0) 230 else 210;
+        const hud_h: f32 = if (fault_count > 0) 210 else 190;
         ui.drawRect(.{ .x = 10, .y = TELEMETRY_PANEL_Y, .width = 220, .height = hud_h }, Color.rgba(0, 0, 0, 0.6));
         Font.drawText(ui, "POS:", 15, telemetryRowY(.position), 1.5, Color.white);
         Font.drawNumber(ui, pc.chunk_x, 120, telemetryRowY(.position), Color.white);
@@ -67,11 +66,6 @@ pub fn draw(session: anytype, ui: *UISystem, atlas: *const TextureAtlas, active_
         Font.drawNumber(ui, @intCast(stats.chunks_loaded), 140, telemetryRowY(.chunks), Color.white);
         Font.drawText(ui, "VISIBLE:", 15, telemetryRowY(.visible), 1.5, Color.white);
         Font.drawNumber(ui, @intCast(rs.chunks_rendered), 140, telemetryRowY(.visible), Color.white);
-
-        if (telemetry.getLODStats()) |ls| {
-            Font.drawText(ui, "LODS:", 15, telemetryRowY(.lods), 1.5, Color.rgba(0.5, 0.8, 1.0, 1.0));
-            Font.drawNumber(ui, @intCast(ls.totalLoaded()), 140, telemetryRowY(.lods), Color.rgba(0.5, 0.8, 1.0, 1.0));
-        }
 
         Font.drawText(ui, "QUEUED GEN:", 15, telemetryRowY(.queued_gen), 1.5, Color.white);
         Font.drawNumber(ui, @intCast(stats.gen_queue), 140, telemetryRowY(.queued_gen), Color.white);

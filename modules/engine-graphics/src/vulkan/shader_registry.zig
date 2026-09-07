@@ -43,8 +43,3 @@ pub const CULLING_COMP = "assets/shaders/vulkan/culling.comp.spv";
 
 pub const WATER_VERT = "assets/shaders/vulkan/water.vert.spv";
 pub const WATER_FRAG = "assets/shaders/vulkan/water.frag.spv";
-
-pub const COMPACT_LOD_TERRAIN_VERT = "assets/shaders/vulkan/lod_compact_terrain.vert.spv";
-pub const COMPACT_LOD_TERRAIN_FRAG = "assets/shaders/vulkan/lod_compact_terrain.frag.spv";
-pub const COMPACT_LOD_WATER_VERT = "assets/shaders/vulkan/lod_compact_water.vert.spv";
-pub const COMPACT_LOD_WATER_FRAG = "assets/shaders/vulkan/lod_compact_water.frag.spv";

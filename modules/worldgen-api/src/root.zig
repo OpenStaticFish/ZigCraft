@@ -2,8 +2,6 @@ const std = @import("std");
 const world_core = @import("world-core");
 
 const Chunk = world_core.Chunk;
-const LODLevel = world_core.LODLevel;
-const LODSimplifiedData = world_core.LODSimplifiedData;
 const BiomeId = world_core.BiomeId;
 
 pub const RegionMood = enum {
@@ -74,31 +72,6 @@ pub const MapSample = struct {
     ridge_mask: f32,
 };
 
-pub const GenerationOptions = struct {
-    lod_level: LODLevel = .lod0,
-    enable_caves: bool = true,
-    enable_worm_caves: bool = true,
-    enable_decorations: bool = true,
-    enable_ores: bool = true,
-    enable_lighting: bool = true,
-    octave_reduction: u8 = 0,
-    skip_biome_blending: bool = false,
-
-    pub fn fromLOD(lod: LODLevel) GenerationOptions {
-        const level = @intFromEnum(lod);
-        return .{
-            .lod_level = lod,
-            .enable_caves = level <= 1,
-            .enable_worm_caves = level == 0,
-            .enable_decorations = level <= 1,
-            .enable_ores = level == 0,
-            .enable_lighting = level == 0,
-            .octave_reduction = @intCast(level),
-            .skip_biome_blending = level > 0,
-        };
-    }
-};
-
 pub const GeneratorInfo = struct {
     name: []const u8,
     description: []const u8,
@@ -112,8 +85,6 @@ pub const Generator = struct {
 
     pub const VTable = struct {
         generate: *const fn (ptr: *anyopaque, chunk: *Chunk, stop_flag: ?*const bool) WorldgenError!void,
-        generateHeightmapOnly: *const fn (ptr: *anyopaque, data: *LODSimplifiedData, region_x: i32, region_z: i32, lod_level: LODLevel, stop_flag: ?*const std.atomic.Value(bool)) void,
-        maybeRecenterCache: *const fn (ptr: *anyopaque, player_x: i32, player_z: i32) bool,
         getSeed: *const fn (ptr: *anyopaque) u64,
         getRegionInfo: *const fn (ptr: *anyopaque, world_x: i32, world_z: i32) RegionInfo,
         getColumnInfo: *const fn (ptr: *anyopaque, wx: f32, wz: f32) ColumnInfo,
@@ -129,14 +100,6 @@ pub const Generator = struct {
         try self.vtable.generate(self.ptr, chunk, stop_flag);
     }
 
-    pub fn generateHeightmapOnly(self: Generator, data: *LODSimplifiedData, region_x: i32, region_z: i32, lod_level: LODLevel, stop_flag: ?*const std.atomic.Value(bool)) void {
-        self.vtable.generateHeightmapOnly(self.ptr, data, region_x, region_z, lod_level, stop_flag);
-    }
-
-    pub fn maybeRecenterCache(self: Generator, player_x: i32, player_z: i32) bool {
-        return self.vtable.maybeRecenterCache(self.ptr, player_x, player_z);
-    }
-
     pub fn getSeed(self: Generator) u64 {
         return self.vtable.getSeed(self.ptr);
     }
@@ -149,7 +112,7 @@ pub const Generator = struct {
         return self.vtable.getColumnInfo(self.ptr, wx, wz);
     }
 
-    /// Returns map/LOD-oriented column data when the generator supports it.
+    /// Returns map-oriented column data when the generator supports it.
     /// Generators without a reduced sampler retain their existing behavior.
     pub fn getColumnInfoReduced(self: Generator, wx: f32, wz: f32, reduction: u8) ColumnInfo {
         const reduced = self.vtable.getColumnInfoReduced orelse return self.getColumnInfo(wx, wz);

@@ -28,6 +28,10 @@ pub const InputSettings = struct {
     /// Version 2 introduced GameAction enum-based mapping.
     /// Version 3 introduced human-readable object-based mapping with action names.
     pub const CURRENT_VERSION = 3;
+    /// Version 2 arrays included this action. Version 3's named bindings made
+    /// action removal safe, but positional migration must continue to reserve
+    /// its historical slot so subsequent bindings are not shifted.
+    const LEGACY_TOGGLE_LOD_RENDER_INDEX = 40;
 
     /// Initialize a new InputSettings instance with default bindings.
     pub fn init(allocator: std.mem.Allocator) InputSettings {
@@ -89,7 +93,6 @@ pub const InputSettings = struct {
         // --- SANITY CHECK FOR BROKEN MIGRATIONS ---
         // If critical debug actions are mapped to Escape (common symptom of shifted indices), reset them.
         const g_bind = settings.input_mapper.getBinding(.toggle_shadow_debug_vis);
-        const f4_bind = settings.input_mapper.getBinding(.toggle_timing_overlay);
         var healed = false;
 
         if (g_bind.primary == .key and g_bind.primary.key == .escape) {
@@ -97,12 +100,6 @@ pub const InputSettings = struct {
             settings.input_mapper.resetActionToDefault(.toggle_shadow_debug_vis);
             healed = true;
         }
-        if (f4_bind.primary == .key and f4_bind.primary.key == .escape) {
-            log.log.warn("InputSettings: Detected broken F4-key mapping (mapped to Escape). Resetting to Default (F4).", .{});
-            settings.input_mapper.resetActionToDefault(.toggle_timing_overlay);
-            healed = true;
-        }
-
         if (healed) {
             settings.save() catch |err| {
                 log.log.err("Failed to persist healed input settings: {}", .{err});
@@ -235,17 +232,11 @@ pub const InputSettings = struct {
             const array = bindings_val.array;
             log.log.info("Migrating input settings from version {} (array) to {} (object)", .{ version, CURRENT_VERSION });
 
-            const count = @min(array.items.len, GameAction.count);
-            if (array.items.len > GameAction.count) {
-                log.log.warn("Migration: Dropping {} unrecognized bindings (source has {}, engine supports {})", .{
-                    array.items.len - GameAction.count, array.items.len, GameAction.count,
-                });
-            }
-
-            for (array.items[0..count], 0..) |item, i| {
+            for (array.items, 0..) |item, legacy_index| {
+                const action = actionForLegacyBindingIndex(legacy_index) orelse continue;
                 const parsed_binding = try std.json.parseFromValue(ActionBinding, self.allocator, item, .{ .ignore_unknown_fields = true });
                 defer parsed_binding.deinit();
-                self.input_mapper.bindings[i] = parsed_binding.value;
+                self.input_mapper.bindings[@intFromEnum(action)] = parsed_binding.value;
             }
         } else {
             // New object format
@@ -261,6 +252,18 @@ pub const InputSettings = struct {
             }
         }
         return migrated;
+    }
+
+    fn actionForLegacyBindingIndex(legacy_index: usize) ?GameAction {
+        if (legacy_index == LEGACY_TOGGLE_LOD_RENDER_INDEX) return null;
+
+        const current_index = if (legacy_index > LEGACY_TOGGLE_LOD_RENDER_INDEX)
+            legacy_index - 1
+        else
+            legacy_index;
+        if (current_index >= GameAction.count) return null;
+
+        return @enumFromInt(current_index);
     }
 };
 
@@ -328,4 +331,51 @@ test "InputSettings V3 object format" {
     // Verify bindings
     try std.testing.expect(settings.input_mapper.getBinding(.move_forward).primary.key == .w);
     try std.testing.expect(settings.input_mapper.getBinding(.jump).primary.key == .space);
+}
+
+test "InputSettings migrates positional bindings without shifting past removed LOD action" {
+    const allocator = std.testing.allocator;
+    const legacy_action_count = GameAction.count + 1;
+    var bindings = [_]ActionBinding{ActionBinding.init(.{ .none = {} })} ** legacy_action_count;
+    bindings[39] = ActionBinding.init(.{ .key = .f4 });
+    bindings[40] = ActionBinding.init(.{ .key = .f6 });
+    bindings[41] = ActionBinding.init(.{ .key = .f7 });
+
+    const LegacySettings = struct {
+        version: u8,
+        bindings: [legacy_action_count]ActionBinding,
+    };
+    const json = try std.json.Stringify.valueAlloc(allocator, LegacySettings{
+        .version = 2,
+        .bindings = bindings,
+    }, .{});
+    defer allocator.free(json);
+
+    var settings = InputSettings.init(allocator);
+    defer settings.deinit();
+    _ = try settings.parseJson(json);
+
+    try std.testing.expectEqual(.f4, settings.input_mapper.getBinding(.toggle_timing_overlay).primary.key);
+    try std.testing.expectEqual(.f7, settings.input_mapper.getBinding(.toggle_gpass_render).primary.key);
+}
+
+test "InputSettings ignores removed actions in named version 3 bindings" {
+    const allocator = std.testing.allocator;
+    const v3_json =
+        \\{
+        \\  "version": 3,
+        \\  "bindings": {
+        \\    "toggle_timing_overlay": { "primary": { "key": 1073741885 }, "alternate": { "none": {} } },
+        \\    "toggle_lod_render": { "primary": { "key": 1073741887 }, "alternate": { "none": {} } },
+        \\    "toggle_gpass_render": { "primary": { "key": 1073741888 }, "alternate": { "none": {} } }
+        \\  }
+        \\}
+    ;
+
+    var settings = InputSettings.init(allocator);
+    defer settings.deinit();
+    _ = try settings.parseJson(v3_json);
+
+    try std.testing.expectEqual(.f4, settings.input_mapper.getBinding(.toggle_timing_overlay).primary.key);
+    try std.testing.expectEqual(.f7, settings.input_mapper.getBinding(.toggle_gpass_render).primary.key);
 }

@@ -218,7 +218,7 @@ pub const HandRenderer = struct {
         const swing_rot = Mat4.rotateZ(swing_rot_z);
         m = m.multiply(swing_rot);
 
-        ctx.setModelMatrix(m, Vec3.one, 0);
+        ctx.setModelMatrix(m, Vec3.one);
 
         ctx.draw(self.buffer_handle, 36, .triangles);
     }

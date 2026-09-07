@@ -1,5 +1,4 @@
 const std = @import("std");
-const RenderDistancePreset = @import("engine-rhi").RenderDistancePreset;
 
 pub const ShadowDebugChannel = enum(u32) {
     off = 0,
@@ -48,15 +47,6 @@ pub fn clearTerrainDebugViews(settings: *@This().Settings) void {
     settings.debug_outdoor_factor_active = false;
 }
 
-pub fn sanitizeRuntimeConflicts(settings: *@This().Settings) bool {
-    if (settings.lod_enabled and settings.taa_enabled) {
-        settings.taa_enabled = false;
-        settings.fxaa_enabled = true;
-        return true;
-    }
-    return false;
-}
-
 pub const ShadowQuality = struct {
     resolution: u32,
     label: []const u8,
@@ -86,8 +76,9 @@ pub const RESOLUTIONS = [_]Resolution{
 };
 
 pub const Settings = struct {
+    /// Full-detail chunk streaming radius. This is the only distance policy;
+    /// distant terrain is not represented by a secondary LOD range.
     render_distance: i32 = 15,
-    horizon_distance: i32 = 512,
     mouse_sensitivity: f32 = 50.0,
     vsync: bool = true,
     fov: f32 = 45.0,
@@ -117,8 +108,6 @@ pub const Settings = struct {
     ui_scale: f32 = 1.0, // Manual UI scale multiplier (0.5 to 2.0)
     window_width: u32 = 1920,
     window_height: u32 = 1080,
-    lod_enabled: bool = true,
-    render_distance_preset: RenderDistancePreset = .high,
     texture_pack: []const u8 = "default",
     environment_map: []const u8 = "default", // "default" or filename.exr/hdr
 
@@ -199,11 +188,6 @@ pub const Settings = struct {
         pub const render_distance = SettingMetadata{
             .label = "RENDER DISTANCE",
             .kind = .{ .int_range = .{ .min = 2, .max = std.math.maxInt(i32), .step = 1 } },
-        };
-        pub const horizon_distance = SettingMetadata{
-            .label = "DISTANT LOD LIMIT",
-            .description = "Maximum distant-terrain radius from the player",
-            .kind = .{ .int_range = .{ .min = 256, .max = 512, .step = 2 } },
         };
         pub const mouse_sensitivity = SettingMetadata{
             .label = "SENSITIVITY",
@@ -296,11 +280,6 @@ pub const Settings = struct {
                 .labels = &[_][]const u8{ "16 PX", "32 PX", "64 PX", "128 PX", "256 PX", "512 PX" },
                 .values = &[_]u32{ 16, 32, 64, 128, 256, 512 },
             } },
-        };
-        pub const lod_enabled = SettingMetadata{
-            .label = "LOD SYSTEM",
-            .description = "Enables high-distance simplified terrain rendering",
-            .kind = .toggle,
         };
         pub const ssao_enabled = SettingMetadata{
             .label = "SSAO",

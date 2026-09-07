@@ -61,26 +61,6 @@ pub fn supportsIndirectCount(ctx: anytype) bool {
     return ctx.vulkan_device.draw_indirect_count;
 }
 
-/// This is intentionally a single backend capability rather than a collection
-/// of Vulkan feature bits.  It certifies the descriptor-snapshot contract used
-/// by compact terrain/water indirect streams.
-pub fn supportsCompactLODGpuCulling(ctx: anytype) bool {
-    return ctx.vulkan_device.draw_indirect_first_instance and ctx.vulkan_device.multi_draw_indirect;
-}
-
-test "compact LOD GPU culling requires first-instance but not indirect-count support" {
-    const Context = struct {
-        vulkan_device: struct {
-            draw_indirect_first_instance: bool,
-            draw_indirect_count: bool,
-            multi_draw_indirect: bool,
-        },
-    };
-    try std.testing.expect(supportsCompactLODGpuCulling(Context{ .vulkan_device = .{ .draw_indirect_first_instance = true, .draw_indirect_count = false, .multi_draw_indirect = true } }));
-    try std.testing.expect(!supportsCompactLODGpuCulling(Context{ .vulkan_device = .{ .draw_indirect_first_instance = false, .draw_indirect_count = true, .multi_draw_indirect = true } }));
-    try std.testing.expect(!supportsCompactLODGpuCulling(Context{ .vulkan_device = .{ .draw_indirect_first_instance = true, .draw_indirect_count = true, .multi_draw_indirect = false } }));
-}
-
 pub fn recover(ctx: anytype) !void {
     if (!ctx.runtime.gpu_fault_detected) return;
 

@@ -104,7 +104,7 @@ dev         <- Staging branch for integrated features
 
 | Branch Type | Purpose | Merge Flow | Examples |
 |-------------|---------|-------------|----------|
-| `feature/*` | New features, enhancements | `feature -> dev -> main` | `feature/lod-system` |
+| `feature/*` | New features, enhancements | `feature -> dev -> main` | `feature/terrain-improvements` |
 | `bug/*` | Non-critical bugs | `bug -> dev -> main` | `bug/rendering-artifact` |
 | `hotfix/*` | Critical bugs (crashes, data loss) | `hotfix -> dev -> main` | `hotfix/crash-on-load` |
 | `ci/*` | CI/workflow changes | `ci -> dev -> main` | `ci/update-runner` |
@@ -113,7 +113,7 @@ dev         <- Staging branch for integrated features
 
 ### Branch Naming Guidelines
 - Use **kebab-case** for branch names
-- Be descriptive: `feature/lod-system`, `bug/chunk-leak`, `hotfix/save-corruption`
+- Be descriptive: `feature/terrain-improvements`, `bug/chunk-leak`, `hotfix/save-corruption`
 - No strict format required (issue numbers optional)
 - CI branches: `ci/` prefix for `.github/` changes
 
@@ -155,7 +155,7 @@ devenv shell zig build test
 Use conventional commits for clear commit messages and PR titles. Allowed types are `feat`, `fix`, `refactor`, `test`, `docs`, `ci`, `chore`, `perf`, `build`, `style`, and `revert`.
 
 ```
-feat: add LOD system for distant terrain
+feat: add terrain generation improvements
 fix: resolve chunk mesh memory leak
 ci: update runner configuration for faster builds
 refactor: extract lighting calculation to separate module
@@ -319,7 +319,6 @@ modules/
   world-core/       # Blocks, chunks, coordinates, and light packing
   world-worldgen/   # Terrain generation, biomes, caves, decorations, generator registry
   world-meshing/    # Chunk storage, chunk mesh generation, GPU block buffers
-  world-lod/        # Distant terrain LOD chunks, meshes, scheduler, renderer, manager
   world-runtime/    # World facade, streamer, renderer, mutation, GPU meshing runtime
   world-persistence/# Level data, region files, chunk serialization, save manager
 src/

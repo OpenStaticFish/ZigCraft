@@ -19,7 +19,6 @@ pub const meshing = struct {
     pub const custom_mesh_mesher = @import("meshing/custom_mesh_mesher.zig");
     pub const greedy_mesher = @import("meshing/greedy_mesher.zig");
     pub const lighting_sampler = @import("meshing/lighting_sampler.zig");
-    pub const quadric_simplifier = @import("meshing/quadric_simplifier.zig");
     pub const wall_attached_mesher = @import("meshing/wall_attached_mesher.zig");
 };
 

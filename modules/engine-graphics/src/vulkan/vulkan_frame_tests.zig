@@ -60,7 +60,6 @@ const MockDrawState = struct {
     current_lpv_texture_g: u32 = 0,
     current_lpv_texture_b: u32 = 0,
     descriptors_dirty: [rhi.MAX_FRAMES_IN_FLIGHT]bool = .{ false, false },
-    lod_mode: bool = false,
     dummy_texture: u32 = 1,
     dummy_texture_3d: u32 = 2,
 };

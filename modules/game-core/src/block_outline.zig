@@ -157,7 +157,7 @@ pub const BlockOutline = struct {
 
         const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
         ctx.setSelectionMode(true);
-        ctx.setModelMatrix(model, Vec3.one, 0);
+        ctx.setModelMatrix(model, Vec3.one);
         ctx.draw(self.buffer_handle, 288, .triangles);
         ctx.setSelectionMode(false);
     }

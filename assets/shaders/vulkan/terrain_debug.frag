@@ -14,7 +14,6 @@ layout(location = 10) in vec3 vBitangent;
 layout(location = 11) in float vAO;
 layout(location = 12) in vec4 vClipPosCurrent;
 layout(location = 13) in vec4 vClipPosPrev;
-layout(location = 14) in float vMaskRadius;
 
 layout(location = 0) out vec4 FragColor;
 

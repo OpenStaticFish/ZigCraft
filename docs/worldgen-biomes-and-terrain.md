@@ -79,7 +79,6 @@ There are also compatibility and utility selectors in `biome_selector.zig`:
 
 - `selectBiomeVoronoiMultiParam` compares heat, humidity, elevation, continentalness, ruggedness, and ridge mask against `BIOME_POINTS` after height, slope, and continentalness filters.
 - Blended selectors return primary/secondary biome IDs and a blend factor for transition-aware callers.
-- `selectBiomeSimple` is reserved for simplified LOD-style selection.
 
 ## Region Roles
 

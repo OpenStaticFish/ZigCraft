@@ -13,7 +13,6 @@ const biomes = @import("biomes.zig");
 const block_colors = @import("block_colors.zig");
 const caves = @import("caves.zig");
 const climate = @import("climate.zig");
-const lod_sampling = @import("lod_sampling.zig");
 const noise = @import("noise.zig");
 const terrain_shape = @import("terrain_shape.zig");
 const trees = @import("trees.zig");
@@ -26,8 +25,6 @@ const CHUNK_SIZE_Y = world_core.CHUNK_SIZE_Y;
 const CHUNK_SIZE_Z = world_core.CHUNK_SIZE_Z;
 const BlockType = world_core.BlockType;
 const BiomeId = world_core.BiomeId;
-const LODLevel = world_core.LODLevel;
-const LODSimplifiedData = world_core.LODSimplifiedData;
 const Generator = worldgen_api.Generator;
 const GeneratorInfo = worldgen_api.GeneratorInfo;
 const ColumnInfo = worldgen_api.ColumnInfo;
@@ -61,8 +58,6 @@ pub const OverworldV2Generator = struct {
     pub const INFO = GeneratorInfo{
         .name = "Overworld V2",
         .description = "Luanti v7-style terrain with ridges, mountains, rivers, and cave noise.",
-        // Version 3 invalidates LOD source caches generated with the grounded
-        // height estimator, which could classify elevated islands as ocean.
         .version = 3,
     };
 
@@ -292,17 +287,6 @@ pub const OverworldV2Generator = struct {
         return biomes.isBeachColumn(self, wx, wz, height);
     }
 
-    pub fn generateHeightmapOnly(self: *const OverworldV2Generator, data: *LODSimplifiedData, region_x: i32, region_z: i32, lod_level: LODLevel, stop_flag: ?*const std.atomic.Value(bool)) void {
-        lod_sampling.generateHeightmapOnly(self, data, region_x, region_z, lod_level, stop_flag);
-    }
-
-    pub fn maybeRecenterCache(self: *OverworldV2Generator, player_x: i32, player_z: i32) bool {
-        _ = self;
-        _ = player_x;
-        _ = player_z;
-        return false;
-    }
-
     pub fn getSeed(self: *const OverworldV2Generator) u64 {
         return self.seed;
     }
@@ -352,8 +336,6 @@ pub const OverworldV2Generator = struct {
 
     const VTABLE = Generator.VTable{
         .generate = generateWrapper,
-        .generateHeightmapOnly = generateHeightmapOnlyWrapper,
-        .maybeRecenterCache = maybeRecenterCacheWrapper,
         .getSeed = getSeedWrapper,
         .getRegionInfo = getRegionInfoWrapper,
         .getColumnInfo = getColumnInfoWrapper,
@@ -364,16 +346,6 @@ pub const OverworldV2Generator = struct {
     fn generateWrapper(ptr: *anyopaque, chunk: *Chunk, stop_flag: ?*const bool) worldgen_api.WorldgenError!void {
         const self: *OverworldV2Generator = @ptrCast(@alignCast(ptr));
         try self.generate(chunk, stop_flag);
-    }
-
-    fn generateHeightmapOnlyWrapper(ptr: *anyopaque, data: *LODSimplifiedData, region_x: i32, region_z: i32, lod_level: LODLevel, stop_flag: ?*const std.atomic.Value(bool)) void {
-        const self: *const OverworldV2Generator = @ptrCast(@alignCast(ptr));
-        self.generateHeightmapOnly(data, region_x, region_z, lod_level, stop_flag);
-    }
-
-    fn maybeRecenterCacheWrapper(ptr: *anyopaque, player_x: i32, player_z: i32) bool {
-        const self: *OverworldV2Generator = @ptrCast(@alignCast(ptr));
-        return self.maybeRecenterCache(player_x, player_z);
     }
 
     fn getSeedWrapper(ptr: *anyopaque) u64 {
@@ -482,60 +454,6 @@ test "overworld-v2 places ground vegetation" {
     }
 
     try std.testing.expect(vegetation_blocks > 0);
-}
-
-test "overworld-v2 generates representative LOD data" {
-    var gen = OverworldV2Generator.init(12345, std.testing.allocator);
-    var data = try LODSimplifiedData.init(std.testing.allocator, .lod3);
-    defer data.deinit();
-
-    gen.generateHeightmapOnly(&data, 0, 0, .lod3, null);
-
-    var filled_columns: u32 = 0;
-    var material_columns: u32 = 0;
-    for (data.heightmap, 0..) |height, i| {
-        if (height > 0.0) filled_columns += 1;
-        if (data.top_blocks[i] != .air and data.colors[i] != 0) material_columns += 1;
-        try std.testing.expect(height <= @as(f32, @floatFromInt(CHUNK_SIZE_Y - 1)));
-    }
-
-    try std.testing.expect(filled_columns > 0);
-    try std.testing.expect(material_columns > 0);
-}
-
-test "overworld-v2 LOD height sampling retains elevated terrain above underwater bases" {
-    var gen = OverworldV2Generator.init(12345, std.testing.allocator);
-    const sea_level = gen.params.sea_level;
-    var found_elevated_island = false;
-
-    var wz: i32 = -2048;
-    scan: while (wz <= 2048) : (wz += 32) {
-        var wx: i32 = -2048;
-        while (wx <= 2048) : (wx += 32) {
-            const base_height = util.floorToI32(terrain_shape.baseTerrainLevelAtPoint(&gen, wx, wz));
-            const grounded_height = terrain_shape.estimateGroundedTerrainHeight(&gen, wx, wz, base_height);
-            const full_height = terrain_shape.estimateTerrainHeight(&gen, wx, wz, base_height);
-            if (grounded_height < sea_level and full_height >= sea_level) {
-                try std.testing.expectEqual(full_height, lod_sampling.sampleTerrainHeightForLOD(&gen, wx, wz));
-                found_elevated_island = true;
-                break :scan;
-            }
-        }
-    }
-
-    try std.testing.expect(found_elevated_island);
-}
-
-test "overworld-v2 LOD tree density covers forest variants" {
-    try std.testing.expect(trees.treeDensityForBiome(.forest) > 0.5);
-    try std.testing.expect(trees.treeDensityForBiome(.birch_forest) > 0.5);
-    try std.testing.expect(trees.treeDensityForBiome(.dark_forest) > trees.treeDensityForBiome(.forest));
-    try std.testing.expect(trees.treeDensityForBiome(.old_growth_taiga) > trees.treeDensityForBiome(.taiga));
-    try std.testing.expect(trees.treeDensityForBiome(.bamboo_jungle) > 0.5);
-    try std.testing.expect(trees.treeDensityForBiome(.plains) >= 0.1);
-    try std.testing.expectEqual(TreeShape.birch, trees.defaultTreeShapeForBiome(.birch_forest));
-    try std.testing.expectEqual(TreeShape.spruce, trees.defaultTreeShapeForBiome(.old_growth_taiga));
-    try std.testing.expectEqual(TreeShape.jungle, trees.defaultTreeShapeForBiome(.bamboo_jungle));
 }
 
 test "overworld-v2 propagates lighting allocation failure" {

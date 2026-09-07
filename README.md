@@ -11,7 +11,7 @@
 |________/|______/ \______/  \______/ |__/  |__/|__/  |__/|__/         |__/   
 ```
 
-  <img src="assets/screenshots/distant-lod-landscape.png" alt="ZigCraft distant voxel landscape with LOD terrain and forests" width="100%" />
+  <img src="assets/screenshots/distant-lod-landscape.png" alt="Historical ZigCraft terrain landscape screenshot" width="100%" />
 
   # ⚡ ZigCraft ⚡
 
@@ -42,7 +42,6 @@
 ### 🌍 World Generation
 - **Biomes & Climate**: Multi-noise system based on temperature and humidity (11+ biomes).
 - **Infinite Terrain**: Seed-based, deterministic generation with domain warping and 3D caves.
-- **Level of Detail (LOD)**: Hierarchical LOD system enabling 100+ chunk render distances using simplified terrain meshes and specialized rendering.
 - **Greedy Meshing**: Optimized vertex data generation for maximum throughput.
 
 ### 🛠️ Engine Core
@@ -118,13 +117,11 @@ To bypass in emergencies: `git push --no-verify`
 - **Shadow/cave lighting capture**: `./scripts/capture_shadow_test.sh screenshots/shadow-test.png`
 
 `-Dchunk-debug-mode` strips the overworld down to basic chunks for isolation work:
-- LOD off by default
 - water generation/rendering off by default
 - caves off by default
 - decorations/features off by default
 
 Re-enable individual systems with `-Dchunk-debug-enable=` using a comma-separated list:
-- `lod`
 - `water`
 - `watergen`
 - `waterrender`
@@ -134,14 +131,11 @@ Re-enable individual systems with `-Dchunk-debug-enable=` using a comma-separate
 Examples:
 
 ```bash
-# LOD only
-devenv shell zig build run -Dchunk-debug-mode -Dchunk-debug-enable=lod -Dauto-world=normal
-
-# LOD plus cave generation
-devenv shell zig build run -Dchunk-debug-mode -Dchunk-debug-enable=lod,caves -Dauto-world=normal
+# Water plus cave generation
+devenv shell zig build run -Dchunk-debug-mode -Dchunk-debug-enable=water,caves -Dauto-world=normal
 
 # Headless startup comparison after 5 seconds
-devenv shell zig build run -Dchunk-debug-mode -Dchunk-debug-enable=lod,water,caves -Dauto-world=normal -Dstartup-diagnostic-seconds=5 -Dskip-present
+devenv shell zig build run -Dchunk-debug-mode -Dchunk-debug-enable=water,caves -Dauto-world=normal -Dstartup-diagnostic-seconds=5 -Dskip-present
 ```
 
 The shadow/cave lighting capture launches a deterministic low-block test scene, applies a small shadow-focused graphics preset, waits 5 seconds after the target is ready, captures a PNG, and exits. It defaults to a `dug-cave` variant that matches a player-dug dirt/grass cave mouth. Use `ZIGCRAFT_SHADOW_TEST_VARIANT=bend ./scripts/capture_shadow_test.sh screenshots/shadow-bend.png` to check the older bend/deep-black regression. Override the wait with `ZIGCRAFT_SCREENSHOT_DELAY_SECONDS=8 ./scripts/capture_shadow_test.sh screenshots/shadow-test.png`. Screenshot paths are restricted to image extensions from `image/png`, `image/jpeg`, `image/gif`, and `image/webp`; the built-in encoder currently writes PNG.
@@ -157,7 +151,6 @@ The shadow/cave lighting capture launches a deterministic low-block test scene, 
 - `modules/world-core`: Blocks, chunks, coordinates, lighting, and shared world types.
 - `modules/world-worldgen`: Procedural terrain, noise, biomes, caves, decorations, and generator registry.
 - `modules/world-meshing`: Chunk storage, mesh generation, GPU block buffers, and meshing helpers.
-- `modules/world-lod`: Distant terrain LOD data, scheduling, rendering, and management.
 - `modules/world-runtime`: World facade, streaming, mutation, rendering, and GPU meshing runtime.
 - `modules/world-persistence`: Level data, chunk serialization, region files, and save manager.
 - `src/game/`: Application/gameplay state, screens, player, inventory, and session logic.

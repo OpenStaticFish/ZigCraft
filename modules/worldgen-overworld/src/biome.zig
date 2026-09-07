@@ -6,7 +6,7 @@
 //!   - biome_registry.zig       — Data definitions, types, BIOME_REGISTRY
 //!   - biome_selector.zig       — Selection algorithms (Voronoi, score-based, blended)
 //!   - biome_edge_detector.zig  — Edge detection, transition rules
-//!   - biome_color_provider.zig — Color lookup for LOD/minimap
+//!   - biome_color_provider.zig — Color lookup for maps
 //!   - biome_source.zig         — BiomeSource unified interface
 
 // ============================================================================
@@ -90,7 +90,6 @@ pub const selectBiomeBlended = biome_selector.selectBiomeBlended;
 pub const selectBiomeWithRiverBlended = biome_selector.selectBiomeWithRiverBlended;
 pub const selectBiomeWithConstraints = biome_selector.selectBiomeWithConstraints;
 pub const selectBiomeWithConstraintsAndRiver = biome_selector.selectBiomeWithConstraintsAndRiver;
-pub const selectBiomeSimple = biome_selector.selectBiomeSimple;
 
 // ============================================================================
 // Functions from biome_color_provider.zig

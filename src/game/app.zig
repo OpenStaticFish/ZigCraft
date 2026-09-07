@@ -82,13 +82,9 @@ fn gameBuildConfig() BuildConfig {
         .chunk_debug_enable = build_options.chunk_debug_enable,
         .chunk_debug_mode = build_options.chunk_debug_mode,
         .screenshot_path = build_options.screenshot_path,
-        .phase5_visual_scene = build_options.phase5_visual_scene,
-        .benchmark_fixture = build_options.benchmark_fixture,
-        .phase5_visual_run_id = build_options.phase5_visual_run_id,
         .shadow_test_scene = build_options.shadow_test_scene,
         .shadow_test_variant = build_options.shadow_test_variant,
         .startup_diagnostic_seconds = build_options.startup_diagnostic_seconds,
-        .benchmark_lod_memory_budget_mb = if (build_options.benchmark) build_options.benchmark_lod_memory_budget_mb else 0,
     };
 }
 
@@ -129,11 +125,10 @@ pub const App = struct {
         errdefer settings_manager.deinit();
 
         if (build_options.benchmark) {
-            applyBenchmarkSettings(settings_manager.ptr(), build_options.benchmark_preset, build_options.benchmark_render_distance, build_options.benchmark_horizon_distance);
+            applyBenchmarkSettings(settings_manager.ptr(), build_options.benchmark_preset, build_options.benchmark_render_distance);
         }
-        // Benchmark setup above already applies its preset and independent
-        // near/horizon overrides. Reapplying `auto_preset` here would silently
-        // reset a dedicated large-horizon culling capture to the preset radius.
+        // Benchmark setup owns its render-distance override. Reapplying
+        // `auto_preset` here would reset the selected benchmark distance.
         if (build_options.auto_preset.len > 0 and !build_options.benchmark) {
             _ = applyNamedPreset(settings_manager.ptr(), build_options.auto_preset, "AUTO PRESET");
         }
@@ -205,7 +200,7 @@ pub const App = struct {
 
         var benchmark_runner: ?*BenchmarkRunner = null;
         if (build_options.benchmark) {
-            // Benchmarks include GPU pass breakdowns, including LOD passes.
+            // Benchmarks include renderer GPU pass breakdowns.
             render_system.getRHI().timing().setTimingEnabled(true);
             const runner = try allocator.create(BenchmarkRunner);
             const benchmark_duration_s: f32 = @as(f32, @floatFromInt(build_options.benchmark_duration));
@@ -214,15 +209,11 @@ pub const App = struct {
                 build_options.benchmark_preset,
                 build_options.benchmark_scenario,
                 settings_manager.settings.render_distance,
-                settings_manager.settings.horizon_distance,
                 benchmark_duration_s,
                 BENCHMARK_WORLD_SEED,
                 build_options.benchmark_build_mode,
                 build_options.benchmark_world,
-                build_options.benchmark_fixture,
                 build_options.benchmark_output,
-                build_options.benchmark_lod_memory_budget_mb,
-                build_options.benchmark_require_gpu_candidates,
             );
             benchmark_runner = runner;
         }
@@ -413,6 +404,11 @@ pub const App = struct {
 
         self.input.beginFrame();
         self.input.pollEvents();
+        self.ui_manager.handleTimingToggle(
+            self.input_mapper.isActionPressed(self.input.interface(), .toggle_timing_overlay),
+            &self.time,
+            self.render_system.getRHI(),
+        );
         // Do not record and submit one more frame after SDL reports that the
         // window is closing. On some WSI/driver paths that final submission
         // races surface teardown and returns VK_ERROR_DEVICE_LOST.
@@ -448,8 +444,6 @@ pub const App = struct {
         }
 
         try self.maybeLaunchPendingWorld(swapchain_extent);
-
-        self.ui_manager.handleTimingToggle(self.input_mapper.interface().isActionPressed(self.input.interface(), .toggle_timing_overlay), &self.time, self.render_system.getRHI());
 
         // UI geometry is rendered in swapchain pixels. SDL input dimensions can
         // remain logical on HiDPI desktops, which previously confined RmlUi to
@@ -537,8 +531,7 @@ pub const App = struct {
             // well; otherwise the headless UI-only fallback clears the output
             // black and a screenshot can race that transient frame.
             const rendered_frame = self.render_system.getRHI().query().getDrawCallCount() > 0;
-            const phase5_ready = build_options.phase5_visual_run_id.len == 0 or build_options.phase5_visual_scene.len == 0 or @import("game-core").phase5CaptureReady();
-            if ((!requires_world_ready or world_ready) and (!requires_world_ready or rendered_frame) and phase5_ready) {
+            if ((!requires_world_ready or world_ready) and (!requires_world_ready or rendered_frame)) {
                 self.screenshot_settle_frames += 1;
             } else {
                 self.screenshot_settle_frames = 0;
@@ -577,11 +570,6 @@ pub const App = struct {
 
             if (should_finish) {
                 if (build_options.screenshot_path.len > 0) {
-                    if (build_options.phase5_visual_run_id.len > 0) if (world_stats) |stats| if (stats.lod) |lod| {
-                        const scene = if (build_options.phase5_visual_scene.len > 0) build_options.phase5_visual_scene else build_options.shadow_test_variant;
-                        log.log.warn("PHASE5_CAPTURE: run={s} scene={s} chunks_rendered={} compact_allocated={} compact_submissions={}", .{ build_options.phase5_visual_run_id, scene, stats.chunks_rendered, lod.compact_pool_allocated_bytes, lod.profiling.compact_submissions });
-                        std.debug.print("PHASE5_CAPTURE: run={s} scene={s} chunks_rendered={} compact_allocated={} compact_submissions={}\n", .{ build_options.phase5_visual_run_id, scene, stats.chunks_rendered, lod.compact_pool_allocated_bytes, lod.profiling.compact_submissions });
-                    };
                     log.log.info("SCREENSHOT: Requesting final composed frame to '{s}'", .{build_options.screenshot_path});
                     if (!self.render_system.getRHI().screenshot().captureFrame(build_options.screenshot_path)) {
                         log.log.err("SCREENSHOT: Failed to request screenshot", .{});
@@ -692,24 +680,18 @@ fn applyBenchmarkPreset(settings: *Settings, preset_name: []const u8) void {
     }
 }
 
-/// Apply the preset first, then explicit benchmark distances. Keeping the
-/// override ordering in one helper makes a large horizon immune to a later
-/// automatic preset application.
-fn applyBenchmarkSettings(settings: *Settings, preset_name: []const u8, render_distance: i32, horizon_distance: i32) void {
+/// Apply the preset first, then explicit benchmark render distance.
+fn applyBenchmarkSettings(settings: *Settings, preset_name: []const u8, render_distance: i32) void {
     applyBenchmarkPreset(settings, preset_name);
     if (render_distance > 0) {
         settings.render_distance = render_distance;
-        settings.horizon_distance = render_distance;
     }
-    // The horizon does not change near-chunk residency.
-    if (horizon_distance > 0) settings.horizon_distance = horizon_distance;
 }
 
-test "benchmark horizon override is retained after its preset" {
+test "benchmark render distance override is retained after its preset" {
     var settings = Settings{};
-    applyBenchmarkSettings(&settings, "high", 12, 4096);
+    applyBenchmarkSettings(&settings, "high", 12);
     try std.testing.expectEqual(@as(i32, 12), settings.render_distance);
-    try std.testing.expectEqual(@as(i32, 4096), settings.horizon_distance);
 }
 
 fn gpuMemoryMb(stats: @import("engine-rhi").Stats) f32 {
@@ -731,8 +713,6 @@ fn applyShadowTestPreset(settings: *Settings) void {
     settings.window_width = 1280;
     settings.window_height = 720;
     settings.render_distance = 4;
-    settings.lod_enabled = false;
-    settings.render_distance_preset = .low;
     settings.shadow_sandbox_enabled = true;
     settings.shadow_beauty_enabled = true;
     settings.shadow_quality = 2;

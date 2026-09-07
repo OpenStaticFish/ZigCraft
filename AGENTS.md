@@ -14,7 +14,7 @@
   devenv shell zig fmt src/ modules/
   devenv shell zig fmt --check src/ modules/
   ```
-- `zig build test` is the broad suite: aggregate/module tests, fuzz roots, shader compilation/validation, SPIR-V size checks, shadow ABI checks, and Phase 5 policy tests.
+- `zig build test` is the broad suite: aggregate/module tests, fuzz roots, shader compilation/validation, SPIR-V size checks, and shadow ABI checks.
   ```bash
   devenv shell zig build test
   devenv shell zig build test -Dtest-filter="name"
@@ -25,11 +25,9 @@
   ```bash
   devenv shell zig build test-integration -Dskip-present=true
   devenv shell zig build test-robustness
-  devenv shell zig build phase5-gate
-  devenv shell zig build phase5-visual-gate
   ```
 - `-Dskip-present=true` only suppresses presentation; SDL/Vulkan initialization still needs a display/compositor and driver. Use the repo skills `headless-crash-test`, `headless-screenshot`, `headless-benchmark`, or `headless-graphics-verification`, and always bound game/graphics commands with a timeout.
-- For deterministic startup checks, combine `-Dskip-present`, `-Dauto-world=<normal|overworld|overworld-v2|flat|test>`, and `-Dstartup-diagnostic-seconds=N`. `-Dchunk-debug-mode` disables LOD, water, caves, and decorations; selectively restore `lod,water,watergen,waterrender,caves,decorations` with `-Dchunk-debug-enable=`.
+- For deterministic startup checks, combine `-Dskip-present`, `-Dauto-world=<normal|overworld|overworld-v2|flat|test>`, and `-Dstartup-diagnostic-seconds=N`. `-Dchunk-debug-mode` disables water, caves, and decorations; selectively restore `water,watergen,waterrender,caves,decorations` with `-Dchunk-debug-enable=`.
 
 ## Benchmarks and generated artifacts
 
@@ -40,7 +38,7 @@
     -Dbenchmark-duration=60 -Dbenchmark-output=zig-out/benchmark-low.json
   ```
   Scenarios are `stationary`, `traversal`, `rapid-turn`, and `teleport-eviction`. Prefer the `headless-benchmark` skill for bounded runs.
-- Focused CPU-only tools: `devenv shell zig build worldgen-report` and `devenv shell zig build lod-bench`. Pass climate snapshot arguments after `--`, e.g. `devenv shell zig build worldgen-climate-snapshot -- --seed 42 ...`.
+- Focused CPU-only tools: `devenv shell zig build worldgen-report` and `devenv shell zig build worldgen-climate-snapshot`. Pass climate snapshot arguments after `--`, e.g. `devenv shell zig build worldgen-climate-snapshot -- --seed 42 ...`.
 - Building/tests compile GLSL and write tracked `*.spv` files beside sources in `assets/shaders/vulkan/`. After intentional shader-size changes, run `./scripts/update_spirv_baseline.sh`; `docs/shaders/spirv-sizes.json` and shadow runtime SPIR-V parity are test-enforced.
 - New/changed textures go through `./scripts/process_textures.sh <pack> 512`; preserve licensing/attribution for placeholder assets.
 
@@ -48,20 +46,19 @@
 
 - `src/main.zig` and `src/game/app.zig` wire the executable. Reusable session/player/settings/benchmark logic belongs in `modules/game-core`; screens belong in `modules/game-ui`.
 - `engine-rhi` owns rendering contracts and opaque handles; `engine-graphics` owns the Vulkan backend, render passes, resources, and pipelines. Vulkan is currently the only backend, so interface changes usually require both the RHI vtable/contracts and Vulkan implementation.
-- `world-core` owns shared block/chunk/coordinate types; world generation is split across `world-worldgen-*` packages; `world-meshing` owns chunk mesh/storage; `world-lod` owns distant terrain; `world-runtime` coordinates streaming, lighting, GPU meshing, mutation, and rendering; `world-persistence` owns saves/regions.
+- `world-core` owns shared block/chunk/coordinate types; world generation is split across `world-worldgen-*` packages; `world-meshing` owns chunk mesh/storage; `world-runtime` coordinates streaming, lighting, GPU meshing, mutation, and rendering; `world-persistence` owns saves/regions.
 - Never call RHI/SDL from worker jobs. Pin chunks while background jobs hold them and synchronize shared mesh/chunk state with the project mutex abstraction.
 - Convert global coordinates with `worldToChunk`/`worldToLocal` from `world-core`; chunk coordinates are floor-divided, so ad-hoc truncating division is wrong for negative positions.
 - GPU-shared structs and shader blocks are ABI contracts. Use explicit layouts (`extern`/packed as appropriate), assert sizes/offsets, and update CPU, GLSL, descriptors, and backend bindings together.
 
 ## Graphics hazards
 
-- `ZIGCRAFT_LOD_COMPACT=auto` is qualified only through immutable per-layer descriptors plus expanded fallback for unsupported shoreline topology; `off` remains the explicit supported fallback. `force` is diagnostic only. Do not weaken the saved-world RADV reload, validation, robustness, and Phase 5 qualification requirements based only on generated-world captures.
 - Dedicated transfer queues cannot upload exclusive graphics buffers safely with semaphore synchronization alone; queue-family release/acquire ownership transfers are required. Until implemented, keep these uploads on the graphics family.
 - A descriptor set update affects all previously recorded commands that bind that set when execution happens. Terrain/water or direct/indirect streams that need different buffers require immutable/per-layer descriptor sets, not sequential updates to one set.
 
 ## Verification and CI
 
-- Match verification to the change, but graphics/RHI/shader/runtime work normally requires: format check, `zig build test`, ReleaseFast build, integration/robustness as relevant, and the appropriate headless graphics skill. CI additionally runs Debug and ReleaseSafe tests, `phase5-gate`, Lavapipe/Weston integration smoke tests, and `phase5-visual-gate`.
+- Match verification to the change, but graphics/RHI/shader/runtime work normally requires: format check, `zig build test`, ReleaseFast build, integration/robustness as relevant, and the appropriate headless graphics skill. CI additionally runs Debug and ReleaseSafe tests and Lavapipe/Weston integration smoke tests.
 - Install the repo pre-push hook with `./scripts/setup-hooks.sh`, but do not treat it as CI parity: it formats only `src/` and omits ReleaseSafe and graphics jobs.
 
 ## Git workflow

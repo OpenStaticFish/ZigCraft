@@ -273,10 +273,10 @@ pub const TerrainShapeGenerator = struct {
         center_controls: region_pkg.RegionControls,
     ) biome_mod.TerrainModifier {
         _ = center_controls;
-        // Coarse LOD columns already represent multiple blocks, so the 9-point
+        // Coarse map samples already represent multiple blocks, so the 9-point
         // biome influence blend is visually indistinguishable but multiplies
-        // the dominant terrain-modifier sampling cost. Keep full blending for
-        // near/detail generation and use the center sample from reduction 2+.
+        // the dominant terrain-modifier sampling cost. Use the center sample
+        // from reduction 2+.
         if (reduction >= 2) return self.sampleTerrainModifierAt(wx, wz, reduction);
 
         const samples = [_]biome_mod.TerrainModifier{

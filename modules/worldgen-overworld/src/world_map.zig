@@ -634,10 +634,6 @@ const FakeMapGenerator = struct {
     release_sample: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     fn generate(_: *anyopaque, _: *world_core.Chunk, _: ?*const bool) gen_interface.WorldgenError!void {}
-    fn generateHeightmapOnly(_: *anyopaque, _: *world_core.LODSimplifiedData, _: i32, _: i32, _: world_core.LODLevel, _: ?*const std.atomic.Value(bool)) void {}
-    fn maybeRecenterCache(_: *anyopaque, _: i32, _: i32) bool {
-        return false;
-    }
     fn getSeed(_: *anyopaque) u64 {
         return 1;
     }
@@ -661,8 +657,6 @@ const FakeMapGenerator = struct {
 
     const VTABLE = Generator.VTable{
         .generate = generate,
-        .generateHeightmapOnly = generateHeightmapOnly,
-        .maybeRecenterCache = maybeRecenterCache,
         .getSeed = getSeed,
         .getRegionInfo = getRegionInfo,
         .getColumnInfo = getColumnInfo,

@@ -88,7 +88,7 @@ pub const DebugFrustum = struct {
         const rel_y = -cam_pos.y;
         const rel_z = -cam_pos.z;
         const model = Mat4.translate(Vec3.init(rel_x, rel_y, rel_z));
-        rc.setModelMatrix(model, Vec3.init(DefaultColor.r, DefaultColor.g, DefaultColor.b), 0);
+        rc.setModelMatrix(model, Vec3.init(DefaultColor.r, DefaultColor.g, DefaultColor.b));
         rc.draw(buffer_handle, @as(u32, @intCast(vertex_count)), .lines);
     }
 };

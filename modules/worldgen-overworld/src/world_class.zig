@@ -1,9 +1,9 @@
-//! World Classification Map - authoritative world layout for LOD
+//! World Classification Map - authoritative world layout for generation.
 //!
 //! Computed ONCE per region, deterministically
-//! All LOD levels sample from this SAME map (no re-computation)
+//! Full-detail generation samples this shared map without recomputation.
 //!
-//! LOD-INVARIANT: These values MUST be identical for all LODs:
+//! Generation invariant: these values must remain stable for every sample:
 //! - Biome ID
 //! - Region Role / Mood
 //! - Land vs water decision

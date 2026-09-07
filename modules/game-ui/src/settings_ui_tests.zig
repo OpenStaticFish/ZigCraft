@@ -211,17 +211,6 @@ test "applyChangedSetting forwards film grain settings" {
     try testing.expectEqual(@as(f32, 0.25), rs.film_grain_intensity);
 }
 
-test "applyPresetSideEffects sanitizes LOD and TAA conflict" {
-    var settings = Settings{ .lod_enabled = true, .taa_enabled = true, .fxaa_enabled = false };
-    var rs = MockRenderSettings{};
-
-    settings_ui.applyPresetSideEffects(&settings, &rs);
-
-    try testing.expect(!settings.taa_enabled);
-    try testing.expect(settings.fxaa_enabled);
-    try testing.expect(rs.fxaa_enabled);
-}
-
 test "applyPresetSideEffects forwards stable render toggles" {
     var settings = Settings{ .anisotropic_filtering = 4, .textures_enabled = false, .taa_blend_factor = 0.5, .taa_velocity_rejection = 0.03 };
     var rs = MockRenderSettings{};

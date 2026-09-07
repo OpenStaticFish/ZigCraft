@@ -65,14 +65,7 @@ pub fn initContext(ctx: anytype, allocator: std.mem.Allocator, render_device: ?*
     ctx.draw.bound_roughness_texture = 0;
     ctx.draw.bound_displacement_texture = 0;
     ctx.draw.bound_env_texture = 0;
-    ctx.draw.current_mask_radius = 0;
-    ctx.draw.lod_mode = false;
-    ctx.draw.lod_descriptor_stream = .terrain_standard_direct;
-    ctx.draw.lod_descriptor_stream_valid = false;
     ctx.draw.pending_instance_buffer = 0;
-    ctx.draw.pending_lod_instance_buffer = 0;
-    ctx.draw.pending_lod_compact_sample_buffer = 0;
-    ctx.draw.pending_lod_compact_instance_buffer = 0;
 
     ctx.options.wireframe_enabled = false;
     ctx.options.textures_enabled = true;

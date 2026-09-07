@@ -4,7 +4,6 @@ const rhi = @import("engine-rhi").rhi;
 const Mat4 = @import("engine-math").Mat4;
 const Vec3 = @import("engine-math").Vec3;
 const bindings = @import("descriptor_bindings.zig");
-const frame_orchestration = @import("rhi_frame_orchestration.zig");
 
 fn getenv(name: [:0]const u8) ?[]const u8 {
     const value = std.c.getenv(name) orelse return null;
@@ -66,46 +65,14 @@ pub fn updateGlobalUniforms(ctx: anytype, uniforms: rhi.GlobalUniforms, frame_pa
     ctx.velocity.view_proj_prev = uniforms.view_proj;
 }
 
-pub fn setModelMatrix(ctx: anytype, model: Mat4, color: Vec3, mask_radius: f32) void {
+pub fn setModelMatrix(ctx: anytype, model: Mat4, color: Vec3) void {
     ctx.draw.current_model = model;
     ctx.draw.current_color = .{ color.x, color.y, color.z, 1.0 };
-    ctx.draw.current_mask_radius = mask_radius;
 }
 
 pub fn setInstanceBuffer(ctx: anytype, handle: rhi.BufferHandle) void {
     if (!ctx.frames.frame_in_progress) return;
     ctx.draw.pending_instance_buffer = handle;
-    ctx.draw.lod_mode = false;
-    applyPendingDescriptorUpdates(ctx, ctx.frames.current_frame);
-}
-
-pub fn setLODInstanceBuffer(ctx: anytype, handle: rhi.BufferHandle) void {
-    if (!ctx.frames.frame_in_progress or !ctx.draw.lod_descriptor_stream_valid) return;
-    ctx.draw.pending_lod_instance_buffer = handle;
-    ctx.draw.lod_mode = true;
-    applyPendingDescriptorUpdates(ctx, ctx.frames.current_frame);
-}
-
-/// Select the immutable LOD descriptor snapshot before updating its bindings.
-/// Callers own stream choice; render state never infers it from pass state.
-pub fn setLODDescriptorStream(ctx: anytype, stream: rhi.LODDescriptorStream) void {
-    if (!ctx.frames.frame_in_progress) return;
-    ctx.draw.lod_descriptor_stream = stream;
-    ctx.draw.lod_mode = true;
-    ctx.draw.lod_descriptor_stream_valid = frame_orchestration.prepareLODDescriptorSnapshot(ctx, stream);
-}
-
-pub fn setLODCompactSampleBuffer(ctx: anytype, handle: rhi.BufferHandle) void {
-    if (!ctx.frames.frame_in_progress or !ctx.draw.lod_descriptor_stream_valid) return;
-    ctx.draw.pending_lod_compact_sample_buffer = handle;
-    ctx.draw.lod_mode = true;
-    applyPendingDescriptorUpdates(ctx, ctx.frames.current_frame);
-}
-
-pub fn setLODCompactInstanceBuffer(ctx: anytype, handle: rhi.BufferHandle) void {
-    if (!ctx.frames.frame_in_progress or !ctx.draw.lod_descriptor_stream_valid) return;
-    ctx.draw.pending_lod_compact_instance_buffer = handle;
-    ctx.draw.lod_mode = true;
     applyPendingDescriptorUpdates(ctx, ctx.frames.current_frame);
 }
 
@@ -139,61 +106,5 @@ pub fn applyPendingDescriptorUpdates(ctx: anytype, frame_index: usize) void {
             c.vkUpdateDescriptorSets(ctx.vulkan_device.vk_device, 1, &write, 0, null);
             ctx.draw.bound_instance_buffer[frame_index] = ctx.draw.pending_instance_buffer;
         }
-    }
-
-    if (!ctx.draw.lod_descriptor_stream_valid) return;
-    const stream_index = @intFromEnum(ctx.draw.lod_descriptor_stream);
-    const snapshot_bindings = &ctx.draw.lod_snapshot_bindings[frame_index];
-    const bound_lod_instance = &snapshot_bindings.instance[stream_index];
-    if (ctx.draw.pending_lod_instance_buffer != 0 and bound_lod_instance.* != ctx.draw.pending_lod_instance_buffer) {
-        const buf_opt = ctx.resources.buffers.get(ctx.draw.pending_lod_instance_buffer);
-
-        if (buf_opt) |buf| {
-            var buffer_info = c.VkDescriptorBufferInfo{
-                .buffer = buf.buffer,
-                .offset = 0,
-                .range = buf.size,
-            };
-
-            var write = std.mem.zeroes(c.VkWriteDescriptorSet);
-            write.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            write.dstSet = ctx.descriptors.lodDescriptorSet(frame_index, ctx.draw.lod_descriptor_stream);
-            write.dstBinding = bindings.INSTANCE_SSBO;
-            write.descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            write.descriptorCount = 1;
-            write.pBufferInfo = &buffer_info;
-
-            c.vkUpdateDescriptorSets(ctx.vulkan_device.vk_device, 1, &write, 0, null);
-            bound_lod_instance.* = ctx.draw.pending_lod_instance_buffer;
-        }
-    }
-
-    const bound_compact_sample = &snapshot_bindings.compact_samples[stream_index];
-    if (ctx.draw.pending_lod_compact_sample_buffer != 0 and bound_compact_sample.* != ctx.draw.pending_lod_compact_sample_buffer) {
-        const buf = ctx.resources.buffers.get(ctx.draw.pending_lod_compact_sample_buffer) orelse return;
-        var info = c.VkDescriptorBufferInfo{ .buffer = buf.buffer, .offset = 0, .range = buf.size };
-        var write = std.mem.zeroes(c.VkWriteDescriptorSet);
-        write.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = ctx.descriptors.lodDescriptorSet(frame_index, ctx.draw.lod_descriptor_stream);
-        write.dstBinding = bindings.COMPACT_LOD_SAMPLES;
-        write.descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        write.descriptorCount = 1;
-        write.pBufferInfo = &info;
-        c.vkUpdateDescriptorSets(ctx.vulkan_device.vk_device, 1, &write, 0, null);
-        bound_compact_sample.* = ctx.draw.pending_lod_compact_sample_buffer;
-    }
-    const bound_compact_instance = &snapshot_bindings.compact_instances[stream_index];
-    if (ctx.draw.pending_lod_compact_instance_buffer != 0 and bound_compact_instance.* != ctx.draw.pending_lod_compact_instance_buffer) {
-        const buf = ctx.resources.buffers.get(ctx.draw.pending_lod_compact_instance_buffer) orelse return;
-        var info = c.VkDescriptorBufferInfo{ .buffer = buf.buffer, .offset = 0, .range = buf.size };
-        var write = std.mem.zeroes(c.VkWriteDescriptorSet);
-        write.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = ctx.descriptors.lodDescriptorSet(frame_index, ctx.draw.lod_descriptor_stream);
-        write.dstBinding = bindings.COMPACT_LOD_INSTANCES;
-        write.descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        write.descriptorCount = 1;
-        write.pBufferInfo = &info;
-        c.vkUpdateDescriptorSets(ctx.vulkan_device.vk_device, 1, &write, 0, null);
-        bound_compact_instance.* = ctx.draw.pending_lod_compact_instance_buffer;
     }
 }

@@ -113,12 +113,6 @@ pub const BiomeSource = struct {
         };
     }
 
-    /// Simplified biome selection for LOD levels
-    pub fn selectBiomeSimplified(self: *const BiomeSource, climate: ClimateParams) BiomeId {
-        _ = self;
-        return selector.selectBiomeSimple(climate);
-    }
-
     /// Check if a position is ocean based on continentalness
     pub fn isOcean(self: *const BiomeSource, continentalness: f32) bool {
         return continentalness < self.params.ocean_threshold;

@@ -241,10 +241,6 @@ pub fn prepareFrameState(ctx: anytype) void {
     ctx.shadow_system.pipeline_bound = false;
     ctx.draw.descriptors_updated = false;
     ctx.draw.bound_texture = 0;
-    // The frame slot fence was waited before prepareFrameState. Reopen only
-    // this slot's LOD snapshots; other in-flight slots remain immutable.
-    ctx.draw.lod_snapshot_seals[ctx.frames.current_frame] = .{};
-    ctx.draw.lod_descriptor_stream_valid = false;
 
     const command_buffer = ctx.frames.getCurrentCommandBuffer();
 
@@ -422,56 +418,4 @@ pub fn refreshTextureDescriptors(ctx: anytype) void {
     }
 
     ctx.draw.descriptors_updated = true;
-}
-
-/// Acquires a stream-local LOD texture/UBO descriptor snapshot.  It copies the
-/// current ordinary descriptor set exactly once, before the snapshot's first
-/// bind. Later selections must observe the same material state until this
-/// frame slot is reused after its fence completes.
-pub fn prepareLODDescriptorSnapshot(ctx: anytype, stream: rhi.LODDescriptorStream) bool {
-    const frame = ctx.frames.current_frame;
-    const index = @intFromEnum(stream);
-    const source = ctx.descriptors.descriptor_sets[frame];
-    const destination = ctx.descriptors.lod_descriptor_snapshots[frame][index];
-    if (source == null or destination == null) {
-        log.log.err("LOD descriptor snapshot unavailable for frame={} stream={s}", .{ frame, @tagName(stream) });
-        return false;
-    }
-    const should_copy = ctx.draw.lod_snapshot_seals[frame].acquire(stream, ctx.draw.texture_state_revision) catch |err| {
-        log.log.err("LOD descriptor snapshot rejected for frame={} stream={s} revision={}: {}", .{ frame, @tagName(stream), ctx.draw.texture_state_revision, err });
-        return false;
-    };
-    if (!should_copy) return true;
-
-    // Per-frame UBO descriptors are installed when every snapshot is
-    // allocated; their mapped contents change, not the descriptors. Copy only
-    // material-controlled textures here. Compact/instance SSBO bindings are
-    // stream-owned and are intentionally not copied from the main set.
-    const copied_bindings = [_]u32{
-        bindings.ALBEDO_TEXTURE,
-        bindings.NORMAL_TEXTURE,
-        bindings.ROUGHNESS_TEXTURE,
-        bindings.DISPLACEMENT_TEXTURE,
-        bindings.ENV_TEXTURE,
-        bindings.SSAO_TEXTURE,
-        bindings.LPV_TEXTURE,
-        bindings.LPV_TEXTURE_G,
-        bindings.LPV_TEXTURE_B,
-        bindings.WATER_REFLECTION_TEXTURE,
-        bindings.SCENE_DEPTH_TEXTURE,
-    };
-    var copies: [copied_bindings.len + 2]c.VkCopyDescriptorSet = undefined;
-    var count: usize = 0;
-    for (copied_bindings) |binding| {
-        copies[count] = .{ .sType = c.VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET, .srcSet = source, .srcBinding = binding, .dstSet = destination, .dstBinding = binding, .descriptorCount = 1 };
-        count += 1;
-    }
-    if (ctx.shadow_system.shadow_image_view != null and ctx.shadow_system.shadow_sampler != null) {
-        for ([_]u32{ bindings.SHADOW_COMPARE_TEXTURE, bindings.SHADOW_REGULAR_TEXTURE }) |binding| {
-            copies[count] = .{ .sType = c.VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET, .srcSet = source, .srcBinding = binding, .dstSet = destination, .dstBinding = binding, .descriptorCount = 1 };
-            count += 1;
-        }
-    }
-    c.vkUpdateDescriptorSets(ctx.vulkan_device.vk_device, 0, null, @intCast(count), &copies);
-    return true;
 }

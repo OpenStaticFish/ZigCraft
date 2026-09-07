@@ -15,10 +15,6 @@ layout(push_constant) uniform ShadowModelUniforms {
 
 struct InstanceData {
     mat4 model;
-    float mask_radius;
-    float lod_fade;
-    float _pad1;
-    float _pad2;
 };
 
 layout(set = 0, binding = 5) readonly buffer InstanceBuffer {
@@ -45,7 +41,7 @@ void main() {
     uint tile_id_u16 = aPackedMeta & 0xFFFFu;
 
     vTexCoord = aTexCoord;
-    vTileID = (tile_id_u16 == 0xFFFFu) ? -1 : int(tile_id_u16);
+    vTileID = int(tile_id_u16);
     mat4 model = (pc.bias_params.y < 0.0) ? instance_buf.instances[gl_InstanceIndex].model : mat4(1.0);
     gl_Position = pc.mvp * model * vec4(biasedPos, 1.0);
 }

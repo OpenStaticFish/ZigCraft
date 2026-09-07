@@ -3,7 +3,6 @@ const UISystem = @import("engine-ui").UISystem;
 const Font = @import("engine-ui").font;
 const Theme = @import("../menu_theme.zig");
 const SettingsUi = @import("../settings_ui.zig");
-const Color = Theme.Color;
 const Rect = Theme.Rect;
 const Screen = @import("../screen.zig");
 const IScreen = Screen.IScreen;
@@ -11,9 +10,6 @@ const EngineContext = Screen.EngineContext;
 const settings_pkg = @import("game-core").settings;
 const apply_logic = settings_pkg.apply_logic;
 const Settings = settings_pkg.Settings;
-const render_settings_mod = @import("engine-rhi").render_settings;
-const RenderDistancePreset = render_settings_mod.RenderDistancePreset;
-const LODConfig = @import("world-lod").lod_chunk.LODConfig;
 
 const PANEL_WIDTH_MAX = 1360.0;
 const PANEL_HEIGHT_MAX = 820.0;
@@ -289,8 +285,8 @@ fn drawCameraTab(ui: *UISystem, settings: anytype, layout: ColumnLayout, row_h: 
 }
 
 fn drawWorldTab(ui: *UISystem, settings: anytype, rs: anytype, layout: ColumnLayout, row_h: f32, label_scale: f32, value_scale: f32, button_scale: f32, mouse_x: f32, mouse_y: f32, mouse_clicked: bool, scale: f32) void {
+    _ = rs;
     var num_buf: [32]u8 = undefined;
-    settings.horizon_distance = LODConfig.normalizeUserHorizonDistance(settings.render_distance, settings.horizon_distance);
 
     var y_left = layout.top_y;
     Theme.drawSectionLabel(ui, layout.left_x, y_left, "DISTANCE", scale);
@@ -301,30 +297,13 @@ fn drawWorldTab(ui: *UISystem, settings: anytype, rs: anytype, layout: ColumnLay
         if (step == .previous and settings.render_distance > 2) settings.render_distance -= 1;
         if (step == .next and settings.render_distance < std.math.maxInt(i32)) {
             settings.render_distance += 1;
-            settings.horizon_distance = LODConfig.normalizeUserHorizonDistance(settings.render_distance, settings.horizon_distance);
         }
-    }
-    y_left += row_h + 8.0 * scale;
-
-    const horizon_distance_label = std.fmt.bufPrint(&num_buf, "{} CHUNKS", .{settings.horizon_distance}) catch "?";
-    if (drawStepperRow(ui, .{ .x = layout.left_x, .y = y_left, .width = layout.col_w, .height = row_h }, "DISTANT LOD LIMIT", "Maximum distant-terrain radius from the player.", horizon_distance_label, label_scale, value_scale, button_scale, mouse_x, mouse_y, mouse_clicked, scale)) |step| {
-        settings.horizon_distance = LODConfig.stepHorizonDistance(settings.render_distance, settings.horizon_distance, step == .next);
-    }
-
-    var y_right = if (layout.two_column) layout.top_y else y_left + row_h + 22.0 * scale;
-    Theme.drawSectionLabel(ui, layout.right_x, y_right, "STREAMING", scale);
-    y_right += 28.0 * scale;
-
-    if (drawToggleRow(ui, .{ .x = layout.right_x, .y = y_right, .width = layout.col_w, .height = row_h }, "LOD SYSTEM", "Distance terrain streaming.", settings.lod_enabled, label_scale, value_scale, mouse_x, mouse_y, mouse_clicked, scale)) {
-        settings.lod_enabled = !settings.lod_enabled;
-        if (settings_pkg.sanitizeRuntimeConflicts(settings)) apply_logic.applyToRenderSettings(settings, rs);
     }
 }
 
 fn drawRenderingTab(ui: *UISystem, self: *SettingsScreen, ctx: EngineContext, settings: *Settings, rs: anytype, inner: Rect, layout: ColumnLayout, row_h: f32, label_scale: f32, value_scale: f32, button_scale: f32, mouse_x: f32, mouse_y: f32, mouse_clicked: bool, scale: f32) void {
     const row_gap = 8.0 * scale;
     const section_h = 28.0 * scale;
-    const warning_h: f32 = if (render_settings_mod.getPresetConfig(settings.render_distance_preset).show_warning) 34.0 * scale else 0.0;
     const material_settings = .{ "textures_enabled", "pbr_enabled", "pbr_quality", "anisotropic_filtering", "max_texture_resolution", "water_quality" };
     const shadow_settings = .{ "shadow_quality", "shadow_pcf_samples", "shadow_cascade_blend", "shadow_distance", "shadow_caster_distance" };
     const image_settings = .{ "taa_enabled", "taa_blend_factor", "taa_velocity_rejection", "fxaa_enabled", "ssao_enabled", "bloom_enabled", "bloom_intensity", "vignette_enabled", "vignette_intensity", "film_grain_enabled", "film_grain_intensity" };
@@ -332,9 +311,9 @@ fn drawRenderingTab(ui: *UISystem, self: *SettingsScreen, ctx: EngineContext, se
     const dynamic_resolution_settings = .{ "dynamic_resolution_enabled", "dynamic_resolution_min_scale", "dynamic_resolution_max_scale", "target_fps" };
     const left_sections = .{ "BASELINE", "MATERIALS", "SHADOWS" };
     const right_sections = .{ "IMAGE", "ATMOSPHERE AND GI", "DYNAMIC RESOLUTION" };
-    const baseline_rows = .{ "OVERALL QUALITY", "RENDER DISTANCE", "WIREFRAME" };
+    const baseline_rows = .{ "OVERALL QUALITY", "WIREFRAME" };
 
-    const left_content_h = renderingContentHeight(left_sections.len, baseline_rows.len + material_settings.len + shadow_settings.len, row_h, row_gap, section_h, scale) + warning_h;
+    const left_content_h = renderingContentHeight(left_sections.len, baseline_rows.len + material_settings.len + shadow_settings.len, row_h, row_gap, section_h, scale);
     const right_content_h = renderingContentHeight(right_sections.len, image_settings.len + atmosphere_settings.len + dynamic_resolution_settings.len, row_h, row_gap, section_h, scale);
     const column_gap: f32 = 28.0 * scale;
     const total_content_h = if (layout.two_column)
@@ -354,7 +333,6 @@ fn drawRenderingTab(ui: *UISystem, self: *SettingsScreen, ctx: EngineContext, se
     drawRenderSection(ui, layout.left_x, y_left, left_sections[0], top, bottom, scale);
     y_left += section_h;
     y_left = drawPresetRow(ui, settings, rs, .{ .x = layout.left_x, .y = y_left, .width = layout.col_w, .height = row_h }, top, bottom, label_scale, value_scale, button_scale, mouse_x, mouse_y, mouse_clicked, scale) + row_gap;
-    y_left = drawRenderDistancePresetRow(ui, settings, .{ .x = layout.left_x, .y = y_left, .width = layout.col_w, .height = row_h }, top, bottom, label_scale, value_scale, button_scale, mouse_x, mouse_y, mouse_clicked, scale) + row_gap;
     if (rowVisible(y_left, row_h, top, bottom)) {
         if (drawToggleRow(ui, .{ .x = layout.left_x, .y = y_left, .width = layout.col_w, .height = row_h }, "WIREFRAME", "Debug mesh visibility.", settings.wireframe_enabled, label_scale, value_scale, mouse_x, mouse_y, mouse_clicked, scale)) {
             settings.wireframe_enabled = !settings.wireframe_enabled;
@@ -362,15 +340,6 @@ fn drawRenderingTab(ui: *UISystem, self: *SettingsScreen, ctx: EngineContext, se
         }
     }
     y_left += row_h + row_gap;
-    if (render_settings_mod.getPresetConfig(settings.render_distance_preset).show_warning) {
-        if (rowVisible(y_left, warning_h, top, bottom)) {
-            ui.drawRect(.{ .x = layout.left_x, .y = y_left, .width = layout.col_w, .height = 30.0 * scale }, Color.rgba(0.28, 0.040, 0.030, 0.80));
-            ui.drawRect(.{ .x = layout.left_x, .y = y_left, .width = 5.0 * scale, .height = 30.0 * scale }, Theme.danger);
-            Font.drawText(ui, "EXTREME DISTANCE CAN DESTABILIZE GPUS BELOW 8GB VRAM", layout.left_x + 16.0 * scale, y_left + 8.0 * scale, 0.90 * scale, Theme.title);
-        }
-        y_left += warning_h;
-    }
-
     drawRenderSection(ui, layout.left_x, y_left, left_sections[1], top, bottom, scale);
     y_left += section_h;
     inline for (material_settings) |name| {
@@ -433,21 +402,6 @@ fn drawPresetRow(ui: *UISystem, settings: *Settings, rs: anytype, row: Rect, top
                 SettingsUi.applyPresetSideEffects(settings, rs);
             }
         }
-    }
-    return row.y + row.height;
-}
-
-fn drawRenderDistancePresetRow(ui: *UISystem, settings: *Settings, row: Rect, top: f32, bottom: f32, label_scale: f32, value_scale: f32, button_scale: f32, mx: f32, my: f32, clicked: bool, scale: f32) f32 {
-    if (!rowVisible(row.y, row.height, top, bottom)) return row.y + row.height;
-    const current_rdp: u32 = @intFromEnum(settings.render_distance_preset);
-    const rdp_label = settings.render_distance_preset.label();
-    const rdp_count = @as(u32, RenderDistancePreset.count);
-    if (drawStepperRow(ui, row, "RENDER DISTANCE", "LOD radius profile and streamer pressure.", rdp_label, label_scale, value_scale, button_scale, mx, my, clicked, scale)) |step| {
-        const next_value = if (step == .previous) if (current_rdp == 0) rdp_count - 1 else current_rdp - 1 else (current_rdp + 1) % rdp_count;
-        settings.render_distance_preset = @enumFromInt(next_value);
-        const preset_cfg = render_settings_mod.getPresetConfig(settings.render_distance_preset);
-        settings.render_distance = preset_cfg.lod_radii[0];
-        settings.horizon_distance = preset_cfg.horizon_radius;
     }
     return row.y + row.height;
 }
@@ -532,9 +486,7 @@ fn drawSettingRow(ui: *UISystem, comptime name: []const u8, settings: *Settings,
     }
 
     if (val_ptr.* != old_val) {
-        const sanitized_conflict = settings_pkg.sanitizeRuntimeConflicts(settings);
         SettingsUi.applyChangedSetting(name, settings, rs);
-        if (sanitized_conflict) rs.setFXAA(settings.fxaa_enabled and !settings.taa_enabled);
     }
 
     return row.y + row.height;

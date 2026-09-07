@@ -2,7 +2,6 @@ const std = @import("std");
 const fs = @import("fs");
 const data = @import("data.zig");
 const Settings = data.Settings;
-const RenderDistancePreset = @import("engine-rhi").RenderDistancePreset;
 const log = @import("engine-core").log;
 const sync = @import("engine-core").sync;
 
@@ -39,10 +38,7 @@ pub const PresetConfig = struct {
     lpv_propagation_iterations: u32 = 3,
     clouds_enabled: bool = true,
     clouds_3d_enabled: bool = true,
-    lod_enabled: bool,
     render_distance: i32,
-    horizon_distance: ?i32 = null,
-    render_distance_preset: RenderDistancePreset = .high,
     fxaa_enabled: bool,
     bloom_enabled: bool,
     bloom_intensity: f32,
@@ -122,12 +118,6 @@ pub fn initPresets(allocator: std.mem.Allocator) !void {
             log.log.warn("Skipping preset '{s}': invalid render_distance {}", .{ p.name, p.render_distance });
             continue;
         }
-        if (p.horizon_distance) |horizon_distance| {
-            if (horizon_distance < 1) {
-                log.log.warn("Skipping preset '{s}': invalid horizon_distance {}", .{ p.name, horizon_distance });
-                continue;
-            }
-        }
         p.name = try allocator.dupe(u8, preset.name);
         errdefer allocator.free(p.name);
         try graphics_presets.append(allocator, p);
@@ -191,14 +181,10 @@ fn applyConfig(settings: *Settings, config: PresetConfig) void {
     settings.lpv_propagation_iterations = config.lpv_propagation_iterations;
     settings.clouds_enabled = config.clouds_enabled;
     settings.clouds_3d_enabled = config.clouds_3d_enabled;
-    settings.lod_enabled = config.lod_enabled;
     settings.render_distance = config.render_distance;
-    settings.horizon_distance = config.horizon_distance orelse @import("engine-rhi").render_settings.getPresetConfig(config.render_distance_preset).horizon_radius;
-    settings.render_distance_preset = config.render_distance_preset;
     settings.fxaa_enabled = config.fxaa_enabled and !config.taa_enabled;
     settings.bloom_enabled = config.bloom_enabled;
     settings.bloom_intensity = config.bloom_intensity;
-    _ = data.sanitizeRuntimeConflicts(settings);
 }
 
 pub fn getIndex(settings: *const Settings) usize {
@@ -232,8 +218,6 @@ fn matches(settings: *const Settings, preset: PresetConfig) bool {
         std.math.approxEqAbs(f32, settings.exposure, preset.exposure, epsilon) and
         std.math.approxEqAbs(f32, settings.saturation, preset.saturation, epsilon) and
         settings.render_distance == preset.render_distance and
-        settings.horizon_distance == (preset.horizon_distance orelse @import("engine-rhi").render_settings.getPresetConfig(preset.render_distance_preset).horizon_radius) and
-        settings.render_distance_preset == preset.render_distance_preset and
         settings.volumetric_lighting_enabled == preset.volumetric_lighting_enabled and
         std.math.approxEqAbs(f32, settings.volumetric_density, preset.volumetric_density, epsilon) and
         settings.volumetric_steps == preset.volumetric_steps and
@@ -246,7 +230,6 @@ fn matches(settings: *const Settings, preset: PresetConfig) bool {
         settings.lpv_propagation_iterations == preset.lpv_propagation_iterations and
         settings.clouds_enabled == preset.clouds_enabled and
         settings.clouds_3d_enabled == preset.clouds_3d_enabled and
-        settings.lod_enabled == preset.lod_enabled and
         settings.fxaa_enabled == preset.fxaa_enabled and
         settings.bloom_enabled == preset.bloom_enabled and
         std.math.approxEqAbs(f32, settings.bloom_intensity, preset.bloom_intensity, epsilon);
@@ -272,7 +255,7 @@ pub fn findAndApplyNamed(settings: *Settings, preset_name: []const u8) ?[]const 
     defer graphics_presets_mutex.unlock();
 
     for (graphics_presets.items) |preset| {
-        if (std.ascii.eqlIgnoreCase(preset.name, preset_name) or std.ascii.eqlIgnoreCase(@tagName(preset.render_distance_preset), preset_name)) {
+        if (std.ascii.eqlIgnoreCase(preset.name, preset_name)) {
             applyConfig(settings, preset);
             return preset.name;
         }

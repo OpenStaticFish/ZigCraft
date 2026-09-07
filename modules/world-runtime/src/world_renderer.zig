@@ -14,8 +14,6 @@ const ResourceManager = rhi_mod.ResourceManager;
 const RenderContext = rhi_mod.RenderContext;
 const IDeviceQuery = rhi_mod.IDeviceQuery;
 const IDeviceTiming = rhi_mod.IDeviceTiming;
-const LODManager = @import("world-lod").LODManager;
-const LODRenderLayer = @import("world-lod").LODRenderLayer;
 const math = @import("engine-math");
 const Vec3 = math.Vec3;
 const Mat4 = math.Mat4;
@@ -333,30 +331,11 @@ pub const WorldRenderer = struct {
         self.allocator.destroy(self);
     }
 
-    pub fn render(self: *WorldRenderer, view_proj: Mat4, camera_pos: Vec3, render_distance: i32, lod_manager: ?*LODManager, render_lod: bool, layer: RenderLayer) void {
+    pub fn render(self: *WorldRenderer, view_proj: Mat4, camera_pos: Vec3, render_distance: i32, layer: RenderLayer) void {
         if (layer != .fluid) {
             self.last_render_stats = .{ .gpu_culling = self.use_gpu_culling };
         }
-        const detail_render_radius = if (lod_manager) |mgr| @min(render_distance, mgr.config.getChunkRenderRadius()) else render_distance;
-
-        if (render_lod) {
-            if (lod_manager) |lod_mgr| {
-                const lod_render_limit = lod_mgr.getHorizonRenderRadius();
-                if (layer != .fluid) {
-                    self.timing.beginPassTiming("LODTerrainPass");
-                    lod_mgr.renderFrame(self.frame_serial, view_proj, camera_pos, ChunkStorage.isChunkTerrainReadyForHandoff, @ptrCast(self.storage), true, lod_render_limit, detail_render_radius, LODRenderLayer.terrain);
-                    self.timing.endPassTiming("LODTerrainPass");
-                }
-                if (layer != .terrain and parseEnabledEnv(getenv("ZIGCRAFT_LOD_WATER"), true)) {
-                    self.timing.beginPassTiming("LODWaterPass");
-                    lod_mgr.renderFrame(self.frame_serial, view_proj, camera_pos, ChunkStorage.isChunkTerrainReadyForHandoff, @ptrCast(self.storage), true, lod_render_limit, detail_render_radius, LODRenderLayer.fluid);
-                    self.timing.endPassTiming("LODWaterPass");
-                }
-            }
-        }
-
-        // LOD rendering uses a separate descriptor set path; switch back before drawing full chunks.
-        self.render_ctx.setInstanceBuffer(0);
+        const detail_render_radius = render_distance;
 
         self.storage.chunks_mutex.lockShared();
         defer self.storage.chunks_mutex.unlockShared();
@@ -389,9 +368,6 @@ pub const WorldRenderer = struct {
         var total_vertices: u64 = 0;
 
         for (self.visible_chunks.items) |data| {
-            // LOD projection is not proof that GPU culling emitted replacement
-            // geometry. Keep detail as the fail-open fallback; the LOD shader
-            // mask owns overlap with the contiguous detailed area.
             if (layer != .fluid) {
                 self.last_render_stats.chunks_rendered += 1;
             }
@@ -429,9 +405,6 @@ pub const WorldRenderer = struct {
 
             self.instance_data.appendAssumeCapacity(.{
                 .model = model,
-                .mask_radius = 0,
-                .lod_fade = 1.0,
-                .padding = .{ 0, 0 },
             });
 
             if (layer != .fluid) {
@@ -503,7 +476,7 @@ pub const WorldRenderer = struct {
     }
 
     fn drawChunkDirect(self: *WorldRenderer, data: *ChunkData, model: Mat4, layer: RenderLayer, count_vertices: bool) u64 {
-        self.render_ctx.setModelMatrix(model, Vec3.one, 0);
+        self.render_ctx.setModelMatrix(model, Vec3.one);
         var total_vertices: u64 = 0;
 
         if (layer != .fluid) {
@@ -759,11 +732,11 @@ pub const WorldRenderer = struct {
                             if (self.instance_data.items.len >= MAX_MDI_CHUNKS or self.draw_commands.items.len + command_count > MAX_MDI_CHUNKS * 3) {
                                 log.log.warn("Shadow MDI: batch capacity reached, drawing overflow chunk directly", .{});
                                 if (data.render.mesh.solid_allocation) |alloc| {
-                                    self.render_ctx.setModelMatrix(model, Vec3.one, 0);
+                                    self.render_ctx.setModelMatrix(model, Vec3.one);
                                     self.render_ctx.drawOffset(self.vertex_allocator.buffer, alloc.count, .triangles, alloc.offset);
                                 }
                                 if (data.render.mesh.cutout_allocation) |alloc| {
-                                    self.render_ctx.setModelMatrix(model, Vec3.one, 0);
+                                    self.render_ctx.setModelMatrix(model, Vec3.one);
                                     self.render_ctx.drawOffset(self.vertex_allocator.buffer, alloc.count, .triangles, alloc.offset);
                                 }
                                 continue;
@@ -772,9 +745,6 @@ pub const WorldRenderer = struct {
                             const instance_idx: u32 = @intCast(self.instance_data.items.len);
                             self.instance_data.append(self.allocator, .{
                                 .model = model,
-                                .mask_radius = 0,
-                                .lod_fade = 1.0,
-                                .padding = .{ 0, 0 },
                             }) catch continue;
 
                             if (data.render.mesh.solid_allocation) |alloc| {
@@ -797,11 +767,11 @@ pub const WorldRenderer = struct {
                         }
 
                         if (data.render.mesh.solid_allocation) |alloc| {
-                            self.render_ctx.setModelMatrix(model, Vec3.one, 0);
+                            self.render_ctx.setModelMatrix(model, Vec3.one);
                             self.render_ctx.drawOffset(self.vertex_allocator.buffer, alloc.count, .triangles, alloc.offset);
                         }
                         if (data.render.mesh.cutout_allocation) |alloc| {
-                            self.render_ctx.setModelMatrix(model, Vec3.one, 0);
+                            self.render_ctx.setModelMatrix(model, Vec3.one);
                             self.render_ctx.drawOffset(self.vertex_allocator.buffer, alloc.count, .triangles, alloc.offset);
                         }
                     }

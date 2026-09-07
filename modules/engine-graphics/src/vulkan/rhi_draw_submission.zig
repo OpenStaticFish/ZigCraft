@@ -1,30 +1,20 @@
 const std = @import("std");
 const c = @import("c").c;
 const rhi = @import("engine-rhi").rhi;
-const rhi_types = @import("engine-rhi").rhi_types;
 const log = @import("engine-core").log;
 const Mat4 = @import("engine-math").Mat4;
 const pass_orchestration = @import("rhi_pass_orchestration.zig");
 
-fn lodDescriptorSet(ctx: anytype) c.VkDescriptorSet {
-    const frame = ctx.frames.current_frame;
-    return ctx.descriptors.lodDescriptorSet(frame, ctx.draw.lod_descriptor_stream);
-}
-
 const ModelUniforms = extern struct {
     model: Mat4,
     color: [4]f32,
-    mask_radius: f32,
 };
 
-/// Push constants for an indirect draw that must fetch instance data from the
-/// bound instance buffer. Alpha is the shader's indirect sentinel so signed
-/// LOD handoff masks remain valid direct-draw values.
+/// Push constants for an indirect draw that fetches per-instance model data.
 pub fn indirectModelUniforms() ModelUniforms {
     return .{
         .model = Mat4.identity,
         .color = .{ 1.0, 1.0, 1.0, -1.0 },
-        .mask_radius = 0.0,
     };
 }
 
@@ -80,90 +70,8 @@ pub fn drawIndexed(ctx: anytype, vbo_handle: rhi.BufferHandle, ebo_handle: rhi.B
     }
 }
 
-/// Indexed, storage-buffer vertex pulling for compact far LOD tiles.  There is
-/// deliberately no vertex buffer binding: the static index grid provides the
-/// vertex id and binding 16 supplies the packed 16-byte samples.
-pub fn drawCompactLOD(ctx: anytype, index_handle: rhi.BufferHandle, index_count: u32, params: rhi.CompactLODDraw) bool {
-    if (!ctx.frames.frame_in_progress or index_count == 0 or params.width < 2 or params.layer > 1) return false;
-    if (!ctx.runtime.main_pass_active and !ctx.water_system.pass_active) pass_orchestration.beginMainPassInternal(ctx);
-    if (!ctx.runtime.main_pass_active and !ctx.water_system.pass_active) return false;
-    const index = ctx.resources.buffers.get(index_handle) orelse return false;
-    const index_bytes = std.math.mul(u64, @as(u64, index_count), @sizeOf(u32)) catch return false;
-    if ((index.usage & c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT) == 0 or index.size < index_bytes) return false;
-    const stream_index = @intFromEnum(ctx.draw.lod_descriptor_stream);
-    const sample_handle = ctx.draw.lod_snapshot_bindings[ctx.frames.current_frame].compact_samples[stream_index];
-    const samples = ctx.resources.buffers.get(sample_handle) orelse return false;
-    if ((samples.usage & c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) == 0 or samples.size == 0 or samples.size % @sizeOf(rhi.CompactLODSampleWords) != 0) return false;
-
-    // Every shader sample is a 16-byte uvec4. Validate the padded (one-sample
-    // apron on each side) address range before recording the draw.
-    const stride = std.math.add(u64, @as(u64, params.width), 2) catch return false;
-    const sample_count = std.math.mul(u64, stride, stride) catch return false;
-    const sample_end = std.math.add(u64, @as(u64, params.sample_offset), sample_count) catch return false;
-    const sample_bytes = std.math.mul(u64, sample_end, @sizeOf(rhi.CompactLODSampleWords)) catch return false;
-    if (sample_bytes > samples.size) return false;
-    const cb = ctx.frames.command_buffers[ctx.frames.current_frame];
-    const pipeline = if (params.layer == 1) ctx.pipeline_manager.compact_lod_water_pipeline else ctx.pipeline_manager.compact_lod_terrain_pipeline;
-    if (pipeline == null) return false;
-    c.vkCmdBindPipeline(cb, c.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    ctx.draw.terrain_pipeline_bound = false;
-    const descriptor_set = lodDescriptorSet(ctx);
-    c.vkCmdBindDescriptorSets(cb, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_manager.pipeline_layout, 0, 1, &descriptor_set, 0, null);
-    c.vkCmdPushConstants(cb, ctx.pipeline_manager.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(rhi.CompactLODDraw), &params);
-    c.vkCmdBindIndexBuffer(cb, index.buffer, 0, c.VK_INDEX_TYPE_UINT32);
-    c.vkCmdDrawIndexed(cb, index_count, 1, 0, 0, 0);
-    ctx.runtime.draw_call_count += 1;
-    return true;
-}
-
-/// Compatibility-named fixed-capacity indexed submission for compact far LOD.
-/// `count_handle` and `count_offset` are deliberately unused: RADV's indexed
-/// indirect-count path corrupts this vertex-pulling stream, while the culler
-/// guarantees every unused command is zero-filled. `max_draw_count` is the
-/// submitted capacity, and zero-count entries are Vulkan no-ops.
-pub fn drawCompactLODIndirectCount(ctx: anytype, index_handle: rhi.BufferHandle, command_handle: rhi.BufferHandle, offset: usize, _count_handle: rhi.BufferHandle, _count_offset: usize, max_draw_count: u32) bool {
-    _ = _count_handle;
-    _ = _count_offset;
-    if (!ctx.frames.frame_in_progress or !ctx.vulkan_device.multi_draw_indirect or max_draw_count == 0 or !ctx.draw.lod_descriptor_stream_valid) return false;
-    if (!ctx.runtime.main_pass_active and !ctx.water_system.pass_active) pass_orchestration.beginMainPassInternal(ctx);
-    if (!ctx.runtime.main_pass_active and !ctx.water_system.pass_active) return false;
-    const index = ctx.resources.buffers.get(index_handle) orelse return false;
-    const commands = ctx.resources.buffers.get(command_handle) orelse return false;
-    const fi = ctx.frames.current_frame;
-    const stream_index = @intFromEnum(ctx.draw.lod_descriptor_stream);
-    const snapshots = ctx.draw.lod_snapshot_bindings[fi];
-    const samples = ctx.resources.buffers.get(snapshots.compact_samples[stream_index]) orelse return false;
-    const instances = ctx.resources.buffers.get(snapshots.compact_instances[stream_index]) orelse return false;
-    if ((index.usage & c.VK_BUFFER_USAGE_INDEX_BUFFER_BIT) == 0 or (commands.usage & c.VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT) == 0) return false;
-    if ((samples.usage & c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) == 0 or (instances.usage & c.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) == 0) return false;
-    if (index.size == 0 or index.size % @sizeOf(u32) != 0) return false;
-    const command_bytes = std.math.mul(usize, max_draw_count, @sizeOf(rhi_types.DrawIndexedIndirectCommand)) catch return false;
-    const command_end = std.math.add(usize, offset, command_bytes) catch return false;
-    if (command_end > commands.size) return false;
-    const cb = ctx.frames.command_buffers[fi];
-    const pipeline = if (ctx.water_system.pass_active) ctx.pipeline_manager.compact_lod_water_pipeline else ctx.pipeline_manager.compact_lod_terrain_pipeline;
-    if (pipeline == null) return false;
-    c.vkCmdBindPipeline(cb, c.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    ctx.draw.terrain_pipeline_bound = false;
-    const descriptor_set = lodDescriptorSet(ctx);
-    c.vkCmdBindDescriptorSets(cb, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_manager.pipeline_layout, 0, 1, &descriptor_set, 0, null);
-    const sentinel = rhi.CompactLODDraw{ .model = Mat4.identity, .mask_radius = 0, .lod_fade = 0, .sample_offset = 0, .width = 0, .cell_size = 0, .layer = 2, .skirt_depth = 0 };
-    c.vkCmdPushConstants(cb, ctx.pipeline_manager.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(rhi.CompactLODDraw), &sentinel);
-    c.vkCmdBindIndexBuffer(cb, index.buffer, 0, c.VK_INDEX_TYPE_UINT32);
-    // RADV consumes correct compute output when copied for validation, yet its
-    // indexed indirect-count execution can corrupt this vertex-pulling stream.
-    // The culler clears every unused command before dispatch, so submitting the
-    // fixed-capacity stream is equivalent: zero indexCount entries are no-ops.
-    // This remains entirely GPU driven; the count buffer is intentionally not
-    // mapped or read back on the CPU.
-    c.vkCmdDrawIndexedIndirect(cb, commands.buffer, @intCast(offset), max_draw_count, @sizeOf(rhi_types.DrawIndexedIndirectCommand));
-    ctx.runtime.draw_call_count += 1;
-    return true;
-}
-
 pub fn drawIndirect(ctx: anytype, handle: rhi.BufferHandle, command_buffer: rhi.BufferHandle, offset: usize, draw_count: u32, stride: u32) void {
     if (!ctx.frames.frame_in_progress) return;
-    if (ctx.draw.lod_mode and !ctx.draw.lod_descriptor_stream_valid) return;
 
     if (!ctx.runtime.main_pass_active and !ctx.shadow_system.pass_active and !ctx.runtime.g_pass_active and !ctx.water_system.pass_active) pass_orchestration.beginMainPassInternal(ctx);
 
@@ -218,10 +126,7 @@ pub fn drawIndirect(ctx: anytype, handle: rhi.BufferHandle, command_buffer: rhi.
                 }
             }
 
-            const descriptor_set = if (ctx.draw.lod_mode)
-                lodDescriptorSet(ctx)
-            else
-                ctx.descriptors.descriptor_sets[ctx.frames.current_frame];
+            const descriptor_set = ctx.descriptors.descriptor_sets[ctx.frames.current_frame];
             c.vkCmdBindDescriptorSets(cb, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_manager.pipeline_layout, 0, 1, &descriptor_set, 0, null);
 
             if (use_shadow) {
@@ -282,7 +187,7 @@ pub fn drawIndirect(ctx: anytype, handle: rhi.BufferHandle, command_buffer: rhi.
 pub fn drawIndirectCount(ctx: anytype, handle: rhi.BufferHandle, command_buffer: rhi.BufferHandle, offset: usize, _count_buffer: rhi.BufferHandle, _count_offset: usize, max_draw_count: u32, stride: u32) bool {
     _ = _count_buffer;
     _ = _count_offset;
-    if (!ctx.frames.frame_in_progress or !ctx.vulkan_device.multi_draw_indirect or max_draw_count == 0 or (ctx.draw.lod_mode and !ctx.draw.lod_descriptor_stream_valid)) return false;
+    if (!ctx.frames.frame_in_progress or !ctx.vulkan_device.multi_draw_indirect or max_draw_count == 0) return false;
     if (!ctx.runtime.main_pass_active and !ctx.shadow_system.pass_active and !ctx.runtime.g_pass_active and !ctx.water_system.pass_active) pass_orchestration.beginMainPassInternal(ctx);
     if (!ctx.runtime.main_pass_active and !ctx.shadow_system.pass_active and !ctx.runtime.g_pass_active and !ctx.water_system.pass_active) return false;
     const vbo = ctx.resources.buffers.get(handle) orelse return false;
@@ -307,15 +212,12 @@ pub fn drawIndirectCount(ctx: anytype, handle: rhi.BufferHandle, command_buffer:
         c.vkCmdBindPipeline(cb, c.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         ctx.draw.terrain_pipeline_bound = !ctx.water_system.pass_active and pipeline == ctx.pipeline_manager.terrain_pipeline;
     }
-    const descriptor_set = if (ctx.draw.lod_mode) lodDescriptorSet(ctx) else ctx.descriptors.descriptor_sets[ctx.frames.current_frame];
+    const descriptor_set = ctx.descriptors.descriptor_sets[ctx.frames.current_frame];
     c.vkCmdBindDescriptorSets(cb, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_manager.pipeline_layout, 0, 1, &descriptor_set, 0, null);
     const uniforms = indirectModelUniforms();
     c.vkCmdPushConstants(cb, ctx.pipeline_manager.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(ModelUniforms), &uniforms);
     const offsets = [_]c.VkDeviceSize{0};
     c.vkCmdBindVertexBuffers(cb, 0, 1, &vbo.buffer, &offsets);
-    // See drawCompactLODIndirectCount. The compute pass zeroes the remainder
-    // of each fixed-capacity stream, making this regular MDI submission exactly
-    // match the compacted count without a CPU readback or a RADV count-path.
     c.vkCmdDrawIndirect(cb, commands.buffer, @intCast(offset), max_draw_count, stride);
     ctx.runtime.draw_call_count += 1;
     return true;
@@ -323,7 +225,6 @@ pub fn drawIndirectCount(ctx: anytype, handle: rhi.BufferHandle, command_buffer:
 
 pub fn drawInstance(ctx: anytype, handle: rhi.BufferHandle, count: u32, instance_index: u32) void {
     if (!ctx.frames.frame_in_progress) return;
-    if (ctx.draw.lod_mode and !ctx.draw.lod_descriptor_stream_valid) return;
 
     if (!ctx.runtime.main_pass_active and !ctx.shadow_system.pass_active and !ctx.runtime.g_pass_active and !ctx.water_system.pass_active) pass_orchestration.beginMainPassInternal(ctx);
 
@@ -362,10 +263,7 @@ pub fn drawInstance(ctx: anytype, handle: rhi.BufferHandle, count: u32, instance
             }
         }
 
-        const descriptor_set = if (ctx.draw.lod_mode)
-            lodDescriptorSet(ctx)
-        else
-            ctx.descriptors.descriptor_sets[ctx.frames.current_frame];
+        const descriptor_set = ctx.descriptors.descriptor_sets[ctx.frames.current_frame];
         c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_manager.pipeline_layout, 0, 1, &descriptor_set, 0, null);
 
         if (use_shadow) {
@@ -380,7 +278,6 @@ pub fn drawInstance(ctx: anytype, handle: rhi.BufferHandle, count: u32, instance
             const uniforms = ModelUniforms{
                 .model = Mat4.identity,
                 .color = .{ 1.0, 1.0, 1.0, 1.0 },
-                .mask_radius = 0,
             };
             c.vkCmdPushConstants(command_buffer, ctx.pipeline_manager.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(ModelUniforms), &uniforms);
         }
@@ -396,7 +293,6 @@ pub fn drawOffset(ctx: anytype, handle: rhi.BufferHandle, count: u32, mode: rhi.
         log.log.warn("drawOffset: no frame in progress", .{});
         return;
     }
-    if (ctx.draw.lod_mode and !ctx.draw.lod_descriptor_stream_valid) return;
 
     if (ctx.post_process.pass_active) {
         const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
@@ -473,10 +369,7 @@ pub fn drawOffset(ctx: anytype, handle: rhi.BufferHandle, count: u32, mode: rhi.
                 ctx.draw.terrain_pipeline_bound = !ctx.water_system.pass_active and selected_pipeline == ctx.pipeline_manager.terrain_pipeline;
             }
 
-            const descriptor_set = if (ctx.draw.lod_mode)
-                lodDescriptorSet(ctx)
-            else
-                ctx.descriptors.descriptor_sets[ctx.frames.current_frame];
+            const descriptor_set = ctx.descriptors.descriptor_sets[ctx.frames.current_frame];
             c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_manager.pipeline_layout, 0, 1, &descriptor_set, 0, null);
         }
 
@@ -492,7 +385,6 @@ pub fn drawOffset(ctx: anytype, handle: rhi.BufferHandle, count: u32, mode: rhi.
             const uniforms = ModelUniforms{
                 .model = ctx.draw.current_model,
                 .color = ctx.draw.current_color,
-                .mask_radius = ctx.draw.current_mask_radius,
             };
             c.vkCmdPushConstants(command_buffer, ctx.pipeline_manager.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(ModelUniforms), &uniforms);
         }

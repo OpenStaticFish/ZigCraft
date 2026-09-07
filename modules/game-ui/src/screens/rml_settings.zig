@@ -15,9 +15,6 @@ const SettingsUi = @import("../settings_ui.zig");
 const settings_pkg = @import("game-core").settings;
 const apply_logic = settings_pkg.apply_logic;
 const Settings = settings_pkg.Settings;
-const render_settings_mod = @import("engine-rhi").render_settings;
-const RenderDistancePreset = render_settings_mod.RenderDistancePreset;
-const LODConfig = @import("world-lod").lod_chunk.LODConfig;
 
 const SettingsTab = enum { display, camera, world, rendering };
 const SettingAction = enum { previous, next, toggle };
@@ -165,18 +162,6 @@ pub const RmlSettingsScreen = struct {
             settings.render_distance -= 1;
         } else if (std.mem.eql(u8, id, "render-distance-next") and settings.render_distance < std.math.maxInt(i32)) {
             settings.render_distance += 1;
-            settings.horizon_distance = LODConfig.normalizeUserHorizonDistance(settings.render_distance, settings.horizon_distance);
-        } else if (std.mem.eql(u8, id, "horizon-distance-prev") or std.mem.eql(u8, id, "horizon-distance-next")) {
-            settings.horizon_distance = LODConfig.stepHorizonDistance(
-                settings.render_distance,
-                settings.horizon_distance,
-                std.mem.eql(u8, id, "horizon-distance-next"),
-            );
-        } else if (std.mem.eql(u8, id, "lod-toggle")) {
-            settings.lod_enabled = !settings.lod_enabled;
-            if (settings_pkg.sanitizeRuntimeConflicts(settings)) {
-                apply_logic.applyToRenderSettings(settings, self.context.render_settings);
-            }
         }
     }
 
@@ -185,10 +170,6 @@ pub const RmlSettingsScreen = struct {
             self.stepOverallPreset(.previous);
         } else if (std.mem.eql(u8, id, "preset-next")) {
             self.stepOverallPreset(.next);
-        } else if (std.mem.eql(u8, id, "render-distance-preset-prev")) {
-            self.stepRenderDistancePreset(.previous);
-        } else if (std.mem.eql(u8, id, "render-distance-preset-next")) {
-            self.stepRenderDistancePreset(.next);
         } else if (std.mem.eql(u8, id, "wireframe-toggle")) {
             self.context.settings.wireframe_enabled = !self.context.settings.wireframe_enabled;
             apply_logic.applyToRenderSettings(self.context.settings, self.context.render_settings);
@@ -214,21 +195,6 @@ pub const RmlSettingsScreen = struct {
             settings_pkg.json_presets.apply(settings, index);
             SettingsUi.applyPresetSideEffects(settings, self.context.render_settings);
         }
-    }
-
-    fn stepRenderDistancePreset(self: *@This(), action: SettingAction) void {
-        const settings = self.context.settings;
-        const current: u32 = @intFromEnum(settings.render_distance_preset);
-        const count: u32 = @as(u32, RenderDistancePreset.count);
-        const next = switch (action) {
-            .previous => if (current == 0) count - 1 else current - 1,
-            .next => (current + 1) % count,
-            .toggle => return,
-        };
-        settings.render_distance_preset = @enumFromInt(next);
-        const config = render_settings_mod.getPresetConfig(settings.render_distance_preset);
-        settings.render_distance = config.lod_radii[0];
-        settings.horizon_distance = config.horizon_radius;
     }
 
     fn applyMetadataAction(self: *@This(), comptime name: []const u8, action: SettingAction) void {
@@ -271,12 +237,10 @@ pub const RmlSettingsScreen = struct {
         }
 
         if (value.* != old_value) {
-            const sanitized_conflict = settings_pkg.sanitizeRuntimeConflicts(settings);
             SettingsUi.applyChangedSetting(name, settings, self.context.render_settings);
             if (comptime std.mem.eql(u8, name, "msaa_samples")) {
                 self.context.render_settings.setMSAA(settings.msaa_samples);
             }
-            if (sanitized_conflict) self.context.render_settings.setFXAA(settings.fxaa_enabled and !settings.taa_enabled);
         }
     }
 
@@ -328,14 +292,9 @@ pub const RmlSettingsScreen = struct {
     fn appendWorldRows(self: *@This(), out: *std.ArrayList(u8)) !void {
         var buffer: [32]u8 = undefined;
         const settings = self.context.settings;
-        settings.horizon_distance = LODConfig.normalizeUserHorizonDistance(settings.render_distance, settings.horizon_distance);
         try appendSection(out, self.context.allocator, "DISTANCE");
         const render_distance = try std.fmt.bufPrint(&buffer, "{} CHUNKS", .{settings.render_distance});
         try appendStepperRow(out, self.context.allocator, "RENDER DISTANCE", "Full-detail chunk radius.", render_distance, "render-distance");
-        const horizon_distance = try std.fmt.bufPrint(&buffer, "{} CHUNKS", .{settings.horizon_distance});
-        try appendStepperRow(out, self.context.allocator, "DISTANT LOD LIMIT", "Maximum distant-terrain radius from the player.", horizon_distance, "horizon-distance");
-        try appendSection(out, self.context.allocator, "STREAMING");
-        try appendToggleRow(out, self.context.allocator, "LOD SYSTEM", "Distance terrain streaming.", settings.lod_enabled, "lod");
     }
 
     fn appendRenderingRows(self: *@This(), out: *std.ArrayList(u8)) !void {
@@ -343,7 +302,6 @@ pub const RmlSettingsScreen = struct {
         try appendSection(out, self.context.allocator, "BASELINE");
         const preset_index = if (settings_pkg.json_presets.count() > 0) settings_pkg.json_presets.getIndex(settings) else 0;
         try appendStepperRow(out, self.context.allocator, "OVERALL QUALITY", "Preset target for renderer cost and quality.", SettingsUi.getPresetLabel(preset_index), "preset");
-        try appendStepperRow(out, self.context.allocator, "RENDER DISTANCE", "LOD radius profile and streamer pressure.", settings.render_distance_preset.label(), "render-distance-preset");
         try appendToggleRow(out, self.context.allocator, "WIREFRAME", "Debug mesh visibility.", settings.wireframe_enabled, "wireframe");
 
         try appendMetadataSection(out, self.context.allocator, settings, "MATERIALS", MATERIAL_SETTING_NAMES);

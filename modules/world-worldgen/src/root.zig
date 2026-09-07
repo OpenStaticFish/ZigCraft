@@ -65,7 +65,6 @@ pub const findGeneratorIndex = registry.findGeneratorIndex;
 pub const createGenerator = registry.createGenerator;
 pub const createGeneratorById = registry.createGeneratorById;
 pub const FeatureFocus = region.FeatureFocus;
-pub const GenerationOptions = worldgen_api.GenerationOptions;
 pub const Generator = worldgen_api.Generator;
 pub const GeneratorInfo = worldgen_api.GeneratorInfo;
 pub const HeightParams = height_sampler.HeightParams;

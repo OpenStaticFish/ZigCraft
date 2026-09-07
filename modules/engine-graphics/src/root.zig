@@ -18,7 +18,6 @@ pub const render_system = @import("render_system.zig");
 pub const resource_pack = @import("engine-assets").resource_pack;
 pub const rhi_vulkan = @import("rhi_vulkan.zig");
 pub const lpv_system = @import("vulkan/lpv_system.zig");
-pub const lod_culling_system = @import("vulkan/lod_culling_system.zig");
 pub const lpv_utils = @import("lpv_utils.zig");
 pub const shadow_scene = @import("engine-shadows").shadow_scene;
 pub const shadow_system = @import("engine-shadows").shadow_system;

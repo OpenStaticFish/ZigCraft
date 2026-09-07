@@ -116,7 +116,7 @@ pub const Vertex = extern struct {
     packed_meta: u32,
     blocklight: u32,
 
-    pub const LOD_TILE_ID: u16 = 0xFFFF;
+    pub const CLOUD_TILE_ID: u16 = 0xFFFF;
 
     pub fn init(
         pos: [3]f32,
@@ -157,22 +157,6 @@ pub const Vertex = extern struct {
             .blocklight = encodeBlocklight(blocklight, true),
         };
     }
-
-    pub fn initLOD(
-        pos: [3]f32,
-        color: [3]f32,
-        normal: [3]f32,
-        uv: [2]f32,
-    ) Vertex {
-        return .{
-            .pos = pos,
-            .color = encodeColor(color),
-            .normal = encodeNormal(normal),
-            .uv = .{ @floatCast(uv[0]), @floatCast(uv[1]) },
-            .packed_meta = encodeMeta(LOD_TILE_ID, 1.0, 1.0),
-            .blocklight = encodeBlocklight(.{ 0.0, 0.0, 0.0 }, false),
-        };
-    }
 };
 
 /// Encode RGB float color to RGBA8. Alpha is always 255.
@@ -210,7 +194,7 @@ pub fn encodeNormal(n: [3]f32) u32 {
 }
 
 /// Pack tile_id (u16), skylight (u8), and AO (u8) into a single u32.
-/// Skylight and AO precision: 1/255 (~0.4% steps). Tile IDs 0-65534 valid; 0xFFFF is LOD sentinel.
+/// Skylight and AO precision: 1/255 (~0.4% steps).
 pub fn encodeMeta(tile_id: u16, skylight: f32, ao: f32) u32 {
     const sl: u8 = @intFromFloat(@round(@max(0.0, @min(1.0, skylight)) * 255.0));
     const ao_u8: u8 = @intFromFloat(@round(@max(0.0, @min(1.0, ao)) * 255.0));
@@ -243,173 +227,6 @@ pub const DrawMode = enum {
     points,
 };
 
-/// Parameters for the far-LOD vertex-pulling path.  Samples live in a storage
-/// buffer; the reusable index grid supplies `gl_VertexIndex`.
-pub const CompactLODDraw = extern struct {
-    model: Mat4,
-    mask_radius: f32,
-    lod_fade: f32,
-    sample_offset: u32,
-    width: u32,
-    cell_size: f32,
-    layer: u32,
-    skirt_depth: f32,
-    /// Bits 0..3: authoritative same-level compact aprons (N/E/S/W). The
-    /// shader emits a skirt for every complementary edge.
-    edge_masks: u32 = 0,
-};
-
-/// Selects one immutable descriptor snapshot before any LOD stream bindings
-/// are updated or draw commands are recorded.  Direct and GPU-indirect streams
-/// are intentionally distinct even when they currently share a buffer type.
-pub const LODDescriptorStream = enum(u3) {
-    terrain_standard_direct,
-    water_standard_direct,
-    terrain_standard_gpu,
-    water_standard_gpu,
-    terrain_compact_direct,
-    water_compact_direct,
-    terrain_compact_gpu,
-    water_compact_gpu,
-};
-
-/// Per-draw compact-tile data consumed from a std430 SSBO by the indirect
-/// vertex-pulling path. `gl_InstanceIndex` includes `firstInstance`, so the
-/// compute pass can compact this record and use its output slot directly.
-pub const CompactLODInstance = extern struct {
-    model: Mat4,
-    /// mask radius, LOD fade, cell size, skirt depth
-    params: [4]f32,
-    /// sample offset, tile width, layer, authoritative-apron mask
-    words: [4]u32,
-};
-
-pub const DrawIndexedIndirectCommand = extern struct {
-    indexCount: u32,
-    instanceCount: u32,
-    firstIndex: u32,
-    vertexOffset: i32,
-    firstInstance: u32,
-};
-
-comptime {
-    // extern alignment rounds the scalar payload fields to a 16-byte
-    // push-constant block, matching Vulkan's GLSL layout size.
-    std.debug.assert(@sizeOf(CompactLODDraw) == 96);
-    std.debug.assert(@offsetOf(CompactLODDraw, "mask_radius") == 64);
-    std.debug.assert(@offsetOf(CompactLODDraw, "lod_fade") == 68);
-    std.debug.assert(@offsetOf(CompactLODDraw, "sample_offset") == 72);
-    std.debug.assert(@offsetOf(CompactLODDraw, "width") == 76);
-    std.debug.assert(@offsetOf(CompactLODDraw, "cell_size") == 80);
-    std.debug.assert(@offsetOf(CompactLODDraw, "layer") == 84);
-    std.debug.assert(@offsetOf(CompactLODDraw, "skirt_depth") == 88);
-    std.debug.assert(@offsetOf(CompactLODDraw, "edge_masks") == 92);
-}
-
-test "compact LOD push constants match GLSL scalar offsets" {
-    try std.testing.expectEqual(@as(usize, 96), @sizeOf(CompactLODDraw));
-    try std.testing.expectEqual(@as(usize, 0), @offsetOf(CompactLODDraw, "model"));
-    try std.testing.expectEqual(@as(usize, 64), @offsetOf(CompactLODDraw, "mask_radius"));
-    try std.testing.expectEqual(@as(usize, 68), @offsetOf(CompactLODDraw, "lod_fade"));
-    try std.testing.expectEqual(@as(usize, 72), @offsetOf(CompactLODDraw, "sample_offset"));
-    try std.testing.expectEqual(@as(usize, 76), @offsetOf(CompactLODDraw, "width"));
-    try std.testing.expectEqual(@as(usize, 80), @offsetOf(CompactLODDraw, "cell_size"));
-    try std.testing.expectEqual(@as(usize, 84), @offsetOf(CompactLODDraw, "layer"));
-    try std.testing.expectEqual(@as(usize, 88), @offsetOf(CompactLODDraw, "skirt_depth"));
-    try std.testing.expectEqual(@as(usize, 92), @offsetOf(CompactLODDraw, "edge_masks"));
-}
-
-test "compact LOD indirect instance and indexed command ABI" {
-    try std.testing.expectEqual(@as(usize, 96), @sizeOf(CompactLODInstance));
-    try std.testing.expectEqual(@as(usize, 64), @offsetOf(CompactLODInstance, "params"));
-    try std.testing.expectEqual(@as(usize, 80), @offsetOf(CompactLODInstance, "words"));
-    try std.testing.expectEqual(@as(usize, 20), @sizeOf(DrawIndexedIndirectCommand));
-    try std.testing.expectEqual(@as(usize, 16), @offsetOf(DrawIndexedIndirectCommand, "firstInstance"));
-}
-
-/// Little-endian 128-bit compact LOD sample, represented as Vulkan SSBO words.
-/// The field locations are shared by the world upload format and the compact
-/// vertex shaders. This is deliberately a word view: Vulkan storage buffers
-/// expose the 16-byte sample as `uvec4`.
-pub const CompactLODSampleWords = extern struct {
-    words: [4]u32,
-
-    pub const Decoded = struct {
-        terrain_height: i16,
-        water_height: i16,
-        water_depth: u8,
-        water_coverage: u8,
-        surface_material: u7,
-        subsurface_material: u7,
-        foundation_material: u7,
-        color: u32,
-        sky_light: u4,
-        block_light: u4,
-        ambient_occlusion: u6,
-    };
-
-    pub fn decode(self: CompactLODSampleWords) Decoded {
-        return .{
-            .terrain_height = signed16(self.words[0], 0),
-            .water_height = signed16(self.words[0], 16),
-            .water_depth = @truncate(self.words[1]),
-            .water_coverage = @truncate(self.words[1] >> 8),
-            .surface_material = @truncate(self.words[1] >> 16),
-            .subsurface_material = @truncate(self.words[1] >> 23),
-            .foundation_material = @truncate((self.words[1] >> 30) | (self.words[2] << 2)),
-            .color = (self.words[2] >> 5) & 0x00ff_ffff,
-            .sky_light = @truncate((self.words[2] >> 29) | (self.words[3] << 3)),
-            .block_light = @truncate(self.words[3] >> 1),
-            .ambient_occlusion = @truncate(self.words[3] >> 5),
-        };
-    }
-
-    fn signed16(word: u32, shift: u5) i16 {
-        const raw: u16 = @truncate(word >> shift);
-        return @bitCast(raw);
-    }
-};
-
-comptime {
-    std.debug.assert(@sizeOf(CompactLODSampleWords) == 16);
-    std.debug.assert(@alignOf(CompactLODSampleWords) == @alignOf(u32));
-    std.debug.assert(@offsetOf(CompactLODSampleWords, "words") == 0);
-}
-
-test "compact LOD 128-bit sample golden vector decodes across word boundaries" {
-    var bits: u128 = 0;
-    bits |= @as(u128, @as(u16, @bitCast(@as(i16, -100))));
-    bits |= @as(u128, @as(u16, @bitCast(@as(i16, 58)))) << 16;
-    bits |= @as(u128, 9) << 32;
-    bits |= @as(u128, 255) << 40;
-    bits |= @as(u128, 0x15) << 48;
-    bits |= @as(u128, 0x2a) << 55;
-    bits |= @as(u128, 0x45) << 62;
-    bits |= @as(u128, 0x00ab_cdef) << 69;
-    bits |= @as(u128, 15) << 93;
-    bits |= @as(u128, 11) << 97;
-    bits |= @as(u128, 42) << 101;
-
-    const sample = CompactLODSampleWords{ .words = .{
-        @truncate(bits),
-        @truncate(bits >> 32),
-        @truncate(bits >> 64),
-        @truncate(bits >> 96),
-    } };
-    const decoded = sample.decode();
-    try std.testing.expectEqual(@as(i16, -100), decoded.terrain_height);
-    try std.testing.expectEqual(@as(i16, 58), decoded.water_height);
-    try std.testing.expectEqual(@as(u8, 9), decoded.water_depth);
-    try std.testing.expectEqual(@as(u8, 255), decoded.water_coverage);
-    try std.testing.expectEqual(@as(u7, 0x15), decoded.surface_material);
-    try std.testing.expectEqual(@as(u7, 0x2a), decoded.subsurface_material);
-    try std.testing.expectEqual(@as(u7, 0x45), decoded.foundation_material);
-    try std.testing.expectEqual(@as(u32, 0x00ab_cdef), decoded.color);
-    try std.testing.expectEqual(@as(u4, 15), decoded.sky_light);
-    try std.testing.expectEqual(@as(u4, 11), decoded.block_light);
-    try std.testing.expectEqual(@as(u6, 42), decoded.ambient_occlusion);
-}
-
 pub const ShaderStageFlags = packed struct(u32) {
     vertex: bool = false,
     fragment: bool = false,
@@ -426,9 +243,6 @@ pub const DrawIndirectCommand = extern struct {
 
 pub const InstanceData = extern struct {
     model: Mat4,
-    mask_radius: f32,
-    lod_fade: f32,
-    padding: [2]f32,
 };
 
 pub const SkyParams = struct {
@@ -557,19 +371,6 @@ pub const GpuTimingResults = struct {
     lpv_pass_ms: f32,
     sky_pass_ms: f32,
     opaque_pass_ms: f32,
-    /// GPU time spent drawing distant-terrain LOD geometry. This is a subset
-    /// of the containing scene pass and is therefore excluded from total_gpu_ms.
-    lod_terrain_pass_ms: f32,
-    /// GPU time spent drawing distant-water LOD geometry. This is a subset
-    /// of the containing scene pass and is therefore excluded from total_gpu_ms.
-    lod_water_pass_ms: f32,
-    /// Compact LOD terrain draw scope; retained separately from aggregate LOD terrain.
-    lod_compact_terrain_pass_ms: f32,
-    /// Compact LOD water draw scope; retained separately from aggregate LOD water.
-    lod_compact_water_pass_ms: f32,
-    /// GPU time spent culling LOD candidates, compacting indirect commands,
-    /// and executing the compute-to-indirect barrier.
-    lod_culling_compute_ms: f32,
     main_pass_ms: f32, // Overall main pass time (sum of sky and opaque)
     bloom_pass_ms: f32,
     fxaa_pass_ms: f32,

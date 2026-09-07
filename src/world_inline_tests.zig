@@ -13,7 +13,6 @@ const worldToLocal = world_core.worldToLocal;
 const BlockType = world_core.BlockType;
 const block_registry = world_core.block_registry;
 const ChunkMesh = @import("world-meshing").ChunkMesh;
-const ChunkStorage = @import("world-meshing").ChunkStorage;
 const NeighborChunks = @import("world-meshing").NeighborChunks;
 const TextureAtlas = @import("engine-assets").TextureAtlas;
 const ao_calculator = @import("world-meshing").meshing.ao_calculator;
@@ -22,29 +21,6 @@ const biome_color_sampler = @import("world-meshing").meshing.biome_color_sampler
 const boundary = @import("world-meshing").meshing.boundary;
 
 pub const std_options: std.Options = .{ .log_level = .err };
-
-test "ChunkStorage terrain handoff remains ready while an existing allocation is remeshed" {
-    var storage = ChunkStorage.init(testing.allocator);
-    defer storage.deinitWithoutRHI();
-    const data = try storage.getOrCreate(-2, 3);
-
-    try testing.expect(!ChunkStorage.isChunkTerrainReadyForHandoff(-2, 3, &storage));
-
-    data.render.mesh.solid_allocation = .{ .offset = 0, .count = 12, .handle = 1 };
-    try testing.expect(ChunkStorage.isChunkTerrainReadyForHandoff(-2, 3, &storage));
-
-    data.render.mesh.solid_allocation = null;
-    data.render.mesh.cutout_allocation = .{ .offset = 12, .count = 6, .handle = 1 };
-    try testing.expect(ChunkStorage.isChunkTerrainReadyForHandoff(-2, 3, &storage));
-
-    data.render.mesh.cutout_allocation = null;
-    data.render.mesh.fluid_allocation = .{ .offset = 18, .count = 6, .handle = 1 };
-    try testing.expect(!ChunkStorage.isChunkTerrainReadyForHandoff(-2, 3, &storage));
-
-    data.chunk.state = .renderable;
-    data.render.mesh.ready = true;
-    try testing.expect(ChunkStorage.isChunkTerrainReadyForHandoff(-2, 3, &storage));
-}
 
 test "PackedLight init and accessors" {
     const light = PackedLight.init(15, 10);

@@ -303,15 +303,14 @@ pub const NoiseSampler = struct {
 
     /// Get detail noise for fine terrain variation.
     ///
-    /// NOTE: The LOD multiplier intentionally reduces detail contribution at higher
-    /// reduction levels. At reduction=4, lod_mult becomes 0.0, completely eliminating
-    /// detail noise. This is by design: distant terrain (high LOD) should appear
-    /// smooth without fine-grained variation that causes visual noise/aliasing.
+    /// Higher reduction levels intentionally reduce detail contribution. At
+    /// reduction=4, the multiplier becomes zero, eliminating detail noise for
+    /// coarse map sampling.
     pub fn getDetail(self: *const NoiseSampler, x: f32, z: f32, reduction: u8) f32 {
         std.debug.assert(reduction <= 4); // Valid reduction range is 0-4
         const octaves: u32 = if (3 > reduction) 3 - reduction else 1;
-        const lod_mult = (1.0 - 0.25 * @as(f32, @floatFromInt(reduction)));
-        return self.detail_noise.get2DOctaves(x, z, @intCast(octaves)) * lod_mult;
+        const detail_multiplier = (1.0 - 0.25 * @as(f32, @floatFromInt(reduction)));
+        return self.detail_noise.get2DOctaves(x, z, @intCast(octaves)) * detail_multiplier;
     }
 
     /// Get mountain lift noise

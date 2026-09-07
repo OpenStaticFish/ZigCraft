@@ -20,8 +20,6 @@ const SaveManager = @import("world-persistence").SaveManager;
 const LoadResult = @import("world-persistence").LoadResult;
 const GpuAccelerationCoordinator = @import("gpu_acceleration_coordinator.zig").GpuAccelerationCoordinator;
 const WorldLightingEngine = @import("lighting_engine.zig").WorldLightingEngine;
-const LODManager = @import("world-lod").LODManager;
-const LODColumnProvenance = @import("world-core").LODColumnProvenance;
 
 /// A pending chunk transition reference captured by a worker when it flips a
 /// chunk into the `.generated` state. The main thread later drains the queue
@@ -87,17 +85,6 @@ const MeshInputRevisions = struct {
 const RECOVERY_SCAN_PERIOD: u64 = 60;
 const MAX_MISSING_SCAN_STEPS: usize = 1024;
 
-/// Persisted chunks are authoritative over advisory LOD source caches, even
-/// when an older cache snapshot already carries edited provenance. Freshly
-/// generated chunks retain the opt-in ingestion path until it is qualified for
-/// the default streaming workload.
-fn lodIngestionProvenance(load_result: LoadResult, ingest_generated_chunks: bool) ?LODColumnProvenance {
-    return switch (load_result) {
-        .success, .success_relight_required => .edited,
-        else => if (ingest_generated_chunks) .chunk_derived else null,
-    };
-}
-
 pub const ChunkQueueCoordinator = struct {
     allocator: std.mem.Allocator,
     storage: *ChunkStorage,
@@ -110,8 +97,6 @@ pub const ChunkQueueCoordinator = struct {
     gpu: *GpuAccelerationCoordinator,
     max_uploads_per_frame: usize,
     save_manager: ?*SaveManager = null,
-    // Optional LOD manager fed chunk-derived data after generation/load.
-    lod_manager: ?*LODManager = null,
 
     chunks_generated_total: std.atomic.Value(u64) = .init(0),
     chunks_meshed_total: std.atomic.Value(u64) = .init(0),
@@ -162,10 +147,6 @@ pub const ChunkQueueCoordinator = struct {
 
     pub fn setSaveManager(self: *ChunkQueueCoordinator, sm: ?*SaveManager) void {
         self.save_manager = sm;
-    }
-
-    pub fn setLODManager(self: *ChunkQueueCoordinator, mgr: ?*LODManager) void {
-        self.lod_manager = mgr;
     }
 
     pub fn setView(self: *ChunkQueueCoordinator, pc_x: i32, pc_z: i32, render_dist: i32) void {
@@ -747,13 +728,6 @@ pub const ChunkQueueCoordinator = struct {
             if (chunk_data.chunk.state == .generated and chunk_data.chunk.job_token == job.data.chunk.job_token) {
                 self.markNeighborsForRemesh(cx, cz);
                 self.enqueueReadyNeighborhood(cx, cz);
-                // Saved chunks always override advisory LOD cache data. Fresh
-                // generated chunks keep the separately qualified opt-in path.
-                if (self.lod_manager) |mgr| {
-                    if (lodIngestionProvenance(load_result, engine_core.envFlag("ZIGCRAFT_LOD_CHUNK_INGEST", false))) |provenance| {
-                        mgr.ingestChunk(cx, cz, &chunk_data.chunk, provenance);
-                    }
-                }
             }
         }
     }
@@ -1060,13 +1034,6 @@ test "runtime edits enqueue dirty renderable chunks immediately" {
 
     try testing.expectEqual(Chunk.State.generated, data.chunk.state);
     try testing.expectEqual(@as(usize, 1), coordinator.pending_mesh_incoming.items.len);
-}
-
-test "saved chunks always override advisory LOD source snapshots" {
-    try std.testing.expectEqual(LODColumnProvenance.edited, lodIngestionProvenance(.success, false).?);
-    try std.testing.expectEqual(LODColumnProvenance.edited, lodIngestionProvenance(.success_relight_required, false).?);
-    try std.testing.expectEqual(@as(?LODColumnProvenance, null), lodIngestionProvenance(.not_found, false));
-    try std.testing.expectEqual(LODColumnProvenance.chunk_derived, lodIngestionProvenance(.not_found, true).?);
 }
 
 test "missing chunk scan cursor covers concentric square rings without duplicates" {

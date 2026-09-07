@@ -200,14 +200,6 @@ jobs:
           log-file: unit-test-${{ matrix.optimize }}.log
           command: devenv shell --profile unit -- zig build -Doptimize=${{ matrix.optimize }} test
 
-      - name: Run Phase 5 compact LOD gate
-        if: needs.changes.outputs.code_changes == 'true' && matrix.optimize == 'Debug'
-        run: devenv shell --profile unit -- zig build phase5-gate
-
-      - name: Run bounded Phase 5 streaming stress gate
-        if: needs.changes.outputs.code_changes == 'true' && matrix.optimize == 'Debug'
-        run: devenv shell --profile unit -- zig build phase5-stress-gate -Dphase5-stress-iterations=64
-
       - name: Upload unit test log
         if: failure()
         uses: actions/upload-artifact@v7
@@ -291,38 +283,15 @@ jobs:
           ZIGCRAFT_SMOKE_FRAMES: "3"
           ZIGCRAFT_SAFE_MODE: "1"
 
-      - name: Run Phase 5 production visual-motion and saved-world gate
-        if: needs.changes.outputs.code_changes == 'true'
-        uses: ./.github/actions/run-with-log
-        with:
-          name: Phase 5 Visual Motion and Saved-World Reload Gate
-          timeout: 35m
-          log-file: phase5-visual-gate.log
-          command: devenv shell --profile graphics -- zig build phase5-visual-gate
-        env:
-          XDG_RUNTIME_DIR: /tmp/runtime-runner
-          WAYLAND_DISPLAY: headless
-
-      - name: Upload Phase 5 visual evidence
-        if: always() && needs.changes.outputs.code_changes == 'true'
-        uses: actions/upload-artifact@v7
-        with:
-          name: phase5-visual-evidence
-          path: |
-            zig-out/phase5-visual-smoke/
-            phase5-visual-gate.log
-          if-no-files-found: ignore
-          retention-days: 14
-
       - name: Fail on Vulkan validation log errors
         if: needs.changes.outputs.code_changes == 'true'
         run: |
           set -euo pipefail
-          if rg -n -e 'Vulkan validation error|Validation Error:|VUID-' integration-test.log world-smoke-test.log phase5-visual-gate.log; then
-            echo "Vulkan validation errors were found in integration or Phase 5 visual logs." >&2
+          if rg -n -e 'Vulkan validation error|Validation Error:|VUID-' integration-test.log world-smoke-test.log; then
+            echo "Vulkan validation errors were found in integration logs." >&2
             exit 1
           fi
-          echo "No Vulkan validation errors found in integration or Phase 5 visual logs."
+          echo "No Vulkan validation errors found in integration logs."
 
       - name: Stop headless Wayland compositor
         if: always() && needs.changes.outputs.code_changes == 'true'
@@ -336,7 +305,6 @@ jobs:
           path: |
             integration-test.log
             world-smoke-test.log
-            phase5-visual-gate.log
             weston.log
           if-no-files-found: ignore
           retention-days: 7

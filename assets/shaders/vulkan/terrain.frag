@@ -14,9 +14,7 @@ layout(location = 10) in vec3 vBitangent;
 layout(location = 11) in float vAO;
 layout(location = 12) in vec4 vClipPosCurrent;
 layout(location = 13) in vec4 vClipPosPrev;
-layout(location = 14) in float vMaskRadius;
 layout(location = 15) in float vCloud;
-layout(location = 16) in float vLODFade;
 
 layout(location = 0) out vec4 FragColor;
 
@@ -41,20 +39,6 @@ layout(set = 0, binding = 0) uniform GlobalUniforms {
 
 // Constants
 const float PI = 3.14159265359;
-const float LOD_CHUNK_SIZE = 16.0;
-
-bool shouldDiscardLODFragment(float encodedMaskRadius, vec2 cameraRelativeXZ) {
-    float maskRadius = abs(encodedMaskRadius);
-    if (maskRadius < 1.0) return false;
-
-    bool readyDiskMask = encodedMaskRadius < 0.0;
-    vec2 cameraChunkLocal = mod(global.cam_pos.xz, LOD_CHUNK_SIZE);
-    vec2 chunkDelta = floor((cameraRelativeXZ + cameraChunkLocal) / LOD_CHUNK_SIZE);
-    // Streaming gives the contiguous ready disk to detail and the outer
-    // annulus to LOD. Legacy integral masks retain the two-chunk overlap.
-    float detailRadiusChunks = floor(maskRadius / LOD_CHUNK_SIZE) + (readyDiskMask ? 0.0 : 2.0);
-    return dot(chunkDelta, chunkDelta) <= detailRadiusChunks * detailRadiusChunks;
-}
 
 float saturate(float v) {
     return clamp(v, 0.0, 1.0);
@@ -73,15 +57,6 @@ const int DEBUG_BLOCK_LIGHT = 9;
 const int DEBUG_OUTDOOR_FACTOR = 10;
 const int DEBUG_SKYLIGHT = 12;
 const int DEBUG_AMBIENT_OCCLUSION = 13;
-
-// World-space hash for LOD transition masking.
-// Using world-space noise avoids a fixed screen-space dot pattern.
-float lodTransitionNoise(vec2 worldXZ) {
-    vec2 p = floor(worldXZ * 0.25);
-    p = fract(p * vec2(0.1031, 0.1030));
-    p += dot(p, p.yx + 33.33);
-    return fract((p.x + p.y) * p.x);
-}
 
 float skyVisibilityFactor(float skyLight) {
     return smoothstep(0.05, 0.25, clamp(skyLight, 0.0, 1.0));
@@ -138,7 +113,6 @@ layout(set = 0, binding = 4) uniform sampler2DArray uShadowMapsRegular;
 layout(push_constant) uniform ModelUniforms {
     mat4 model;
     vec4 color_override;
-    float mask_radius;
 } model_data;
 
 // Poisson Disk for PCF (16-sample)
@@ -278,7 +252,6 @@ float computeShadowFactor(vec3 fragPosWorld, vec3 N, vec3 L, int layer) {
     // receiver reference moves slightly closer to the light (higher depth) to
     // avoid self-shadowing on coplanar surfaces.
     float biasTexels = 0.35 + 0.2 * min(tanTheta, 5.0);
-    if (vTileID < 0 || abs(vMaskRadius) > 0.0) biasTexels = max(biasTexels, 0.45);
     float bias = worldTexelSize * biasTexels / depthSpan;
     float compareDepth = min(currentDepth + bias, 1.0);
 
@@ -523,24 +496,17 @@ void main() {
     const float TEXTURE_FADE_START = 32.0;
     const float TEXTURE_FADE_END = 128.0;
     float viewDistance = length(vFragPosWorld);
-    bool isLOD = vTileID < 0 || abs(vMaskRadius) > 0.0;
     float textureDetail = 1.0 - smoothstep(TEXTURE_FADE_START, TEXTURE_FADE_END, viewDistance);
-    if (isLOD) {
-        textureDetail = 0.0;
-    }
-
-    // Full-detail chunks own this area. Dithering the handoff creates a
-    // camera-following grid of holes at the chunk/LOD boundary.
-    if (shouldDiscardLODFragment(vMaskRadius, vFragPosWorld.xz)) discard;
 
     vec2 tileBase = vec2(mod(float(vTileID), 16.0), floor(float(vTileID) / 16.0)) * (1.0 / 16.0);
     vec2 tiledUV = fract(vTexCoord);
     tiledUV = clamp(tiledUV, 0.001, 0.999);
     vec2 uv = tileBase + tiledUV * (1.0 / 16.0);
 
+    bool isCloud = vCloud > 0.5;
     vec3 N = normalize(vNormal);
     vec4 normalMapSample = vec4(0.5, 0.5, 1.0, 0.0);
-    if (global.lighting.z > 0.5 && global.pbr_params.x > 1.5 && vTileID >= 0 && textureDetail > 0.2) {
+    if (!isCloud && global.lighting.z > 0.5 && global.pbr_params.x > 1.5 && textureDetail > 0.2) {
         normalMapSample = texture(uNormalMap, uv);
         vec3 T = normalize(vTangent - N * dot(N, vTangent));
         float handedness = dot(cross(N, T), vBitangent) < 0.0 ? -1.0 : 1.0;
@@ -552,27 +518,21 @@ void main() {
     vec3 L = normalize(global.sun_dir.xyz);
     float skyVisibility = clamp(vSkyLight, 0.0, 1.0);
     float atmosphericVisibility = skyVisibilityFactor(skyVisibility);
-    bool isCloud = vCloud > 0.5;
     float cascadeDistance = max(vViewDepth, 0.0);
     int layer = selectShadowCascade(vFragPosWorld, cascadeDistance);
     float shadowFactor = 0.0;
-    if (!isLOD) {
-        shadowFactor = computeShadowCascades(vFragPosWorld, N, L, cascadeDistance, layer);
-        shadowFactor *= 1.0 - smoothstep(shadows.fade_params.x, shadows.fade_params.y, cascadeDistance);
-    }
+    shadowFactor = computeShadowCascades(vFragPosWorld, N, L, cascadeDistance, layer);
+    shadowFactor *= 1.0 - smoothstep(shadows.fade_params.x, shadows.fade_params.y, cascadeDistance);
     if (isCloud) shadowFactor = 0.0;
     
     float totalShadow = shadowFactor * clamp(global.shadow_params.z, 0.0, 1.0);
 
     float ssao = mix(1.0, texture(uSSAOMap, gl_FragCoord.xy / global.viewport_size.xy).r, global.pbr_params.w);
-    if (isLOD) {
-        ssao = 1.0;
-    }
     float ao = mix(1.0, vAO, mix(0.4, 0.05, clamp(viewDistance / AO_FADE_DISTANCE, 0.0, 1.0)));
 
     vec3 albedo = vColor;
     float roughness = 0.85;
-    if (!isLOD && global.lighting.y > 0.5 && vTileID >= 0) {
+    if (!isCloud && global.lighting.y > 0.5) {
         vec4 texColor = texture(uTexture, uv);
         if (texColor.a < 0.1) discard;
         outputAlpha = texColor.a;
@@ -586,7 +546,7 @@ void main() {
     color = computeTerrainLighting(albedo, N, V, L, clamp(roughness, 0.05, 1.0), totalShadow, vSkyLight * global.lighting.x, skyVisibility, vBlockLight, ao, ssao, debugDirectKey, debugSkyFill, debugBlockLight, debugOutdoor);
 
     if (global.volumetric_params.x > 0.5) {
-        float shaftDither = lodTransitionNoise(gl_FragCoord.xy + vec2(global.params.x));
+        float shaftDither = interleavedGradientNoise(gl_FragCoord.xy + vec2(global.params.x));
         if (atmosphericVisibility > 0.01) {
             vec4 volumetric = computeVolumetric(vec3(0.0), vFragPosWorld, shaftDither);
             volumetric.rgb *= atmosphericVisibility;

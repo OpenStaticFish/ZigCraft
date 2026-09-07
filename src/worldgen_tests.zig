@@ -1038,33 +1038,6 @@ test "BiomeSource selectBiome river override" {
     try testing.expectEqual(result, BiomeId.river);
 }
 
-test "BiomeSource selectBiomeSimplified returns valid biome" {
-    const biome_mod = world_worldgen.biome;
-    const source = BiomeSource.init();
-
-    const climate1 = biome_mod.ClimateParams{
-        .temperature = 0.9,
-        .humidity = 0.1,
-        .elevation = 0.4,
-        .continentalness = 0.6,
-        .ruggedness = 0.2,
-    };
-
-    const result1 = source.selectBiomeSimplified(climate1);
-    try testing.expectEqual(result1, BiomeId.desert);
-
-    const climate2 = biome_mod.ClimateParams{
-        .temperature = 0.5,
-        .humidity = 0.5,
-        .elevation = 0.2,
-        .continentalness = 0.1,
-        .ruggedness = 0.2,
-    };
-
-    const result2 = source.selectBiomeSimplified(climate2);
-    try testing.expectEqual(BiomeId.deep_ocean, result2);
-}
-
 test "BiomeSource getColor returns valid packed RGB" {
     const source = BiomeSource.init();
 

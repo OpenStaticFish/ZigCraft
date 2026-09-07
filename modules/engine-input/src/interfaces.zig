@@ -56,7 +56,6 @@ pub const GameAction = enum(u8) {
     ui_back,
     toggle_shadow_debug_vis,
     toggle_timing_overlay,
-    toggle_lod_render,
     toggle_gpass_render,
     toggle_ssao,
     toggle_fog,

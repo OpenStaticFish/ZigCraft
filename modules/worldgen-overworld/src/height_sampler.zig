@@ -216,7 +216,7 @@ pub const HeightSampler = struct {
     /// This is the main entry point for height computation.
     ///
     /// Parameters:
-    /// - reduction: LOD reduction level (0-4). Higher values simplify noise sampling.
+    /// - reduction: Detail-reduction level (0-4). Higher values simplify noise sampling.
     pub fn computeHeight(
         self: *const HeightSampler,
         noise_sampler: *const NoiseSampler,
@@ -237,7 +237,7 @@ pub const HeightSampler = struct {
         reduction: u8,
         terrain_modifier: ?TerrainModifier,
     ) f32 {
-        // Validate reduction is in expected range (0-4 for LOD0-LOD4)
+        // Validate the supported detail-reduction range.
         std.debug.assert(reduction <= 4);
 
         const p = self.params;
