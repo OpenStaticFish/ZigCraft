@@ -70,6 +70,7 @@ pub fn setModelMatrix(ctx: anytype, model: Mat4, color: Vec3, mask_radius: f32) 
     ctx.draw.current_model = model;
     ctx.draw.current_color = .{ color.x, color.y, color.z, 1.0 };
     ctx.draw.current_mask_radius = mask_radius;
+    ctx.draw.current_lod_ownership_bounds = .{ 0, 0, 0, 0 };
 }
 
 pub fn setInstanceBuffer(ctx: anytype, handle: rhi.BufferHandle) void {

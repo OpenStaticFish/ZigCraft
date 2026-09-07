@@ -33,6 +33,7 @@ const ChunkChecker = lod_gpu.ChunkChecker;
 const MeshMap = lod_gpu.MeshMap;
 const RegionMap = lod_gpu.RegionMap;
 const lod_scheduler = @import("lod_scheduler.zig");
+const lod_service = @import("lod_service.zig");
 const lod_cache = @import("lod_cache.zig");
 const lod_store = @import("lod_store.zig");
 const lod_ingest = @import("lod_ingest.zig");
@@ -177,82 +178,186 @@ pub fn processUploadsWithBudget(self: *Self, upload_budget_bytes: usize) void {
 
     var uploads: u32 = 0;
     var uploaded_bytes: usize = 0;
+    var first_selection = true;
+    self.memory_governor.required_upload_bytes = 0;
+    self.memory_governor.required_horizon_upload_bytes = 0;
+    self.memory_governor.maintenance_staging_bytes = if (upload_budget_bytes == 0) std.math.maxInt(usize) else upload_budget_bytes;
 
     while (uploads < max_uploads) {
+        // Refresh known allocations after every attempt, including failed
+        // replacements which may leave fence-retired GPU backing behind.
+        // Avoid a map scan (and render-stat reset) when there is no upload work.
+        if (self.gpu_bridge.on_upload_memory_cost != null) {
+            var queued = false;
+            for (&self.upload_queues) |*queue| queued = queued or queue.count() > 0;
+            if (!queued) {
+                self.memory_governor.required_upload_bytes = 0;
+                break;
+            }
+            self.updateStats();
+        }
         const prep_timer = self.profiling.begin();
         var task: ?UploadTask = null;
         var oversized_fallback: ?UploadTask = null;
         var completed_without_upload = false;
-        var made_progress = false;
-        var deferred_for_budget = false;
 
         self.mutex.lock();
         const active_lod_count = lod_chunk.activeLODCount(self.config);
+        const memory_budget = @as(usize, self.config.getMemoryBudgetMB()) * 1024 * 1024;
+        const available_memory = if (memory_budget == 0) std.math.maxInt(usize) else memory_budget -| self.memory_governor.logical_admission_bytes;
 
-        // Inspect at most the queue depth observed for each level. An
-        // oversized far migration goes back at the tail, allowing a later
-        // near upload to use the remaining frame budget without looping on
-        // that deferred entry forever.
-        var order_idx: usize = 0;
-        while (order_idx < active_lod_count and task == null and !completed_without_upload) : (order_idx += 1) {
-            const i = lod_scheduler.priorityLevelIndex(order_idx, active_lod_count);
-            const attempts = self.upload_queues[i].count();
-            var attempt: usize = 0;
-            while (attempt < attempts and task == null and !completed_without_upload) : (attempt += 1) if (self.upload_queues[i].pop()) |chunk| {
-                made_progress = true;
-                const key = chunk.key();
-                if (self.meshes[i].get(key)) |mesh| {
-                    const staging_bytes = self.gpu_bridge.uploadCost(mesh).total();
-                    if (wouldExceedUploadBudget(uploaded_bytes, staging_bytes, upload_budget_bytes)) {
-                        self.profiling.addStagingPressure();
-                        deferred_for_budget = true;
-                        // Preserve room for any smaller task later in the
-                        // priority scan. If every queued task is oversized,
-                        // admit one at the start of the frame so a pool
-                        // migration cannot be deferred forever.
-                        if (uploaded_bytes == 0 and oversized_fallback == null) {
-                            oversized_fallback = .{
-                                .key = key,
-                                .chunk = chunk,
-                                .mesh = mesh,
-                                .lod_idx = i,
-                                .staging_bytes = staging_bytes,
-                            };
-                        } else {
-                            self.requeueUpload(i, chunk);
-                        }
+        // Only a token inherited from the previous call earns a bonus turn.
+        // Resolve it under the lock; queued identity and memory are checked
+        // again below before the staging exception can be used.
+        var owed: ?manager_ctx.LifecycleToken = null;
+        if (first_selection) {
+            first_selection = false;
+            if (self.service_upload_owed) |token| {
+                const idx = @intFromEnum(token.key.lod);
+                if (token.stage == .upload and idx < active_lod_count) {
+                    if (self.regions[idx].get(token.key)) |chunk| {
+                        if (token.matches(chunk) and token.service_lane == chunk.service_lane and chunk.getState() == .uploading) owed = token;
+                    }
+                }
+            }
+            self.service_upload_owed = null;
+        }
+        var scanned_lanes: u8 = 0;
+        var turn: usize = 0;
+        const bonus_turns: usize = @intFromBool(owed != null);
+        while (turn < self.service_upload_wheel.len + bonus_turns and task == null and !completed_without_upload) : (turn += 1) {
+            const is_owed_turn = turn < bonus_turns;
+            const lane = if (is_owed_turn) owed.?.service_lane else self.service_upload_wheel.next();
+            if (!is_owed_turn) {
+                const bit = @as(u8, 1) << lane;
+                if (scanned_lanes & bit != 0) continue;
+                scanned_lanes |= bit;
+            }
+            var order_idx: usize = 0;
+            while (order_idx < active_lod_count and task == null and !completed_without_upload) : (order_idx += 1) {
+                const order = (self.service_upload_level_cursor[lane] + order_idx) % active_lod_count;
+                const i = lod_scheduler.priorityLevelIndex(order, active_lod_count);
+                if (is_owed_turn and i != @intFromEnum(owed.?.key.lod)) continue;
+                const attempts = self.upload_queues[i].count();
+                var attempt: usize = 0;
+                // Finish rotating the observed ring even after selection, so
+                // mismatched lanes keep their original FIFO order.
+                while (attempt < attempts) : (attempt += 1) if (self.upload_queues[i].pop()) |chunk| {
+                    const key = chunk.key();
+                    if (task != null or completed_without_upload or chunk.service_lane != lane or
+                        (is_owed_turn and (!LODRegionKey.eql(key, owed.?.key) or !owed.?.matches(chunk) or self.regions[i].get(key) != chunk)))
+                    {
+                        self.requeueUpload(i, chunk);
                         continue;
                     }
+                    if (self.meshes[i].get(key)) |mesh| {
+                        // A fresh near mesh can use the existing dedicated path
+                        // when its own buffer fits but replacing a pool does not.
+                        // The strategy must fit this lane's headroom, not borrow
+                        // the reserve granted to more urgent work.
+                        const lane_available = if (memory_budget == 0) std.math.maxInt(usize) else lod_service.memoryLimitWithNearUsage(lane, memory_budget, self.memory_governor.near_exclusive_bytes) -| self.memory_governor.logical_admission_bytes;
+                        self.gpu_bridge.prepareUpload(mesh, @min(available_memory, lane_available));
+                        // Staging's one-oversized-task exception must never bypass
+                        // backing-memory admission. Zero-growth uploads may drain
+                        // pending CPU payloads even while already under pressure.
+                        const memory_cost = self.gpu_bridge.uploadMemoryCost(mesh);
+                        if (memory_cost > available_memory) {
+                            self.memory_governor.pressure_pending = true;
+                            // Ask eviction to make room for one achievable pending
+                            // replacement, not just bring current usage below cap.
+                            if (memory_cost <= memory_budget) {
+                                const previous = self.memory_governor.required_upload_bytes;
+                                self.memory_governor.required_upload_bytes = if (previous == 0) memory_cost else @min(previous, memory_cost);
+                            }
+                            self.requeueUpload(i, chunk);
+                            continue;
+                        }
+                        if (memory_budget != 0 and lane >= @intFromEnum(lod_service.Class.horizon) and
+                            memory_cost > lod_service.memoryLimitWithNearUsage(lane, memory_budget, self.memory_governor.near_exclusive_bytes) -| self.memory_governor.logical_admission_bytes)
+                        {
+                            // Refinement remains optional under the background
+                            // reserve. The configured coarsest horizon is
+                            // different: reclaim stale *outer* work down to the
+                            // reserve so it can make bounded forward progress.
+                            // This never spends the reserve and never treats an
+                            // oversized task as feasible.
+                            if (lane == @intFromEnum(lod_service.Class.horizon) and
+                                i + 1 == active_lod_count and
+                                memory_cost <= lod_service.memoryLimitWithNearUsage(lane, memory_budget, self.memory_governor.near_exclusive_bytes))
+                            {
+                                const previous = self.memory_governor.required_horizon_upload_bytes;
+                                self.memory_governor.required_horizon_upload_bytes = if (previous == 0) memory_cost else @min(previous, memory_cost);
+                            }
+                            self.memory_governor.pressure_pending = true;
+                            self.requeueUpload(i, chunk);
+                            continue;
+                        }
+                        const staging_bytes = self.gpu_bridge.uploadCost(mesh).total();
+                        if (wouldExceedUploadBudget(uploaded_bytes, staging_bytes, upload_budget_bytes) and !(is_owed_turn and uploaded_bytes == 0)) {
+                            self.profiling.addStagingPressure();
+                            // Preserve room for any smaller task later in the
+                            // priority scan. If every queued task is oversized,
+                            // admit one at the start of the frame so a pool
+                            // migration cannot be deferred forever.
+                            if (uploaded_bytes == 0 and oversized_fallback == null) {
+                                oversized_fallback = .{
+                                    .key = key,
+                                    .chunk = chunk,
+                                    .mesh = mesh,
+                                    .lod_idx = i,
+                                    .staging_bytes = staging_bytes,
+                                };
+                            } else {
+                                self.requeueUpload(i, chunk);
+                            }
+                            continue;
+                        }
 
-                    chunk.pin();
-                    task = .{
-                        .key = key,
-                        .chunk = chunk,
-                        .mesh = mesh,
-                        .lod_idx = i,
-                        .staging_bytes = staging_bytes,
-                    };
-                } else {
-                    self.markRegionRenderable(key, chunk);
-                    uploads += 1;
-                    completed_without_upload = true;
-                }
-            };
+                        chunk.pin();
+                        task = .{
+                            .key = key,
+                            .chunk = chunk,
+                            .mesh = mesh,
+                            .lod_idx = i,
+                            .staging_bytes = staging_bytes,
+                        };
+                    } else {
+                        self.markRegionRenderable(key, chunk);
+                        self.service_upload_level_cursor[lane] = (order + 1) % active_lod_count;
+                        uploads += 1;
+                        completed_without_upload = true;
+                    }
+                };
+            }
         }
         if (oversized_fallback) |fallback| {
             if (task == null and !completed_without_upload and uploaded_bytes == 0) {
                 fallback.chunk.pin();
                 task = fallback;
             } else {
+                if (self.service_upload_owed == null) {
+                    self.service_upload_owed = .{
+                        .key = fallback.key,
+                        .job_token = fallback.chunk.job_token,
+                        .source_revision = fallback.chunk.source_revision,
+                        .service_lane = fallback.chunk.service_lane,
+                        .priority = 0,
+                        .stage = .upload,
+                    };
+                }
                 self.requeueUpload(fallback.lod_idx, fallback.chunk);
+            }
+        }
+        if (task) |selected| {
+            // A lane can span multiple LOD levels. Rotate those levels too so
+            // continual small near-level work cannot hide an older far upload.
+            self.service_upload_level_cursor[selected.chunk.service_lane] = (lod_scheduler.priorityRank(selected.key.lod, active_lod_count) + 1) % active_lod_count;
+            if (self.service_upload_owed) |token| {
+                if (LODRegionKey.eql(token.key, selected.key) and token.matches(selected.chunk)) self.service_upload_owed = null;
             }
         }
         self.mutex.unlock();
 
-        if (!made_progress) {
-            self.profiling.end(.upload_prep, prep_timer);
-            break;
-        }
         if (completed_without_upload) {
             self.profiling.end(.upload_prep, prep_timer);
             continue;
@@ -260,12 +365,14 @@ pub fn processUploadsWithBudget(self: *Self, upload_budget_bytes: usize) void {
 
         const upload_task = task orelse {
             self.profiling.end(.upload_prep, prep_timer);
-            if (deferred_for_budget) break;
-            continue;
+            break;
         };
         self.profiling.end(.upload_prep, prep_timer);
         const submission_timer = self.profiling.begin();
         self.gpu_bridge.upload(upload_task.mesh) catch |err| {
+            // A partial migration can consume staging before returning an
+            // error; don't independently spend that frame's allowance on trim.
+            self.memory_governor.maintenance_staging_bytes = 0;
             self.profiling.end(.upload_submission, submission_timer);
             log.log.warn("LOD{} mesh upload failed (will retry): {}", .{ upload_task.lod_idx, err });
             // Compact allocation/update failures must not strand a far region
@@ -303,6 +410,7 @@ pub fn processUploadsWithBudget(self: *Self, upload_budget_bytes: usize) void {
                 return;
             }
             upload_task.chunk.setState(.mesh_ready);
+            self.enqueueTransition(upload_task.key, upload_task.chunk, .upload);
             upload_task.chunk.unpin();
             self.mutex.unlock();
             continue;
@@ -310,6 +418,9 @@ pub fn processUploadsWithBudget(self: *Self, upload_budget_bytes: usize) void {
         self.profiling.end(.upload_submission, submission_timer);
 
         uploaded_bytes = std.math.add(usize, uploaded_bytes, upload_task.staging_bytes) catch std.math.maxInt(usize);
+        if (self.memory_governor.maintenance_staging_bytes != 0) {
+            self.memory_governor.maintenance_staging_bytes = if (upload_budget_bytes == 0) std.math.maxInt(usize) else upload_budget_bytes -| uploaded_bytes;
+        }
         self.profiling.addUploadBytes(upload_task.staging_bytes);
         // Count only ownership that reached the GPU bridge successfully. A
         // requeued failure arrives here once on its eventual successful upload,
@@ -336,6 +447,7 @@ pub fn requeueUpload(self: *Self, lod_idx: usize, chunk: *LODChunk) void {
         log.log.warn("LOD{} upload requeue failed: {}", .{ lod_idx, err });
         self.stats.upload_failures += 1;
         chunk.setState(.mesh_ready);
+        self.enqueueTransition(chunk.key(), chunk, .upload);
     };
 }
 
@@ -364,8 +476,12 @@ pub fn adjustParentReadyChildren(self: *Self, key: LODRegionKey, delta: i8) void
 }
 
 pub fn markRegionRenderable(self: *Self, key: LODRegionKey, chunk: *LODChunk) void {
+    if (self.service_upload_owed) |token| {
+        if (LODRegionKey.eql(token.key, key) and token.matches(chunk)) self.service_upload_owed = null;
+    }
     if (chunk.isRenderable()) return;
     chunk.markRenderable(self.countRenderableChildren(key));
+    self.service_counters.record(.renderable, chunk.service_lane);
     if (engine_core.envFlag("ZIGCRAFT_LOD_DIAG", false)) {
         log.log.warn("LOD_REGION_RENDERABLE: lod={} region=({}, {})", .{ @intFromEnum(key.lod), key.rx, key.rz });
     }
@@ -414,4 +530,8 @@ pub fn demoteRegionForRemesh(self: *Self, key: LODRegionKey, chunk: *LODChunk) v
         chunk.setState(.generated);
         self.enqueueTransition(key, chunk, .mesh);
     }
+}
+
+test {
+    _ = @import("lod_service_upload_tests.zig");
 }

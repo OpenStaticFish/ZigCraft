@@ -257,6 +257,8 @@ pub const CompactLODDraw = extern struct {
     /// Bits 0..3: authoritative same-level compact aprons (N/E/S/W). The
     /// shader emits a skirt for every complementary edge.
     edge_masks: u32 = 0,
+    /// Local min X/Z, max X/Z ownership rectangle; zero disables clipping.
+    ownership_bounds: [4]f32 = .{ 0, 0, 0, 0 },
 };
 
 /// Selects one immutable descriptor snapshot before any LOD stream bindings
@@ -282,6 +284,7 @@ pub const CompactLODInstance = extern struct {
     params: [4]f32,
     /// sample offset, tile width, layer, authoritative-apron mask
     words: [4]u32,
+    ownership_bounds: [4]f32 = .{ 0, 0, 0, 0 },
 };
 
 pub const DrawIndexedIndirectCommand = extern struct {
@@ -295,7 +298,8 @@ pub const DrawIndexedIndirectCommand = extern struct {
 comptime {
     // extern alignment rounds the scalar payload fields to a 16-byte
     // push-constant block, matching Vulkan's GLSL layout size.
-    std.debug.assert(@sizeOf(CompactLODDraw) == 96);
+    std.debug.assert(@sizeOf(CompactLODDraw) == 112);
+    std.debug.assert(@offsetOf(CompactLODDraw, "ownership_bounds") == 96);
     std.debug.assert(@offsetOf(CompactLODDraw, "mask_radius") == 64);
     std.debug.assert(@offsetOf(CompactLODDraw, "lod_fade") == 68);
     std.debug.assert(@offsetOf(CompactLODDraw, "sample_offset") == 72);
@@ -307,7 +311,8 @@ comptime {
 }
 
 test "compact LOD push constants match GLSL scalar offsets" {
-    try std.testing.expectEqual(@as(usize, 96), @sizeOf(CompactLODDraw));
+    try std.testing.expectEqual(@as(usize, 112), @sizeOf(CompactLODDraw));
+    try std.testing.expectEqual(@as(usize, 96), @offsetOf(CompactLODDraw, "ownership_bounds"));
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(CompactLODDraw, "model"));
     try std.testing.expectEqual(@as(usize, 64), @offsetOf(CompactLODDraw, "mask_radius"));
     try std.testing.expectEqual(@as(usize, 68), @offsetOf(CompactLODDraw, "lod_fade"));
@@ -320,7 +325,8 @@ test "compact LOD push constants match GLSL scalar offsets" {
 }
 
 test "compact LOD indirect instance and indexed command ABI" {
-    try std.testing.expectEqual(@as(usize, 96), @sizeOf(CompactLODInstance));
+    try std.testing.expectEqual(@as(usize, 112), @sizeOf(CompactLODInstance));
+    try std.testing.expectEqual(@as(usize, 96), @offsetOf(CompactLODInstance, "ownership_bounds"));
     try std.testing.expectEqual(@as(usize, 64), @offsetOf(CompactLODInstance, "params"));
     try std.testing.expectEqual(@as(usize, 80), @offsetOf(CompactLODInstance, "words"));
     try std.testing.expectEqual(@as(usize, 20), @sizeOf(DrawIndexedIndirectCommand));
@@ -429,7 +435,14 @@ pub const InstanceData = extern struct {
     mask_radius: f32,
     lod_fade: f32,
     padding: [2]f32,
+    /// Local min X/Z, max X/Z. Zero disables clipping for full chunks.
+    ownership_bounds: [4]f32 = .{ 0, 0, 0, 0 },
 };
+
+comptime {
+    std.debug.assert(@sizeOf(InstanceData) == 96);
+    std.debug.assert(@offsetOf(InstanceData, "ownership_bounds") == 80);
+}
 
 pub const SkyParams = struct {
     cam_pos: Vec3,

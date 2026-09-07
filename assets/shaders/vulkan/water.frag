@@ -1,4 +1,8 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "distance_appearance.glsl"
+#include "lod_ownership.glsl"
 
 layout(location = 0) in vec3 vColor;
 layout(location = 1) flat in vec3 vNormal;
@@ -33,6 +37,8 @@ layout(set = 0, binding = 0) uniform GlobalUniforms {
     vec4 lpv_params;
     vec4 lpv_origin;
 } global;
+
+#include "lod_water_appearance.glsl"
 
 layout(set = 0, binding = 1) uniform sampler2D uTexture;
 layout(set = 0, binding = 9) uniform sampler2D uEnvMap;
@@ -131,6 +137,7 @@ vec2 atlasUV(int tileID, vec2 texCoord) {
 }
 
 void main() {
+    discardOutsideLODOwnership();
     bool isLOD = vTileID < 0 || abs(vMaskRadius) > 0.0;
     float lodMaskAlpha = 1.0;
     if (abs(vMaskRadius) >= 1.0) {
@@ -144,6 +151,11 @@ void main() {
         // Fade the translucent LOD underlay in across the detailed-water
         // overlap instead of changing its contribution at a hard circle.
         lodMaskAlpha = smoothstep(maskRadius, maskRadius + LOD_MASK_BLEND_WIDTH, maskDistance);
+    }
+    if (isLOD) {
+        FragColor = lodWaterAppearance(vColor, vNormal, vFragPosWorld, vSkyLight, vBlockLight);
+        FragColor.a *= lodMaskAlpha;
+        return;
     }
     float time = global.params.x;
 
@@ -188,10 +200,6 @@ void main() {
     float distance_water_mass = smoothstep(96.0, 520.0, vDistance);
     float water_mass = max(depth_factor, distance_water_mass);
     float edge_depth = 1.0 - smoothstep(0.0, 2.5, water_depth);
-    if (isLOD) {
-        water_mass = max(water_mass, 0.82);
-        edge_depth *= 0.25;
-    }
 
     vec2 uv = atlasUV(vTileID, vTexCoord + vec2(time * 0.025, time * 0.012));
     vec2 uv2 = atlasUV(vTileID, vTexCoord * 0.5 + vec2(-time * 0.018, time * 0.020));
@@ -201,11 +209,11 @@ void main() {
 
     vec3 depth_color = mix(WATER_SHALLOW, mix(WATER_MID, WATER_DEEP, depth_factor), depth_factor);
     vec3 tint = mix(vec3(1.0), clamp(vColor * 1.35, 0.0, 1.0), 0.25);
-    float texture_mix = isLOD ? 0.18 : 0.42;
+    float texture_mix = 0.42;
     vec3 waterColor = mix(depth_color, water_tex * depth_color * 1.8, texture_mix) * tint;
 
     float tile_grid = max(smoothstep(0.030, 0.0, fract(vTexCoord.x)), smoothstep(0.030, 0.0, fract(vTexCoord.y)));
-    waterColor *= 1.0 - tile_grid * (isLOD ? 0.012 : 0.045);
+    waterColor *= 1.0 - tile_grid * 0.045;
     waterColor = mix(waterColor, WATER_SHALLOW * 1.18, edge_depth * 0.18);
     waterColor = mix(waterColor, mix(WATER_MID, WATER_DEEP, water_mass), water_mass * 0.34);
 
@@ -226,15 +234,13 @@ void main() {
     waterColor += sun_specular;
 
     if (global.params.z > 0.5) {
-        float rawFog = clamp(1.0 - exp(-vDistance * global.params.y), 0.0, 1.0);
-        float fogBlend = max(rawFog * rawFog * 0.65, water_mass * 0.28);
+        float fogBlend = atmosphericFogFactor(length(vFragPosWorld), global.params.y, vSkyLight);
         waterColor = mix(waterColor, global.fog_color.rgb, fogBlend);
     }
 
     float alpha = mix(0.66, 0.94, water_mass);
     alpha = mix(alpha, 0.90, fresnel * 0.20);
     alpha = mix(alpha, 0.56, edge_depth * 0.18);
-    if (isLOD) alpha = max(alpha, 0.93);
     alpha = clamp(alpha, 0.56, 0.96);
 
     FragColor = vec4(waterColor, alpha * lodMaskAlpha);

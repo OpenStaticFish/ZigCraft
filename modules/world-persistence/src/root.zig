@@ -3,6 +3,7 @@ pub const fuzz_tests = @import("fuzz_tests.zig");
 pub const level_data = @import("level_data.zig");
 pub const region_file = @import("region_file.zig");
 pub const save_manager = @import("save_manager.zig");
+pub const summary_store = @import("summary_store.zig");
 
 pub const LevelData = level_data.LevelData;
 pub const LoadResult = save_manager.LoadResult;

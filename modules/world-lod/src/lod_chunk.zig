@@ -86,6 +86,43 @@ pub const LODRegionKey = struct {
         };
     }
 
+    /// Clip a draw of this region to a descendant's X/Z footprint. Internal
+    /// boundaries are half-open; preserve vertical faces on the outer edge.
+    pub fn ownershipBounds(self: LODRegionKey, owner: LODRegionKey) [4]f32 {
+        const size: i32 = @intCast(regionSizeBlocks(self.lod));
+        const owner_size: i32 = @intCast(regionSizeBlocks(owner.lod));
+        const x = owner.rx * owner_size - self.rx * size;
+        const z = owner.rz * owner_size - self.rz * size;
+        std.debug.assert(x >= 0 and z >= 0 and x + owner_size <= size and z + owner_size <= size);
+        return .{
+            @floatFromInt(if (x == 0) -1 else x),
+            @floatFromInt(if (z == 0) -1 else z),
+            @floatFromInt(x + owner_size + @as(i32, if (x + owner_size == size) 1 else 0)),
+            @floatFromInt(z + owner_size + @as(i32, if (z + owner_size == size) 1 else 0)),
+        };
+    }
+
+    /// Tests a local surface sample against a half-open ownership rectangle.
+    /// A face exactly on a shared edge probes inward, opposite its local-space
+    /// outward normal, so the owner retains its exposed vertical face while
+    /// horizontal surfaces still partition half-open.
+    pub fn ownershipContainsLocalSurface(bounds: [4]f32, local_xz: [2]f32, local_normal_xz: [2]f32) bool {
+        if (bounds[2] <= bounds[0] or bounds[3] <= bounds[1]) return true;
+        const epsilon: f32 = 0.001;
+        var probe = local_xz;
+        if (@abs(local_xz[0] - bounds[0]) <= epsilon or @abs(local_xz[0] - bounds[2]) <= epsilon) {
+            probe[0] -= normalDirection(local_normal_xz[0]) * epsilon;
+        }
+        if (@abs(local_xz[1] - bounds[1]) <= epsilon or @abs(local_xz[1] - bounds[3]) <= epsilon) {
+            probe[1] -= normalDirection(local_normal_xz[1]) * epsilon;
+        }
+        return probe[0] >= bounds[0] and probe[0] < bounds[2] and probe[1] >= bounds[1] and probe[1] < bounds[3];
+    }
+
+    fn normalDirection(component: f32) f32 {
+        return if (component > 0) 1 else if (component < 0) -1 else 0;
+    }
+
     /// Get the chunk coordinates that this region covers
     pub fn chunkBounds(self: LODRegionKey) ChunkBounds {
         const scale: i32 = @intCast(self.lod.chunksPerSide());
@@ -162,6 +199,13 @@ pub const LODChunk = struct {
     /// transitions so bootstrap horizon seeds keep their spatial ordering.
     job_priority: i32,
     preserve_job_priority: bool,
+    /// Runtime admission class, retained through remesh/recovery but never persisted.
+    service_lane: u3 = 4,
+    canonical_refresh_requested: std.atomic.Value(bool) = .init(false),
+    refresh_in_flight: std.atomic.Value(bool) = .init(false),
+    canonical_retry_tick: u32 = 0,
+    /// Borrowed while simplified data allocations keep the quota owner alive.
+    canonical_allocator: ?*@import("lod_budget_allocator.zig").BudgetAllocator = null,
 
     /// Pin count for preventing unload during async work
     pin_count: std.atomic.Value(u32),
@@ -436,6 +480,10 @@ pub const LODChunk = struct {
             .simplified => |*data| {
                 var min_height: f32 = std.math.floatMax(f32);
                 var max_height: f32 = -std.math.floatMax(f32);
+                if (data.scene_grid) |grid| if (grid.heightBounds()) |bounds| {
+                    min_height = bounds.min;
+                    max_height = bounds.max;
+                };
                 if (data.hasVerticalSpans()) {
                     const counts = data.vertical_span_counts.?;
                     const spans = data.vertical_spans.?;

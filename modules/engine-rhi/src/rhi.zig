@@ -478,6 +478,10 @@ pub const RenderContext = struct {
     pub fn setModelMatrix(self: RenderContext, model: Mat4, color: Vec3, mask_radius: f32) void {
         self.state.setModelMatrix(model, color, mask_radius);
     }
+
+    pub fn setLODOwnershipBounds(self: RenderContext, bounds: [4]f32) void {
+        self.state.vtable.setLODOwnershipBounds(self.state.ptr, bounds);
+    }
     /// Sets instance buffer on the active graphics backend.
     /// The setting affects later frames or later commands according to backend state lifetime. Must be called from the render thread that owns the backend context.
     pub fn setInstanceBuffer(self: RenderContext, handle: BufferHandle) void {
@@ -915,6 +919,7 @@ pub const IRenderStateContext = struct {
 
     pub const VTable = struct {
         setModelMatrix: *const fn (ptr: *anyopaque, model: Mat4, color: Vec3, mask_radius: f32) void,
+        setLODOwnershipBounds: *const fn (ptr: *anyopaque, bounds: [4]f32) void,
         setInstanceBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
         setLODInstanceBuffer: *const fn (ptr: *anyopaque, handle: BufferHandle) void,
         setLODDescriptorStream: *const fn (ptr: *anyopaque, stream: LODDescriptorStream) void,

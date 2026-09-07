@@ -17,6 +17,9 @@ layout(location = 13) out vec4 vClipPosPrev;
 layout(location = 14) out float vMaskRadius;
 layout(location = 15) out float vCloud;
 layout(location = 16) out float vLODFade;
+layout(location = 18) out vec2 vLODLocalXZ;
+layout(location = 19) flat out vec4 vLODOwnershipBounds;
+layout(location = 20) flat out vec2 vLODLocalNormalXZ;
 
 layout(set = 0, binding = 0) uniform Global {
     mat4 view_proj;
@@ -42,7 +45,7 @@ layout(set = 0, binding = 0) uniform Global {
 layout(set = 0, binding = 16) readonly buffer Samples {
     uvec4 sample_words[];
 } samples;
-struct CompactInstance { mat4 model; vec4 params; uvec4 words; };
+struct CompactInstance { mat4 model; vec4 params; uvec4 words; vec4 ownership_bounds; };
 layout(set = 0, binding = 17) readonly buffer CompactInstances {
     CompactInstance items[];
 } compact_instances;
@@ -59,6 +62,7 @@ layout(push_constant) uniform CompactDraw {
     uint layer;
     float skirt_depth;
     uint edge_masks;
+    vec4 ownership_bounds;
 } draw_data;
 
 // `layer == 2` is the indirect sentinel. Direct draws retain their existing
@@ -189,6 +193,9 @@ void main() {
         else normal = vec3(1.0, 0.0, 0.0);
     }
     vec3 local_pos = vec3(float(x) * params.z, height, float(z) * params.z);
+    vLODLocalXZ = local_pos.xz;
+    vLODLocalNormalXZ = normal.xz;
+    vLODOwnershipBounds = indirectMode() ? compact_instances.items[gl_InstanceIndex].ownership_bounds : draw_data.ownership_bounds;
     vec4 world_pos = tileModel() * vec4(local_pos, 1.0);
     vec4 clip_pos = global.view_proj * world_pos;
 

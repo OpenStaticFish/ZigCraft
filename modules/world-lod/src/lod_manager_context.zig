@@ -8,6 +8,7 @@ const LODRegionKey = lod_chunk.LODRegionKey;
 const world_core = @import("world-core");
 const Chunk = world_core.Chunk;
 const LODColumnProvenance = world_core.LODColumnProvenance;
+const ServiceWheel = engine_core.job_system.ServiceWheel;
 
 pub const ChunkCoordKey = struct {
     cx: i32,
@@ -83,6 +84,9 @@ pub const LifecycleToken = struct {
     source_revision: u32,
     priority: i32,
     stage: LifecycleStage,
+    service_lane: u3 = 4,
+    /// Assigned by the queue, not the producer, to retain FIFO within a lane.
+    service_sequence: u64 = 0,
 
     /// Map records are authoritative; queued copies are accepted only while
     /// both lifecycle and source revisions still match.
@@ -95,6 +99,7 @@ pub const LifecyclePushResult = enum { primary, overflow };
 
 pub const LifecycleQueue = struct {
     const Heap = std.PriorityQueue(LifecycleToken, void, compare);
+    const ServiceHeap = std.PriorityQueue(LifecycleToken, void, compareSequence);
 
     mutex: sync.Mutex = .{},
     heap: Heap = Heap.initContext({}),
@@ -106,9 +111,25 @@ pub const LifecycleQueue = struct {
     /// stale generations for every resident region while remaining bounded.
     overflow_capacity: usize = MAX_LIFECYCLE_OVERFLOW_TOKENS,
     overflow_events: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    service_wheel: ServiceWheel = .{},
+    service_heaps: [8]ServiceHeap = @splat(ServiceHeap.initContext({})),
+    service_count: usize = 0,
+    next_sequence: u64 = 0,
 
     fn compare(_: void, a: LifecycleToken, b: LifecycleToken) std.math.Order {
         return std.math.order(a.priority, b.priority);
+    }
+
+    fn compareSequence(_: void, a: LifecycleToken, b: LifecycleToken) std.math.Order {
+        return std.math.order(a.service_sequence, b.service_sequence);
+    }
+
+    /// Opt in before producers start. Default/fade queues retain priority semantics.
+    pub fn enableServiceLanes(self: *LifecycleQueue, order: []const u3) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        std.debug.assert(self.heap.count() + self.overflow_heap.count() + self.service_count == 0);
+        self.service_wheel = ServiceWheel.init(order);
     }
 
     pub fn deinit(self: *LifecycleQueue, allocator: std.mem.Allocator) void {
@@ -116,6 +137,7 @@ pub const LifecycleQueue = struct {
         defer self.mutex.unlock();
         self.heap.deinit(allocator);
         self.overflow_heap.deinit(allocator);
+        for (&self.service_heaps) |*heap| heap.deinit(allocator);
     }
 
     /// All heap mutations are serialized because workers publish transitions
@@ -124,6 +146,17 @@ pub const LifecycleQueue = struct {
     pub fn push(self: *LifecycleQueue, allocator: std.mem.Allocator, token: LifecycleToken) !LifecyclePushResult {
         self.mutex.lock();
         defer self.mutex.unlock();
+        if (self.service_wheel.len != 0) {
+            const overflow = self.service_count >= self.capacity;
+            if (overflow and self.service_count - self.capacity >= self.overflow_capacity) return error.LifecycleQueueFull;
+            var queued = token;
+            queued.service_sequence = self.next_sequence;
+            try self.service_heaps[queued.service_lane].push(allocator, queued);
+            self.next_sequence +%= 1;
+            self.service_count += 1;
+            if (overflow) _ = self.overflow_events.fetchAdd(1, .monotonic);
+            return if (overflow) .overflow else .primary;
+        }
         if (self.heap.count() < self.capacity) {
             try self.heap.push(allocator, token);
             return .primary;
@@ -137,6 +170,24 @@ pub const LifecycleQueue = struct {
     pub fn pop(self: *LifecycleQueue) ?LifecycleToken {
         self.mutex.lock();
         defer self.mutex.unlock();
+        if (self.service_wheel.len != 0) {
+            if (self.service_count == 0) return null;
+            for (0..self.service_wheel.len) |_| {
+                const lane = self.service_wheel.next();
+                if (self.service_heaps[lane].pop()) |token| {
+                    self.service_count -= 1;
+                    return token;
+                }
+            }
+            // Partial orders must not strand tokens from unscheduled lanes.
+            var oldest_lane: ?usize = null;
+            for (&self.service_heaps, 0..) |*heap, lane| {
+                const token = heap.peek() orelse continue;
+                if (oldest_lane == null or token.service_sequence < self.service_heaps[oldest_lane.?].peek().?.service_sequence) oldest_lane = lane;
+            }
+            self.service_count -= 1;
+            return self.service_heaps[oldest_lane.?].pop();
+        }
         const primary = self.heap.peek();
         const overflow = self.overflow_heap.peek();
         if (primary == null) return self.overflow_heap.pop();
@@ -150,7 +201,7 @@ pub const LifecycleQueue = struct {
     pub fn count(self: *LifecycleQueue) usize {
         self.mutex.lock();
         defer self.mutex.unlock();
-        return self.heap.count() + self.overflow_heap.count();
+        return self.heap.count() + self.overflow_heap.count() + self.service_count;
     }
 
     pub fn overflowEvents(self: *const LifecycleQueue) u64 {
@@ -188,6 +239,11 @@ pub const MAX_LOD_REGIONS = 2048;
 /// mesh. It bounds cold-cache admissions against the configured total LOD
 /// memory cap; exact accounting remains available in diagnostics.
 pub const LOGICAL_LOD_REGION_RESERVATION_BYTES: usize = 1024 * 1024;
+/// Local/near services scan a small overlap beyond full-detail coverage. Memory
+/// eviction must preserve this same collar or it can evict a region that the
+/// near service is responsible for replacing, then shrink that service out of
+/// the region before it gets another turn.
+pub const LOCAL_SERVICE_COLLAR_CHUNKS: i32 = 4;
 // Bound queued and in-flight regions so a cold cache cannot bury the horizon
 // fallback behind thousands of expensive generation jobs.
 pub const MAX_PENDING_LOD_REGIONS: usize = 64;
@@ -257,6 +313,60 @@ test "LifecycleToken rejects stale lifecycle and source revisions" {
     try std.testing.expect(current.matches(&chunk));
     try std.testing.expect(!stale_job.matches(&chunk));
     try std.testing.expect(!stale_source.matches(&chunk));
+}
+
+test "LifecycleQueue service lanes retain weighted FIFO across overflow" {
+    const service = @import("lod_service.zig");
+    var queue = LifecycleQueue{ .capacity = 2, .overflow_capacity = 10 };
+    defer queue.deinit(std.testing.allocator);
+    queue.enableServiceLanes(&service.WHEEL);
+    const key = LODRegionKey{ .rx = 0, .rz = 0, .lod = .lod3 };
+    for (0..service.CLASS_COUNT) |lane| {
+        const count: usize = if (lane == @intFromEnum(service.Class.horizon)) 4 else 2;
+        for (0..count) |i| {
+            _ = try queue.push(std.testing.allocator, .{
+                .key = key,
+                .job_token = @intCast(lane * 10 + i),
+                .source_revision = 0,
+                .priority = -@as(i32, @intCast(lane * 10 + i)),
+                .stage = .mesh,
+                .service_lane = @intCast(lane),
+                .service_sequence = 100 - i,
+            });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 12), queue.count());
+    try std.testing.expectEqual(@as(u64, 10), queue.overflowEvents());
+    try std.testing.expectError(error.LifecycleQueueFull, queue.push(std.testing.allocator, .{
+        .key = key,
+        .job_token = 99,
+        .source_revision = 0,
+        .priority = -1000,
+        .stage = .mesh,
+    }));
+    var consumed: [service.CLASS_COUNT]u32 = @splat(0);
+    for (0..2) |_| {
+        for (service.WHEEL) |lane| {
+            const token = queue.pop().?;
+            try std.testing.expectEqual(lane, token.service_lane);
+            try std.testing.expectEqual(@as(u32, lane) * 10 + consumed[lane], token.job_token);
+            consumed[lane] += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), queue.count());
+    const cursor = queue.service_wheel.cursor;
+    try std.testing.expect(queue.pop() == null);
+    try std.testing.expectEqual(cursor, queue.service_wheel.cursor);
+}
+
+test "LifecycleQueue default ignores service lanes and retains priority order" {
+    var queue: LifecycleQueue = .{};
+    defer queue.deinit(std.testing.allocator);
+    const key = LODRegionKey{ .rx = 0, .rz = 0, .lod = .lod3 };
+    _ = try queue.push(std.testing.allocator, .{ .key = key, .job_token = 1, .source_revision = 0, .priority = 20, .stage = .fade, .service_lane = 0 });
+    _ = try queue.push(std.testing.allocator, .{ .key = key, .job_token = 2, .source_revision = 0, .priority = 1, .stage = .fade, .service_lane = 4 });
+    try std.testing.expectEqual(@as(u32, 2), queue.pop().?.job_token);
+    try std.testing.expectEqual(@as(u32, 1), queue.pop().?.job_token);
 }
 
 test "LifecycleQueue serializes concurrent production push and pop operations" {

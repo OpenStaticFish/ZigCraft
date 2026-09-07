@@ -185,6 +185,579 @@ test "flushDirtyStoresNow drains more than one cache pipeline batch" {
     }
 }
 
+// Only the RHI resource boundary is mocked. Admission, pool growth/retirement,
+// renderer maintenance, and lifecycle publication remain production code.
+const MemoryAdmissionRHI = struct {
+    const rhi = @import("engine-rhi");
+    const State = struct {
+        buffers: [96]?[]u8 = @splat(null),
+        usages: [96]rhi.BufferUsage = @splat(.storage),
+        retired_slots: [96]?usize = @splat(null),
+        next_handle: u32 = 1,
+        frame_index: usize = 0,
+        fail_update_handle: ?u32 = null,
+        failed_updates: usize = 0,
+        waits: usize = 0,
+        cost_calls: usize = 0,
+        cost_call_limit: usize = std.math.maxInt(usize),
+
+        fn deinit(self: *@This()) void {
+            for (self.buffers) |buffer| if (buffer) |bytes| testing.allocator.free(bytes);
+        }
+
+        fn completeFrame(self: *@This()) void {
+            for (&self.buffers, &self.retired_slots) |*buffer, *slot| {
+                if (slot.* == self.frame_index) {
+                    testing.allocator.free(buffer.*.?);
+                    buffer.* = null;
+                    slot.* = null;
+                }
+            }
+        }
+
+        fn vertexBytes(self: *const @This()) usize {
+            var bytes: usize = 0;
+            for (self.buffers, self.usages) |buffer, usage| {
+                if (usage == .vertex) if (buffer) |allocation| {
+                    bytes += allocation.len;
+                };
+            }
+            return bytes;
+        }
+    };
+    state: *State,
+
+    pub fn createBuffer(self: @This(), size: usize, usage: rhi.BufferUsage) rhi.RhiError!u32 {
+        const handle = self.state.next_handle;
+        const bytes = try testing.allocator.alloc(u8, size);
+        @memset(bytes, 0);
+        self.state.buffers[handle] = bytes;
+        self.state.usages[handle] = usage;
+        self.state.next_handle += 1;
+        return handle;
+    }
+
+    pub fn destroyBuffer(self: @This(), handle: u32) void {
+        std.debug.assert(self.state.buffers[handle] != null);
+        std.debug.assert(self.state.retired_slots[handle] == null);
+        self.state.retired_slots[handle] = self.state.frame_index;
+    }
+
+    pub fn updateBuffer(self: @This(), handle: u32, offset: usize, data: []const u8) rhi.RhiError!void {
+        std.debug.assert(self.state.retired_slots[handle] == null);
+        if (self.state.fail_update_handle == handle) {
+            self.state.failed_updates += 1;
+            return error.GpuLost;
+        }
+        @memcpy(self.state.buffers[handle].?[offset .. offset + data.len], data);
+    }
+
+    pub fn uploadBuffer(self: @This(), handle: u32, data: []const u8) rhi.RhiError!void {
+        try self.updateBuffer(handle, 0, data);
+    }
+
+    pub fn waitIdle(self: @This()) void {
+        self.state.waits += 1;
+    }
+
+    pub fn getFrameIndex(self: @This()) usize {
+        return self.state.frame_index;
+    }
+
+    pub fn supportsIndirectFirstInstance(_: @This()) bool {
+        return false;
+    }
+
+    pub fn setModelMatrix(_: @This(), _: @import("engine-math").Mat4, _: Vec3, _: f32) void {}
+    pub fn setLODInstanceBuffer(_: @This(), _: u32) void {}
+    pub fn drawOffset(_: @This(), _: u32, _: u32, _: anytype, _: usize) void {
+        unreachable;
+    }
+
+    fn countedMemoryCost(mesh: *LODMesh, ctx: *anyopaque) usize {
+        const renderer: *MemoryAdmissionRenderer = @ptrCast(@alignCast(ctx));
+        renderer.rhi.state.cost_calls += 1;
+        // Fail deterministically instead of hanging if a denied entry is scanned
+        // repeatedly after being returned to the same queue.
+        std.debug.assert(renderer.rhi.state.cost_calls <= renderer.rhi.state.cost_call_limit);
+        return renderer.createGPUBridge().uploadMemoryCost(mesh);
+    }
+};
+
+const MemoryAdmissionRenderer = @import("lod_renderer.zig").LODRenderer(MemoryAdmissionRHI);
+
+fn putMemoryAdmissionRegion(manager: *LODManager, key: LODRegionKey, vertices: usize) !*LODChunk {
+    const chunk = try putTestRegion(manager, key, .uploading);
+    // These pool-peak/recovery fixtures exercise the full hard cap, not the
+    // background service reserve (the default lane is refinement).
+    chunk.service_lane = 1;
+    chunk.data = .{ .simplified = try LODSimplifiedData.initWithGridSize(testing.allocator, key.lod, 2) };
+    const mesh = try putTestPendingMesh(manager, key, vertices);
+    @memset(mesh.pending_vertices.?, std.mem.zeroes(Vertex));
+    return chunk;
+}
+
+test "LODManager memory admission refreshes growth and failed replacement debt before the next upload" {
+    inline for (.{ false, true }) |fail_replacement| {
+        var state = MemoryAdmissionRHI.State{};
+        defer state.deinit();
+        const renderer = try MemoryAdmissionRenderer.init(testing.allocator, .{ .state = &state });
+        defer renderer.deinit();
+        renderer.enable_mdi = true;
+        renderer.vertex_pools[2].initial_capacity_bytes = 128 * 1024;
+        renderer.vertex_pools[1].initial_capacity_bytes = 256 * 1024;
+
+        var config = LODConfig{ .memory_budget_mb = 1, .max_uploads_per_frame = 8, .active_lod_count = 3 };
+        var manager = try initEvictionTestManager(testing.allocator, &config);
+        defer deinitEvictionTestManager(&manager);
+        manager.renderer = renderer.toInterface();
+        manager.gpu_bridge = renderer.createGPUBridge();
+        // Force pool-only allocation, with no dedicated alternative, so the
+        // real pool's replacement/retirement debt remains unavoidable here.
+        manager.gpu_bridge.on_prepare_upload = null;
+        manager.profiling = .init(true);
+        manager.gpu_bridge.beginFrame(1);
+
+        const seed = try putMemoryAdmissionRegion(&manager, .{ .rx = 0, .rz = 0, .lod = .lod2 }, 3);
+        try manager.gpu_bridge.upload(manager.meshes[2].get(seed.key()).?);
+        manager.markRegionRenderable(seed.key(), seed);
+        const first = try putMemoryAdmissionRegion(&manager, .{ .rx = 1, .rz = 0, .lod = .lod2 }, 128 * 1024 / @sizeOf(Vertex) + 1);
+        const second = try putMemoryAdmissionRegion(&manager, .{ .rx = 0, .rz = 0, .lod = .lod1 }, 3);
+        const first_mesh = manager.meshes[2].get(first.key()).?;
+        const second_mesh = manager.meshes[1].get(second.key()).?;
+        try manager.upload_queues[2].push(first);
+        try manager.upload_queues[1].push(second);
+
+        const deferred = try testing.allocator.create(LODMesh);
+        deferred.* = LODMesh.init(testing.allocator, .lod0);
+        deferred.pending_vertices = try testing.allocator.alloc(Vertex, 32 * 1024 / @sizeOf(Vertex));
+        manager.queueMeshDeletion(deferred);
+        manager.updateStats();
+        const budget = 1024 * 1024;
+        const initial_headroom = budget - manager.memory_governor.logical_admission_bytes;
+        try testing.expect(manager.gpu_bridge.uploadMemoryCost(first_mesh) <= initial_headroom);
+        try testing.expect(manager.gpu_bridge.uploadMemoryCost(second_mesh) <= initial_headroom);
+        const first_staging = manager.gpu_bridge.uploadCost(first_mesh).total();
+        const created_before = state.next_handle;
+        if (fail_replacement) state.fail_update_handle = created_before;
+
+        manager.processUploadsWithBudget(DEFAULT_LOD_UPLOAD_BUDGET_BYTES);
+
+        try testing.expectEqual(created_before + 1, state.next_handle);
+        try testing.expectEqual(@as(usize, if (fail_replacement) 1 else 0), state.failed_updates);
+        try testing.expectEqual(if (fail_replacement) LODState.mesh_ready else LODState.renderable, first.getState());
+        try testing.expectEqual(LODState.uploading, second.getState());
+        try testing.expect(!first.isPinned() and !second.isPinned());
+        try testing.expectEqual(@as(usize, 1), manager.upload_queues[1].count());
+        try testing.expect(second_mesh.pending_vertices != null);
+        if (fail_replacement) {
+            try testing.expect(first_mesh.pending_vertices != null);
+            try testing.expectEqual(@as(usize, 1), manager.transition_tokens.count());
+        }
+        const stats = manager.getStats();
+        const retired_bytes: usize = if (fail_replacement) 256 * 1024 else 128 * 1024;
+        try testing.expectEqual(retired_bytes, stats.pool_gpu_retired_bytes);
+        try testing.expectEqual(retired_bytes, stats.profiling.pool_gpu_retired_bytes);
+        try testing.expectEqual(state.vertexBytes(), stats.pool_gpu_capacity_bytes + stats.pool_gpu_retired_bytes);
+        try testing.expectEqual(deferred.pendingUploadBytes(), stats.deferred_deletion_cpu_bytes);
+        try testing.expectEqual(stats.source_data_cpu_bytes + stats.pool_gpu_capacity_bytes + stats.pool_cpu_shadow_bytes + retired_bytes + stats.pending_cpu_upload_bytes + stats.deferred_deletion_cpu_bytes, stats.memory_used_bytes);
+        try testing.expect(manager.gpu_bridge.uploadMemoryCost(second_mesh) > budget - manager.memory_governor.logical_admission_bytes);
+        try testing.expect(manager.memory_governor.pressure_pending);
+        const staging_left = if (fail_replacement) 0 else DEFAULT_LOD_UPLOAD_BUDGET_BYTES - first_staging;
+        try testing.expectEqual(staging_left, manager.memory_governor.maintenance_staging_bytes);
+
+        // Add real update-side debt after the last admission snapshot. Prepare
+        // must refresh it and deliver the pressure latch BEFORE renderer prepare.
+        const late = try testing.allocator.create(LODMesh);
+        late.* = LODMesh.init(testing.allocator, .lod0);
+        late.pending_vertices = try testing.allocator.alloc(Vertex, 17);
+        manager.queueMeshDeletion(late);
+        const expected_accounted = manager.memory_governor.logical_admission_bytes + late.pendingUploadBytes();
+        manager.prepareFrame(1, @import("engine-math").Mat4.identity, Vec3.zero, null, null, null, 16);
+        try testing.expectEqual(@as(usize, budget), renderer.memory_pressure_budget_bytes);
+        try testing.expectEqual(expected_accounted, renderer.memory_pressure_accounted_bytes);
+        try testing.expectEqual(staging_left, renderer.memory_pressure_staging_bytes);
+        try testing.expect(!manager.memory_governor.pressure_pending);
+        try testing.expect(!renderer.memory_pressure_requested);
+        try testing.expectEqual(@as(usize, 0), state.waits);
+    }
+}
+
+test "LODManager memory denial scans are bounded and oversized staging cannot bypass admission" {
+    var state = MemoryAdmissionRHI.State{};
+    defer state.deinit();
+    const renderer = try MemoryAdmissionRenderer.init(testing.allocator, .{ .state = &state });
+    defer renderer.deinit();
+    renderer.enable_mdi = true;
+    renderer.vertex_pools[2].initial_capacity_bytes = 1024 * 1024;
+    renderer.vertex_pools[1].initial_capacity_bytes = 1024;
+    var config = LODConfig{ .memory_budget_mb = 1, .max_uploads_per_frame = 8, .active_lod_count = 3 };
+    var manager = try initEvictionTestManager(testing.allocator, &config);
+    defer deinitEvictionTestManager(&manager);
+    manager.renderer = renderer.toInterface();
+    manager.gpu_bridge = renderer.createGPUBridge();
+    // Force pool-only allocation: dedicated fallback would make these oversized
+    // pool requests admissible and stop exercising all-denied termination.
+    manager.gpu_bridge.on_prepare_upload = null;
+    manager.gpu_bridge.on_upload_memory_cost = MemoryAdmissionRHI.countedMemoryCost;
+    const far_a = try putMemoryAdmissionRegion(&manager, .{ .rx = 8, .rz = 0, .lod = .lod2 }, 2);
+    const far_b = try putMemoryAdmissionRegion(&manager, .{ .rx = 9, .rz = 0, .lod = .lod2 }, 2);
+    try manager.upload_queues[2].push(far_a);
+    try manager.upload_queues[2].push(far_b);
+    const near = try putMemoryAdmissionRegion(&manager, .{ .rx = 0, .rz = 0, .lod = .lod1 }, 1);
+    try manager.upload_queues[1].push(near);
+    const unmaterialized = try putTestRegion(&manager, .{ .rx = 0, .rz = 0, .lod = .lod0 }, .generating);
+    const created_before = state.next_handle;
+    state.cost_call_limit = 3;
+    manager.processUploadsWithBudget(@sizeOf(Vertex));
+    try testing.expectEqual(@as(usize, 3), state.cost_calls);
+    try testing.expectEqual(created_before, state.next_handle);
+    try testing.expectEqual(@as(usize, 2), manager.upload_queues[2].count());
+    try testing.expectEqual(LODState.uploading, near.getState());
+    try testing.expect(manager.memory_governor.used_bytes < 1024 * 1024);
+    try testing.expect(manager.memory_governor.logical_admission_bytes > 1024 * 1024);
+    try testing.expect(manager.memory_governor.pressure_pending);
+    try testing.expectEqual(@as(usize, 2 * 1024), manager.memory_governor.required_upload_bytes);
+
+    // Publishing measurable source data replaces its conservative reservation.
+    // Only the near upload fits the newly available headroom.
+    unmaterialized.data = .{ .simplified = try LODSimplifiedData.initWithGridSize(testing.allocator, .lod0, 2) };
+    state.cost_calls = 0;
+    state.cost_call_limit = 5; // two denied, one admitted, then two denied again
+    manager.processUploadsWithBudget(@sizeOf(Vertex));
+    try testing.expectEqual(@as(usize, 5), state.cost_calls);
+    try testing.expectEqual(created_before + 1, state.next_handle);
+    try testing.expectEqual(LODState.renderable, near.getState());
+    for ([_]*LODChunk{ far_a, far_b }) |far| {
+        try testing.expectEqual(LODState.uploading, far.getState());
+        try testing.expect(!far.isPinned());
+        try testing.expect(manager.meshes[2].get(far.key()).?.pending_vertices != null);
+    }
+    try testing.expectEqual(@as(usize, 2), manager.upload_queues[2].count());
+    try testing.expectEqual(@as(usize, 0), manager.memory_governor.maintenance_staging_bytes);
+    // The remaining far allocations exceed the entire budget. They must not
+    // retain the smaller, now-completed upload's achievable recovery target.
+    try testing.expectEqual(@as(usize, 0), manager.memory_governor.required_upload_bytes);
+    // Even with no smaller candidate left, the one-oversized-staging exception
+    // must not turn a memory-denied upload into an allocation.
+    for ([_]bool{ true, false }) |owed_bonus| {
+        if (owed_bonus) manager.service_upload_owed = .{
+            .key = far_a.key(),
+            .job_token = far_a.job_token,
+            .source_revision = far_a.source_revision,
+            .service_lane = far_a.service_lane,
+            .priority = 0,
+            .stage = .upload,
+        };
+        state.cost_calls = 0;
+        // A valid owed token gets one bonus check before the ordinary scan of
+        // both denied entries. It is consumed, not renewed by memory denial.
+        state.cost_call_limit = 2 + @as(usize, @intFromBool(owed_bonus));
+        manager.processUploadsWithBudget(@sizeOf(Vertex));
+        try testing.expectEqual(state.cost_call_limit, state.cost_calls);
+        try testing.expectEqual(created_before + 1, state.next_handle);
+        try testing.expectEqual(@as(usize, 2), manager.upload_queues[2].count());
+        try testing.expect(manager.service_upload_owed == null);
+        try testing.expectEqual(@as(usize, 0), manager.memory_governor.required_upload_bytes);
+    }
+}
+
+test "LODManager memory admission prepares a fresh dedicated upload only when hard headroom fits" {
+    var state = MemoryAdmissionRHI.State{};
+    defer state.deinit();
+    const renderer = try MemoryAdmissionRenderer.init(testing.allocator, .{ .state = &state });
+    defer renderer.deinit();
+    renderer.enable_mdi = true;
+    renderer.vertex_pools[1].initial_capacity_bytes = 1024 * 1024;
+    var config = LODConfig{ .memory_budget_mb = 1, .active_lod_count = 3 };
+    var manager = try initEvictionTestManager(testing.allocator, &config);
+    defer deinitEvictionTestManager(&manager);
+    manager.renderer = renderer.toInterface();
+    manager.gpu_bridge = renderer.createGPUBridge();
+    const chunk = try putMemoryAdmissionRegion(&manager, .{ .rx = 0, .rz = 0, .lod = .lod1 }, 3);
+    const mesh = manager.meshes[1].get(chunk.key()).?;
+    try manager.upload_queues[1].push(chunk);
+    const unmaterialized = try putTestRegion(&manager, .{ .rx = 0, .rz = 0, .lod = .lod0 }, .generating);
+    const budget = 1024 * 1024;
+    const created_before = state.next_handle;
+    manager.updateStats();
+    try testing.expect(manager.memory_governor.logical_admission_bytes > budget);
+    manager.processUploadsWithBudget(DEFAULT_LOD_UPLOAD_BUDGET_BYTES);
+    try testing.expectEqual(created_before, state.next_handle);
+    try testing.expectEqual(LODState.uploading, chunk.getState());
+    try testing.expect(!mesh.usesDedicatedUploadFallback());
+    try testing.expect(mesh.pending_vertices != null);
+
+    // Publishing real source replaces the reservation, not the hard budget.
+    // The dedicated buffer fits this headroom; the pool plus shadow cannot.
+    unmaterialized.data = .{ .simplified = try LODSimplifiedData.initWithGridSize(testing.allocator, .lod0, 2) };
+    manager.updateStats();
+    const headroom = budget - manager.memory_governor.logical_admission_bytes;
+    try testing.expect(1024 <= headroom);
+    try testing.expect(manager.gpu_bridge.uploadMemoryCost(mesh) > headroom);
+    manager.processUploadsWithBudget(DEFAULT_LOD_UPLOAD_BUDGET_BYTES);
+    manager.updateStats();
+    try testing.expectEqual(created_before + 1, state.next_handle);
+    try testing.expectEqual(LODState.renderable, chunk.getState());
+    try testing.expect(mesh.usesDedicatedUploadFallback() and !mesh.isPooled());
+    try testing.expect(mesh.isRenderable() and mesh.pending_vertices == null);
+    try testing.expect(!chunk.isPinned());
+    try testing.expect(manager.upload_queues[1].isEmpty());
+    try testing.expectEqual(@as(usize, 1024), state.vertexBytes());
+    try testing.expectEqual(@as(u64, 1024), manager.stats.direct_mesh_gpu_bytes);
+    try testing.expectEqual(@as(u64, 0), manager.stats.pool_gpu_capacity_bytes);
+    try testing.expectEqual(@as(u64, 0), manager.stats.pending_cpu_upload_bytes);
+    try testing.expectEqual(manager.stats.source_data_cpu_bytes + 1024, manager.stats.memory_used_bytes);
+    try testing.expect(manager.memory_governor.logical_admission_bytes <= budget);
+    try testing.expectEqual(@as(usize, 0), manager.memory_governor.required_upload_bytes);
+    try testing.expectEqual(@as(usize, 0), state.waits);
+}
+
+test "LODManager memory retry republishes upload transition when queue growth fails" {
+    var config = LODConfig{ .max_uploads_per_frame = 4 };
+    var manager = try initEvictionTestManager(testing.allocator, &config);
+    defer deinitEvictionTestManager(&manager);
+    manager.update_tick = 1; // Do not let periodic reconciliation hide lost tokens.
+    var mock = UploadMock{ .allocator = testing.allocator };
+    manager.gpu_bridge = mock.bridge();
+    const queue = &manager.upload_queues[1];
+    for (0..queue.capacity()) |i| {
+        const chunk = try putTestRegion(&manager, .{ .rx = @intCast(i), .rz = 0, .lod = .lod1 }, .uploading);
+        try queue.push(chunk);
+    }
+    const key = LODRegionKey{ .rx = 8, .rz = 0, .lod = .lod1 };
+    const retry = try putTestRegion(&manager, key, .uploading);
+    retry.job_token = 37;
+    retry.source_revision = 9;
+    const mesh = try putTestPendingMesh(&manager, key, 3);
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    const original_allocator = queue.allocator;
+    queue.allocator = failing.allocator();
+    defer queue.allocator = original_allocator;
+
+    manager.requeueUpload(1, retry);
+    try testing.expectEqual(LODState.mesh_ready, retry.getState());
+    try testing.expectEqual(@as(usize, 1), manager.transition_tokens.count());
+    try testing.expectError(error.OutOfMemory, manager.processStateTransitions(Vec3.zero));
+    try testing.expectEqual(LODState.mesh_ready, retry.getState());
+    try testing.expectEqual(@as(usize, 1), manager.transition_tokens.count());
+    try testing.expectEqual(@as(u32, 37), retry.job_token);
+    try testing.expectEqual(@as(u32, 9), retry.source_revision);
+
+    // Drain genuine queued work; the republished token, not a manual state
+    // reset or reconciliation sweep, must carry this retry to completion.
+    manager.processUploadsWithBudget(DEFAULT_LOD_UPLOAD_BUDGET_BYTES);
+    try testing.expect(queue.isEmpty());
+    try manager.processStateTransitions(Vec3.zero);
+    try testing.expectEqual(LODState.uploading, retry.getState());
+    try testing.expectEqual(@as(usize, 0), manager.transition_tokens.count());
+    try testing.expectEqual(@as(usize, 1), queue.count());
+    manager.processUploadsWithBudget(DEFAULT_LOD_UPLOAD_BUDGET_BYTES);
+    try testing.expectEqual(LODState.renderable, retry.getState());
+    try testing.expect(mesh.isRenderable());
+    try testing.expect(mesh.pending_vertices == null);
+    try testing.expectEqual(@as(u32, 1), mock.calls);
+}
+
+test "LODManager memory recovery crosses bridge eviction retirement trim completion and readmission" {
+    var state = MemoryAdmissionRHI.State{};
+    defer state.deinit();
+    const renderer = try MemoryAdmissionRenderer.init(testing.allocator, .{ .state = &state });
+    defer renderer.deinit();
+    renderer.enable_mdi = true;
+    renderer.vertex_pools[0].initial_capacity_bytes = 256 * 1024;
+    renderer.vertex_pools[1].initial_capacity_bytes = 128 * 1024;
+    renderer.vertex_pools[2].initial_capacity_bytes = 128 * 1024;
+    var config = LODConfig{ .memory_budget_mb = 0, .active_lod_count = 3 };
+    var manager = try initEvictionTestManager(testing.allocator, &config);
+    defer deinitEvictionTestManager(&manager);
+    manager.renderer = renderer.toInterface();
+    manager.gpu_bridge = renderer.createGPUBridge();
+    // Force pool-only allocation without a dedicated alternative. This test
+    // must cross real pool eviction, fence retirement and trim before upload.
+    manager.gpu_bridge.on_prepare_upload = null;
+    manager.profiling = .init(true);
+    manager.gpu_bridge.beginFrame(1);
+    const child_key = LODRegionKey{ .rx = 8, .rz = 0, .lod = .lod1 };
+    const parent_key = child_key.parentKey().?;
+    const near = try putMemoryAdmissionRegion(&manager, .{ .rx = 0, .rz = 0, .lod = .lod0 }, 3);
+    const child = try putMemoryAdmissionRegion(&manager, child_key, 3);
+    const parent = try putMemoryAdmissionRegion(&manager, parent_key, 3);
+    for ([_]*LODChunk{ near, child, parent }) |chunk| try manager.upload_queues[@intFromEnum(chunk.lod_level)].push(chunk);
+    manager.processUploadsWithBudget(0);
+    const child_mesh = manager.meshes[1].get(child_key).?;
+    child_mesh.pending_vertices = try testing.allocator.alloc(Vertex, 320 * 1024 / @sizeOf(Vertex));
+    @memset(child_mesh.pending_vertices.?, std.mem.zeroes(Vertex));
+    manager.requeueUpload(1, child);
+    manager.processUploadsWithBudget(0);
+    try testing.expectEqual(@as(usize, 512 * 1024), renderer.vertex_pools[1].gpuMemoryBytes());
+    try testing.expectEqual(@as(usize, 128 * 1024), renderer.vertex_pools[1].retiredGpuMemoryBytes());
+
+    const target = try putMemoryAdmissionRegion(&manager, .{ .rx = 0, .rz = 0, .lod = .lod1 }, 224 * 1024 / @sizeOf(Vertex));
+    const target_mesh = manager.meshes[1].get(target.key()).?;
+    try manager.upload_queues[1].push(target);
+    config.memory_budget_mb = 1;
+    manager.processUploadsWithBudget(DEFAULT_LOD_UPLOAD_BUDGET_BYTES);
+    try testing.expectEqual(LODState.uploading, target.getState());
+    try testing.expect(manager.memory_governor.used_bytes > 1024 * 1024);
+    try manager.enforceMemoryBudget();
+    try testing.expect(!manager.regions[1].contains(child_key));
+    try testing.expect(manager.regions[2].contains(parent_key));
+    try testing.expect(manager.meshes[2].get(parent_key).?.isRenderable());
+    try testing.expect(manager.memory_governor.radius_shrink_chunks[1] > 0);
+    try testing.expectEqual(@as(i32, 0), manager.memory_governor.radius_shrink_chunks[2]);
+    manager.processMeshDeletions(8);
+    try testing.expect(renderer.vertex_pools[1].retired_ranges.items.len > 0);
+    manager.prepareFrame(1, @import("engine-math").Mat4.identity, Vec3.zero, null, null, null, 16);
+    try testing.expectEqual(@as(usize, 512 * 1024), renderer.vertex_pools[1].gpuMemoryBytes());
+
+    // Reclaiming the empty pool pays the existing deficit first. Its freed
+    // shadow cannot fund a trim while retained GPU debt keeps us over budget.
+    state.completeFrame();
+    manager.gpu_bridge.beginFrame(2);
+    manager.updateStats();
+    try manager.enforceMemoryBudget();
+    manager.prepareFrame(2, @import("engine-math").Mat4.identity, Vec3.zero, null, null, null, 16);
+    try testing.expectEqual(@as(usize, 0), renderer.vertex_pools[1].gpuMemoryBytes());
+    try testing.expectEqual(@as(usize, 256 * 1024), renderer.vertex_pools[0].gpuMemoryBytes());
+    manager.updateStats();
+    try testing.expectEqual(@as(u64, 512 * 1024), manager.stats.pool_gpu_retired_bytes);
+    try testing.expect(manager.memory_governor.used_bytes > 1024 * 1024);
+    try testing.expectEqual(state.vertexBytes(), manager.stats.pool_gpu_capacity_bytes + manager.stats.pool_gpu_retired_bytes);
+    try testing.expectEqual(manager.stats.pool_gpu_retired_bytes, manager.getStats().profiling.pool_gpu_retired_bytes);
+    manager.processUploadsWithBudget(DEFAULT_LOD_UPLOAD_BUDGET_BYTES);
+    try testing.expectEqual(LODState.uploading, target.getState());
+    try testing.expect(target_mesh.pending_vertices != null);
+
+    state.completeFrame();
+    manager.gpu_bridge.beginFrame(3);
+    manager.updateStats();
+    try testing.expectEqual(@as(u64, 0), manager.stats.pool_gpu_retired_bytes);
+    try testing.expectEqual(state.vertexBytes(), manager.stats.pool_gpu_capacity_bytes);
+    try testing.expect(manager.memory_governor.used_bytes < 1024 * 1024);
+    try testing.expect(manager.memory_governor.used_bytes > (1024 * 1024 * 4) / 5);
+    const shrink_before_trim = manager.memory_governor.radius_shrink_chunks[1];
+    try manager.enforceMemoryBudget();
+    try testing.expectEqual(shrink_before_trim, manager.memory_governor.radius_shrink_chunks[1]);
+    manager.prepareFrame(3, @import("engine-math").Mat4.identity, Vec3.zero, null, null, null, 16);
+    try testing.expectEqual(@as(usize, 1024), renderer.vertex_pools[0].gpuMemoryBytes());
+    manager.updateStats();
+    try testing.expectEqual(@as(u64, 256 * 1024), manager.stats.pool_gpu_retired_bytes);
+    try testing.expectEqual(state.vertexBytes(), manager.stats.pool_gpu_capacity_bytes + manager.stats.pool_gpu_retired_bytes);
+    manager.processUploadsWithBudget(DEFAULT_LOD_UPLOAD_BUDGET_BYTES);
+    try testing.expectEqual(LODState.uploading, target.getState());
+
+    state.completeFrame();
+    manager.gpu_bridge.beginFrame(4);
+    manager.updateStats();
+    try testing.expectEqual(@as(u64, 0), manager.stats.pool_gpu_retired_bytes);
+    try testing.expect(manager.memory_governor.used_bytes < (1024 * 1024 * 4) / 5);
+    const shrink = manager.memory_governor.radius_shrink_chunks[1];
+    try manager.enforceMemoryBudget();
+    // Retirements have settled, but the denied target is still in the pipeline.
+    // Recovery must upload it without reopening the evicted refinement band.
+    try testing.expectEqual(shrink, manager.memory_governor.radius_shrink_chunks[1]);
+    try testing.expectEqual(@as(?i64, null), manager.memory_governor.reexpand_after_ms);
+    manager.prepareFrame(4, @import("engine-math").Mat4.identity, Vec3.zero, null, null, null, 16);
+    manager.processUploadsWithBudget(DEFAULT_LOD_UPLOAD_BUDGET_BYTES);
+    manager.updateStats();
+    try testing.expectEqual(LODState.renderable, target.getState());
+    try testing.expect(target_mesh.isRenderable());
+    try testing.expect(target_mesh.pending_vertices == null);
+    try testing.expect(manager.upload_queues[1].isEmpty());
+    try testing.expectEqual(@as(usize, 0), manager.memory_governor.required_upload_bytes);
+    try testing.expect(manager.memory_governor.used_bytes <= 1024 * 1024);
+    try testing.expect(manager.meshes[2].get(parent_key).?.isRenderable());
+    try testing.expectEqual(@as(i32, 0), manager.memory_governor.radius_shrink_chunks[2]);
+    try testing.expectEqual(@as(usize, 0), state.waits);
+}
+
+test "LODManager memory denied upload evicts below budget when live pools cannot halve" {
+    var state = MemoryAdmissionRHI.State{};
+    defer state.deinit();
+    const renderer = try MemoryAdmissionRenderer.init(testing.allocator, .{ .state = &state });
+    defer renderer.deinit();
+    renderer.enable_mdi = true;
+    renderer.vertex_pools[0].initial_capacity_bytes = 128 * 1024;
+    renderer.vertex_pools[1].initial_capacity_bytes = 256 * 1024;
+    renderer.vertex_pools[2].initial_capacity_bytes = 64 * 1024;
+    var config = LODConfig{ .memory_budget_mb = 0, .active_lod_count = 3 };
+    var manager = try initEvictionTestManager(testing.allocator, &config);
+    defer deinitEvictionTestManager(&manager);
+    manager.renderer = renderer.toInterface();
+    manager.gpu_bridge = renderer.createGPUBridge();
+    // Force the pool-only peak: a fresh dedicated buffer would fit without
+    // the below-budget eviction this regression is intended to exercise.
+    manager.gpu_bridge.on_prepare_upload = null;
+    manager.gpu_bridge.beginFrame(1);
+
+    const child_key = LODRegionKey{ .rx = 8, .rz = 0, .lod = .lod1 };
+    const parent_key = child_key.parentKey().?;
+    const child = try putMemoryAdmissionRegion(&manager, child_key, 192 * 1024 / @sizeOf(Vertex));
+    const source = try LODSimplifiedData.init(testing.allocator, .lod1);
+    child.data.simplified.deinit();
+    child.data = .{ .simplified = source };
+    const source_bytes = child.data.simplified.totalMemoryBytes();
+    const parent = try putMemoryAdmissionRegion(&manager, parent_key, 48 * 1024 / @sizeOf(Vertex));
+    try manager.upload_queues[1].push(child);
+    try manager.upload_queues[2].push(parent);
+    manager.processUploadsWithBudget(0);
+    try testing.expect(child.isRenderable() and parent.isRenderable());
+
+    const target = try putMemoryAdmissionRegion(&manager, .{ .rx = 0, .rz = 0, .lod = .lod0 }, 3);
+    const target_mesh = manager.meshes[0].get(target.key()).?;
+    try manager.upload_queues[0].push(target);
+    config.memory_budget_mb = 1;
+    const budget = 1024 * 1024;
+    manager.updateStats();
+    const used_before = manager.memory_governor.used_bytes;
+    try testing.expect(used_before < budget);
+    try testing.expectEqual(used_before, manager.memory_governor.logical_admission_bytes);
+    const required = manager.gpu_bridge.uploadMemoryCost(target_mesh);
+    try testing.expectEqual(@as(usize, 256 * 1024), required);
+    try testing.expect(required > budget - used_before);
+    try testing.expect(used_before - source_bytes + required <= budget);
+    try manager.enforceMemoryBudget();
+    try testing.expect(manager.regions[1].contains(child_key));
+
+    manager.processUploadsWithBudget(DEFAULT_LOD_UPLOAD_BUDGET_BYTES);
+    try testing.expectEqual(LODState.uploading, target.getState());
+    try testing.expectEqual(required, manager.memory_governor.required_upload_bytes);
+    const created_before = state.next_handle;
+    // Actual renderer maintenance cannot halve either occupied pool, even with
+    // unlimited trim budgets. Eviction must make room for the denied peak.
+    const resources = @import("lod_mesh_resources.zig").LODMeshResources.fromProvider(MemoryAdmissionRHI, &renderer.rhi);
+    for ([_]usize{ 1, 2 }) |i| {
+        try testing.expect(!try renderer.vertex_pools[i].trim(resources, std.math.maxInt(usize), std.math.maxInt(usize)));
+    }
+    manager.prepareFrame(1, @import("engine-math").Mat4.identity, Vec3.zero, null, null, null, 16);
+    try testing.expectEqual(created_before, state.next_handle);
+    try testing.expectEqual(used_before, manager.memory_governor.used_bytes);
+
+    try manager.enforceMemoryBudget();
+    try testing.expect(!manager.regions[1].contains(child_key));
+    try testing.expectEqual(@as(u32, 1), manager.stats.evictions);
+    try testing.expect(manager.memory_governor.radius_shrink_chunks[1] > 0);
+    try testing.expectEqual(@as(i32, 0), manager.memory_governor.radius_shrink_chunks[2]);
+    try testing.expect(manager.meshes[2].get(parent_key).?.isRenderable());
+    manager.updateStats();
+    try testing.expectEqual(used_before - source_bytes, manager.memory_governor.used_bytes);
+    // Source release alone funds the upload, without pretending deferred pool
+    // ranges or their still-live backing buffers have already been freed.
+    try testing.expectEqual(@as(usize, 1), manager.mesh_disposal.queue.items.len);
+    try testing.expectEqual(@as(usize, 320 * 1024), state.vertexBytes());
+    manager.processUploadsWithBudget(DEFAULT_LOD_UPLOAD_BUDGET_BYTES);
+    try testing.expectEqual(LODState.renderable, target.getState());
+    try testing.expect(target_mesh.isRenderable());
+    try testing.expect(manager.upload_queues[0].isEmpty());
+    try testing.expectEqual(@as(usize, 0), manager.memory_governor.required_upload_bytes);
+    manager.processUploadsWithBudget(DEFAULT_LOD_UPLOAD_BUDGET_BYTES);
+    try testing.expectEqual(@as(usize, 0), manager.memory_governor.required_upload_bytes);
+    manager.updateStats();
+    try testing.expect(manager.memory_governor.used_bytes <= budget);
+    try testing.expectEqual(@as(usize, 0), state.waits);
+}
+
 test "LODManager cache helpers delete corrupt cache files" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
@@ -1668,7 +2241,7 @@ test "LODManager memory budget eviction skips unsafe regions and evicts farthest
     const mesh_capacity: u32 = @intCast(@max(eviction_bytes / @sizeOf(Vertex), 1));
     const mesh_bytes = @as(usize, mesh_capacity) * @sizeOf(Vertex);
 
-    const near_key = LODRegionKey{ .rx = 2, .rz = 0, .lod = .lod1 };
+    const near_key = LODRegionKey{ .rx = 6, .rz = 0, .lod = .lod1 };
     const far_key = LODRegionKey{ .rx = 20, .rz = 0, .lod = .lod1 };
     const pinned_key = LODRegionKey{ .rx = 40, .rz = 0, .lod = .lod1 };
     const no_parent_key = LODRegionKey{ .rx = 60, .rz = 0, .lod = .lod1 };
@@ -1701,7 +2274,9 @@ test "LODManager memory budget eviction skips unsafe regions and evicts farthest
     try testing.expect(manager.regions[1].contains(pinned_key));
     try testing.expect(manager.regions[1].contains(no_parent_key));
     try testing.expect(manager.regions[1].contains(in_flight_key));
-    try testing.expect(manager.memory_governor.used_bytes <= budget_bytes);
+    // Deferred direct GPU allocations remain charged until disposal, even
+    // though their eventual release stops further eviction of visible terrain.
+    try testing.expectEqual(budget_bytes + mesh_bytes, manager.memory_governor.used_bytes);
     try testing.expectEqual(@as(u32, 1), manager.stats.evictions);
     try testing.expectEqual(@as(u32, 1), manager.mesh_disposal.queue.items.len);
 }
@@ -1822,7 +2397,7 @@ test "Phase 5 stress repeated teleport eviction cache recovery edits and upload 
         manager.memory_governor.used_bytes = budget_bytes + mesh_bytes;
         try manager.enforceMemoryBudget();
         try testing.expect(!manager.regions[@intFromEnum(child_key.lod)].contains(child_key));
-        try testing.expect(manager.memory_governor.used_bytes <= budget_bytes);
+        try testing.expectEqual(budget_bytes + mesh_bytes, manager.memory_governor.used_bytes);
         manager.processMeshDeletions(1);
 
         // Edits are deliberately repeated across a small set of coordinates;
@@ -1831,20 +2406,28 @@ test "Phase 5 stress repeated teleport eviction cache recovery edits and upload 
         try testing.expect(manager.ingestion_queue.edit_dirty.count() <= 8);
     }
 
-    // Saturate logical admission after the low-memory eviction loop. The
-    // scheduler must not add another resident region when its reservation
-    // would exceed the configured cap.
-    const resident_before = manager.regions[@intFromEnum(LODLevel.lod1)].count();
-    manager.memory_governor.logical_admission_bytes = budget_bytes;
-    manager.cleanup_covered_regions = false;
-    try manager.queueLODRegions(.lod1, Vec3.zero, null, null);
-    try testing.expectEqual(resident_before, manager.regions[@intFromEnum(LODLevel.lod1)].count());
-
+    // Admission refresh intentionally resets per-frame stats, so retain the
+    // long-session assertions before the final saturated scheduling probe.
     try testing.expect(mock.calls >= cycles * 2);
     try testing.expect(manager.stats.upload_failures >= cycles);
     try testing.expect(manager.cancelled_jobs >= cycles * 2);
     try testing.expectEqual(@as(u32, 0), mock.wait_idle_calls);
     try testing.expectEqual(@as(u64, 0), manager.profiling.snapshot().wait_idle_count);
+
+    // Saturate logical admission after the low-memory eviction loop. The
+    // scheduler must not add another resident region when its reservation
+    // would exceed the configured cap.
+    const resident_before = manager.regions[@intFromEnum(LODLevel.lod1)].count();
+    const SaturatedMemory = struct {
+        fn stats(ptr: *anyopaque) @import("lod_upload_queue.zig").LODRendererMemoryStats {
+            const bytes: *const usize = @ptrCast(@alignCast(ptr));
+            return .{ .pool_gpu_capacity_bytes = bytes.* };
+        }
+    };
+    manager.renderer = .{ .render_fn = undefined, .deinit_fn = undefined, .ptr = @constCast(&budget_bytes), .memory_stats_fn = SaturatedMemory.stats };
+    manager.cleanup_covered_regions = false;
+    try manager.queueLODRegions(.lod1, Vec3.zero, null, null);
+    try testing.expectEqual(resident_before, manager.regions[@intFromEnum(LODLevel.lod1)].count());
     for (0..LODLevel.count) |lod_idx| {
         var regions = manager.regions[lod_idx].iterator();
         while (regions.next()) |entry| switch (entry.value_ptr.*.getState()) {
@@ -1853,4 +2436,237 @@ test "Phase 5 stress repeated teleport eviction cache recovery edits and upload 
         };
         try testing.expectEqual(@as(usize, 0), manager.upload_queues[lod_idx].count());
     }
+}
+
+test "LODManager memory recovery purges duplicate upload pointers and frees unfinished CPU payloads first" {
+    inline for (.{ LODState.generated, LODState.mesh_ready, LODState.uploading }) |state| {
+        var config = LODConfig{ .memory_budget_mb = 1, .active_lod_count = 3, .chunk_render_radius = 6 };
+        var manager = try initEvictionTestManager(testing.allocator, &config);
+        defer deinitEvictionTestManager(&manager);
+        manager.renderer = .{ .render_fn = undefined, .deinit_fn = undefined, .ptr = &config };
+        manager.profiling = .init(true);
+        manager.update_tick = 1;
+        var mock = UploadMock{ .allocator = testing.allocator };
+        manager.gpu_bridge = mock.bridge();
+
+        const key = LODRegionKey{ .rx = 6, .rz = -1, .lod = .lod1 };
+        const victim = try putMemoryAdmissionRegion(&manager, key, 600 * 1024 / @sizeOf(Vertex));
+        victim.setState(state);
+        victim.job_token = 37;
+        const mesh = manager.meshes[1].get(key).?;
+        mesh.capacity = 11; // A failed first upload may already own GPU storage.
+        const released = victim.data.simplified.totalMemoryBytes() + mesh.pendingUploadBytes();
+        const parent = try putMemoryAdmissionRegion(&manager, key.parentKey().?, 0);
+        parent.setState(.renderable);
+        const visible_key = LODRegionKey{ .rx = 7, .rz = -1, .lod = .lod1 };
+        const visible = try putMemoryAdmissionRegion(&manager, visible_key, 3);
+        try manager.gpu_bridge.upload(manager.meshes[1].get(visible_key).?);
+        visible.setState(.renderable);
+        mock.calls = 0;
+        const near = try putMemoryAdmissionRegion(&manager, .{ .rx = 5, .rz = 0, .lod = .lod1 }, 3);
+        const other = try putMemoryAdmissionRegion(&manager, .{ .rx = 4, .rz = 0, .lod = .lod1 }, 3);
+        const near_parent = try putMemoryAdmissionRegion(&manager, near.key().parentKey().?, 0);
+        near_parent.setState(.renderable);
+        manager.pending_region_count = 3;
+        manager.enqueueTransition(key, victim, .upload);
+        manager.enqueueFade(key, victim);
+
+        const queue = &manager.upload_queues[1];
+        try queue.push(near);
+        _ = queue.pop(); // Exercise a full, wrapped ring with repeated pointers.
+        for ([_]*LODChunk{ victim, near, victim, other }) |chunk| try queue.push(chunk);
+        try manager.upload_queues[0].push(victim);
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+        queue.allocator = failing.allocator();
+        defer queue.allocator = testing.allocator;
+
+        manager.updateStats();
+        const before = manager.memory_governor.used_bytes;
+        try testing.expect(before < 1024 * 1024);
+        manager.memory_governor.required_upload_bytes = 512 * 1024;
+        try manager.enforceMemoryBudget();
+        try testing.expect(!manager.regions[1].contains(key));
+        try testing.expect(!manager.meshes[1].contains(key));
+        try testing.expect(manager.regions[1].get(visible_key) == visible);
+        try testing.expectEqual(@as(usize, 2), manager.pending_region_count);
+        try testing.expectEqual(@as(usize, 2), queue.count());
+        try testing.expectEqual(@as(usize, 0), manager.upload_queues[0].count());
+        try testing.expect(queue.pop().? == near);
+        try testing.expect(queue.pop().? == other);
+        try queue.push(near);
+        try queue.push(other);
+        try testing.expectEqual(@as(usize, 1), manager.mesh_disposal.queue.items.len);
+        try testing.expect(mesh.pending_vertices == null);
+        try testing.expectEqual(@as(u32, 11), mesh.capacity);
+        try testing.expectEqual(before - released, manager.memory_governor.used_bytes);
+        manager.updateStats();
+        try testing.expectEqual(before - released, manager.memory_governor.used_bytes);
+        try testing.expectEqual(@as(u64, 11 * @sizeOf(Vertex)), manager.stats.deferred_deletion_gpu_bytes);
+        try testing.expectEqual(@as(u64, 0), manager.getStats().profiling.deferred_deletion_cpu_bytes);
+
+        // Key/token lifecycle records may remain, but cannot act on a new
+        // incarnation. Raw upload entries must actually execute safely too.
+        const replacement = try putTestRegion(&manager, key, .missing);
+        replacement.job_token = 99;
+        try manager.processStateTransitions(Vec3.zero);
+        manager.decayTransitionFrames();
+        try testing.expectEqual(LODState.missing, replacement.getState());
+        try testing.expectEqual(@as(usize, 0), manager.transition_tokens.count());
+        manager.processUploadsWithBudget(DEFAULT_LOD_UPLOAD_BUDGET_BYTES);
+        try testing.expectEqual(@as(u32, 2), mock.calls);
+        try testing.expectEqual(@as(usize, 0), manager.pending_region_count);
+        try testing.expect(queue.isEmpty());
+    }
+}
+
+test "LODManager memory recovery shrinks affected footprint bands and preserves unsafe near and horizon regions" {
+    var config = LODConfig{
+        .memory_budget_mb = 1,
+        .active_lod_count = 4,
+        .chunk_render_radius = 6,
+        .radii = .{ 6, 48, 64, 96, 96 },
+    };
+    var manager = try initEvictionTestManager(testing.allocator, &config);
+    defer deinitEvictionTestManager(&manager);
+    var memory = lod_gpu.LODRendererMemoryStats{};
+    manager.renderer = .{
+        .render_fn = undefined,
+        .deinit_fn = undefined,
+        .ptr = &memory,
+        .memory_stats_fn = struct {
+            fn stats(ctx: *anyopaque) lod_gpu.LODRendererMemoryStats {
+                return @as(*lod_gpu.LODRendererMemoryStats, @ptrCast(@alignCast(ctx))).*;
+            }
+        }.stats,
+    };
+    const keys = [_]LODRegionKey{
+        .{ .rx = -8, .rz = 0, .lod = .lod1 },
+        .{ .rx = -5, .rz = 0, .lod = .lod1 },
+        .{ .rx = 4, .rz = 0, .lod = .lod2 },
+    };
+    var released: usize = 0;
+    for (keys) |key| {
+        _ = try putTestRegion(&manager, key.parentKey().?, .renderable);
+        const chunk = try putTestRegion(&manager, key, .generated);
+        chunk.data = .{ .simplified = try LODSimplifiedData.initWithGridSize(testing.allocator, key.lod, 2) };
+        released += chunk.data.simplified.totalMemoryBytes();
+    }
+    const protected = [_]LODRegionKey{
+        .{ .rx = 12, .rz = 0, .lod = .lod1 }, // pinned upload
+        .{ .rx = 14, .rz = 0, .lod = .lod1 }, // generation
+        .{ .rx = 16, .rz = 0, .lod = .lod1 }, // meshing
+        .{ .rx = 18, .rz = 0, .lod = .lod1 }, // no parent
+        .{ .rx = 1, .rz = 0, .lod = .lod1 }, // full-detail fallback
+        .{ .rx = 8, .rz = 0, .lod = .lod3 }, // coarsest active, even with a parent
+    };
+    const states = [_]LODState{ .uploading, .generating, .meshing, .mesh_ready, .generated, .generated };
+    for (protected, states, 0..) |key, state, i| {
+        if (i != 3) _ = try putTestRegion(&manager, key.parentKey().?, .renderable);
+        const chunk = try putTestRegion(&manager, key, state);
+        if (i == 0) chunk.pin();
+    }
+    defer manager.regions[1].get(protected[0]).?.unpin();
+    manager.pending_region_count = keys.len + protected.len;
+    manager.memory_governor.used_bytes = 1024 * 1024 + released;
+    manager.memory_governor.logical_admission_bytes = manager.memory_governor.used_bytes;
+    try manager.enforceMemoryBudget();
+    try testing.expectEqual(@as(usize, protected.len), manager.pending_region_count);
+    try testing.expectEqualSlices(i32, &.{ 0, 32, 33, 0, 0 }, &manager.memory_governor.radius_shrink_chunks);
+    for (keys) |key| {
+        try testing.expect(!manager.regions[@intFromEnum(key.lod)].contains(key));
+        const radius = config.radii[@intFromEnum(key.lod)] - manager.memory_governor.radius_shrink_chunks[@intFromEnum(key.lod)];
+        try testing.expect(!key.chunkBounds().intersectsRadius(0, 0, radius));
+        try testing.expect(radius >= config.chunk_render_radius);
+    }
+    for (protected) |key| try testing.expect(manager.regions[@intFromEnum(key.lod)].contains(key));
+
+    // Remove memory admission as a possible reason for excluding the victims:
+    // the real scheduler must retain the reduced footprint on its next scan.
+    config.memory_budget_mb = 0;
+    try manager.queueLODRegions(.lod1, Vec3.zero, null, null);
+    try testing.expectEqual(@as(i32, 16), manager.scan_states[1].effective_radius);
+    try testing.expect(manager.pending_region_count > protected.len);
+    for (keys[0..2]) |key| try testing.expect(!manager.regions[1].contains(key));
+}
+
+test "LODManager memory recovery reexpands only after logical low water pipeline retirement and cooldown settle" {
+    var config = LODConfig{ .memory_budget_mb = 4, .active_lod_count = 3 };
+    var manager = try initEvictionTestManager(testing.allocator, &config);
+    defer deinitEvictionTestManager(&manager);
+    var memory = lod_gpu.LODRendererMemoryStats{};
+    manager.renderer = .{
+        .render_fn = undefined,
+        .deinit_fn = undefined,
+        .ptr = &memory,
+        .memory_stats_fn = struct {
+            fn stats(ctx: *anyopaque) lod_gpu.LODRendererMemoryStats {
+                return @as(*lod_gpu.LODRendererMemoryStats, @ptrCast(@alignCast(ctx))).*;
+            }
+        }.stats,
+    };
+    manager.memory_governor.radius_shrink_chunks[1] = 7;
+    const key = LODRegionKey{ .rx = 0, .rz = 0, .lod = .lod1 };
+    const chunk = try putTestRegion(&manager, key, .generating);
+    manager.pending_region_count = 1;
+    inline for (.{ LODState.generating, LODState.generated, LODState.meshing, LODState.mesh_ready, LODState.uploading }) |state| {
+        chunk.setState(state);
+        manager.updateStats();
+        manager.memory_governor.reexpand_after_ms = 0;
+        for (0..1000) |_| try manager.enforceMemoryBudget();
+        try testing.expectEqual(@as(i32, 7), manager.memory_governor.radius_shrink_chunks[1]);
+        try testing.expectEqual(@as(?i64, null), manager.memory_governor.reexpand_after_ms);
+    }
+    chunk.setState(.renderable);
+    manager.pending_region_count = 0;
+    try manager.upload_queues[1].push(chunk);
+    try manager.enforceMemoryBudget();
+    try testing.expectEqual(@as(?i64, null), manager.memory_governor.reexpand_after_ms);
+    _ = manager.upload_queues[1].pop();
+
+    const deferred = try testing.allocator.create(LODMesh);
+    deferred.* = LODMesh.init(testing.allocator, .lod1);
+    manager.queueMeshDeletion(deferred);
+    try manager.enforceMemoryBudget();
+    try testing.expectEqual(@as(?i64, null), manager.memory_governor.reexpand_after_ms);
+    manager.processMeshDeletions(1);
+    memory.pool_gpu_retired_bytes = 1024;
+    manager.updateStats();
+    try manager.enforceMemoryBudget();
+    try testing.expectEqual(@as(?i64, null), manager.memory_governor.reexpand_after_ms);
+    memory.pool_gpu_retired_bytes = 0;
+    memory.compact_pool_retired_bytes = 1024;
+    manager.updateStats();
+    try manager.enforceMemoryBudget();
+    try testing.expectEqual(@as(?i64, null), manager.memory_governor.reexpand_after_ms);
+    memory.compact_pool_retired_bytes = 0;
+
+    // Four empty resident regions reserve the whole budget, despite no actual
+    // allocations. The old actual-only low-water check would expand here.
+    for (1..4) |i| _ = try putTestRegion(&manager, .{ .rx = @intCast(i), .rz = 0, .lod = .lod2 }, .missing);
+    manager.updateStats();
+    try testing.expectEqual(@as(usize, 0), manager.memory_governor.used_bytes);
+    try manager.enforceMemoryBudget();
+    try testing.expectEqual(@as(?i64, null), manager.memory_governor.reexpand_after_ms);
+    for (&manager.regions) |*regions| {
+        var it = regions.valueIterator();
+        while (it.next()) |entry| entry.*.data = .{ .simplified = try LODSimplifiedData.initWithGridSize(testing.allocator, entry.*.lod_level, 2) };
+    }
+    manager.updateStats();
+    try manager.enforceMemoryBudget();
+    try testing.expect(manager.memory_governor.reexpand_after_ms != null);
+    // Control the explicit deadline, not elapsed test runtime or frame count.
+    manager.memory_governor.reexpand_after_ms = std.math.maxInt(i64);
+    for (0..1000) |_| try manager.enforceMemoryBudget();
+    try testing.expectEqual(@as(i32, 7), manager.memory_governor.radius_shrink_chunks[1]);
+    memory.pool_cpu_shadow_bytes = 1;
+    manager.updateStats();
+    try manager.enforceMemoryBudget();
+    try testing.expect(manager.memory_governor.reexpand_after_ms.? < std.math.maxInt(i64));
+    manager.memory_governor.reexpand_after_ms = 0;
+    try manager.enforceMemoryBudget();
+    try testing.expectEqual(@as(i32, 6), manager.memory_governor.radius_shrink_chunks[1]);
+    try testing.expectEqual(@as(?i64, null), manager.memory_governor.reexpand_after_ms);
+    try manager.enforceMemoryBudget();
+    try testing.expectEqual(@as(i32, 6), manager.memory_governor.radius_shrink_chunks[1]);
+    try testing.expect(manager.memory_governor.reexpand_after_ms != null);
 }

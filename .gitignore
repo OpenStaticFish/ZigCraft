@@ -2,6 +2,7 @@ zig-cache/
 .zig-cache/
 .zig-cache-new/
 zig-out/
+dist/
 blocks-temp/
 libs/zig-image/
 result

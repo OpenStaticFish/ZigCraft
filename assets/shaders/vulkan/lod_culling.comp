@@ -14,9 +14,10 @@ struct Candidate {
     uvec4 water_command_a;
     uvec4 water_command_b;
     uvec4 lod_and_padding;
+    vec4 ownership_bounds;
 };
-struct Instance { mat4 model; vec4 params; };
-struct CompactInstance { mat4 model; vec4 params; uvec4 words; };
+struct Instance { mat4 model; vec4 params; vec4 ownership_bounds; };
+struct CompactInstance { mat4 model; vec4 params; uvec4 words; vec4 ownership_bounds; };
 layout(std430, binding = 0) readonly buffer Candidates { Candidate items[]; } candidates;
 layout(std430, binding = 1) writeonly buffer TerrainInstances { Instance items[]; } terrain_instances;
 layout(std430, binding = 2) writeonly buffer WaterInstances { Instance items[]; } water_instances;
@@ -57,12 +58,12 @@ void emit(bool water, Candidate c, uvec4 command_a, uvec4 command_b) {
     if (!water) model[3][1] -= 0.05;
     if (!compact) {
         uvec4 command = uvec4(command_a.x, command_a.y, command_a.z, out_index);
-        Instance instance = Instance(model, c.instance_params);
+        Instance instance = Instance(model, c.instance_params, c.ownership_bounds);
         if (water) { water_instances.items[out_index] = instance; water_commands.items[out_index] = command; }
         else { terrain_instances.items[out_index] = instance; terrain_commands.items[out_index] = command; }
         return;
     }
-    CompactInstance instance = CompactInstance(model, c.instance_params, c.compact_words);
+    CompactInstance instance = CompactInstance(model, c.instance_params, c.compact_words, c.ownership_bounds);
     uint command_offset = out_index * 5u;
     if (water) {
         compact_water_instances.items[out_index] = instance;

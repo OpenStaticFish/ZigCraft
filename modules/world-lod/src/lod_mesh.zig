@@ -18,6 +18,8 @@ const world_core = @import("world-core");
 const BiomeId = world_core.BiomeId;
 const biome_mod = @import("biome_color_provider.zig");
 const BlockType = world_core.BlockType;
+const SceneGrid = world_core.lod_scene.SceneGrid;
+const SceneSpan = world_core.lod_scene.SceneSpan;
 const TextureAtlas = @import("engine-assets").TextureAtlas;
 const rhi_types = @import("engine-rhi");
 const Vertex = rhi_types.Vertex;
@@ -25,6 +27,10 @@ const BufferHandle = rhi_types.BufferHandle;
 const RhiError = rhi_types.RhiError;
 const QuadricSimplifier = @import("world-meshing").meshing.quadric_simplifier.QuadricSimplifier;
 const log = @import("engine-core").log;
+
+test {
+    _ = @import("lod_scene_mesh_tests.zig");
+}
 
 /// Chunk-derived and edited source columns can contain cave and overhang spans
 /// surrounded by worldgen-only samples. Rendering those partial underground
@@ -178,6 +184,284 @@ const unpackB = geom.unpackB;
 const unpackG = geom.unpackG;
 const unpackR = geom.unpackR;
 
+const SceneBox = struct {
+    min: [3]f32,
+    max: [3]f32,
+
+    fn fromSpan(span: SceneSpan, gx: i32, gz: i32, cell_size: u32) SceneBox {
+        const size: f32 = @floatFromInt(cell_size);
+        const extent = @sqrt(span.coverage);
+        const x = (@as(f32, @floatFromInt(gx)) + std.math.clamp(span.center_x - extent * 0.5, 0, 1 - extent)) * size;
+        const z = (@as(f32, @floatFromInt(gz)) + std.math.clamp(span.center_z - extent * 0.5, 0, 1 - extent)) * size;
+        // Clamped faces share the exact coarse-cell edge, including fractional
+        // coverage whose square root cannot be represented exactly.
+        const max_x = if (span.center_x + extent * 0.5 >= 1) @as(f32, @floatFromInt(gx + 1)) * size else x + extent * size;
+        const max_z = if (span.center_z + extent * 0.5 >= 1) @as(f32, @floatFromInt(gz + 1)) * size else z + extent * size;
+        return .{ .min = .{ x, span.min_y, z }, .max = .{ max_x, span.max_y, max_z } };
+    }
+};
+
+fn scenePlantHeight(block: BlockType) ?f32 {
+    return switch (world_core.getBlockDefinition(block).render_shape) {
+        .cross => 1,
+        .tall_cross => 2,
+        else => null,
+    };
+}
+
+/// `terrain.frag` reconstructs detailed LOD atlas color by dividing `vColor`
+/// by the tile average. Keep that average in the vertex albedo so the detailed
+/// path resolves to the same texture * default-color * biome-tint as CPU mesh.
+fn scenePlantColor(span: SceneSpan, atlas: *const TextureAtlas) [3]f32 {
+    const definition = world_core.getBlockDefinition(span.block);
+    const tint = if (definition.is_tintable) biome_mod.getBiomeColors(span.biome).grass else [3]f32{ 1, 1, 1 };
+    const source = [3]f32{
+        definition.default_color[0] * tint[0],
+        definition.default_color[1] * tint[1],
+        definition.default_color[2] * tint[2],
+    };
+    if (geom.averageTextureColorForFace(span.block, .side, atlas)) |average| {
+        return .{ source[0] * unpackR(average), source[1] * unpackG(average), source[2] * unpackB(average) };
+    }
+    const factor = std.math.clamp(atlas.getLuminanceForBlock(@intFromEnum(span.block)).side, 0.18, 1.0);
+    return .{ source[0] * factor, source[1] * factor, source[2] * factor };
+}
+
+/// Mirrors the full-detail cross mesh: one cull-none diagonal quad per plane.
+/// The projection emits one coarse representative per Y band; exact RLE spans
+/// retain one root per source Y. Both use a bounded footprint, never a billboard
+/// widened to the whole grass-covered cell.
+fn appendScenePlantRoots(allocator: std.mem.Allocator, vertices: *std.ArrayListUnmanaged(Vertex), span: SceneSpan, gx: i32, gz: i32, cell_size: u32, atlas: *const TextureAtlas) !void {
+    const height = scenePlantHeight(span.block) orelse return;
+    const cell: f32 = @floatFromInt(cell_size);
+    const footprint = @min(cell, 1);
+    const center_x = (@as(f32, @floatFromInt(gx)) + span.center_x) * cell;
+    const center_z = (@as(f32, @floatFromInt(gz)) + span.center_z) * cell;
+    const min_x = std.math.clamp(center_x - footprint * 0.5, @as(f32, @floatFromInt(gx)) * cell, @as(f32, @floatFromInt(gx + 1)) * cell - footprint);
+    const min_z = std.math.clamp(center_z - footprint * 0.5, @as(f32, @floatFromInt(gz)) * cell, @as(f32, @floatFromInt(gz + 1)) * cell - footprint);
+    const color = scenePlantColor(span, atlas);
+    const light = sceneLightChannels(span.light);
+    const tile: u16 = @intCast(atlas.getTilesForBlock(@intFromEnum(span.block)).side);
+    const first_y: u16 = @intFromFloat(span.min_y);
+    const past_last_y: u16 = @intFromFloat(span.max_y);
+    var root_y = first_y;
+    while (root_y < past_last_y) : (root_y += 1) {
+        const y: f32 = @floatFromInt(root_y);
+        const planes = [_][2][3]f32{
+            .{ .{ min_x, y, min_z }, .{ min_x + footprint, y + height, min_z + footprint } },
+            .{ .{ min_x + footprint, y, min_z }, .{ min_x, y + height, min_z + footprint } },
+        };
+        for (planes) |plane| {
+            const p0 = plane[0];
+            const p1 = plane[1];
+            const dx = p1[0] - p0[0];
+            const dz = p1[2] - p0[2];
+            const length = @sqrt(dx * dx + dz * dz);
+            const normal = [3]f32{ -dz / length, 0, dx / length };
+            const quad = [_][3]f32{
+                .{ p0[0], p0[1], p0[2] },
+                .{ p1[0], p0[1], p1[2] },
+                .{ p1[0], p1[1], p1[2] },
+                .{ p0[0], p1[1], p0[2] },
+            };
+            const indices = [_]usize{ 0, 1, 2, 0, 2, 3 };
+            const uv = [_][2]f32{ .{ 0, 1 }, .{ 1, 1 }, .{ 1, 0 }, .{ 0, 0 } };
+            for (indices) |index| try vertices.append(allocator, Vertex.init(quad[index], color, normal, uv[index], tile, light[0], .{ light[1], light[2], light[3] }, 1));
+        }
+    }
+}
+
+const SceneRect = struct {
+    min: [2]f32,
+    max: [2]f32,
+};
+
+/// CPU-only intermediate: keep material identity even when atlas colors/tiles
+/// coincide. Nonuniform corner lighting is retained exactly and never merged.
+const SceneFace = struct {
+    plane: f32,
+    rect: SceneRect,
+    color: u32,
+    meta: [4]u32,
+    blocklight: [4]u32,
+    block: BlockType,
+    axis: u2,
+    positive: bool,
+    uniform: bool,
+
+    fn mergeAxis(self: SceneFace, pass: usize) usize {
+        // X-normal sides have (Y,Z) rectangle axes; merge Z before Y.
+        return if (self.axis == 0) 1 - pass else pass;
+    }
+
+    fn sameSurface(a: SceneFace, b: SceneFace) bool {
+        return a.axis == b.axis and a.positive == b.positive and a.plane == b.plane and
+            a.block == b.block and a.color == b.color and
+            std.mem.eql(u32, &a.meta, &b.meta) and std.mem.eql(u32, &a.blocklight, &b.blocklight);
+    }
+
+    fn lessThan(pass: usize, a: SceneFace, b: SceneFace) bool {
+        if (a.axis != b.axis) return a.axis < b.axis;
+        if (a.positive != b.positive) return !a.positive;
+        if (a.plane != b.plane) return a.plane < b.plane;
+        if (a.block != b.block) return @intFromEnum(a.block) < @intFromEnum(b.block);
+        if (a.color != b.color) return a.color < b.color;
+        for (a.meta, b.meta) |left, right| {
+            if (left != right) return left < right;
+        }
+        for (a.blocklight, b.blocklight) |left, right| {
+            if (left != right) return left < right;
+        }
+        const along = a.mergeAxis(pass);
+        const across = 1 - along;
+        const left = [4]f32{ a.rect.min[across], a.rect.max[across], a.rect.min[along], a.rect.max[along] };
+        const right = [4]f32{ b.rect.min[across], b.rect.max[across], b.rect.min[along], b.rect.max[along] };
+        for (left, right) |x, y| {
+            if (x != y) return x < y;
+        }
+        return false;
+    }
+};
+
+comptime {
+    std.debug.assert(@sizeOf(SceneFace) == 60);
+}
+
+/// Two bounded O(n log n), allocation-free passes. Exact transverse extents and
+/// touching edges ensure merging cannot fill holes, overlaps, or partial cells.
+fn mergeSceneFaces(faces: *std.ArrayListUnmanaged(SceneFace)) void {
+    for (0..2) |pass| {
+        std.sort.heap(SceneFace, faces.items, pass, SceneFace.lessThan);
+        var count: usize = 0;
+        for (faces.items) |face| {
+            if (count > 0 and face.uniform) {
+                const previous = &faces.items[count - 1];
+                const along = face.mergeAxis(pass);
+                const across = 1 - along;
+                if (previous.uniform and SceneFace.sameSurface(previous.*, face) and
+                    previous.rect.min[across] == face.rect.min[across] and previous.rect.max[across] == face.rect.max[across] and
+                    previous.rect.max[along] == face.rect.min[along])
+                {
+                    previous.rect.max[along] = face.rect.max[along];
+                    continue;
+                }
+            }
+            faces.items[count] = face;
+            count += 1;
+        }
+        faces.items.len = count;
+    }
+}
+
+fn sceneLightChannels(light: world_core.PackedLight) [4]f32 {
+    return .{
+        @as(f32, @floatFromInt(light.sky_light)) / 15.0,
+        @as(f32, @floatFromInt(light.block_light_r)) / 15.0,
+        @as(f32, @floatFromInt(light.block_light_g)) / 15.0,
+        @as(f32, @floatFromInt(light.block_light_b)) / 15.0,
+    };
+}
+
+fn interpolateSceneLight(bottom: world_core.PackedLight, top: world_core.PackedLight, amount: f32) [4]f32 {
+    const low = [4]u4{ bottom.sky_light, bottom.block_light_r, bottom.block_light_g, bottom.block_light_b };
+    const high = [4]u4{ top.sky_light, top.block_light_r, top.block_light_g, top.block_light_b };
+    var result: [4]f32 = undefined;
+    for (&result, low, high) |*value, a, b| {
+        const lower: f32 = @floatFromInt(a);
+        const upper: f32 = @floatFromInt(b);
+        value.* = (lower + (upper - lower) * std.math.clamp(amount, 0, 1)) / 15.0;
+    }
+    return result;
+}
+
+/// Sample the air immediately outside a side, not the light buried at this
+/// material run's top. The horizontal probe stays inside the exposed rectangle
+/// so a clipped corner cannot accidentally sample the adjacent occluding solid.
+fn sceneSideLight(data: *const SceneGrid, gx: i32, gz: i32, span_index: usize, nx: i32, nz: i32, axis: usize, positive: bool, probe: [3]f32) [4]f32 {
+    const own = data.column(gx, gz)[span_index];
+    const tangent: usize = if (axis == 0) 2 else 0;
+    var lower: ?SceneSpan = null;
+    var upper: ?SceneSpan = null;
+    var transparent: ?SceneSpan = null;
+    for (data.column(nx, nz), 0..) |other, i| {
+        if (nx == gx and nz == gz and i == span_index) continue;
+        const box = SceneBox.fromSpan(other, nx, nz, data.cell_size);
+        const outside = if (positive) box.min[axis] <= probe[axis] and box.max[axis] > probe[axis] else box.min[axis] < probe[axis] and box.max[axis] >= probe[axis];
+        if (!outside or probe[tangent] < box.min[tangent] or probe[tangent] > box.max[tangent]) continue;
+        if (other.max_y <= probe[1]) {
+            if (lower == null or other.max_y > lower.?.max_y) lower = other;
+        } else if (other.min_y >= probe[1]) {
+            if (upper == null or other.min_y < upper.?.min_y) upper = other;
+        } else if (!world_core.block_registry.getBlockDefinition(other.block).isFullCubeOccluder()) {
+            if (transparent == null or other.max_y - other.min_y < transparent.?.max_y - transparent.?.min_y) transparent = other;
+        }
+    }
+    var light: [4]f32 = .{ 0, 0, 0, 0 };
+    if (transparent) |medium| {
+        light = interpolateSceneLight(medium.light_bottom orelse medium.light, medium.light, (probe[1] - medium.min_y) / (medium.max_y - medium.min_y));
+    } else if (lower != null and upper != null) {
+        const floor = lower.?;
+        const ceiling = upper.?;
+        if (ceiling.min_y > floor.max_y) {
+            light = interpolateSceneLight(floor.light, ceiling.light_bottom orelse ceiling.light, (probe[1] - floor.max_y) / (ceiling.min_y - floor.max_y));
+        } else {
+            light = sceneLightChannels(floor.light);
+            for (&light, sceneLightChannels(ceiling.light_bottom orelse ceiling.light)) |*value, channel| value.* = @max(value.*, channel);
+        }
+    } else if (lower) |floor| {
+        light = sceneLightChannels(floor.light);
+    } else if (upper) |ceiling| {
+        light = sceneLightChannels(ceiling.light_bottom orelse ceiling.light);
+    } else {
+        const info = data.columns[@as(usize, @intCast(nz + 1)) * (data.width + 2) + @as(usize, @intCast(nx + 1))];
+        if (data.column(nx, nz).len == 0 and info.total_area > 0 and info.known_area == info.total_area and !info.approximate) light[0] = 1;
+    }
+
+    // Only an exposed run boundary at this endpoint contributes its own light.
+    // A sunny roof top must not brighten a cave wall or its dark underside.
+    if (probe[1] == own.min_y or probe[1] == own.max_y) {
+        const top = probe[1] == own.max_y;
+        var visible = top or own.min_y > 0;
+        for (data.column(gx, gz), 0..) |other, i| {
+            if (i == span_index) continue;
+            if (!world_core.block_registry.getBlockDefinition(other.block).isFullCubeOccluder() and other.block != own.block) continue;
+            const box = SceneBox.fromSpan(other, gx, gz, data.cell_size);
+            if (probe[0] < box.min[0] or probe[0] > box.max[0] or probe[2] < box.min[2] or probe[2] > box.max[2]) continue;
+            if (if (top) other.min_y <= probe[1] and other.max_y > probe[1] else other.min_y < probe[1] and other.max_y >= probe[1]) visible = false;
+        }
+        if (visible) {
+            const boundary = sceneLightChannels(if (top) own.light else own.light_bottom orelse own.light);
+            for (&light, boundary) |*value, channel| value.* = @max(value.*, channel);
+        }
+    }
+    return light;
+}
+
+/// Retain uncovered horizontal strips as well as Y gaps: a partial neighbor
+/// must not erase a whole face just because its height overlaps.
+fn subtractSceneRect(allocator: std.mem.Allocator, exposed: *std.ArrayListUnmanaged(SceneRect), cover: SceneRect) !void {
+    var i: usize = 0;
+    while (i < exposed.items.len) {
+        const rect = exposed.items[i];
+        const min = [2]f32{ @max(rect.min[0], cover.min[0]), @max(rect.min[1], cover.min[1]) };
+        const max = [2]f32{ @min(rect.max[0], cover.max[0]), @min(rect.max[1], cover.max[1]) };
+        if (min[0] >= max[0] or min[1] >= max[1]) {
+            i += 1;
+            continue;
+        }
+        _ = exposed.swapRemove(i);
+        const strips = [_]SceneRect{
+            .{ .min = rect.min, .max = .{ min[0], rect.max[1] } },
+            .{ .min = .{ max[0], rect.min[1] }, .max = rect.max },
+            .{ .min = .{ min[0], rect.min[1] }, .max = .{ max[0], min[1] } },
+            .{ .min = .{ min[0], max[1] }, .max = .{ max[0], rect.max[1] } },
+        };
+        for (strips) |strip| {
+            if (strip.min[0] < strip.max[0] and strip.min[1] < strip.max[1]) try exposed.append(allocator, strip);
+        }
+    }
+}
+
 /// Size of each LOD mesh grid cell in blocks
 pub fn getCellSize(lod: LODLevel) u32 {
     return LODSimplifiedData.getCellSizeBlocks(lod);
@@ -214,6 +498,7 @@ pub const LODMesh = struct {
         opaque_vertex_count: u32 = 0,
         water_vertex_offset: usize = 0,
         water_vertex_count: u32 = 0,
+        canonical_empty_coverage: bool = false,
     };
 
     pub const MemorySnapshot = struct {
@@ -240,6 +525,8 @@ pub const LODMesh = struct {
     vertex_offset: usize = 0,
     /// True when buffer_handle is owned by a shared LOD vertex pool.
     pooled: bool = false,
+    /// Pressure-selected upload strategy, sticky for this mesh's lifetime.
+    dedicated_upload_fallback: bool = false,
     /// Pending vertices to upload
     pending_vertices: ?[]Vertex = null,
     /// Present only while a compact tile awaits GPU upload.  The pool owns the
@@ -263,12 +550,19 @@ pub const LODMesh = struct {
     source_revision: u32 = 0,
     /// Allocator
     allocator: std.mem.Allocator,
+    allocator_owner: ?struct {
+        ptr: *anyopaque,
+        release_fn: *const fn (*anyopaque) void,
+        parent_allocator: std.mem.Allocator,
+    } = null,
     /// Mutex for thread safety
     mutex: sync.Mutex = .{},
     /// LOD level
     lod_level: LODLevel,
     /// Ready for rendering
     ready: bool = false,
+    /// Only a successfully built, known-air canonical interior covers without draws.
+    canonical_empty_coverage: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, lod: LODLevel) LODMesh {
         return .{
@@ -281,12 +575,22 @@ pub const LODMesh = struct {
         return self.ready and self.vertex_count > 0;
     }
 
+    pub fn isCoverageReady(self: *const LODMesh) bool {
+        return self.ready and (self.isRenderable() or self.canonical_empty_coverage);
+    }
+
     pub fn isReady(self: *const LODMesh) bool {
         return self.ready;
     }
 
     pub fn isPooled(self: *const LODMesh) bool {
         return self.pooled;
+    }
+
+    pub fn usesDedicatedUploadFallback(self: *LODMesh) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.dedicated_upload_fallback;
     }
     /// Representation selection is serialized by the LOD manager/renderer.
     /// Code outside that invariant must hold `mutex` before reading `compact`.
@@ -460,13 +764,16 @@ pub const LODMesh = struct {
 
     pub fn clearDrawStateUnlocked(self: *LODMesh) void {
         self.setDrawStateUnlocked(.empty);
+        self.canonical_empty_coverage = false;
         self.opaque_vertex_count = 0;
         self.water_vertex_offset = 0;
         self.water_vertex_count = 0;
     }
 
     pub fn markEmptyUploadedUnlocked(self: *LODMesh) void {
+        const canonical_empty = self.canonical_empty_coverage;
         self.clearDrawStateUnlocked();
+        self.canonical_empty_coverage = canonical_empty;
         self.ready = true;
     }
 
@@ -500,6 +807,7 @@ pub const LODMesh = struct {
             .opaque_vertex_count = self.opaque_vertex_count,
             .water_vertex_offset = self.water_vertex_offset,
             .water_vertex_count = self.water_vertex_count,
+            .canonical_empty_coverage = self.canonical_empty_coverage,
         };
         self.pending_vertices = null;
         return result;
@@ -516,6 +824,7 @@ pub const LODMesh = struct {
         self.opaque_vertex_count = build.opaque_vertex_count;
         self.water_vertex_offset = build.water_vertex_offset;
         self.water_vertex_count = build.water_vertex_count;
+        self.canonical_empty_coverage = build.canonical_empty_coverage;
         self.pending_vertices = build.vertices;
         build.* = .{};
     }
@@ -554,6 +863,19 @@ pub const LODMesh = struct {
         self.compact_draw_failed = false;
         self.compact_backend_draw_failures = 0;
         self.ready = false;
+        self.canonical_empty_coverage = false;
+        self.releaseAllocatorOwner();
+    }
+
+    /// Caller owns the mesh exclusively or holds its mutex. Pool destruction
+    /// retires GPU storage separately; its manager calls this before destroying
+    /// the parent-allocated mesh object. Repeated release is harmless.
+    pub fn releaseAllocatorOwner(self: *LODMesh) void {
+        const owner = self.allocator_owner orelse return;
+        std.debug.assert(self.pending_vertices == null and self.compact_tile == null);
+        self.allocator_owner = null;
+        self.allocator = owner.parent_allocator;
+        owner.release_fn(owner.ptr);
     }
 
     pub fn buildCompactTile(self: *LODMesh, data: *const LODSimplifiedData) !void {
@@ -562,6 +884,7 @@ pub const LODMesh = struct {
         defer self.mutex.unlock();
         if (self.compact_tile) |*old| old.deinit();
         self.compact_tile = tile;
+        self.canonical_empty_coverage = false;
         self.compact_neighbor_apron_mask = 0;
         self.compact = true;
         const cells = (data.width - 1) * (data.width - 1);
@@ -618,6 +941,7 @@ pub const LODMesh = struct {
         self.capacity = 0;
         self.pooled = false;
         self.ready = false;
+        self.canonical_empty_coverage = false;
     }
 
     /// Idempotent cleanup after the renderer has retired/destroyed the GPU
@@ -680,6 +1004,217 @@ pub const LODMesh = struct {
         };
     }
 
+    /// Scene columns are already projected footprints, never endpoint samples.
+    /// Build off to the side so allocation failure cannot disturb a live fallback.
+    pub fn buildFromSceneGrid(self: *LODMesh, data: *const SceneGrid, atlas: *const TextureAtlas) !void {
+        var faces = std.ArrayListUnmanaged(SceneFace).empty;
+        defer faces.deinit(self.allocator);
+        var plants = std.ArrayListUnmanaged(Vertex).empty;
+        defer plants.deinit(self.allocator);
+        var water_faces = std.ArrayListUnmanaged(SceneFace).empty;
+        defer water_faces.deinit(self.allocator);
+        var exposed = std.ArrayListUnmanaged(SceneRect).empty;
+        defer exposed.deinit(self.allocator);
+        var known_empty = true;
+        const width: i32 = @intCast(data.width);
+        var gz: i32 = 0;
+        while (gz < width) : (gz += 1) {
+            var gx: i32 = 0;
+            while (gx < width) : (gx += 1) {
+                const spans = data.column(gx, gz);
+                const info = data.columns[@as(usize, @intCast(gz + 1)) * (data.width + 2) + @as(usize, @intCast(gx + 1))];
+                known_empty = known_empty and spans.len == 0 and info.total_area > 0 and info.known_area == info.total_area and !info.approximate;
+                var terrain_top: f32 = 0;
+                for (spans) |span| {
+                    if (world_core.block_registry.getBlockDefinition(span.block).isFullCubeOccluder() and !isNearVegetation(span.block)) terrain_top = @max(terrain_top, span.max_y);
+                }
+                for (spans, 0..) |span, span_index| {
+                    if (scenePlantHeight(span.block) != null) {
+                        try appendScenePlantRoots(self.allocator, &plants, span, gx, gz, data.cell_size, atlas);
+                        continue;
+                    }
+                    const box = SceneBox.fromSpan(span, gx, gz, data.cell_size);
+                    const target = if (span.block == .water) &water_faces else &faces;
+                    const tiles = atlas.getTilesForBlock(@intFromEnum(span.block));
+                    // Cyclic in-plane axes have cross(u, v) == positive axis.
+                    for (0..3) |axis| {
+                        const u = (axis + 1) % 3;
+                        const v = (axis + 2) % 3;
+                        for ([_]bool{ false, true }) |positive| {
+                            if (axis == 1 and !positive and span.min_y == 0) continue;
+                            const plane = if (positive) box.max[axis] else box.min[axis];
+                            const face: geom.LODTextureFace = if (axis != 1) .side else if (positive) .top else .bottom;
+                            var rect = SceneRect{ .min = .{ box.min[u], box.min[v] }, .max = .{ box.max[u], box.max[v] } };
+                            var nx = gx;
+                            var nz = gz;
+                            if (axis == 0) nx += if (positive) @as(i32, 1) else -1;
+                            if (axis == 2) nz += if (positive) @as(i32, 1) else -1;
+                            const cell_edge = @as(f32, @floatFromInt((if (axis == 0) gx else gz) + @as(i32, if (positive) 1 else 0))) * @as(f32, @floatFromInt(data.cell_size));
+                            const meets_edge = axis != 1 and plane == cell_edge;
+                            const region_boundary = meets_edge and (nx < 0 or nz < 0 or nx == width or nz == width);
+                            if (region_boundary) {
+                                const halo = data.columns[@as(usize, @intCast(nz + 1)) * (data.width + 2) + @as(usize, @intCast(nx + 1))];
+                                // Approximate halo spans are evidence too. Only wholly
+                                // unknown edges need a short handoff, never a wall to Y=0.
+                                if (halo.known_area == 0 and data.column(nx, nz).len == 0 and world_core.block_registry.getBlockDefinition(span.block).isFullCubeOccluder() and !isNearVegetation(span.block)) {
+                                    const floor = terrain_top - std.math.clamp(@as(f32, @floatFromInt(data.cell_size)), 1, 8);
+                                    if (u == 1) rect.min[0] = @max(rect.min[0], floor);
+                                    if (v == 1) rect.min[1] = @max(rect.min[1], floor);
+                                }
+                            }
+                            exposed.clearRetainingCapacity();
+                            if (rect.min[0] >= rect.max[0] or rect.min[1] >= rect.max[1]) continue;
+                            try exposed.append(self.allocator, rect);
+                            // Source halo spans do not describe the published neighbor:
+                            // it may still be an older, coarser, or inset fallback. Until
+                            // compatible published topology is supplied, retain boundary
+                            // faces; only this mesh's interior can safely occlude them.
+                            const neighbor_spans: []const SceneSpan = if (meets_edge and !region_boundary) data.column(nx, nz) else &.{};
+                            for ([_][]const SceneSpan{ spans, neighbor_spans }, 0..) |occluders, group| {
+                                for (occluders, 0..) |other, other_index| {
+                                    if (group == 0 and other_index == span_index) continue;
+                                    const definition = world_core.block_registry.getBlockDefinition(other.block);
+                                    if (!definition.isFullCubeOccluder() and other.block != span.block) continue;
+                                    const other_box = SceneBox.fromSpan(other, if (group == 0) gx else nx, if (group == 0) gz else nz, data.cell_size);
+                                    const extends_outward = if (positive)
+                                        other_box.min[axis] <= plane and other_box.max[axis] > plane
+                                    else
+                                        other_box.min[axis] < plane and other_box.max[axis] >= plane;
+                                    const wins_tie = (definition.isFullCubeOccluder() and !world_core.block_registry.getBlockDefinition(span.block).isFullCubeOccluder()) or other_index < span_index;
+                                    const coincident = group == 0 and wins_tie and
+                                        (if (positive) other_box.max[axis] == plane else other_box.min[axis] == plane);
+                                    if (!extends_outward and !coincident) continue;
+                                    try subtractSceneRect(self.allocator, &exposed, .{ .min = .{ other_box.min[u], other_box.min[v] }, .max = .{ other_box.max[u], other_box.max[v] } });
+                                }
+                            }
+                            const atlas_tile = switch (face) {
+                                .top => tiles.top,
+                                .side => tiles.side,
+                                .bottom => tiles.bottom,
+                            };
+                            const tile = if (atlas_tile == 0 or (data.cell_size != 1 and isLeafBlock(span.block))) Vertex.LOD_TILE_ID else atlas_tile;
+                            const tint = if (geom.shouldTintLodFace(span.block, face)) biome_mod.getBlockTintColor(span.biome, span.block) else packBlockDefaultColor(span.block, 0xFFFFFF);
+                            const albedo = applyTextureLuminance(tint, span.block, face, atlas);
+                            // Albedo is atlas average * tint only. Normals drive shading;
+                            // captured light and neutral AO are encoded once, not baked.
+                            const color = rhi_types.encodeColor(.{ unpackR(albedo), unpackG(albedo), unpackB(albedo) });
+                            for (exposed.items) |piece| {
+                                var record = SceneFace{
+                                    .plane = plane,
+                                    .rect = piece,
+                                    .color = color,
+                                    .meta = undefined,
+                                    .blocklight = undefined,
+                                    .block = span.block,
+                                    .axis = @intCast(axis),
+                                    .positive = positive,
+                                    .uniform = true,
+                                };
+                                for ([_][2]f32{ piece.min, .{ piece.max[0], piece.min[1] }, piece.max, .{ piece.min[0], piece.max[1] } }, 0..) |point, i| {
+                                    var pos: [3]f32 = undefined;
+                                    pos[axis] = plane;
+                                    pos[u] = point[0];
+                                    pos[v] = point[1];
+                                    var probe = pos;
+                                    if (axis != 1) {
+                                        const tangent: usize = if (axis == 0) 2 else 0;
+                                        const horizontal: usize = if (u == tangent) 0 else 1;
+                                        probe[tangent] = (piece.min[horizontal] + piece.max[horizontal]) * 0.5;
+                                    }
+                                    const light = if (axis == 1)
+                                        sceneLightChannels(if (positive) span.light else span.light_bottom orelse span.light)
+                                    else
+                                        sceneSideLight(data, gx, gz, span_index, if (meets_edge) nx else gx, if (meets_edge) nz else gz, axis, positive, probe);
+                                    record.meta[i] = rhi_types.encodeMeta(tile, light[0], 1);
+                                    record.blocklight[i] = rhi_types.encodeBlocklight(.{ light[1], light[2], light[3] }, false);
+                                    if (record.meta[i] != record.meta[0] or record.blocklight[i] != record.blocklight[0]) record.uniform = false;
+                                }
+                                try target.append(self.allocator, record);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        mergeSceneFaces(&faces);
+        mergeSceneFaces(&water_faces);
+        const opaque_count = faces.items.len * 6 + plants.items.len;
+        const water_count = water_faces.items.len * 6;
+        const total_count = opaque_count + water_count;
+        const pending = try self.allocator.alloc(Vertex, total_count);
+        var next: usize = 0;
+        for (faces.items) |face| {
+            const axis: usize = face.axis;
+            const u = (axis + 1) % 3;
+            const v = (axis + 2) % 3;
+            var normal = [3]f32{ 0, 0, 0 };
+            normal[axis] = if (face.positive) 1 else -1;
+            const packed_normal = rhi_types.encodeNormal(normal);
+            var quad: [4]Vertex = undefined;
+            for ([_][2]f32{ face.rect.min, .{ face.rect.max[0], face.rect.min[1] }, face.rect.max, .{ face.rect.min[0], face.rect.max[1] } }, 0..) |point, i| {
+                var pos: [3]f32 = undefined;
+                pos[axis] = face.plane;
+                pos[u] = point[0];
+                pos[v] = point[1];
+                const uv = if (axis == 1) geom.topFaceUV(pos, data.origin_x, data.origin_z) else geom.sideFaceUV(pos, if (axis == 0) .east else .north, data.origin_x, data.origin_z);
+                quad[i] = .{
+                    .pos = pos,
+                    .color = face.color,
+                    .normal = packed_normal,
+                    .uv = .{ @floatCast(uv[0]), @floatCast(uv[1]) },
+                    .packed_meta = face.meta[i],
+                    .blocklight = face.blocklight[i],
+                };
+            }
+            const indices: [6]usize = if (face.positive) .{ 0, 1, 2, 0, 2, 3 } else .{ 0, 2, 1, 0, 3, 2 };
+            for (indices) |i| {
+                pending[next] = quad[i];
+                next += 1;
+            }
+        }
+        for (plants.items) |vertex| {
+            pending[next] = vertex;
+            next += 1;
+        }
+        for (water_faces.items) |face| {
+            const axis: usize = face.axis;
+            const u = (axis + 1) % 3;
+            const v = (axis + 2) % 3;
+            var normal = [3]f32{ 0, 0, 0 };
+            normal[axis] = if (face.positive) 1 else -1;
+            const packed_normal = rhi_types.encodeNormal(normal);
+            var quad: [4]Vertex = undefined;
+            for ([_][2]f32{ face.rect.min, .{ face.rect.max[0], face.rect.min[1] }, face.rect.max, .{ face.rect.min[0], face.rect.max[1] } }, 0..) |point, i| {
+                var pos: [3]f32 = undefined;
+                pos[axis] = face.plane;
+                pos[u] = point[0];
+                pos[v] = point[1];
+                const uv = if (axis == 1) geom.topFaceUV(pos, data.origin_x, data.origin_z) else geom.sideFaceUV(pos, if (axis == 0) .east else .north, data.origin_x, data.origin_z);
+                quad[i] = .{
+                    .pos = pos,
+                    .color = face.color,
+                    .normal = packed_normal,
+                    .uv = .{ @floatCast(uv[0]), @floatCast(uv[1]) },
+                    .packed_meta = face.meta[i],
+                    .blocklight = face.blocklight[i],
+                };
+            }
+            const indices: [6]usize = if (face.positive) .{ 0, 1, 2, 0, 2, 3 } else .{ 0, 2, 1, 0, 3, 2 };
+            for (indices) |i| {
+                pending[next] = quad[i];
+                next += 1;
+            }
+        }
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.pending_vertices) |old| self.allocator.free(old);
+        self.pending_vertices = pending;
+        self.opaque_vertex_count = @intCast(opaque_count);
+        self.water_vertex_offset = opaque_count * @sizeOf(Vertex);
+        self.water_vertex_count = @intCast(water_count);
+        self.canonical_empty_coverage = known_empty and total_count == 0;
+    }
+
     /// Build mesh from simplified LOD data (heightmap-based)
     pub fn buildFromSimplifiedData(self: *LODMesh, data: *const LODSimplifiedData, world_x: i32, world_z: i32, atlas: *const TextureAtlas) !void {
         return self.buildSimplifiedData(data, world_x, world_z, atlas, @import("engine-core").envFlag("ZIGCRAFT_LOD_NEAR_SOURCE", false));
@@ -692,6 +1227,7 @@ pub const LODMesh = struct {
     }
 
     fn buildSimplifiedData(self: *LODMesh, data: *const LODSimplifiedData, world_x: i32, world_z: i32, atlas: *const TextureAtlas, enable_near_source: bool) !void {
+        if (data.scene_grid) |grid| return self.buildFromSceneGrid(grid, atlas);
         if (data.width < 2) return error.EmptyData;
         const near_source = enable_near_source and isNearSourceGrid(data, self.lod_level);
 
@@ -775,6 +1311,7 @@ pub const LODMesh = struct {
         self.water_vertex_offset = opaque_count * @sizeOf(Vertex);
         self.water_vertex_count = @intCast(water_count);
         self.pending_vertices = pending;
+        self.canonical_empty_coverage = false;
     }
 
     fn addNearSourceColumn(self: *LODMesh, vertices: *std.ArrayListUnmanaged(Vertex), water_vertices: *std.ArrayListUnmanaged(Vertex), data: *const LODSimplifiedData, gx: u32, gz: u32, atlas: *const TextureAtlas, world_x: i32, world_z: i32) !void {
@@ -877,6 +1414,7 @@ pub const LODMesh = struct {
     /// Build mesh from rich LOD column/span data, falling back to the stable heightfield path
     /// when spans are not available. This is intentionally exposed as a test/config hook.
     pub fn buildFromColumnSpans(self: *LODMesh, data: *const LODSimplifiedData, world_x: i32, world_z: i32, atlas: *const TextureAtlas) !void {
+        if (data.scene_grid) |grid| return self.buildFromSceneGrid(grid, atlas);
         if (data.width < 2) return error.EmptyData;
         if (!canBuildColumnSpans(data)) return self.buildFromSimplifiedData(data, world_x, world_z, atlas);
 
@@ -963,6 +1501,7 @@ pub const LODMesh = struct {
         const water_count = water_vertices.items.len;
         const total_count = opaque_count + water_count;
         self.opaque_vertex_count = @intCast(opaque_count);
+        self.canonical_empty_coverage = false;
         self.water_vertex_offset = opaque_count * @sizeOf(Vertex);
         self.water_vertex_count = @intCast(water_count);
 
@@ -988,6 +1527,7 @@ pub const LODMesh = struct {
         min_input_triangles: u32,
         atlas: *const TextureAtlas,
     ) !void {
+        if (data.scene_grid) |grid| return self.buildFromSceneGrid(grid, atlas);
         const full_mesh = buildFullDetailHeightmapMesh(self.allocator, self.lod_level, data, world_x, world_z, atlas) catch |err| {
             log.log.warn("LOD{} full-detail mesh build failed, falling back: {}", .{ @intFromEnum(self.lod_level), err });
             return self.buildFromSimplifiedData(data, world_x, world_z, atlas);
@@ -1057,6 +1597,7 @@ pub const LODMesh = struct {
         self.water_vertex_offset = 0;
         self.water_vertex_count = 0;
 
+        self.canonical_empty_coverage = false;
         if (indices.len == 0) return;
 
         const expanded = try self.allocator.alloc(Vertex, indices.len);
@@ -1152,6 +1693,7 @@ pub const LODMesh = struct {
             self.allocator.free(p);
         }
 
+        self.canonical_empty_coverage = false;
         if (vertices.items.len > 0) {
             self.pending_vertices = try self.allocator.dupe(Vertex, vertices.items);
             self.opaque_vertex_count = @intCast(vertices.items.len);

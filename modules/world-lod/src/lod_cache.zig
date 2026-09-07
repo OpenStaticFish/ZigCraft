@@ -40,6 +40,7 @@ pub const CacheError = error{
     InvalidProvenance,
     MissingProvenance,
     ChecksumMismatch,
+    CanonicalSourceUnsupported,
 };
 
 pub const ColumnProvenance = world_core.LODColumnProvenance;
@@ -103,6 +104,14 @@ pub fn cloneSourceData(data: *const LODSimplifiedData, lod: LODLevel, allocator:
     @memcpy(copy.provenance, data.provenance);
     if (data.vertical_span_counts) |counts| @memcpy(copy.vertical_span_counts.?, counts);
     if (data.vertical_spans) |spans| @memcpy(copy.vertical_spans.?, spans);
+    if (data.scene_grid) |grid| {
+        const owned = try allocator.create(world_core.lod_scene.SceneGrid);
+        owned.* = grid.clone(allocator) catch |err| {
+            allocator.destroy(owned);
+            return err;
+        };
+        copy.scene_grid = owned;
+    }
     return copy;
 }
 
@@ -240,6 +249,9 @@ fn computeCrc(bytes: []const u8) u32 {
 }
 
 pub fn serialize(data: *const LODSimplifiedData, key: Key, allocator: std.mem.Allocator) ![]u8 {
+    // Canonical summaries have their own store; the legacy wire format cannot
+    // silently discard cell occupancy, material runs, or halo ownership.
+    if (data.scene_grid != null) return CacheError.CanonicalSourceUnsupported;
     const width_usize = @as(usize, @intCast(data.width));
     const count = width_usize * width_usize;
     const total_size = serializedSize(data);

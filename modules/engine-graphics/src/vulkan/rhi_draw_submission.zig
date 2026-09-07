@@ -15,7 +15,14 @@ const ModelUniforms = extern struct {
     model: Mat4,
     color: [4]f32,
     mask_radius: f32,
+    _padding: [3]f32 = .{ 0, 0, 0 },
+    ownership_bounds: [4]f32 = .{ 0, 0, 0, 0 },
 };
+
+comptime {
+    std.debug.assert(@sizeOf(ModelUniforms) == 112);
+    std.debug.assert(@offsetOf(ModelUniforms, "ownership_bounds") == 96);
+}
 
 /// Push constants for an indirect draw that must fetch instance data from the
 /// bound instance buffer. Alpha is the shader's indirect sentinel so signed
@@ -515,6 +522,7 @@ pub fn drawOffset(ctx: anytype, handle: rhi.BufferHandle, count: u32, mode: rhi.
                 .model = ctx.draw.current_model,
                 .color = ctx.draw.current_color,
                 .mask_radius = ctx.draw.current_mask_radius,
+                .ownership_bounds = ctx.draw.current_lod_ownership_bounds,
             };
             c.vkCmdPushConstants(command_buffer, ctx.pipeline_manager.pipeline_layout, c.VK_SHADER_STAGE_VERTEX_BIT | c.VK_SHADER_STAGE_FRAGMENT_BIT, 0, @sizeOf(ModelUniforms), &uniforms);
         }

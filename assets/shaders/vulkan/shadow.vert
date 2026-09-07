@@ -19,6 +19,7 @@ struct InstanceData {
     float lod_fade;
     float _pad1;
     float _pad2;
+    vec4 ownership_bounds;
 };
 
 layout(set = 0, binding = 5) readonly buffer InstanceBuffer {

@@ -14,6 +14,7 @@ const log = @import("engine-core").log;
 /// Cache setup is an explicit world-load operation. It may perform synchronous
 /// filesystem maintenance, unlike the frame/update path.
 pub fn enableCache(self: *Self, save_dir_path: []const u8) !void {
+    if (self.source_hierarchy) |source| return source.setPersistence(save_dir_path);
     self.flushCacheIO();
     // Experimental source/header maintenance must never touch shipped caches.
     // LOD0/1 are memory-only; coarse caches use an isolated derived namespace.
@@ -281,6 +282,7 @@ pub fn logLegacyCacheNotice(self: *Self) void {
 }
 
 pub fn cacheDirPathSnapshot(self: *Self) ?[]u8 {
+    if (self.usesCanonicalSource()) return null;
     self.mutex.lockShared();
     defer self.mutex.unlockShared();
     const path = self.cache_store.cache_dir_path orelse return null;
@@ -291,6 +293,7 @@ pub fn cacheDirPathSnapshot(self: *Self) ?[]u8 {
 }
 
 pub fn cacheEnabled(self: *Self) bool {
+    if (self.usesCanonicalSource()) return false;
     self.mutex.lockShared();
     defer self.mutex.unlockShared();
     return self.cache_store.cache_dir_path != null;
@@ -299,6 +302,7 @@ pub fn cacheEnabled(self: *Self) bool {
 // Synchronous helpers remain explicit setup/diagnostic APIs. Update and
 // generation paths use CacheIoPipeline exclusively.
 pub fn readStorePayload(self: *Self, save_dir_path: []const u8, cache_key: lod_cache.Key) !?[]u8 {
+    if (self.usesCanonicalSource()) return null;
     if (self.usesNearSource(cache_key.lod)) return null;
     self.cache_store.store_mutex.lock();
     defer self.cache_store.store_mutex.unlock();
@@ -306,6 +310,7 @@ pub fn readStorePayload(self: *Self, save_dir_path: []const u8, cache_key: lod_c
 }
 
 pub fn writeStorePayload(self: *Self, save_dir_path: []const u8, cache_key: lod_cache.Key, bytes: []const u8) !void {
+    if (self.usesCanonicalSource()) return;
     if (self.usesNearSource(cache_key.lod)) return;
     self.cache_store.store_mutex.lock();
     defer self.cache_store.store_mutex.unlock();
@@ -314,6 +319,7 @@ pub fn writeStorePayload(self: *Self, save_dir_path: []const u8, cache_key: lod_
 }
 
 pub fn deleteStorePayload(self: *Self, save_dir_path: []const u8, cache_key: lod_cache.Key) void {
+    if (self.usesCanonicalSource()) return;
     if (self.usesNearSource(cache_key.lod)) return;
     self.cache_store.store_mutex.lock();
     defer self.cache_store.store_mutex.unlock();
@@ -329,6 +335,7 @@ pub fn deleteStoreContainer(self: *Self, path: []const u8) void {
 }
 
 pub fn loadCachedSourceData(self: *Self, key: LODRegionKey) ?LODSimplifiedData {
+    if (self.usesCanonicalSource()) return null;
     if (self.usesNearSource(key.lod)) return null;
     const path = self.cacheDirPathSnapshot() orelse return null;
     defer self.allocator.free(path);
@@ -388,6 +395,7 @@ pub fn recordCacheMiss(self: *Self) void {
 /// Explicit API used by tools/tests. Like frame writes, it snapshots then
 /// serializes on the cache worker; callers may use flushCacheIO to wait.
 pub fn saveCachedSourceData(self: *Self, key: LODRegionKey, data: *const LODSimplifiedData) void {
+    if (self.usesCanonicalSource()) return;
     if (self.usesNearSource(key.lod)) return;
     const path = self.cacheDirPathSnapshot() orelse return;
     defer self.allocator.free(path);

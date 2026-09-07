@@ -34,7 +34,7 @@ const LODRenderLayer = lod_gpu.LODRenderLayer;
 const ChunkChecker = lod_gpu.ChunkChecker;
 const MeshMap = lod_gpu.MeshMap;
 const RegionMap = lod_gpu.RegionMap;
-const lod_scheduler = @import("lod_scheduler.zig");
+const lod_service = @import("lod_service.zig");
 const lod_cache = @import("lod_cache.zig");
 const lod_store = @import("lod_store.zig");
 const lod_ingest = @import("lod_ingest.zig");
@@ -164,8 +164,16 @@ pub fn init(allocator: std.mem.Allocator, config: ILODConfig, gpu_bridge: LODGPU
     const lod_capacity = @max(MIN_LOD_WORKERS, total_budget -| foreground_minimum);
     const lod_worker_count = @min(std.math.clamp(cpu_count / 2, MIN_LOD_WORKERS, MAX_LOD_WORKERS), lod_capacity);
 
-    // All LOD jobs go through one shared queue. LOD-aware priority bits keep
-    // fine near-detail jobs ahead of coarse fallback regions.
+    // Opt in only while queues are empty, before the shared worker pool starts.
+    mgr.generation_tokens.enableServiceLanes(&lod_service.WHEEL);
+    mgr.transition_tokens.enableServiceLanes(&lod_service.WHEEL);
+    mgr.job_dispatcher.queues[LODLevel.count - 1].enableServiceLanes(&lod_service.WHEEL);
+    if (engine_core.envFlag("ZIGCRAFT_LOD_CANONICAL", false) and generator.generate_chunk_summary != null) {
+        const budget = @as(usize, config.getMemoryBudgetMB()) * 1024 * 1024;
+        mgr.source_hierarchy = try Self.SourceHierarchy.init(allocator, generator, mgr.job_dispatcher.queues[LODLevel.count - 1], std.math.clamp(budget / 4, 16 * 1024 * 1024, 64 * 1024 * 1024));
+        mgr.near_source_enabled = false;
+    }
+    errdefer if (mgr.source_hierarchy) |source| source.deinit();
     mgr.job_dispatcher.worker_pool = try WorkerPool.init(allocator, lod_worker_count, mgr.job_dispatcher.queues[LODLevel.count - 1], mgr, @import("lod_manager_generation_ops.zig").processLODJob);
 
     const radii = config.getRadii();
@@ -177,13 +185,13 @@ pub fn init(allocator: std.mem.Allocator, config: ILODConfig, gpu_bridge: LODGPU
     return mgr;
 }
 
-pub fn deinit(self: *Self) void {
+pub fn stopWorkersAndJoin(self: *Self) void {
+    if (self.job_dispatcher.stop_flag.swap(true, .acq_rel)) return;
     // Abort any in-flight heightmap jobs BEFORE joining the worker pool.
     // Coarse-LOD heightmap generation can take seconds per region and is
     // only interruptible via this flag (checked inside the generation loop).
     // This is the ONLY place stop_flag is set: normal pause()/unpause() and
     // map-open leave it false so LOD generation runs uninterrupted.
-    self.job_dispatcher.stop_flag.store(true, .release);
 
     const cancellation_lock_wait_timer = self.profiling.begin();
     self.mutex.lock();
@@ -205,6 +213,16 @@ pub fn deinit(self: *Self) void {
     // stop_flag above, so this join completes promptly.
     if (self.job_dispatcher.worker_pool) |pool| {
         pool.deinit();
+        self.job_dispatcher.worker_pool = null;
+    }
+}
+
+pub fn deinit(self: *Self) void {
+    self.stopWorkersAndJoin();
+    @import("lod_manager_generation_ops.zig").drainCanonicalRefreshes(self, true);
+    if (self.source_hierarchy) |source| {
+        source.deinit();
+        self.source_hierarchy = null;
     }
 
     // This is an explicit shutdown boundary: it is permitted to wait for the
@@ -228,6 +246,7 @@ pub fn deinit(self: *Self) void {
         while (mesh_iter.next()) |entry| {
             entry.value_ptr.*.releasePendingCompactTile();
             self.gpu_bridge.destroy(entry.value_ptr.*);
+            entry.value_ptr.*.releaseAllocatorOwner();
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.meshes[i].deinit();
@@ -268,6 +287,9 @@ pub fn deinit(self: *Self) void {
 pub fn update(self: *Self, player_pos: Vec3, player_velocity: Vec3, chunk_checker: ?ChunkChecker, checker_ctx: ?*anyopaque) !void {
     const update_timer = self.profiling.begin();
     defer self.profiling.end(.update, update_timer);
+    self.beginUploadFrame(lodUploadBudgetBytes());
+    self.memory_governor.required_admission_bytes = 0;
+    self.memory_governor.required_admission_lane = @intFromEnum(lod_service.Class.refinement);
     // Completion application only: no filesystem or serialization occurs on
     // this frame/update path.
     self.drainCacheCompletions();
@@ -279,6 +301,10 @@ pub fn update(self: *Self, player_pos: Vec3, player_velocity: Vec3, chunk_checke
         return;
     }
     if (self.paused) return;
+    if (self.usesCanonicalSource()) {
+        @import("lod_manager_generation_ops.zig").drainCanonicalChanges(self);
+        if (self.update_tick % 2 == 0) @import("lod_manager_generation_ops.zig").drainCanonicalRefreshes(self, false);
+    }
 
     // Render detects compact submission failure under its shared lock. Only
     // this update thread may retire its GPU range and publish CPU fallback.
@@ -307,16 +333,14 @@ pub fn update(self: *Self, player_pos: Vec3, player_velocity: Vec3, chunk_checke
         cancelWorkOutsideHorizon(self, pc.chunk_x, pc.chunk_z);
     }
 
-    // Keep LOD job priorities fresh as the player moves. doReprioritize is
-    // LOD-aware (scales region coords to chunk space, preserves LOD-bias
-    // bits), so this safely re-orders stale jobs after chunk crossings.
-    // The actual rebuild is lazy (only on pop when the queue is large).
+    // Refresh spatial priorities without changing queue-owned FIFO tickets or
+    // the service wheel. The rebuild is lazy, only on sufficiently large queues.
     self.job_dispatcher.queues[LODLevel.count - 1].updatePlayerPos(pc.chunk_x, pc.chunk_z) catch {};
 
     // Throttle heavy LOD management logic (generation queuing, state processing, unloads).
     // LOD management involves iterating over thousands of potential regions and can
-    // take several milliseconds. Throttling to every 4 frames (approx 15Hz at 60fps)
-    // significantly reduces CPU overhead while remaining responsive to player movement.
+    // take several milliseconds. LOD_UPDATE_DIVISOR bounds that frequency
+    // while uploads and transition retirement continue on intervening updates.
     self.update_tick += 1;
     if (self.update_tick % LOD_UPDATE_DIVISOR != 0) {
         self.processUploads();
@@ -336,20 +360,8 @@ pub fn update(self: *Self, player_pos: Vec3, player_velocity: Vec3, chunk_checke
     const player_wz: i32 = @intFromFloat(player_pos.z);
     _ = self.generator.maybeRecenterCache(player_wx, player_wz);
 
-    self.mutex.lock();
-    const active_lod_count = lod_chunk.activeLODCount(self.config);
-    self.mutex.unlock();
-
-    // Queue the coarsest concentric fallback first, then let LOD0/LOD1/LOD2
-    // refinements fill and replace it without creating outer-horizon islands.
     const scheduling_timer = self.profiling.begin();
-    var order_idx: usize = 0;
-    while (order_idx < active_lod_count) : (order_idx += 1) {
-        const i = lod_scheduler.priorityLevelIndex(order_idx, active_lod_count);
-        self.queueLODRegions(@enumFromInt(@as(u3, @intCast(i))), player_velocity, chunk_checker, checker_ctx) catch |err| {
-            log.log.warn("LOD queue error for level {}: {} (non-fatal)", .{ i, err });
-        };
-    }
+    queueServiceAdmissions(self, player_velocity, chunk_checker, checker_ctx);
     self.profiling.end(.scheduling, scheduling_timer);
 
     self.processQueuedGenerations(player_velocity) catch |err| {
@@ -357,6 +369,7 @@ pub fn update(self: *Self, player_pos: Vec3, player_velocity: Vec3, chunk_checke
     };
 
     // Process state transitions
+    if (self.usesCanonicalSource()) @import("lod_manager_generation_ops.zig").queueCanonicalRefreshes(self);
     @import("lod_manager_near_source_ops.zig").replay(self, 32);
     const transitions_timer = self.profiling.begin();
     self.processStateTransitions(player_velocity) catch |err| {
@@ -410,6 +423,91 @@ pub fn update(self: *Self, player_pos: Vec3, player_velocity: Vec3, chunk_checke
     self.decayTransitionFrames();
 }
 
+/// One heavy update: at most 64 admissions and 512 examined coordinates per
+/// class (2560 total). The wheel survives movement and pending-slot pressure.
+pub fn queueServiceAdmissions(self: *Self, velocity: Vec3, chunk_checker: ?ChunkChecker, checker_ctx: ?*anyopaque) void {
+    self.mutex.lockShared();
+    const active = lod_chunk.activeLODCount(self.config);
+    self.mutex.unlockShared();
+    const coarsest = active - 1;
+    var scans: [lod_service.CLASS_COUNT]usize = @splat(0);
+    var exhausted: [lod_service.CLASS_COUNT]bool = @splat(false);
+    var refinement_exhausted: [LODLevel.count]bool = @splat(false);
+    var admitted: usize = 0;
+    var turns: usize = 0;
+    while (admitted < 64 and turns < 384) : (turns += 1) {
+        self.mutex.lockShared();
+        const pending_full = self.pending_region_count >= manager_ctx.MAX_PENDING_LOD_REGIONS;
+        self.mutex.unlockShared();
+        // Do not consume the next opportunity while globally blocked. A single
+        // slot released next update must belong to the next class, not horizon.
+        if (pending_full) {
+            var next = self.service_admission_wheel;
+            self.service_pending_blocked[next.next()] +|= 1;
+            break;
+        }
+        const wheel_before = self.service_admission_wheel;
+        const lane = self.service_admission_wheel.next();
+        if (exhausted[lane] or scans[lane] >= 512) continue;
+        const class: lod_service.Class = @enumFromInt(lane);
+        var level: usize = coarsest;
+        var scan_state = &self.scan_states[coarsest];
+        switch (class) {
+            .local_fallback => scan_state = &self.local_fallback_scan_state,
+            .near0, .near1 => {
+                level = if (class == .near0) 0 else 1;
+                if (level >= coarsest) {
+                    exhausted[lane] = true;
+                    continue;
+                }
+                scan_state = &self.near_scan_states[level];
+            },
+            .horizon => {},
+            .refinement => {
+                var selected = false;
+                for (0..coarsest) |_| {
+                    level = self.refinement_level_cursor % coarsest;
+                    self.refinement_level_cursor = (level + 1) % coarsest;
+                    if (refinement_exhausted[level]) continue;
+                    selected = true;
+                    break;
+                }
+                if (!selected) {
+                    exhausted[lane] = true;
+                    continue;
+                }
+                scan_state = &self.scan_states[level];
+            },
+        }
+        self.service_opportunities[lane] +|= 1;
+        const result = self.queueLODService(@enumFromInt(level), lane, scan_state, @min(128, 512 - scans[lane]), velocity, chunk_checker, checker_ctx) catch |err| {
+            log.log.warn("LOD service queue error for class {s}: {} (non-fatal)", .{ @tagName(class), err });
+            // A failing call may already have examined its entire allowance.
+            scans[lane] += @min(128, 512 - scans[lane]);
+            exhausted[lane] = true;
+            continue;
+        };
+        scans[lane] += result.examined;
+        admitted += result.admitted;
+        for (0..result.admitted) |_| self.service_counters.record(.admitted, lane);
+        if (result.pending_blocked) self.service_pending_blocked[lane] +|= 1;
+        if (result.memory_blocked) self.service_memory_blocked[lane] +|= 1;
+        if (result.exhausted or result.memory_blocked) {
+            if (class == .refinement) {
+                refinement_exhausted[level] = true;
+            } else {
+                exhausted[lane] = true;
+            }
+        }
+        if (result.pending_blocked) {
+            // A full lifecycle queue is backpressure too. Preserve the turn
+            // when no admission happened, just as for a full pending-region cap.
+            if (result.admitted == 0) self.service_admission_wheel = wheel_before;
+            break;
+        }
+    }
+}
+
 /// Get current statistics
 pub fn getStats(self: *Self) LODStats {
     const lock_wait_timer = self.profiling.begin();
@@ -420,6 +518,7 @@ pub fn getStats(self: *Self) LODStats {
     defer self.mutex.unlockShared();
     var snapshot = self.stats;
     snapshot.profiling = self.profiling.snapshot();
+    snapshot.service = self.service_counters.snapshot();
     return snapshot;
 }
 
@@ -439,6 +538,7 @@ pub fn pause(self: *Self) void {
         var iter = self.regions[i].iterator();
         while (iter.next()) |entry| {
             const chunk = entry.value_ptr.*;
+            if (chunk.refresh_in_flight.load(.acquire)) chunk.requestCancellation();
             switch (chunk.getState()) {
                 .generating => {
                     chunk.requestCancellation();
@@ -455,6 +555,7 @@ pub fn pause(self: *Self) void {
                     // mesh transition after unpause without discarding its
                     // pending admission slot.
                     chunk.setState(.generated);
+                    self.enqueueTransition(entry.key_ptr.*, chunk, .mesh);
                     self.cancelled_jobs +|= 1;
                 },
                 .queued_for_generation => {
@@ -480,6 +581,10 @@ pub fn cancelWorkOutsideHorizon(self: *Self, player_cx: i32, player_cz: i32) voi
         var iter = self.regions[i].iterator();
         while (iter.next()) |entry| {
             const chunk = entry.value_ptr.*;
+            if (chunk.getState() == .renderable and chunk.refresh_in_flight.load(.acquire)) {
+                if (i >= active or !entry.key_ptr.*.chunkBounds().intersectsRadius(player_cx, player_cz, radii[i])) chunk.requestCancellation();
+                continue;
+            }
             switch (chunk.getState()) {
                 .queued_for_generation, .generating, .meshing => {},
                 else => continue,
@@ -492,6 +597,7 @@ pub fn cancelWorkOutsideHorizon(self: *Self, player_cx: i32, player_cz: i32) voi
             chunk.cache_read_queued = false;
             if (was_generation and self.pending_region_count > 0) self.pending_region_count -= 1;
             chunk.setState(if (was_generation) .missing else .generated);
+            if (!was_generation) self.enqueueTransition(entry.key_ptr.*, chunk, .mesh);
             self.cancelled_jobs +|= 1;
         }
     }
@@ -563,6 +669,14 @@ pub fn renderFrame(self: *Self, frame_serial: u64, view_proj: Mat4, camera_pos: 
 }
 
 pub fn prepareFrame(self: *Self, frame_serial: u64, view_proj: Mat4, camera_pos: Vec3, chunk_checker: ?ChunkChecker, checker_ctx: ?*anyopaque, max_distance_chunks: ?i32, detail_render_radius: i32) void {
+    if (self.memory_governor.pressure_pending) {
+        // Refresh after all update-side allocations. Only prepass preparation
+        // may relocate pools, before GPU candidates or graphics draws exist.
+        self.updateStats();
+        const budget = @as(usize, self.config.getMemoryBudgetMB()) * 1024 * 1024;
+        self.gpu_bridge.memoryPressure(if (budget == 0) std.math.maxInt(usize) else budget, self.memory_governor.logical_admission_bytes, self.memory_governor.maintenance_staging_bytes);
+        self.memory_governor.pressure_pending = false;
+    }
     const lock_wait_timer = self.profiling.begin();
     self.mutex.lockShared();
     self.profiling.end(.manager_lock_wait, lock_wait_timer);
@@ -577,4 +691,49 @@ pub fn pointDistanceSquared(x0: i32, z0: i32, x1: i32, z1: i32) i64 {
     const dz = @as(i64, z0) - @as(i64, z1);
     const distance_sq = @as(i128, dx) * dx + @as(i128, dz) * dz;
     return @intCast(@min(distance_sq, std.math.maxInt(i64)));
+}
+
+test "LODManager service admissions preserve the next class while pending is full" {
+    const allocator = std.testing.allocator;
+    var config = LODConfig{ .memory_budget_mb = 0 };
+    var manager = try Self.initCacheTestManager(allocator, "");
+    defer manager.cache_io.deinit();
+    defer manager.ingestion_queue.deinit(allocator);
+    defer manager.generation_tokens.deinit(allocator);
+    manager.config = config.interface();
+    manager.cleanup_covered_regions = false;
+    var queue = JobQueue.init(allocator);
+    defer queue.deinit();
+    manager.job_dispatcher = .{ .queues = @splat(&queue) };
+    manager.generation_tokens.enableServiceLanes(&lod_service.WHEEL);
+    for (&manager.regions) |*regions| regions.* = RegionMap.init(allocator);
+    defer {
+        for (&manager.regions) |*regions| {
+            var it = regions.valueIterator();
+            while (it.next()) |chunk| {
+                chunk.*.deinit(allocator);
+                allocator.destroy(chunk.*);
+            }
+            regions.deinit();
+        }
+    }
+
+    // Model one released global slot at a time. The first four opportunities
+    // all have cold candidates, so a whole-pass horizon policy fails this test.
+    manager.pending_region_count = manager_ctx.MAX_PENDING_LOD_REGIONS - 1;
+    for (lod_service.WHEEL[0..4], 0..) |lane, index| {
+        if (index != 0) manager.pending_region_count -= 1;
+        queueServiceAdmissions(&manager, Vec3.zero, null, null);
+        try std.testing.expectEqual(manager_ctx.MAX_PENDING_LOD_REGIONS, manager.pending_region_count);
+        const token = manager.generation_tokens.pop().?;
+        try std.testing.expectEqual(lane, token.service_lane);
+        try std.testing.expectEqual(lane, manager.regions[@intFromEnum(token.key.lod)].get(token.key).?.service_lane);
+        try std.testing.expectEqual(@as(u64, 1), manager.service_counters.snapshot().admitted[lane]);
+        const cursor = manager.service_admission_wheel.cursor;
+        manager.storePlayerChunkPos(1, 1);
+        queueServiceAdmissions(&manager, Vec3.zero, null, null);
+        try std.testing.expectEqual(cursor, manager.service_admission_wheel.cursor);
+        try std.testing.expectEqual(@as(usize, 0), manager.generation_tokens.count());
+        manager.storePlayerChunkPos(0, 0);
+    }
 }

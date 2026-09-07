@@ -272,12 +272,31 @@ test "SurfaceBuilder beach band matches coastal biome range" {
 
 test "SurfaceBuilder coastal beach replaces exposed filler" {
     const builder = SurfaceBuilder.init();
+    const coastal_type = builder.getCoastalSurfaceType(0.38, 1, 65, 0.3);
+    try std.testing.expectEqual(CoastalSurfaceType.sand_beach, coastal_type);
 
-    const deep_fill = builder.getSurfaceBlock(65, 70, .plains, 3, false, false, .sand_beach);
-    try std.testing.expectEqual(BlockType.sand, deep_fill);
+    // At height 65 the minimum three-block beach layer occupies Y=63..65.
+    // Deeper biome filler extends that layer, but never paints the stone below it.
+    const cases = [_]struct { filler_depth: i32, bottom_sand_y: i32, stone_y: i32 }{
+        .{ .filler_depth = 1, .bottom_sand_y = 63, .stone_y = 62 },
+        .{ .filler_depth = 3, .bottom_sand_y = 63, .stone_y = 62 },
+        .{ .filler_depth = 5, .bottom_sand_y = 61, .stone_y = 60 },
+    };
+    for (cases) |case| {
+        var y = case.bottom_sand_y;
+        while (y <= 65) : (y += 1) {
+            try std.testing.expectEqual(BlockType.sand, builder.getSurfaceBlock(y, 65, .plains, case.filler_depth, false, false, coastal_type));
+        }
+        try std.testing.expectEqual(BlockType.stone, builder.getSurfaceBlock(case.stone_y, 65, .plains, case.filler_depth, false, false, coastal_type));
+        try std.testing.expectEqual(BlockType.air, builder.getSurfaceBlock(66, 65, .plains, case.filler_depth, false, false, coastal_type));
+        try std.testing.expectEqual(BlockType.bedrock, builder.getSurfaceBlock(0, 65, .plains, case.filler_depth, false, false, coastal_type));
+    }
+    try std.testing.expectEqual(BlockType.dirt, builder.getSurfaceBlock(64, 65, .plains, 3, false, false, .none));
 
-    const below_fill = builder.getSurfaceBlock(63, 70, .plains, 3, false, false, .sand_beach);
-    try std.testing.expectEqual(BlockType.stone, below_fill);
+    // The old fixture forced a beach at height 70, above the shoreline band.
+    const high_coast = builder.getCoastalSurfaceType(0.38, 1, 70, 0.3);
+    try std.testing.expectEqual(CoastalSurfaceType.none, high_coast);
+    try std.testing.expectEqual(BlockType.stone, builder.getSurfaceBlock(65, 70, .plains, 3, false, false, high_coast));
 }
 
 test "SurfaceBuilder bedrock at y=0" {
@@ -310,11 +329,28 @@ test "SurfaceBuilder air above terrain above sea level" {
     try std.testing.expectEqual(BlockType.air, block);
 }
 
-test "SurfaceBuilder ocean floor shallow" {
-    const builder = SurfaceBuilder.init();
-    // Shallow ocean (depth <= 12): sand
-    const block = builder.getBlockAt(55, 55, .ocean, 3, true, true);
-    try std.testing.expectEqual(BlockType.sand, block);
+test "SurfaceBuilder ocean floor material depth boundaries" {
+    // Sand is confined to the immediate waterline; depth 9 is clay, not sand.
+    const cases = [_]struct { depth: i32, block: BlockType }{
+        .{ .depth = 1, .block = .sand },
+        .{ .depth = 5, .block = .sand },
+        .{ .depth = 6, .block = .clay },
+        .{ .depth = 9, .block = .clay },
+        .{ .depth = 30, .block = .clay },
+        .{ .depth = 31, .block = .gravel },
+    };
+    for ([_]i32{ 64, 80 }) |sea_level| {
+        const builder = SurfaceBuilder.initWithParams(.{ .sea_level = sea_level });
+        for (cases) |case| {
+            const floor_y = sea_level - case.depth;
+            try std.testing.expectEqual(case.block, builder.getBlockAt(floor_y, floor_y, .ocean, 3, true, true));
+            try std.testing.expectEqual(BlockType.water, builder.getBlockAt(floor_y + 1, floor_y, .ocean, 3, true, true));
+        }
+
+        const shallow_floor_y = sea_level - 5;
+        try std.testing.expectEqual(BlockType.sand, builder.getBlockAt(shallow_floor_y - 2, shallow_floor_y, .ocean, 3, true, true));
+        try std.testing.expectEqual(BlockType.stone, builder.getBlockAt(shallow_floor_y - 3, shallow_floor_y, .ocean, 3, true, true));
+    }
 }
 
 test "SurfaceBuilder inland water floor" {

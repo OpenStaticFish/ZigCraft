@@ -1,4 +1,8 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "distance_appearance.glsl"
+#include "lod_ownership.glsl"
 
 layout(location = 0) in vec3 vColor;
 layout(location = 1) flat in vec3 vNormal;
@@ -44,16 +48,17 @@ bool shouldDiscardLODFragment(float encodedMaskRadius, vec2 cameraRelativeXZ) {
 }
 
 void main() {
+    discardOutsideLODOwnership();
     if (shouldDiscardLODFragment(vMaskRadius, vFragPosWorld.xz)) discard;
     vec3 normal = normalize(vNormal);
     vec3 light_dir = normalize(global.sun_dir.xyz);
     float diffuse = max(dot(normal, light_dir), 0.0);
     float block_light = max(vBlockLight.r, max(vBlockLight.g, vBlockLight.b));
     float illumination = clamp(max(vSkyLight * global.lighting.x, block_light) + diffuse * global.params.w * 0.45, 0.18, 1.15);
+    // CPU atlas-resolved color; compact lighting remains an approximation, not feature parity.
     vec3 color = vColor * illumination * mix(0.72, 1.0, clamp(vAO, 0.0, 1.0));
     if (global.params.z > 0.5) {
-        float rawFog = clamp(1.0 - exp(-vDistance * global.params.y), 0.0, 1.0);
-        float fog = rawFog * rawFog * 0.72;
+        float fog = atmosphericFogFactor(length(vFragPosWorld), global.params.y, vSkyLight);
         color = mix(color, global.fog_color.rgb, fog);
     }
     outColor = vec4(color, 1.0);

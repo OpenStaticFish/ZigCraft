@@ -1,4 +1,8 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "distance_appearance.glsl"
+#include "lod_ownership.glsl"
 
 layout(location = 0) in vec3 vColor;
 layout(location = 1) flat in vec3 vNormal;
@@ -513,6 +517,7 @@ vec4 computeVolumetric(vec3 rayStart, vec3 rayEnd, float dither) {
 }
 
 void main() {
+    discardOutsideLODOwnership();
     vec3 color;
     float outputAlpha = 1.0;
     float debugDirectKey = 0.0;
@@ -525,7 +530,7 @@ void main() {
     float viewDistance = length(vFragPosWorld);
     bool isLOD = vTileID < 0 || abs(vMaskRadius) > 0.0;
     float textureDetail = 1.0 - smoothstep(TEXTURE_FADE_START, TEXTURE_FADE_END, viewDistance);
-    if (isLOD) {
+    if (vTileID < 0 || vTileID >= 256) {
         textureDetail = 0.0;
     }
 
@@ -572,7 +577,27 @@ void main() {
 
     vec3 albedo = vColor;
     float roughness = 0.85;
-    if (!isLOD && global.lighting.y > 0.5 && vTileID >= 0) {
+    if (isLOD && global.lighting.y > 0.5 && vTileID >= 0 && vTileID < 256) {
+        vec4 texColor = texture(uTexture, uv);
+        // Atlas-backed exact leaves retain full-detail cutout coverage at every
+        // distance. Coarse flat canopies explicitly use the no-atlas tile ID.
+        if (texColor.a < 0.1) discard;
+        outputAlpha = texColor.a;
+        if (textureDetail > 0.0) {
+            vec3 averageColor = sampleTileAverage(tileBase);
+            // LOD color already contains the atlas average and biome/face tint.
+            vec3 detailColor = vColor;
+            for (int channel = 0; channel < 3; channel++) {
+                if (averageColor[channel] > 0.001) {
+                    detailColor[channel] = texColor[channel] * (vColor[channel] / averageColor[channel]);
+                }
+            }
+            albedo = mix(vColor, detailColor, textureDetail);
+            if (global.lighting.z > 0.5 && global.pbr_params.x > 0.5) {
+                roughness = mix(roughness, texture(uRoughnessMap, uv).r, textureDetail);
+            }
+        }
+    } else if (!isLOD && global.lighting.y > 0.5 && vTileID >= 0) {
         vec4 texColor = texture(uTexture, uv);
         if (texColor.a < 0.1) discard;
         outputAlpha = texColor.a;
@@ -595,8 +620,7 @@ void main() {
     }
 
     if (global.params.z > 0.5) {
-        float rawFog = clamp(1.0 - exp(-viewDistance * global.params.y), 0.0, 1.0);
-        float fogFactor = rawFog * rawFog * 0.72 * atmosphericVisibility;
+        float fogFactor = atmosphericFogFactor(viewDistance, global.params.y, vSkyLight);
         color = mix(color, global.fog_color.rgb, fogFactor);
     }
 

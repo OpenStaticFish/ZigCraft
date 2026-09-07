@@ -83,6 +83,7 @@ pub const LODCullCandidate = extern struct {
     terrain_command: LODCullCommand,
     water_command: LODCullCommand,
     lod_and_padding: [4]u32,
+    ownership_bounds: [4]f32 = .{ 0, 0, 0, 0 },
 };
 
 pub const LODCullDispatch = extern struct {
@@ -144,7 +145,8 @@ pub const ILODCullingSystem = struct {
 };
 
 test "LOD culling candidate ABI is std430 aligned" {
-    try @import("std").testing.expectEqual(@as(usize, 224), @sizeOf(LODCullCandidate));
+    try @import("std").testing.expectEqual(@as(usize, 240), @sizeOf(LODCullCandidate));
+    try @import("std").testing.expectEqual(@as(usize, 224), @offsetOf(LODCullCandidate, "ownership_bounds"));
     try @import("std").testing.expectEqual(@as(usize, 32), @offsetOf(LODCullCandidate, "model"));
     try @import("std").testing.expectEqual(@as(usize, 96), @offsetOf(LODCullCandidate, "instance_params"));
     try @import("std").testing.expectEqual(@as(usize, 144), @offsetOf(LODCullCandidate, "terrain_command"));

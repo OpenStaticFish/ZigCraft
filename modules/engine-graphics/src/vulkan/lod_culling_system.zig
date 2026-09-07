@@ -338,6 +338,7 @@ const LODCullingSystem = struct {
                 .mask_radius = candidate.instance_params[0],
                 .lod_fade = candidate.instance_params[1],
                 .padding = .{ candidate.instance_params[2], candidate.instance_params[3] },
+                .ownership_bounds = candidate.ownership_bounds,
             };
             return std.mem.eql(u8, std.mem.asBytes(actual_instance), std.mem.asBytes(&expected_instance));
         }
@@ -357,6 +358,7 @@ const LODCullingSystem = struct {
             .model = expected_model,
             .params = candidate.instance_params,
             .words = candidate.compact_words,
+            .ownership_bounds = candidate.ownership_bounds,
         };
         return std.mem.eql(u8, std.mem.asBytes(actual_instance), std.mem.asBytes(&expected_instance));
     }

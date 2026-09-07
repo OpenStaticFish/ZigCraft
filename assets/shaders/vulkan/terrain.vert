@@ -24,6 +24,9 @@ layout(location = 13) out vec4 vClipPosPrev;
 layout(location = 14) out float vMaskRadius;
 layout(location = 15) out float vCloud;
 layout(location = 16) out float vLODFade;
+layout(location = 18) out vec2 vLODLocalXZ;
+layout(location = 19) flat out vec4 vLODOwnershipBounds;
+layout(location = 20) flat out vec2 vLODLocalNormalXZ;
 
 layout(set = 0, binding = 0) uniform GlobalUniforms {
     mat4 view_proj;
@@ -50,6 +53,7 @@ struct InstanceData {
     float lod_fade;
     float _pad1;
     float _pad2;
+    vec4 ownership_bounds;
 };
 
 layout(set = 0, binding = 5) readonly buffer InstanceBuffer {
@@ -60,6 +64,7 @@ layout(push_constant) uniform ModelUniforms {
     mat4 model;
     vec4 color_override;
     float mask_radius;
+    layout(offset = 96) vec4 ownership_bounds;
 } model_data;
 
 vec3 decodeColor(uint c) {
@@ -97,13 +102,16 @@ void main() {
         mask_radius = inst.mask_radius;
         lod_fade = inst.lod_fade;
         color_override = vec3(1.0);
+        vLODOwnershipBounds = inst.ownership_bounds;
     } else {
         model = model_data.model;
         mask_radius = model_data.mask_radius;
         lod_fade = 1.0;
         color_override = model_data.color_override.xyz;
+        vLODOwnershipBounds = model_data.ownership_bounds;
     }
 
+    vLODLocalXZ = aPos.xz;
     vec4 worldPos = model * vec4(aPos, 1.0);
     vec4 clipPos = global.view_proj * worldPos;
     vec4 clipPosPrev = global.view_proj_prev * worldPos;
@@ -116,6 +124,7 @@ void main() {
 
     vec3 decodedColor = decodeColor(aColor);
     vec3 decodedNormal = decodeNormal(aNormal);
+    vLODLocalNormalXZ = decodedNormal.xz;
 
     uint tile_id_u16 = aPackedMeta & 0xFFFFu;
     float skylight = float((aPackedMeta >> 16u) & 0xFFu) / 255.0;

@@ -658,10 +658,22 @@ pub const ChunkQueueCoordinator = struct {
         self.storage.chunks_mutex.unlock();
 
         if (chunk_data.chunk.state == .generating and chunk_data.chunk.job_token == job.data.chunk.job_token) {
-            const load_result = blk: {
-                const sm = self.save_manager orelse break :blk LoadResult.not_found;
-                break :blk sm.loadChunk(cx, cz, &chunk_data.chunk);
+            const resident_load = blk: {
+                const sm = self.save_manager orelse break :blk SaveManager.ResidentLoad{ .result = .not_found, .pending = false };
+                break :blk sm.loadResidentChunk(cx, cz, &chunk_data.chunk);
             };
+            const load_result = resident_load.result;
+
+            const canonical = if (self.lod_manager) |mgr| mgr.usesCanonicalSource() else false;
+            if (canonical and (load_result == .read_error or load_result == .corrupt_data)) {
+                log.log.warn("Saved chunk ({}, {}) unavailable: {}; canonical mode preserves the source file", .{ cx, cz, load_result });
+                self.storage.chunks_mutex.lock();
+                chunk_data.chunk.state = .missing;
+                chunk_data.chunk.generated = false;
+                self.missing_rescan_requested.store(true, .release);
+                self.storage.chunks_mutex.unlock();
+                return;
+            }
 
             const generated_new = load_result != .success and load_result != .success_relight_required;
             if (generated_new) {
@@ -688,6 +700,8 @@ pub const ChunkQueueCoordinator = struct {
                 // current instead of rebuilding a loaded chunk neighborhood.
                 chunk_data.chunk.lighting_valid = true;
             }
+
+            chunk_data.chunk.source_kind = if (generated_new) .generated else if (resident_load.pending) .edited else .saved;
 
             if (load_result == .success_relight_required) {
                 // Legacy saved chunks have no trustworthy lighting, so rebuild
@@ -727,8 +741,23 @@ pub const ChunkQueueCoordinator = struct {
                 if (!mgr.near_source_enabled or !chunk_data.chunk.generated) break :capture null;
                 self.storage.lighting_mutex.lock();
                 defer self.storage.lighting_mutex.unlock();
-                break :capture mgr.captureNearChunk(&chunk_data.chunk, if (generated_new) .generated else .loaded);
+                break :capture mgr.captureNearChunk(&chunk_data.chunk, switch (chunk_data.chunk.source_kind) {
+                    .generated => .generated,
+                    .saved => .loaded,
+                    .edited => .edited,
+                });
             } else null;
+            var scene_capture = if (self.lod_manager) |mgr| capture: {
+                if (!canonical or !chunk_data.chunk.generated) break :capture null;
+                self.storage.lighting_mutex.lock();
+                defer self.storage.lighting_mutex.unlock();
+                break :capture mgr.captureSceneChunk(&chunk_data.chunk, switch (chunk_data.chunk.source_kind) {
+                    .generated => .generated,
+                    .saved => .saved,
+                    .edited => .live,
+                }) catch null;
+            } else null;
+            defer if (scene_capture) |*summary| summary.deinit();
 
             self.storage.chunks_mutex.lock();
             const publishable = if (self.storage.chunks.get(ChunkKey{ .x = cx, .z = cz })) |data|
@@ -743,7 +772,7 @@ pub const ChunkQueueCoordinator = struct {
                 log.log.warn("CHUNK_GEN_FAILED: ({},{}) generator returned without setting generated=true, resetting to missing", .{ cx, cz });
                 chunk_data.chunk.state = .missing;
             } else {
-                if (non_air_count == 0) {
+                if (non_air_count == 0 and !canonical) {
                     log.log.warn("CHUNK_GEN_EMPTY: ({},{}) generated chunk has ZERO non-air blocks, resetting to missing", .{ cx, cz });
                     chunk_data.chunk.generated = false;
                     chunk_data.chunk.state = .missing;
@@ -756,6 +785,14 @@ pub const ChunkQueueCoordinator = struct {
             const published = chunk_data.chunk.state == .generated;
             self.storage.chunks_mutex.unlock();
             if (published) {
+                if (canonical) {
+                    const mgr = self.lod_manager.?;
+                    if (scene_capture) |summary| {
+                        mgr.source_hierarchy.?.submit(summary);
+                        scene_capture = null;
+                    } else mgr.requestIngestion(cx, cz, .chunk_derived);
+                    if (!generated_new) self.requestResidentSceneRefresh(cx, cz);
+                }
                 if (near_capture) |capture| {
                     if (self.lod_manager) |mgr| {
                         if (!mgr.submitNearChunk(cx, cz, capture)) mgr.deferNearChunk(cx, cz, capture);
@@ -768,12 +805,39 @@ pub const ChunkQueueCoordinator = struct {
                 // Saved chunks always override advisory LOD cache data. Fresh
                 // generated chunks keep the separately qualified opt-in path.
                 if (self.lod_manager) |mgr| {
-                    if (lodIngestionProvenance(load_result, engine_core.envFlag("ZIGCRAFT_LOD_CHUNK_INGEST", false))) |provenance| {
+                    if (!canonical) if (lodIngestionProvenance(load_result, engine_core.envFlag("ZIGCRAFT_LOD_CHUNK_INGEST", false))) |provenance| {
                         mgr.ingestCoarseChunk(cx, cz, &chunk_data.chunk, provenance);
-                    }
+                    };
                 }
             }
         }
+    }
+
+    /// Observations are bounded streaming work, not durable user edits. A
+    /// generating neighbor will capture itself at publication. Release storage
+    /// before entering the manager (whose resolver takes lighting -> storage).
+    pub fn requestResidentSceneRefresh(self: *ChunkQueueCoordinator, cx: i32, cz: i32) void {
+        const manager = self.lod_manager orelse return;
+        if (!manager.usesCanonicalSource()) return;
+        var keys: [8]ChunkKey = undefined;
+        var count: usize = 0;
+        self.storage.chunks_mutex.lockShared();
+        for (0..3) |z| for (0..3) |x| {
+            if (x == 1 and z == 1) continue;
+            const nx = std.math.add(i32, cx, @as(i32, @intCast(x)) - 1) catch continue;
+            const nz = std.math.add(i32, cz, @as(i32, @intCast(z)) - 1) catch continue;
+            const key = ChunkKey{ .x = nx, .z = nz };
+            const data = self.storage.chunks.get(key) orelse continue;
+            switch (data.chunk.state) {
+                .missing, .queued_for_generation, .generating => continue,
+                else => {},
+            }
+            if (!data.chunk.generated) continue;
+            keys[count] = key;
+            count += 1;
+        };
+        self.storage.chunks_mutex.unlockShared();
+        for (keys[0..count]) |key| manager.requestIngestion(key.x, key.z, .chunk_derived);
     }
 
     pub fn processMeshJob(ctx: *anyopaque, job: Job) void {

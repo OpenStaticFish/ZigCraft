@@ -33,6 +33,20 @@ pub const LODGPUBridge = struct {
     /// Preflight staging bytes. Non-pooled bridge implementations can omit
     /// this and are charged for the mesh payload alone.
     on_upload_cost: ?*const fn (mesh: *LODMesh, ctx: *anyopaque) LODStagingCost = null,
+    /// Select upload strategy before memory preflight, under the manager lock
+    /// on the main thread while the region is uploading. Must not allocate.
+    on_prepare_upload: ?*const fn (mesh: *LODMesh, available_memory_bytes: usize, ctx: *anyopaque) void = null,
+    /// Notify the completed/reused RHI slot before update-side uploads/deletion.
+    /// Call only after RHI frame begin completes its fence and deletion queue,
+    /// with the upcoming world frame serial.
+    on_begin_frame: ?*const fn (frame_serial: u64, ctx: *anyopaque) void = null,
+    /// Additional peak backing memory, excluding already-accounted payloads and
+    /// staging. Only the production renderer supplies an accurate estimate;
+    /// omitted callbacks return zero for legacy mocks, not budget qualification.
+    on_upload_memory_cost: ?*const fn (mesh: *LODMesh, ctx: *anyopaque) usize = null,
+    /// Latch current budget and logical usage, preserving any over-budget debt.
+    /// Unlimited budgets use maxInt(usize). Maintenance runs only at prepare.
+    on_memory_pressure: ?*const fn (budget_bytes: usize, accounted_bytes: usize, staging_budget_bytes: usize, ctx: *anyopaque) void = null,
     /// Opaque context pointer (typically the concrete RHI instance).
     ctx: *anyopaque,
     /// Optional capability probe for compact storage-buffer vertex pulling.
@@ -91,6 +105,28 @@ pub const LODGPUBridge = struct {
         return estimate(mesh, self.ctx);
     }
 
+    pub fn beginFrame(self: LODGPUBridge, frame_serial: u64) void {
+        if (self.hasInvalidCtx()) return;
+        if (self.on_begin_frame) |begin| begin(frame_serial, self.ctx);
+    }
+
+    pub fn prepareUpload(self: LODGPUBridge, mesh: *LODMesh, available_memory_bytes: usize) void {
+        if (self.hasInvalidCtx()) return;
+        if (self.on_prepare_upload) |prepare| prepare(mesh, available_memory_bytes, self.ctx);
+    }
+
+    pub fn uploadMemoryCost(self: LODGPUBridge, mesh: *LODMesh) usize {
+        if (self.hasInvalidCtx()) return 0;
+        const estimate = self.on_upload_memory_cost orelse return 0;
+        return estimate(mesh, self.ctx);
+    }
+
+    /// Refresh budget, logical usage and remaining staging before prepareFrame.
+    pub fn memoryPressure(self: LODGPUBridge, budget_bytes: usize, accounted_bytes: usize, staging_budget_bytes: usize) void {
+        if (self.hasInvalidCtx()) return;
+        if (self.on_memory_pressure) |pressure| pressure(budget_bytes, accounted_bytes, staging_budget_bytes, self.ctx);
+    }
+
     pub fn supportsCompact(self: LODGPUBridge) bool {
         if (self.hasInvalidCtx()) return false;
         const probe = self.on_supports_compact orelse return false;
@@ -116,10 +152,15 @@ pub const LODRenderLayer = enum {
     fluid,
 };
 
-/// Renderer-owned LOD pool accounting. Pool allocation and slack are reported
+/// Renderer-owned LOD backing accounting. Pool allocation and slack are reported
 /// separately because every pool buffer also has a same-sized CPU shadow.
 pub const LODRendererMemoryStats = struct {
+    /// Dedicated buffer deletion debt, including failed uploads/replacements.
+    /// Active dedicated storage is already counted by LODMesh.memorySnapshot.
+    direct_gpu_retired_bytes: usize = 0,
     pool_gpu_capacity_bytes: usize = 0,
+    /// Deferred GPU backing deletion debt, without an associated CPU shadow.
+    pool_gpu_retired_bytes: usize = 0,
     pool_gpu_allocated_bytes: usize = 0,
     pool_gpu_slack_bytes: usize = 0,
     pool_cpu_shadow_bytes: usize = 0,

@@ -48,9 +48,9 @@ pub const OverworldGenerator = struct {
     pub const INFO = GeneratorInfo{
         .name = "Overworld",
         .description = "Standard terrain with diverse biomes and caves.",
-        // Version 3 invalidates LOD source caches whose blended controls did
-        // not match the chunk-local controls used by full-detail generation.
-        .version = 3,
+        // Version 4 applies biome transitions independently of cache location.
+        // Generated summaries must be refreshed; saved chunks remain authoritative.
+        .version = 4,
     };
 
     allocator: std.mem.Allocator,
@@ -208,7 +208,7 @@ pub const OverworldGenerator = struct {
         chunk.generated = false;
         const world_x = chunk.getWorldX();
         const world_z = chunk.getWorldZ();
-        const cache_center = blk: {
+        {
             self.cache_mutex.lock();
             defer self.cache_mutex.unlock();
 
@@ -217,9 +217,7 @@ pub const OverworldGenerator = struct {
                 self.cache_center_x = world_x;
                 self.cache_center_z = world_z;
             }
-
-            break :blk .{ .x = self.cache_center_x, .z = self.cache_center_z };
-        };
+        }
 
         const phase_data = try self.allocator.create(terrain_shape_mod.ChunkPhaseData);
         defer self.allocator.destroy(phase_data);
@@ -227,8 +225,6 @@ pub const OverworldGenerator = struct {
             phase_data,
             world_x,
             world_z,
-            cache_center.x,
-            cache_center.z,
             stop_flag,
         )) return;
 
@@ -296,8 +292,8 @@ pub const OverworldGenerator = struct {
         return self.terrain_shape.getContinentalZone(c);
     }
 
-    /// Generate heightmap data only (for LODSimplifiedData)
-    /// Uses classification cache when available to ensure LOD matches LOD0.
+    /// Provisional analytical LOD estimates, independent of classification cache
+    /// availability. Canonical summaries must capture fully generated chunks.
     pub fn generateHeightmapOnly(self: *const OverworldGenerator, data: *LODSimplifiedData, region_x: i32, region_z: i32, lod_level: LODLevel, stop_flag: ?*const std.atomic.Value(bool)) void {
         if (data.width < 2) return;
 
@@ -561,18 +557,9 @@ pub const OverworldGenerator = struct {
         const column = self.sampleFullDetailColumnData(wx, wz, wx_i, wz_i);
         const render_water_surface = column.terrain_height_i < sea_level;
 
-        if (self.getCachedClassification(wx_i, wz_i)) |cached| {
-            return .{
-                .wx_i = wx_i,
-                .wz_i = wz_i,
-                .terrain_height = column.terrain_height,
-                .terrain_height_i = column.terrain_height_i,
-                .biome = cached.biome_id,
-                .surface_block = if (render_water_surface) .water else self.surfaceTypeToBlock(cached.surface_type),
-                .render_water_surface = render_water_surface,
-            };
-        }
-
+        // Coarse cache cells retain one pre-dither column's classification, not
+        // this column's final biome/material. Mixing that with analytical heights
+        // made provisional LOD change as full chunks arrived or the cache moved.
         const climate = biome_mod.computeClimateParams(
             column.temperature,
             column.humidity,
@@ -706,18 +693,6 @@ pub const OverworldGenerator = struct {
         };
     }
 
-    fn surfaceTypeToBlock(_: *const OverworldGenerator, surface_type: SurfaceType) BlockType {
-        return switch (surface_type) {
-            .grass => .grass,
-            .sand => .sand,
-            .rock => .gravel,
-            .snow => .snow_block,
-            .water_deep, .water_shallow => .water,
-            .dirt => .dirt,
-            .stone => .stone,
-        };
-    }
-
     fn getSurfaceBlock(_: *const OverworldGenerator, biome_id: BiomeId, height: i32, sea_level: i32, render_water_surface: bool) BlockType {
         if (render_water_surface and biome_id == .frozen_ocean) return .ice;
         if (render_water_surface and biome_id == .frozen_river) return .ice;
@@ -775,13 +750,6 @@ pub const OverworldGenerator = struct {
                 });
             }
         }
-    }
-
-    fn getCachedClassification(self: *const OverworldGenerator, world_x: i32, world_z: i32) ?gen_region.ClassCell {
-        const mutable_self: *OverworldGenerator = @constCast(self);
-        mutable_self.cache_mutex.lock();
-        defer mutable_self.cache_mutex.unlock();
-        return mutable_self.classification_cache.get(world_x, world_z);
     }
 
     fn deriveSurfaceTypeInternal(
@@ -874,11 +842,6 @@ pub const OverworldGenerator = struct {
         allocator.destroy(self);
     }
 };
-
-test "LOD cached water surfaces resolve to seabed block" {
-    try std.testing.expectEqual(BlockType.water, OverworldGenerator.surfaceTypeToBlock(undefined, .water_shallow));
-    try std.testing.expectEqual(BlockType.water, OverworldGenerator.surfaceTypeToBlock(undefined, .water_deep));
-}
 
 test "LOD classification matches full-detail chunk controls and sea-level water" {
     var gen = OverworldGenerator.initWithParams(12345, std.testing.allocator, testDecorationProvider(), .{

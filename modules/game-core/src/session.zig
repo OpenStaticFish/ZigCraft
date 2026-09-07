@@ -97,23 +97,47 @@ pub fn cameraFarPlaneForDistances(render_distance_chunks: i32, horizon_distance_
     return cameraFarPlaneForHorizon(@max(render_distance_chunks, horizon_distance_chunks));
 }
 
-/// Local M1 capture override, never a persisted user horizon. Callers syncing
+/// Scoped fidelity capture override, never a persisted user horizon. Callers syncing
 /// live settings must leave this session's distances alone when non-null.
 pub fn localCaptureHorizonDistance(scene: []const u8) ?i32 {
-    return if (std.ascii.eqlIgnoreCase(scene, "lod-forest")) 24 else null;
+    if (isCanonicalSavedScene(scene) or (std.ascii.eqlIgnoreCase(scene, "lod-forest") and lodFidelityReference(getenv("ZIGCRAFT_LOD_FIDELITY_REFERENCE")))) return 24;
+    return if (std.ascii.eqlIgnoreCase(scene, "lod-forest")) parseLodFidelityHorizonChunks(getenv("ZIGCRAFT_LOD_FIDELITY_HORIZON_CHUNKS")) else null;
 }
 
-fn applyLocalCaptureProfile(scene: []const u8, config: *LODConfig) ?i32 {
-    const horizon = localCaptureHorizonDistance(scene) orelse return null;
-    config.chunk_render_radius = 6;
-    config.radii = .{ 6, 16, horizon, horizon, horizon };
+fn lodFidelityReference(value: ?[]const u8) bool {
+    return std.mem.eql(u8, value orelse return false, "1");
+}
+
+fn applyFullReferenceProfile(config: *LODConfig) void {
+    config.chunk_render_radius = 12;
+    config.radii = .{ 12, 16, 24, 24, 24 };
     config.active_lod_count = 3;
-    // Isolate visual fidelity from the existing non-shrinking pool governor.
-    // This reference profile is not a production memory-budget qualification.
-    config.memory_budget_mb = 1024;
+    config.sample_density = .{ 1, 1, 0.25, 0.5, 0.5 };
+}
+
+fn parseLodFidelityHorizonChunks(value: ?[]const u8) i32 {
+    const requested = std.fmt.parseInt(u32, value orelse return 24, 10) catch return 24;
+    return if (requested >= 64 and requested <= 512) @intCast(requested) else 24;
+}
+
+fn applyLocalCaptureProfile(scene: []const u8, config: *LODConfig, horizon_value: ?[]const u8, memory_value: ?[]const u8) ?i32 {
+    if (!std.ascii.eqlIgnoreCase(scene, "lod-forest") and !isCanonicalSavedScene(scene)) return null;
+    const horizon = if (isCanonicalSavedScene(scene)) 24 else parseLodFidelityHorizonChunks(horizon_value);
+    const service = horizon >= 64;
+    config.chunk_render_radius = 6;
+    config.radii = .{ 6, 16, @min(64, horizon), @min(128, horizon), horizon };
+    config.active_lod_count = if (service) 5 else 3;
+    // Explicit memory overrides retain the existing parser, including its
+    // invalid-value fallback. Only an absent service budget defaults to 256.
+    config.memory_budget_mb = if (service and memory_value == null) 256 else parseLodFidelityMemoryMB(memory_value);
     // The outer band is coverage only; reserve detailed geometry for LOD1.
-    config.sample_density = .{ 1.0, 1.0, 0.25, 0.5, 0.5 };
+    config.sample_density = .{ 1.0, 1.0, 0.25, if (service) 0.25 else 0.5, 0.5 };
     return horizon;
+}
+
+fn parseLodFidelityMemoryMB(value: ?[]const u8) u32 {
+    const requested = std.fmt.parseInt(u32, value orelse return 1024, 10) catch return 1024;
+    return std.math.clamp(requested, 64, 4096);
 }
 
 pub const GameSession = struct {
@@ -159,6 +183,8 @@ pub const GameSession = struct {
     phase5_motion_evidence_emitted: bool = false,
     lod_forest_evidence: LodForestEvidence = .{},
     lod_forest_probe_frames: u32 = 0,
+    lod_forest_service_overlap: LodForestServiceOverlap = .{},
+    lod_forest_first_target_current_draw_tick: ?u32 = null,
     gpu_culling_scale_fixture_installed: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, rhi: *RHI, atlas: *const TextureAtlas, seed: u64, render_distance: i32, horizon_distance: i32, lod_enabled: bool, compact_tiles_enabled: bool, generator_index: usize, render_distance_preset: RenderDistancePreset, build_config: BuildConfig) !*GameSession {
@@ -240,12 +266,16 @@ pub const GameSession = struct {
             lod_config.memory_budget_mb = build_config.benchmark_lod_memory_budget_mb;
             log.log.info("BENCHMARK: overriding LOD memory budget to {} MiB", .{lod_config.memory_budget_mb});
         }
-        if (applyLocalCaptureProfile(build_config.phase5_visual_scene, &lod_config)) |capture_horizon| {
+        const reference = std.ascii.eqlIgnoreCase(build_config.phase5_visual_scene, "lod-forest") and lodFidelityReference(getenv("ZIGCRAFT_LOD_FIDELITY_REFERENCE"));
+        const requested_capture_horizon = if (reference) null else getenv("ZIGCRAFT_LOD_FIDELITY_HORIZON_CHUNKS");
+        const requested_capture_memory = getenv("ZIGCRAFT_LOD_FIDELITY_MEMORY_MB");
+        if (applyLocalCaptureProfile(build_config.phase5_visual_scene, &lod_config, requested_capture_horizon, requested_capture_memory)) |capture_horizon| {
+            if (reference) applyFullReferenceProfile(&lod_config);
             // Bound both comparisons identically without changing production
             // admission/scheduling policy or claiming full-horizon qualification.
             effective_render_distance = lod_config.chunk_render_radius;
             effective_horizon_distance = capture_horizon;
-            std.debug.print("LOD_FIDELITY_CONFIG: run={s} scene=lod-forest local_reference=1 qualified=0 capture_horizon={} horizon_chunks={} detail_radius_chunks={} radii_chunks={any} active_lod_count={} memory_budget_mb={} seed={} auto_world={s} near_source={s}\n", .{ build_config.phase5_visual_run_id, capture_horizon * 16, capture_horizon, lod_config.chunk_render_radius, lod_config.radii, lod_config.active_lod_count, lod_config.memory_budget_mb, seed, build_config.auto_world, getenv("ZIGCRAFT_LOD_NEAR_SOURCE") orelse "unset" });
+            std.debug.print("LOD_FIDELITY_CONFIG: run={s} scene={s} scope={s} requested_scope={s} local_reference={} qualified=0 requested_horizon_chunks={s} horizon_policy=64..512_else24 capture_horizon={} horizon_chunks={} detail_radius_chunks={} radii_chunks={any} source_density={d:.2},{d:.2},{d:.2},{d:.2},{d:.2} active_lod_count={} requested_memory_budget_mb={s} memory_budget_mb={} seed={} auto_world={s} reference={} canonical={s} near_source={s}\n", .{ build_config.phase5_visual_run_id, build_config.phase5_visual_scene, if (reference) @as([]const u8, "full_reference") else if (capture_horizon >= 64) "service" else "local", if (reference) @as([]const u8, "full_reference") else if (requested_capture_horizon != null) "service" else "local", @intFromBool(capture_horizon == 24), requested_capture_horizon orelse "unset", capture_horizon * 16, capture_horizon, lod_config.chunk_render_radius, lod_config.radii, lod_config.sample_density[0], lod_config.sample_density[1], lod_config.sample_density[2], lod_config.sample_density[3], lod_config.sample_density[4], lod_config.active_lod_count, requested_capture_memory orelse "unset", lod_config.memory_budget_mb, seed, build_config.auto_world, @intFromBool(reference), getenv("ZIGCRAFT_LOD_CANONICAL") orelse "unset", getenv("ZIGCRAFT_LOD_NEAR_SOURCE") orelse "unset" });
         }
 
         session.* = undefined;
@@ -451,7 +481,7 @@ pub const GameSession = struct {
                     self.applyPhase5VisualPose(scene);
                     // Forest readiness consumes the last rendered projection
                     // before World.update resets its submission statistics.
-                    if (scene.motion == .forest_retreat) self.updatePhase5CaptureReadiness();
+                    if (scene.motion == .forest_retreat or isCanonicalSavedScene(self.build_config.phase5_visual_scene)) self.updatePhase5CaptureReadiness();
                 }
                 const world_sim = self.world.interface().simulation();
                 try world_sim.update(self.player.camera.position, dt);
@@ -524,7 +554,7 @@ pub const GameSession = struct {
                     }
                 }
 
-                if (!std.ascii.eqlIgnoreCase(self.build_config.phase5_visual_scene, "lod-forest")) self.updatePhase5CaptureReadiness();
+                if (!std.ascii.eqlIgnoreCase(self.build_config.phase5_visual_scene, "lod-forest") and !isCanonicalSavedScene(self.build_config.phase5_visual_scene)) self.updatePhase5CaptureReadiness();
 
                 // ECS Updates
                 ECSPhysicsSystem.update(&self.ecs_registry, world_sim.collisionWorld(), dt);
@@ -549,6 +579,34 @@ pub const GameSession = struct {
         // Camera-only generated-world scene. Residency is observed below;
         // never route it through the authored flat-world mutations.
         if (std.ascii.eqlIgnoreCase(scene, "lod-forest")) return;
+        if (isCanonicalSavedScene(scene)) {
+            if (std.ascii.eqlIgnoreCase(scene, "canonical-save-reload")) return; // Never visit or mutate source chunks on reload.
+            if (self.world.save_manager == null) return error.CanonicalFixtureNeedsSaveDirectory;
+            const lod = self.world.lod orelse return error.CanonicalFixtureNeedsCanonicalSource;
+            if (!lod.manager.usesCanonicalSource()) return error.CanonicalFixtureNeedsCanonicalSource;
+            for (0..2) |cx| {
+                const data = self.world.getChunk(@intCast(cx), 0) orelse return;
+                if (!data.chunk.generated or data.chunk.state != .renderable) return;
+            }
+            // Homogeneous patches retain the features under near-source reduction.
+            // Clear above the flat floor, then author strata, a floating roof,
+            // a trunk-free crown, a pool, and an entirely known-empty column.
+            for (0..16) |x| for (0..16) |z| for (65..105) |y| {
+                const block: BlockType = if (x < 8 and z < 8 and y < 76) .stone else if (x < 8 and z < 8 and y < 80) .dirt else if (x < 8 and z < 8 and y == 80) .grass else if (x < 4 and z < 4 and y >= 90 and y < 92) .stone else if (x >= 8 and x < 12 and z < 4 and y >= 100 and y < 104) .birch_leaves else if (x < 4 and z >= 8 and z < 12 and y >= 84 and y < 86) .water else .air;
+                try world_sim.setBlock(@intCast(x), @intCast(y), @intCast(z), block);
+            };
+            for (18..20) |x| for (2..4) |z| for (0..256) |y| try world_sim.setBlock(@intCast(x), @intCast(y), @intCast(z), .air);
+            for (canonicalSavedProbes()) |probe| if (world_sim.getBlock(probe.x, probe.y, probe.z) != probe.block) return error.CanonicalFixtureMutationFailed;
+            for (18..20) |x| for (2..4) |z| for (0..256) |y| {
+                if (world_sim.getBlock(@intCast(x), @intCast(y), @intCast(z)) != .air) return error.CanonicalFixtureMutationFailed;
+            };
+            self.world.saveAllModifiedChunks();
+            if (self.world.takeSaveFailureWarningCount() != 0 or self.world.save_manager.?.sourceEpoch() < 2) return error.CanonicalFixtureSaveFailed;
+            self.phase5_fixture_applied = true;
+            self.phase5_save_flushed = true;
+            std.debug.print("CANONICAL_SAVE_FLUSH: run={s} scene={s} saved=1 failures=0 committed_epoch={} source_chunks=0,0;1,0 strata=1 roof=1 gap=1 leaf_only_crown=1 water=1 known_empty_edit=1\n", .{ self.build_config.phase5_visual_run_id, scene, self.world.save_manager.?.sourceEpoch() });
+            return;
+        }
         // Mutations are deliberately small, local, and above the flat-world
         // grass. They make the production launch visually identifiable while
         // retaining the normal generator, streamer, mesher, and LOD pipeline.
@@ -638,6 +696,10 @@ pub const GameSession = struct {
             self.updateLodForestReadiness(scene);
             return;
         }
+        if (isCanonicalSavedScene(self.build_config.phase5_visual_scene)) {
+            self.updateCanonicalSavedReadiness();
+            return;
+        }
 
         const world_stats = self.world.getStats();
         const render_stats = self.world.getRenderStats();
@@ -682,51 +744,110 @@ pub const GameSession = struct {
         self.lod_forest_probe_frames -= 1;
         const world_stats = self.world.getStats();
         const render_stats = self.world.getRenderStats();
-        const target = self.lodForestTargetEvidence(scene);
-        const ready = lodForestLocallyReady(self.lod_forest_evidence, self.phase5_motion_complete, render_stats.chunks_rendered, target);
+        const reference = lodFidelityReference(getenv("ZIGCRAFT_LOD_FIDELITY_REFERENCE"));
+        const target = self.lodTargetEvidence(lodForestTargetKey(scene));
+        const full = if (reference) self.fullReferenceEvidence(lodForestTargetKey(scene)) else FullReferenceEvidence{};
+        const service = self.lod_config.radii[4] >= 64;
+        const scope: []const u8 = if (reference) "full_reference" else if (service) "service" else "local";
+        const target_current_draw = target.drawn and target.mesh_ready and target.source_current;
+        if (service and (diagnostic_tick or (target_current_draw and self.lod_forest_first_target_current_draw_tick == null))) {
+            if (self.world.lod) |lod| {
+                const manager = lod.manager;
+                manager.mutex.lockShared();
+                defer manager.mutex.unlockShared();
+                if (target_current_draw and self.lod_forest_first_target_current_draw_tick == null) {
+                    self.lod_forest_first_target_current_draw_tick = manager.update_tick;
+                    if (phase5EvidenceEnabled(self.build_config)) {
+                        std.debug.print("LOD_FIDELITY_TARGET_DRAW: run={s} scene=lod-forest scope=service qualified=0 target_lod=1 target=14,-18 first_current_draw_tick={} tick_origin=manager_init tick_units=update_calls source_revision={} mesh_revision={}\n", .{ self.build_config.phase5_visual_run_id, manager.update_tick, target.source_revision, target.mesh_revision });
+                    }
+                }
+                if (diagnostic_tick) {
+                    const counters = manager.service_counters.snapshot();
+                    var horizon_pending: usize = 0;
+                    var horizon_missing: usize = 0;
+                    var horizon_resident_renderable: usize = 0;
+                    // Only admitted resident maps, never a configured-radius
+                    // world scan. Missing map entries are not claimed as loaded.
+                    for (&manager.regions) |*regions| {
+                        var iterator = regions.valueIterator();
+                        while (iterator.next()) |entry| {
+                            const chunk = entry.*;
+                            if (chunk.service_lane != 3) continue;
+                            const state = chunk.getState();
+                            switch (state) {
+                                .renderable => horizon_resident_renderable += 1,
+                                .missing => horizon_missing += 1,
+                                else => horizon_pending += 1,
+                            }
+                        }
+                    }
+                    const delta = self.lod_forest_service_overlap.observe(counters.renderable, horizon_pending);
+                    if (phase5EvidenceEnabled(self.build_config)) {
+                        std.debug.print("LOD_FIDELITY_SERVICE: run={s} scene=lod-forest scope=service qualified=0 tick={} probe_frames=60 lanes=local_fallback,near0,near1,horizon,refinement admitted={any} dispatched={any} started={any} renderable={any} progress_lanes=near0,near1,horizon renderable_delta={any} horizon_pending={} horizon_missing={} horizon_resident_renderable={} near_overlap_seen={any} horizon_progress_seen={} overlap_seen={} first_target_current_draw_tick={any} backlog_scope=resident_maps scheduling_evidence=bounded_opportunities ms_guarantee=0\n", .{ self.build_config.phase5_visual_run_id, manager.update_tick, counters.admitted, counters.dispatched, counters.started, counters.renderable, delta, horizon_pending, horizon_missing, horizon_resident_renderable, self.lod_forest_service_overlap.near_seen, @intFromBool(self.lod_forest_service_overlap.horizon_seen), @intFromBool(self.lod_forest_service_overlap.overlap_seen), self.lod_forest_first_target_current_draw_tick });
+                    }
+                }
+            }
+        }
+        const ready = if (reference) fullReferenceReady(self.lod_forest_evidence, self.phase5_motion_complete, full) else lodForestCaptureReady(self.lod_forest_evidence, self.phase5_motion_complete, render_stats.chunks_rendered, target, service, self.lod_forest_service_overlap.overlap_seen);
         if (ready) self.phase5_settle_frames +|= 1 else self.phase5_settle_frames = 0;
         const settled = self.phase5_settle_frames >= 180;
         phase5_capture_ready.store(settled, .release);
         if (phase5EvidenceEnabled(self.build_config) and (diagnostic_tick or (settled and !self.phase5_ready_evidence_emitted))) {
             const key = lodForestTargetKey(scene);
-            std.debug.print("LOD_FIDELITY_READINESS: run={s} scene=lod-forest stage={s} ready={} stable_frames={} required_frames=180 chunks_rendered={} world_queues={},{},{} target_lod={} target={},{} state={s} pinned={} dirty={} mesh_ready={} projected={} drawn={} source_current={} near_enabled={} captured_summaries={} target_summaries={} provenance_worldgen={} provenance_chunk_derived={} provenance_edited={} source_revision={} mesh_revision={} retained_leaves={}\n", .{ self.build_config.phase5_visual_run_id, if (!self.phase5_fixture_applied) @as([]const u8, "warmup") else if (!self.phase5_motion_complete) "motion" else "settle", @intFromBool(ready), self.phase5_settle_frames, render_stats.chunks_rendered, world_stats.gen_queue, world_stats.mesh_queue, world_stats.upload_queue, @intFromEnum(key.lod), key.rx, key.rz, @tagName(target.state), target.pinned, target.dirty, target.mesh_ready, target.projected, target.drawn, target.source_current, target.near_enabled, target.captured_summaries, target.target_summaries, target.provenance[0], target.provenance[1], target.provenance[2], target.source_revision, target.mesh_revision, self.lod_forest_evidence.leaves });
+            self.logCanonicalTarget(target);
+            if (reference) std.debug.print("LOD_FIDELITY_REFERENCE: run={s} scope=full_reference qualified=0 ready={} target_ready={} target_visible={} required_chunks=16 projected_terrain={} chunks_rendered={} vertices_rendered={} projection_current={} canonical_enabled={} lod_target_draw_required=0\n", .{ self.build_config.phase5_visual_run_id, @intFromBool(ready), full.target_ready, full.target_visible, full.projected_terrain, full.chunks_rendered, full.vertices_rendered, full.projection_current, target.canonical_enabled });
+            std.debug.print("LOD_FIDELITY_READINESS: run={s} scene=lod-forest scope={s} overlap_seen={} stage={s} ready={} stable_frames={} required_frames=180 chunks_rendered={} world_queues={},{},{} target_lod={} target={},{} state={s} pinned={} dirty={} mesh_ready={} projected={} drawn={} source_current={} near_enabled={} captured_summaries={} target_summaries={} provenance_worldgen={} provenance_chunk_derived={} provenance_edited={} source_revision={} mesh_revision={} retained_leaves={}\n", .{ self.build_config.phase5_visual_run_id, scope, @intFromBool(self.lod_forest_service_overlap.overlap_seen), if (!self.phase5_fixture_applied) @as([]const u8, "warmup") else if (!self.phase5_motion_complete) "motion" else "settle", @intFromBool(ready), self.phase5_settle_frames, render_stats.chunks_rendered, world_stats.gen_queue, world_stats.mesh_queue, world_stats.upload_queue, @intFromEnum(key.lod), key.rx, key.rz, @tagName(target.state), target.pinned, target.dirty, target.mesh_ready, target.projected, target.drawn, target.source_current, target.near_enabled, target.captured_summaries, target.target_summaries, target.provenance[0], target.provenance[1], target.provenance[2], target.source_revision, target.mesh_revision, self.lod_forest_evidence.leaves });
             if (self.world.lod) |lod| {
                 const manager = lod.manager;
                 manager.mutex.lockShared();
                 defer manager.mutex.unlockShared();
-                std.debug.print("LOD_FIDELITY_RESIDENCY: run={s} scene=lod-forest detail_radius_chunks={} configured_radii_chunks={any} loaded={any} drawn={any} generating={any} meshing={any} gen_queue={any} upload_queue={any} memory_used_bytes={} memory_budget_mb={} logical_admission_bytes={} pending_upload_bytes={} pending_regions={}\n", .{ self.build_config.phase5_visual_run_id, manager.config.getChunkRenderRadius(), manager.config.getRadii(), manager.stats.loaded, manager.stats.drawn, manager.stats.generating, manager.stats.meshing, manager.stats.gen_queue_depth, manager.stats.upload_queue_depth, manager.stats.memory_used_bytes, manager.config.getMemoryBudgetMB(), manager.stats.logical_admission_bytes, manager.stats.pending_cpu_upload_bytes, manager.pending_region_count });
+                std.debug.print("LOD_FIDELITY_RESIDENCY: run={s} scene=lod-forest scope={s} detail_radius_chunks={} configured_radii_chunks={any} loaded={any} drawn={any} generating={any} meshing={any} gen_queue={any} upload_queue={any} memory_used_bytes={} memory_budget_mb={} logical_admission_bytes={} pending_upload_bytes={} pending_regions={}\n", .{ self.build_config.phase5_visual_run_id, scope, manager.config.getChunkRenderRadius(), manager.config.getRadii(), manager.stats.loaded, manager.stats.drawn, manager.stats.generating, manager.stats.meshing, manager.stats.gen_queue_depth, manager.stats.upload_queue_depth, manager.stats.memory_used_bytes, manager.config.getMemoryBudgetMB(), manager.stats.logical_admission_bytes, manager.stats.pending_cpu_upload_bytes, manager.pending_region_count });
+                std.debug.print("LOD_FIDELITY_MEMORY: run={s} active_gpu={} shadow_cpu={} retired_gpu={} source_cpu={} required_upload={} radius_shrink={any}\n", .{ self.build_config.phase5_visual_run_id, manager.stats.pool_gpu_capacity_bytes, manager.stats.pool_cpu_shadow_bytes, manager.stats.pool_gpu_retired_bytes, manager.stats.source_data_cpu_bytes, manager.memory_governor.required_upload_bytes, manager.memory_governor.radius_shrink_chunks });
             }
             if (settled and !self.phase5_ready_evidence_emitted) {
-                std.debug.print("LOD_FIDELITY_READY: run={s} scene=lod-forest qualified=0 motion=forest-retreat completed=1 stable_frames={} player={d:.1},{d:.1},{d:.1} yaw={d:.6} pitch={d:.6} target_lod={} target={},{} drawn=1 leaves={} logs={} water={}\n", .{ self.build_config.phase5_visual_run_id, self.phase5_settle_frames, self.player.position.x, self.player.position.y, self.player.position.z, self.player.camera.yaw, self.player.camera.pitch, @intFromEnum(key.lod), key.rx, key.rz, self.lod_forest_evidence.leaves, self.lod_forest_evidence.logs, self.lod_forest_evidence.water });
+                std.debug.print("LOD_FIDELITY_READY: run={s} scene=lod-forest scope={s} overlap_seen={} qualified=0 motion=forest-retreat completed=1 stable_frames={} player={d:.1},{d:.1},{d:.1} yaw={d:.6} pitch={d:.6} target_lod={} target={},{} drawn={} leaves={} logs={} water={} lod_target_draw_required={}\n", .{ self.build_config.phase5_visual_run_id, scope, @intFromBool(self.lod_forest_service_overlap.overlap_seen), self.phase5_settle_frames, self.player.position.x, self.player.position.y, self.player.position.z, self.player.camera.yaw, self.player.camera.pitch, @intFromEnum(key.lod), key.rx, key.rz, @intFromBool(target.drawn), self.lod_forest_evidence.leaves, self.lod_forest_evidence.logs, self.lod_forest_evidence.water, @intFromBool(!reference) });
                 self.phase5_ready_evidence_emitted = true;
             }
         }
     }
 
-    fn lodForestTargetEvidence(self: *GameSession, scene: Phase5VisualScene) LodForestTargetEvidence {
+    fn lodTargetEvidence(self: *GameSession, key: @import("world-lod").lod_chunk.LODRegionKey) LodForestTargetEvidence {
         var result: LodForestTargetEvidence = .{};
         const lod = self.world.lod orelse return result;
         const manager = lod.manager;
-        const key = lodForestTargetKey(scene);
         const target_index = @intFromEnum(key.lod);
         manager.mutex.lockShared();
         defer manager.mutex.unlockShared();
         result.near_enabled = manager.near_source_enabled;
-        result.captured_summaries = manager.near_sources.count();
+        result.canonical_enabled = manager.usesCanonicalSource();
         const bounds = key.chunkBounds();
-        for (manager.near_sources.keys()) |coordinate| {
-            if (coordinate.cx >= bounds.min_x and coordinate.cx <= bounds.max_x and coordinate.cz >= bounds.min_z and coordinate.cz <= bounds.max_z) result.target_summaries += 1;
+        if (manager.source_hierarchy) |source| {
+            const diagnostics = manager.getCanonicalDiagnostics();
+            result.captured_summaries = diagnostics.known_chunks;
+            result.hierarchy_epoch = diagnostics.source_epoch;
+            result.refresh_outstanding = diagnostics.refresh_outstanding;
+            result.target_summaries = source.countKnownInBounds(bounds.min_x, bounds.min_z, bounds.max_x, bounds.max_z);
+        } else {
+            result.captured_summaries = manager.near_sources.count();
+            for (manager.near_sources.keys()) |coordinate| {
+                if (coordinate.cx >= bounds.min_x and coordinate.cx <= bounds.max_x and coordinate.cz >= bounds.min_z and coordinate.cz <= bounds.max_z) result.target_summaries += 1;
+            }
         }
         const region = manager.regions[target_index].get(key) orelse return result;
         result.state = region.getState();
         result.pinned = region.isPinned();
         result.dirty = region.dirty;
         result.source_revision = region.source_revision;
+        result.refresh_pending = region.canonical_refresh_requested.load(.acquire) or region.refresh_in_flight.load(.acquire);
         // A pin may belong to a worker modifying source data without this lock.
         if (result.state != .renderable or result.pinned) return result;
         switch (region.data) {
-            .simplified => |data| for (data.provenance) |provenance| {
-                result.provenance[@intFromEnum(provenance)] += 1;
+            .simplified => |data| {
+                for (data.provenance) |provenance| result.provenance[@intFromEnum(provenance)] += 1;
+                if (data.scene_grid) |grid| {
+                    observeCanonicalGrid(&result, grid);
+                    if (isCanonicalSavedScene(self.build_config.phase5_visual_scene)) result.saved_features = canonicalSavedGridFeatures(grid);
+                }
             },
             else => return result,
         }
@@ -755,6 +876,69 @@ pub const GameSession = struct {
         }
         result.drawn = result.projected and projected_terrain > 0 and manager.stats.drawn[target_index] >= projected_terrain;
         return result;
+    }
+
+    fn logCanonicalTarget(self: *GameSession, target: LodForestTargetEvidence) void {
+        std.debug.print("LOD_CANONICAL_TARGET: run={s} scene={s} canonical_enabled={} cached_known={} target_cached_known={} cache_counts_diagnostic_only=1 grid_known_area={} grid_total_area={} grid_complete={} source_epoch={} hierarchy_epoch={} refresh_pending={} refresh_outstanding={} source_revision={} mesh_revision={} source_current={} mesh_ready={} projected={} drawn={} saved_features={}\n", .{ self.build_config.phase5_visual_run_id, self.build_config.phase5_visual_scene, target.canonical_enabled, target.captured_summaries, target.target_summaries, target.grid_known_area, target.grid_total_area, target.grid_complete, target.source_epoch, target.hierarchy_epoch, target.refresh_pending, target.refresh_outstanding, target.source_revision, target.mesh_revision, target.source_current, target.mesh_ready, target.projected, target.drawn, target.saved_features });
+    }
+
+    fn fullReferenceEvidence(self: *GameSession, key: @import("world-lod").lod_chunk.LODRegionKey) FullReferenceEvidence {
+        const renderer = self.world.renderer;
+        const stats = self.world.getRenderStats();
+        var result = FullReferenceEvidence{ .chunks_rendered = stats.chunks_rendered, .vertices_rendered = stats.vertices_rendered };
+        const bounds = key.chunkBounds();
+        self.world.storage.chunks_mutex.lockShared();
+        defer self.world.storage.chunks_mutex.unlockShared();
+        var iterator = self.world.storage.iteratorUnsafe();
+        while (iterator.next()) |entry| {
+            const coord = entry.key_ptr.*;
+            if (coord.x < bounds.min_x or coord.x > bounds.max_x or coord.z < bounds.min_z or coord.z > bounds.max_z) continue;
+            const data = entry.value_ptr.*;
+            data.render.mesh.mutex.lock();
+            defer data.render.mesh.mutex.unlock();
+            if (data.chunk.generated and data.chunk.state == .renderable and data.render.mesh.ready and data.render.mesh.solid_allocation != null) result.target_ready += 1;
+        }
+        const eye = self.player.camera.position;
+        const rendered_eye = renderer.cpu_cull_cache_camera_pos;
+        result.projection_current = !renderer.use_gpu_culling and renderer.cpu_cull_cache_valid and renderer.cpu_cull_cache_frame == renderer.frame_serial and eye.x == rendered_eye.x and eye.y == rendered_eye.y and eye.z == rendered_eye.z;
+        if (!result.projection_current) return result;
+        // These are the renderer's actual frustum/radius results, not a second
+        // approximate camera test. Consume before World.update can evict them.
+        for (renderer.cpu_cull_cache.items) |data| {
+            data.render.mesh.mutex.lock();
+            defer data.render.mesh.mutex.unlock();
+            if (!data.render.mesh.ready or data.render.mesh.solid_allocation == null) continue;
+            result.projected_terrain += 1;
+            const cx = data.chunk.chunk_x;
+            const cz = data.chunk.chunk_z;
+            if (cx >= bounds.min_x and cx <= bounds.max_x and cz >= bounds.min_z and cz <= bounds.max_z) result.target_visible += 1;
+        }
+        return result;
+    }
+
+    fn updateCanonicalSavedReadiness(self: *GameSession) void {
+        const reload = std.ascii.eqlIgnoreCase(self.build_config.phase5_visual_scene, "canonical-save-reload");
+        const key = @import("world-lod").lod_chunk.LODRegionKey{ .rx = 0, .rz = 0, .lod = .lod1 };
+        const target = self.lodTargetEvidence(key);
+        var resident: u32 = 0;
+        for (0..4) |cx| for (0..4) |cz| {
+            if (self.world.getChunk(@intCast(cx), @intCast(cz)) != null) resident += 1;
+        };
+        const stats = self.world.getRenderStats();
+        const ready = canonicalSavedReady(target, resident, stats.chunks_rendered, reload, self.phase5_save_flushed);
+        if (ready) self.phase5_settle_frames +|= 1 else self.phase5_settle_frames = 0;
+        const settled = self.phase5_settle_frames >= 180;
+        phase5_capture_ready.store(settled, .release);
+        if (self.lod_forest_probe_frames == 0 or (settled and !self.phase5_ready_evidence_emitted)) {
+            self.lod_forest_probe_frames = 60;
+            self.logCanonicalTarget(target);
+            std.debug.print("CANONICAL_SAVED_READINESS: run={s} scene={s} scope=saved_source qualified=0 ready={} stable_frames={} required_frames=180 target=0,0 target_lod=1 target_source_resident={} required_nonresident={} saved_features={} canonical_enabled={} mesh_ready={} source_current={} projected={} drawn={} chunks_rendered={} player={d:.1},{d:.1},{d:.1} warmup_visit=0 compact_qualification=0\n", .{ self.build_config.phase5_visual_run_id, self.build_config.phase5_visual_scene, @intFromBool(ready), self.phase5_settle_frames, resident, @intFromBool(reload), target.saved_features, target.canonical_enabled, target.mesh_ready, target.source_current, target.projected, target.drawn, stats.chunks_rendered, self.player.position.x, self.player.position.y, self.player.position.z });
+        }
+        self.lod_forest_probe_frames -|= 1;
+        if (settled and !self.phase5_ready_evidence_emitted) {
+            std.debug.print("CANONICAL_SAVED_READY: run={s} scene={s} scope=saved_source qualified=0 stable_frames=180 reload={} target_source_resident={} saved_features={} compact_qualification=0\n", .{ self.build_config.phase5_visual_run_id, self.build_config.phase5_visual_scene, @intFromBool(reload), resident, target.saved_features });
+            self.phase5_ready_evidence_emitted = true;
+        }
     }
 
     fn observeLodForest(self: *GameSession, scene: Phase5VisualScene) void {
@@ -820,6 +1004,30 @@ pub const GameSession = struct {
     }
 };
 
+const LodForestServiceOverlap = struct {
+    previous_renderable: ?[5]u64 = null,
+    near_seen: [2]bool = .{ false, false },
+    horizon_seen: bool = false,
+    overlap_seen: bool = false,
+
+    fn observe(self: *LodForestServiceOverlap, renderable: [5]u64, horizon_pending: usize) [3]u64 {
+        const previous = self.previous_renderable;
+        self.previous_renderable = renderable;
+        const before = previous orelse return .{ 0, 0, 0 };
+        const delta = [3]u64{ renderable[1] -| before[1], renderable[2] -| before[2], renderable[3] -| before[3] };
+        // Each near lane must make NEW progress while horizon work is pending
+        // and some horizon work is renderable. Separately require new horizon
+        // progress under backlog; old nonzero totals cannot qualify a capture.
+        if (horizon_pending > 0 and renderable[3] > 0) {
+            self.near_seen[0] = self.near_seen[0] or delta[0] > 0;
+            self.near_seen[1] = self.near_seen[1] or delta[1] > 0;
+            self.horizon_seen = self.horizon_seen or delta[2] > 0;
+            self.overlap_seen = self.near_seen[0] and self.near_seen[1] and self.horizon_seen;
+        }
+        return delta;
+    }
+};
+
 const LodForestEvidence = struct {
     resident_chunks: u32 = 0,
     ground: u32 = 0,
@@ -852,7 +1060,105 @@ const LodForestTargetEvidence = struct {
     provenance: [3]u32 = .{ 0, 0, 0 },
     source_revision: u32 = 0,
     mesh_revision: u32 = 0,
+    canonical_enabled: bool = false,
+    grid_known_area: u64 = 0,
+    grid_total_area: u64 = 0,
+    grid_complete: bool = false,
+    source_epoch: u64 = 0,
+    hierarchy_epoch: u64 = 0,
+    refresh_pending: bool = false,
+    refresh_outstanding: usize = 0,
+    saved_features: u32 = 0,
 };
+
+fn observeCanonicalGrid(result: *LodForestTargetEvidence, grid: *@import("world-core").lod_scene.SceneGrid) void {
+    result.source_epoch = grid.source_epoch;
+    result.grid_complete = grid.width > 0;
+    // Halo can legitimately be unknown. Only the target's interior is proof.
+    for (0..grid.width) |z| for (0..grid.width) |x| {
+        const info = grid.columnInfo(@intCast(x), @intCast(z));
+        result.grid_known_area += info.known_area;
+        result.grid_total_area += info.total_area;
+        result.grid_complete = result.grid_complete and info.total_area > 0 and info.known_area == info.total_area;
+    };
+}
+
+fn canonicalGridReady(target: LodForestTargetEvidence) bool {
+    // A valid projection owns its data even after source leases/cache eviction.
+    // Global epoch/refresh counts may concern unrelated regions.
+    return target.canonical_enabled and target.grid_complete and target.grid_total_area > 0 and target.grid_known_area == target.grid_total_area and target.source_epoch > 0 and target.source_current;
+}
+
+const FullReferenceEvidence = struct {
+    target_ready: u32 = 0,
+    target_visible: u32 = 0,
+    projected_terrain: u32 = 0,
+    chunks_rendered: u32 = 0,
+    vertices_rendered: u64 = 0,
+    projection_current: bool = false,
+};
+
+fn fullReferenceReady(evidence: LodForestEvidence, motion_complete: bool, full: FullReferenceEvidence) bool {
+    return lodForestWarmupReady(evidence) and motion_complete and full.target_ready == 16 and full.target_visible == 16 and full.projection_current and full.projected_terrain >= 16 and full.chunks_rendered >= full.projected_terrain and full.vertices_rendered > 0;
+}
+
+const CanonicalSavedProbe = struct { x: i32, y: i32, z: i32, block: BlockType };
+
+fn canonicalSavedProbes() []const CanonicalSavedProbe {
+    return &.{
+        .{ .x = 2, .y = 70, .z = 2, .block = .stone },
+        .{ .x = 2, .y = 78, .z = 2, .block = .dirt },
+        .{ .x = 2, .y = 80, .z = 2, .block = .grass },
+        .{ .x = 2, .y = 85, .z = 2, .block = .air },
+        .{ .x = 2, .y = 90, .z = 2, .block = .stone },
+        .{ .x = 10, .y = 102, .z = 2, .block = .birch_leaves },
+        .{ .x = 10, .y = 95, .z = 2, .block = .air },
+        .{ .x = 2, .y = 85, .z = 10, .block = .water },
+    };
+}
+
+fn canonicalSavedGridFeatures(grid: *@import("world-core").lod_scene.SceneGrid) u32 {
+    var matched: u32 = 0;
+    for (canonicalSavedProbes()) |probe| {
+        const gx = @divFloor(probe.x - grid.origin_x, @as(i32, @intCast(grid.cell_size)));
+        const gz = @divFloor(probe.z - grid.origin_z, @as(i32, @intCast(grid.cell_size)));
+        if (gx < 0 or gz < 0 or gx >= grid.width or gz >= grid.width) continue;
+        const info = grid.columnInfo(gx, gz);
+        if (info.total_area == 0 or info.known_area != info.total_area or info.approximate) continue;
+        var block: BlockType = .air;
+        var vegetation: LodForestEvidence = .{};
+        const y: f32 = @floatFromInt(probe.y);
+        for (grid.column(gx, gz)) |span| {
+            vegetation.observe(span.block);
+            if (span.min_y <= y and span.max_y > y) {
+                if (span.coverage != 1) {
+                    block = .bedrock;
+                    break;
+                }
+                block = span.block;
+            }
+        }
+        if (block == probe.block and (probe.block != .birch_leaves or vegetation.logs == 0)) matched += 1;
+    }
+    const gx = @divFloor(18 - grid.origin_x, @as(i32, @intCast(grid.cell_size)));
+    const gz = @divFloor(2 - grid.origin_z, @as(i32, @intCast(grid.cell_size)));
+    if (gx >= 0 and gz >= 0 and gx < grid.width and gz < grid.width) {
+        const info = grid.columnInfo(gx, gz);
+        if (info.total_area > 0 and info.known_area == info.total_area and !info.approximate and grid.column(gx, gz).len == 0) matched += 1;
+    }
+    return matched;
+}
+
+fn canonicalSavedReady(target: LodForestTargetEvidence, resident: u32, chunks_rendered: u32, reload: bool, save_flushed: bool) bool {
+    // Creation may retain source chunks, but a flush alone does not prove the
+    // edited canonical grid has replaced the pre-edit projection.
+    const source_ready = if (reload) resident == 0 else save_flushed;
+    return source_ready and chunks_rendered > 0 and target.saved_features == canonicalSavedProbes().len + 1 and target.grid_total_area == 4096 and canonicalGridReady(target) and target.state == .renderable and !target.pinned and target.mesh_ready and target.projected and target.drawn;
+}
+
+fn isCanonicalSavedScene(scene: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(scene, "canonical-save-create") or std.ascii.eqlIgnoreCase(scene, "canonical-save-reload");
+}
 
 fn lodForestTargetKey(scene: Phase5VisualScene) @import("world-lod").lod_chunk.LODRegionKey {
     const center = @import("world-core").worldToChunk(@intFromFloat(@floor(scene.position.x)), @intFromFloat(@floor(scene.position.z)));
@@ -871,7 +1177,12 @@ fn lodForestLocallyReady(evidence: LodForestEvidence, motion_complete: bool, chu
     // not that flag, proves no unapplied source change remains.
     // No global queue drain: unrelated horizon jobs may continue. The enabled
     // comparison must actually have captured and applied source at this target.
+    if (target.canonical_enabled) return canonicalGridReady(target);
     return !target.near_enabled or (target.captured_summaries > 0 and target.target_summaries > 0 and target.provenance[1] > 0);
+}
+
+fn lodForestCaptureReady(evidence: LodForestEvidence, motion_complete: bool, chunks_rendered: u32, target: LodForestTargetEvidence, service: bool, overlap_seen: bool) bool {
+    return lodForestLocallyReady(evidence, motion_complete, chunks_rendered, target) and (!service or overlap_seen);
 }
 
 fn allZero(values: anytype) bool {
@@ -966,6 +1277,8 @@ pub const Phase5VisualScene = struct {
 
 pub fn parsePhase5VisualScene(name: []const u8) ?Phase5VisualScene {
     const forward_z = std.math.pi / 2.0;
+    if (std.ascii.eqlIgnoreCase(name, "canonical-save-create")) return .{ .position = Vec3.init(8, 110, -32), .yaw = forward_z, .pitch = -std.math.degreesToRadians(25.0) };
+    if (std.ascii.eqlIgnoreCase(name, "canonical-save-reload")) return .{ .position = Vec3.init(160, 106, 160), .yaw = -3.0 * std.math.pi / 4.0, .pitch = -std.math.degreesToRadians(10.0) };
     if (std.ascii.eqlIgnoreCase(name, "seam")) return .{ .position = Vec3.init(16.0, 74.0, -18.0), .yaw = forward_z, .pitch = -std.math.degreesToRadians(15.0) };
     if (std.ascii.eqlIgnoreCase(name, "water")) return .{ .position = Vec3.init(25.0, 75.0, -16.0), .yaw = forward_z, .pitch = -std.math.degreesToRadians(17.0) };
     if (std.ascii.eqlIgnoreCase(name, "lod-handoff")) return .{ .position = Vec3.init(0.0, 110.0, -80.0), .yaw = forward_z, .pitch = -std.math.degreesToRadians(13.0) };
@@ -1044,21 +1357,245 @@ test "Phase 5 visual scene parser exposes bounded motion poses" {
     try std.testing.expect(teleport_end.position.x != teleport.position.x);
 }
 
+test "canonical capture accepts evicted source caches but rejects incomplete or stale grids" {
+    const evidence = LodForestEvidence{ .resident_chunks = 16, .ground = 4096, .leaves = 501 };
+    const target = LodForestTargetEvidence{
+        .state = .renderable,
+        .mesh_ready = true,
+        .projected = true,
+        .drawn = true,
+        .source_current = true,
+        .canonical_enabled = true,
+        .near_enabled = true,
+        .captured_summaries = 0,
+        .target_summaries = 0,
+        .grid_known_area = 4096,
+        .grid_total_area = 4096,
+        .grid_complete = true,
+        .source_epoch = 17,
+        .hierarchy_epoch = 23,
+        .refresh_pending = true,
+        .refresh_outstanding = 7,
+    };
+    try std.testing.expect(lodForestCaptureReady(evidence, true, 4, target, false, false));
+    try std.testing.expect(!lodForestCaptureReady(evidence, true, 4, target, true, false));
+    try std.testing.expect(lodForestCaptureReady(evidence, true, 4, target, true, true));
+    inline for (.{ "grid_complete", "source_current", "mesh_ready", "projected", "drawn" }) |field| {
+        var missing = target;
+        @field(missing, field) = false;
+        missing.captured_summaries = 999;
+        missing.target_summaries = 16;
+        try std.testing.expect(!lodForestCaptureReady(evidence, true, 4, missing, false, false));
+    }
+    var missing = target;
+    missing.source_epoch = 0;
+    try std.testing.expect(!canonicalGridReady(missing));
+    missing = target;
+    missing.grid_known_area = 4095;
+    try std.testing.expect(!canonicalGridReady(missing));
+    missing = target;
+    missing.canonical_enabled = false;
+    try std.testing.expect(!lodForestLocallyReady(evidence, true, 4, missing)); // Legacy proof is still required.
+}
+
+test "canonical capture observes interior known area without requiring a known halo" {
+    var grid = try @import("world-core").lod_scene.SceneGrid.init(std.testing.allocator, 0, 0, 2, 2);
+    defer grid.deinit();
+    grid.source_epoch = 9;
+    for (0..2) |z| for (0..2) |x| try grid.appendColumn(@intCast(x), @intCast(z), &.{}, 4, 4, false);
+    var target = LodForestTargetEvidence{ .canonical_enabled = true, .source_current = true };
+    observeCanonicalGrid(&target, &grid);
+    try std.testing.expectEqual(@as(u64, 16), target.grid_known_area);
+    try std.testing.expect(canonicalGridReady(target));
+    grid.columnInfo(1, 1).* = .{}; // Even equal aggregate areas cannot hide an unwritten cell.
+    target = .{ .canonical_enabled = true, .source_current = true };
+    observeCanonicalGrid(&target, &grid);
+    try std.testing.expectEqual(target.grid_known_area, target.grid_total_area);
+    try std.testing.expect(!canonicalGridReady(target));
+}
+
+test "full reference parser and profile preserve matched forest camera and cover all target chunks" {
+    try std.testing.expect(lodFidelityReference("1"));
+    for ([_]?[]const u8{ null, "", "0", "true", "on", "01", "invalid" }) |value| try std.testing.expect(!lodFidelityReference(value));
+    var config = LODConfig{ .memory_budget_mb = 384 };
+    applyFullReferenceProfile(&config);
+    try std.testing.expectEqual([5]i32{ 12, 16, 24, 24, 24 }, config.radii);
+    try std.testing.expectEqual(@as(i32, 12), config.chunk_render_radius);
+    try std.testing.expectEqual(@as(u32, 384), config.memory_budget_mb);
+    const scene = parsePhase5VisualScene("lod-forest").?;
+    const pose = phase5VisualPoseAtFrame(scene, 180);
+    try std.testing.expectEqualDeep(Vec3.init(1024, 106, -1024), pose.position);
+    try std.testing.expectEqual(scene.yaw, pose.yaw);
+    try std.testing.expectEqual(scene.pitch, pose.pitch);
+    const bounds = lodForestTargetKey(scene).chunkBounds();
+    const camera = @import("world-core").worldToChunk(1024, -1024);
+    var cx = bounds.min_x;
+    while (cx <= bounds.max_x) : (cx += 1) {
+        var cz = bounds.min_z;
+        while (cz <= bounds.max_z) : (cz += 1) {
+            const dx = cx - camera.chunk_x;
+            const dz = cz - camera.chunk_z;
+            try std.testing.expect(dx * dx + dz * dz <= 12 * 12);
+        }
+    }
+}
+
+test "full reference gate rejects plausible counts without all sixteen visible current chunks" {
+    const evidence = LodForestEvidence{ .resident_chunks = 16, .ground = 100, .leaves = 500 };
+    const full = FullReferenceEvidence{ .target_ready = 16, .target_visible = 16, .projected_terrain = 81, .chunks_rendered = 81, .vertices_rendered = 9000, .projection_current = true };
+    try std.testing.expect(fullReferenceReady(evidence, true, full));
+    try std.testing.expect(!fullReferenceReady(evidence, false, full));
+    try std.testing.expect(!fullReferenceReady(.{}, true, full));
+    inline for (.{ "target_ready", "target_visible" }) |field| {
+        var missing = full;
+        @field(missing, field) = 15;
+        missing.chunks_rendered = 999;
+        try std.testing.expect(!fullReferenceReady(evidence, true, missing));
+    }
+    var missing = full;
+    missing.chunks_rendered = 80;
+    try std.testing.expect(!fullReferenceReady(evidence, true, missing));
+    missing = full;
+    missing.projection_current = false;
+    try std.testing.expect(!fullReferenceReady(evidence, true, missing));
+    missing = full;
+    missing.vertices_rendered = 0;
+    try std.testing.expect(!fullReferenceReady(evidence, true, missing));
+}
+
+test "canonical saved scenes require nonresident drawn saved features and never use compact qualification" {
+    const scene = parsePhase5VisualScene("canonical-save-reload").?;
+    try std.testing.expectEqual(Phase5VisualMotion.fixed, scene.motion);
+    try std.testing.expectEqualDeep(scene, phase5VisualPoseAtFrame(scene, 900));
+    try std.testing.expect(!isSavedWorldReloadScene("canonical-save-reload"));
+    try std.testing.expect(!phase5SceneRequiresGpuValidation("canonical-save-reload"));
+    var config = LODConfig{};
+    try std.testing.expectEqual(@as(?i32, 24), applyLocalCaptureProfile("canonical-save-reload", &config, "512", null));
+    try std.testing.expectEqual(@as(i32, 6), config.chunk_render_radius);
+    const target = LodForestTargetEvidence{ .canonical_enabled = true, .state = .renderable, .grid_complete = true, .grid_known_area = 4096, .grid_total_area = 4096, .source_epoch = 12, .source_current = true, .mesh_ready = true, .projected = true, .drawn = true, .saved_features = 9 };
+    try std.testing.expect(canonicalSavedReady(target, 0, 20, true, false));
+    try std.testing.expect(!canonicalSavedReady(target, 1, 20, true, true));
+    try std.testing.expect(canonicalSavedReady(target, 16, 20, false, true));
+    try std.testing.expect(!canonicalSavedReady(target, 16, 20, false, false));
+    for ([_]bool{ false, true }) |reload| {
+        const resident: u32 = if (reload) 0 else 16;
+        try std.testing.expect(!canonicalSavedReady(target, resident, 0, reload, true));
+        for (0..9) |features| {
+            var missing = target;
+            missing.saved_features = @intCast(features);
+            try std.testing.expect(!canonicalSavedReady(missing, resident, 20, reload, true));
+        }
+        inline for (.{ "drawn", "projected", "mesh_ready", "source_current", "grid_complete", "canonical_enabled" }) |field| {
+            var missing = target;
+            @field(missing, field) = false;
+            try std.testing.expect(!canonicalSavedReady(missing, resident, 20, reload, true));
+        }
+        var missing = target;
+        missing.pinned = true;
+        try std.testing.expect(!canonicalSavedReady(missing, resident, 20, reload, true));
+        missing = target;
+        missing.grid_known_area = 4095;
+        try std.testing.expect(!canonicalSavedReady(missing, resident, 20, reload, true));
+        missing = target;
+        missing.source_epoch = 0;
+        try std.testing.expect(!canonicalSavedReady(missing, resident, 20, reload, true));
+    }
+}
+
+test "canonical saved feature parser distinguishes known empty from unknown and preserves strata gaps" {
+    const scene = @import("world-core").lod_scene;
+    var grid = try scene.SceneGrid.init(std.testing.allocator, 0, 0, 2, 16);
+    defer grid.deinit();
+    for (0..16) |z| for (0..16) |x| {
+        const spans: []const scene.SceneSpan = if (x == 1 and z == 1) &.{
+            .{ .min_y = 65, .max_y = 76, .block = .stone, .biome = .plains, .light = .{ .sky_light = 15 } },
+            .{ .min_y = 76, .max_y = 80, .block = .dirt, .biome = .plains, .light = .{ .sky_light = 15 } },
+            .{ .min_y = 80, .max_y = 81, .block = .grass, .biome = .plains, .light = .{ .sky_light = 15 } },
+            .{ .min_y = 90, .max_y = 92, .block = .stone, .biome = .plains, .light = .{ .sky_light = 15 } },
+        } else if (x == 5 and z == 1) &.{
+            .{ .min_y = 100, .max_y = 104, .block = .birch_leaves, .biome = .plains, .light = .{ .sky_light = 15 } },
+        } else if (x == 1 and z == 5) &.{
+            .{ .min_y = 84, .max_y = 86, .block = .water, .biome = .plains, .light = .{ .sky_light = 15 } },
+        } else &.{};
+        try grid.appendColumn(@intCast(x), @intCast(z), spans, 4, 4, false);
+    };
+    try std.testing.expectEqual(@as(u32, 9), canonicalSavedGridFeatures(&grid));
+    grid.columnInfo(9, 1).known_area = 0;
+    try std.testing.expectEqual(@as(u32, 8), canonicalSavedGridFeatures(&grid));
+    grid.columnInfo(9, 1).known_area = 4;
+    grid.columnInfo(1, 1).approximate = true;
+    try std.testing.expectEqual(@as(u32, 4), canonicalSavedGridFeatures(&grid));
+}
+
+test "LOD fidelity memory parser accepts regression and reference budgets" {
+    try std.testing.expectEqual(@as(u32, 256), parseLodFidelityMemoryMB("256"));
+    try std.testing.expectEqual(@as(u32, 384), parseLodFidelityMemoryMB("384"));
+    try std.testing.expectEqual(@as(u32, 1024), parseLodFidelityMemoryMB("1024"));
+}
+
+test "LOD fidelity memory parser clamps valid budgets" {
+    for ([_][]const u8{ "0", "-0", "63", "64" }) |value| {
+        try std.testing.expectEqual(@as(u32, 64), parseLodFidelityMemoryMB(value));
+    }
+    for ([_][]const u8{ "4096", "4097", "4294967295" }) |value| {
+        try std.testing.expectEqual(@as(u32, 4096), parseLodFidelityMemoryMB(value));
+    }
+}
+
+test "LOD fidelity memory parser defaults missing and invalid budgets" {
+    try std.testing.expectEqual(@as(u32, 1024), parseLodFidelityMemoryMB(null));
+    for ([_][]const u8{ "", "invalid", "-1", "256MB", "384.0", "4294967296" }) |value| {
+        try std.testing.expectEqual(@as(u32, 1024), parseLodFidelityMemoryMB(value));
+    }
+}
+
+test "LOD fidelity horizon parser defaults absent malformed and out of range requests to local" {
+    try std.testing.expectEqual(@as(i32, 24), parseLodFidelityHorizonChunks(null));
+    for ([_][]const u8{ "", "invalid", "-1", "0", "24", "63", "513", "4294967295", "4294967296", "128chunks", "128.0" }) |value| {
+        try std.testing.expectEqual(@as(i32, 24), parseLodFidelityHorizonChunks(value));
+    }
+}
+
+test "LOD fidelity service profile uses five levels and scoped memory defaults" {
+    for ([_][]const u8{ "64", "96", "128", "256", "512", "+0_128" }, [_]i32{ 64, 96, 128, 256, 512, 128 }) |value, horizon| {
+        var config = LODConfig{};
+        try std.testing.expectEqual(horizon, parseLodFidelityHorizonChunks(value));
+        try std.testing.expectEqual(@as(?i32, horizon), applyLocalCaptureProfile("lod-forest", &config, value, null));
+        try std.testing.expectEqual(@as(i32, 6), config.chunk_render_radius);
+        try std.testing.expectEqual([5]i32{ 6, 16, 64, @min(128, horizon), horizon }, config.radii);
+        try std.testing.expectEqual([5]f32{ 1, 1, 0.25, 0.25, 0.5 }, config.sample_density);
+        try std.testing.expectEqual(@as(u32, 5), config.active_lod_count);
+        try std.testing.expectEqual(@as(u32, 256), config.memory_budget_mb);
+    }
+    for ([_]?[]const u8{ null, "", "invalid", "0", "384", "4097" }, [_]u32{ 256, 1024, 1024, 64, 384, 4096 }) |value, budget| {
+        var config = LODConfig{};
+        _ = applyLocalCaptureProfile("lod-forest", &config, "256", value);
+        try std.testing.expectEqual(budget, config.memory_budget_mb);
+    }
+    var config = LODConfig{};
+    _ = applyLocalCaptureProfile("lod-forest", &config, "invalid", null);
+    try std.testing.expectEqual(@as(u32, 1024), config.memory_budget_mb);
+    _ = applyLocalCaptureProfile("lod-forest", &config, null, "384");
+    try std.testing.expectEqual(@as(u32, 384), config.memory_budget_mb);
+}
+
 test "local capture profile scopes horizon and memory to lod-forest only" {
     const original = LODConfig{ .chunk_render_radius = 12, .radii = .{ 12, 64, 156, 256, 256 }, .memory_budget_mb = 128, .max_uploads_per_frame = 7, .compact_tiles_enabled = false };
     for ([_][]const u8{ "", "seam", "water", "lod-handoff", "lod-aerial", "lod-handoff-traversal", "fog-rapid-turn", "teleport-handoff", "saved-world-create", "saved-world-reload", "lod-forest-unknown" }) |scene| {
         var config = original;
         try std.testing.expect(localCaptureHorizonDistance(scene) == null);
-        try std.testing.expect(applyLocalCaptureProfile(scene, &config) == null);
+        try std.testing.expect(applyLocalCaptureProfile(scene, &config, "256", "384") == null);
         try std.testing.expectEqualDeep(original, config);
     }
     var config = original;
-    try std.testing.expectEqual(@as(?i32, 24), applyLocalCaptureProfile("LOD-FOREST", &config));
-    try std.testing.expectEqual(@as(?i32, 24), localCaptureHorizonDistance("lod-forest"));
+    try std.testing.expectEqual(@as(?i32, 24), applyLocalCaptureProfile("LOD-FOREST", &config, null, null));
+    const expected_horizon = if (lodFidelityReference(getenv("ZIGCRAFT_LOD_FIDELITY_REFERENCE"))) 24 else parseLodFidelityHorizonChunks(getenv("ZIGCRAFT_LOD_FIDELITY_HORIZON_CHUNKS"));
+    try std.testing.expectEqual(@as(?i32, expected_horizon), localCaptureHorizonDistance("lod-forest"));
     try std.testing.expectEqual(@as(i32, 6), config.chunk_render_radius);
     try std.testing.expectEqual([LODLevel.count]i32{ 6, 16, 24, 24, 24 }, config.radii);
     try std.testing.expectEqual(@as(u32, 3), config.active_lod_count);
     try std.testing.expectEqual(@as(u32, 1024), config.memory_budget_mb);
+    try std.testing.expectEqual([5]f32{ 1, 1, 0.25, 0.5, 0.5 }, config.sample_density);
     try std.testing.expectEqual(@as(usize, 3), @import("world-lod").lod_chunk.activeLODCount(config.interface()));
     try std.testing.expectEqual(original.max_uploads_per_frame, config.max_uploads_per_frame);
     try std.testing.expectEqual(original.compact_tiles_enabled, config.compact_tiles_enabled);
@@ -1179,6 +1716,69 @@ test "lod-forest readiness requires completed retreat and current drawn target w
     enabled.captured_summaries = 16;
     enabled.target_summaries = 0;
     try std.testing.expect(!lodForestLocallyReady(evidence, true, 4, enabled));
+}
+
+test "LOD fidelity overlap rejects quiet totals absent horizon and progress without backlog" {
+    var overlap = LodForestServiceOverlap{};
+    const quiet = [5]u64{ 10, 20, 30, 40, 50 };
+    _ = overlap.observe(quiet, 10);
+    _ = overlap.observe(quiet, 10);
+    try std.testing.expect(!overlap.overlap_seen);
+    _ = overlap.observe(.{ 11, 21, 31, 41, 51 }, 0);
+    _ = overlap.observe(.{ 11, 21, 31, 41, 51 }, 10);
+    try std.testing.expect(!overlap.overlap_seen);
+    try std.testing.expectEqual([2]bool{ false, false }, overlap.near_seen);
+    try std.testing.expect(!overlap.horizon_seen);
+    // Counter resets must not wrap into enormous apparent progress.
+    try std.testing.expectEqual([3]u64{ 0, 0, 0 }, overlap.observe(.{ 0, 0, 0, 0, 0 }, 10));
+    _ = overlap.observe(.{ 0, 1, 1, 0, 0 }, 10);
+    try std.testing.expectEqual([2]bool{ false, false }, overlap.near_seen);
+    _ = overlap.observe(.{ 1, 1, 1, 1, 1 }, 10);
+    try std.testing.expect(!overlap.overlap_seen);
+    try std.testing.expect(overlap.horizon_seen);
+}
+
+test "LOD fidelity overlap requires progress in both near lanes and horizon then latches" {
+    var overlap = LodForestServiceOverlap{};
+    _ = overlap.observe(.{ 0, 0, 0, 5, 0 }, 10);
+    _ = overlap.observe(.{ 0, 1, 1, 5, 0 }, 10);
+    try std.testing.expect(!overlap.overlap_seen);
+    try std.testing.expect(!overlap.horizon_seen);
+    // New horizon progress, not the pre-existing five, completes this latch.
+    try std.testing.expectEqual([3]u64{ 0, 0, 1 }, overlap.observe(.{ 0, 1, 1, 6, 0 }, 10));
+    try std.testing.expect(overlap.overlap_seen);
+    _ = overlap.observe(.{ 0, 1, 1, 6, 0 }, 0);
+    try std.testing.expect(overlap.overlap_seen);
+
+    overlap = .{};
+    _ = overlap.observe(.{ 0, 0, 0, 0, 0 }, 10);
+    _ = overlap.observe(.{ 1, 1, 0, 1, 1 }, 10);
+    try std.testing.expect(!overlap.overlap_seen);
+    _ = overlap.observe(.{ 1, 1, 1, 1, 1 }, 10);
+    try std.testing.expect(overlap.overlap_seen);
+}
+
+test "LOD fidelity service readiness adds overlap without weakening local acceptance" {
+    const evidence = LodForestEvidence{ .resident_chunks = 16, .ground = 1, .leaves = 778, .logs = 244 };
+    const target = LodForestTargetEvidence{ .state = .renderable, .mesh_ready = true, .projected = true, .drawn = true, .source_current = true };
+    try std.testing.expect(lodForestCaptureReady(evidence, true, 4, target, false, false));
+    try std.testing.expect(!lodForestCaptureReady(evidence, true, 4, target, true, false));
+    try std.testing.expect(lodForestCaptureReady(evidence, true, 4, target, true, true));
+    try std.testing.expect(!lodForestCaptureReady(.{}, true, 4, target, true, true));
+    try std.testing.expect(!lodForestCaptureReady(evidence, false, 4, target, true, true));
+    try std.testing.expect(!lodForestCaptureReady(evidence, true, 3, target, true, true));
+    inline for (.{ "mesh_ready", "projected", "drawn", "source_current" }) |field| {
+        var missing = target;
+        @field(missing, field) = false;
+        try std.testing.expect(!lodForestCaptureReady(evidence, true, 4, missing, true, true));
+    }
+    var enabled = target;
+    enabled.near_enabled = true;
+    try std.testing.expect(!lodForestCaptureReady(evidence, true, 4, enabled, true, true));
+    enabled.captured_summaries = 16;
+    enabled.target_summaries = 4;
+    enabled.provenance[1] = 1;
+    try std.testing.expect(lodForestCaptureReady(evidence, true, 4, enabled, true, true));
 }
 
 fn lightingBaselineScene(name: []const u8) LightingBaselineScene {

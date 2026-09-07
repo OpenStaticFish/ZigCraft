@@ -131,6 +131,8 @@ pub const LODSimplifiedData = struct {
     provenance: []LODColumnProvenance,
     vertical_span_counts: ?[]u8,
     vertical_spans: ?[]LODVerticalSpan,
+    /// Owns the grid; its pointer must be allocated with this data's allocator.
+    scene_grid: ?*@import("lod_scene.zig").SceneGrid = null,
     allocator: std.mem.Allocator,
 
     pub fn getGridSize(lod_level: LODLevel) u32 {
@@ -268,6 +270,10 @@ pub const LODSimplifiedData = struct {
         self.allocator.free(self.provenance);
         if (self.vertical_span_counts) |counts| self.allocator.free(counts);
         if (self.vertical_spans) |spans| self.allocator.free(spans);
+        if (self.scene_grid) |grid| {
+            grid.deinit();
+            self.allocator.destroy(grid);
+        }
         self.* = undefined;
     }
 
@@ -513,6 +519,7 @@ pub const LODSimplifiedData = struct {
         var total: usize = count_usize * (@sizeOf(f32) + @sizeOf(world_core.BiomeId) + @sizeOf(world_core.BlockType) + @sizeOf(u32) + @sizeOf(LODMaterialLayers) + @sizeOf(LODWaterState) + @sizeOf(LODLightingHint) + @sizeOf(LODVegetationHint) + @sizeOf(LODColumnProvenance));
         if (self.vertical_span_counts != null) total += count_usize * @sizeOf(u8);
         if (self.vertical_spans != null) total += @as(usize, @intCast(count)) * MAX_LOD_VERTICAL_SPANS * @sizeOf(LODVerticalSpan);
+        if (self.scene_grid) |grid| total += grid.memoryBytes();
         return total;
     }
 
@@ -693,6 +700,29 @@ test "LODSimplifiedData memory accounting includes optional vertical spans" {
     const count = @as(usize, @intCast(baseline.width * baseline.width));
     const span_bytes = count * (@sizeOf(u8) + MAX_LOD_VERTICAL_SPANS * @sizeOf(LODVerticalSpan));
     try std.testing.expectEqual(baseline.totalMemoryBytes() + span_bytes, rich.totalMemoryBytes());
+}
+
+test "LODSimplifiedData owns optional scene grid and accounts for its allocation" {
+    const SceneGrid = @import("lod_scene.zig").SceneGrid;
+    const allocator = std.testing.allocator;
+    var data = try LODSimplifiedData.init(allocator, .lod1);
+    defer data.deinit();
+    try std.testing.expect(data.scene_grid == null);
+    const baseline = data.totalMemoryBytes();
+    const grid = try allocator.create(SceneGrid);
+    grid.* = SceneGrid.init(allocator, 0, 0, 2, 1) catch |err| {
+        allocator.destroy(grid);
+        return err;
+    };
+    data.scene_grid = grid;
+    try grid.appendColumn(-1, 1, &.{.{
+        .min_y = 2,
+        .max_y = 4,
+        .block = .water,
+        .biome = .ocean,
+        .light = world_core.PackedLight.init(15, 0),
+    }}, 4, 4, false);
+    try std.testing.expectEqual(baseline + grid.memoryBytes(), data.totalMemoryBytes());
 }
 
 test "LODSimplifiedData setColumn seeds representative span when enabled" {

@@ -186,6 +186,7 @@ const DrawState = struct {
     current_model: Mat4 = Mat4.identity,
     current_color: [4]f32 = .{ 1.0, 1.0, 1.0, 1.0 },
     current_mask_radius: f32 = 0.0,
+    current_lod_ownership_bounds: [4]f32 = .{ 0, 0, 0, 0 },
 };
 
 const RuntimeState = struct {

@@ -58,6 +58,9 @@ pub const WorldMutationCoordinator = struct {
 
         const cp = worldToChunk(world_x, world_z);
         const data = self.storage.get(cp.chunk_x, cp.chunk_z) orelse return null;
+        // Workers can set generated before publishing their load/generation.
+        // Do not race their payload or overwrite its source lineage with an edit.
+        if (data.chunk.state == .queued_for_generation or data.chunk.state == .generating) return null;
         if (!data.chunk.generated) return null;
         const local = worldToLocal(world_x, world_z);
 
@@ -65,6 +68,7 @@ pub const WorldMutationCoordinator = struct {
         const old_block = data.chunk.getBlock(local.x, local_y, local.z);
         if (old_block == block) return null;
         data.chunk.setBlock(local.x, local_y, local.z, block);
+        data.chunk.source_kind = .edited;
 
         if (self.gpu_mesher_active) {
             if (self.gpu_block_buffer) |buf| {
@@ -148,6 +152,7 @@ test "WorldMutationCoordinator places block within bounds" {
     try testing.expectEqual(@as(u32, 64), result.local_y);
     try testing.expectEqual(@as(u32, 2), result.local_z);
     try testing.expectEqual(BlockType.stone, result.chunk_data.chunk.getBlock(1, 64, 2));
+    try testing.expectEqual(world_core.Chunk.SourceKind.edited, result.chunk_data.chunk.source_kind);
 }
 
 test "WorldMutationCoordinator ignores out-of-bounds y" {
@@ -220,8 +225,33 @@ test "WorldMutationCoordinator ignores no-op mutations" {
     data.chunk.dirty = false;
 
     var mutation = WorldMutationCoordinator.init(&storage, testing.allocator, null, false);
-    try testing.expect((try mutation.applyBlockMutation(1, 64, 2, .stone)) == null);
-    try testing.expect(!data.chunk.dirty);
+    for (std.enums.values(world_core.Chunk.SourceKind)) |kind| {
+        data.chunk.source_kind = kind;
+        const revision = data.chunk.content_revision.load(.acquire);
+        try testing.expect((try mutation.applyBlockMutation(1, 64, 2, .stone)) == null);
+        try testing.expect(!data.chunk.dirty);
+        try testing.expectEqual(kind, data.chunk.source_kind);
+        try testing.expectEqual(revision, data.chunk.content_revision.load(.acquire));
+    }
+}
+
+test "WorldMutationCoordinator waits for generation publication before editing lineage" {
+    const testing = std.testing;
+    var storage = ChunkStorage.init(testing.allocator);
+    defer storage.deinitWithoutRHI();
+    const data = try storage.getOrCreate(0, 0);
+    data.chunk.generated = true;
+    data.chunk.source_kind = .saved;
+    var mutation = WorldMutationCoordinator.init(&storage, testing.allocator, null, false);
+    for ([_]world_core.Chunk.State{ .queued_for_generation, .generating }) |state| {
+        data.chunk.state = state;
+        try testing.expect((try mutation.applyBlockMutation(1, 64, 2, .stone)) == null);
+        try testing.expectEqual(BlockType.air, data.chunk.getBlock(1, 64, 2));
+        try testing.expectEqual(world_core.Chunk.SourceKind.saved, data.chunk.source_kind);
+    }
+    data.chunk.state = .generated;
+    try testing.expect((try mutation.applyBlockMutation(1, 64, 2, .stone)) != null);
+    try testing.expectEqual(world_core.Chunk.SourceKind.edited, data.chunk.source_kind);
 }
 
 test "WorldMutationCoordinator relights water transitions" {

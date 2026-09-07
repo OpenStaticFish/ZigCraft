@@ -59,6 +59,7 @@ pub const SerializeError = error{
     DataTooShort,
     InvalidBiomeData,
     ChecksumMismatch,
+    CoordinateMismatch,
 };
 
 const BlockDataSize = CHUNK_VOLUME;
@@ -143,6 +144,23 @@ pub fn serializeChunk(chunk: *const Chunk, allocator: Allocator) ![]u8 {
     std.mem.writeInt(u32, buf[6..][0..4], crc, .little);
 
     return buf;
+}
+
+/// Transactional saved-source decode. Only persisted fields are published, so
+/// caller-owned pins, revisions, and residency state are not overwritten.
+pub fn deserializeChunkAt(data: []const u8, cx: i32, cz: i32, chunk: *Chunk) !void {
+    var scratch = Chunk.init(cx, cz);
+    try deserializeChunk(data, &scratch);
+    if (scratch.chunk_x != cx or scratch.chunk_z != cz) return SerializeError.CoordinateMismatch;
+
+    chunk.chunk_x = scratch.chunk_x;
+    chunk.chunk_z = scratch.chunk_z;
+    chunk.blocks = scratch.blocks;
+    chunk.light = scratch.light;
+    chunk.biomes = scratch.biomes;
+    chunk.heightmap = scratch.heightmap;
+    chunk.lighting_valid = scratch.lighting_valid;
+    chunk.dirty = scratch.dirty;
 }
 
 pub fn deserializeChunk(data: []const u8, chunk: *Chunk) !void {

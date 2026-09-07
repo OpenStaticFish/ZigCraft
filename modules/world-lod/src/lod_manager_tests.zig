@@ -662,18 +662,17 @@ fn chunk_derived_setBlock(chunk: *Chunk, x: u32, y: u32, z: u32, block: world_co
     chunk.setBlock(x, y, z, block);
 }
 
-test "enforceMemoryBudget shrinks finer radii under sustained pressure and spares the horizon" {
+test "enforceMemoryBudget requests reclamation without shrinking empty refinement rings" {
     const allocator = std.testing.allocator;
     var config = LODConfig{ .radii = .{ 2, 4, 8, 16, 32 }, .memory_budget_mb = 1 };
     const mgr = try buildIngestionManager(allocator, &config);
     defer mgr.deinit();
 
-    // Force sustained over-budget state with no evictable regions, so the
-    // hysteresis grow path must fire.
+    // Retained backing can exceed the budget with no evictable regions.
+    // Shrinking empty rings cannot release it and used to prevent recovery.
     mgr.memory_governor.used_bytes = 50_000_000;
     try mgr.enforceMemoryBudget();
 
-    // Finer levels (1..count-2) must have grown; coarsest (horizon) untouched.
-    try std.testing.expect(mgr.memory_governor.radius_shrink_chunks[1] > 0);
-    try std.testing.expectEqual(@as(i32, 0), mgr.memory_governor.radius_shrink_chunks[LODLevel.count - 1]);
+    try std.testing.expect(mgr.memory_governor.pressure_pending);
+    for (mgr.memory_governor.radius_shrink_chunks) |shrink| try std.testing.expectEqual(@as(i32, 0), shrink);
 }

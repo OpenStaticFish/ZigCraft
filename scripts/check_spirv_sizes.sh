@@ -33,16 +33,17 @@ while IFS= read -r shader; do
     mv "$updated" "$current"
 
     baseline_size=$(jq -r --arg shader "$shader" '.shaders[$shader] // empty' "$baseline")
+    # Explicit update mode records intentional changes to existing shaders too.
+    # Normal verification below remains strict and never rewrites the baseline.
+    if [[ "$update_baseline" == "1" ]]; then
+        jq --arg shader "$shader" --argjson size "$size" '.shaders[$shader] = $size' "$baseline" > "$updated"
+        mv "$updated" "$baseline"
+        updated_baseline=1
+        continue
+    fi
     if [[ -z "$baseline_size" ]]; then
-        if [[ "$update_baseline" == "1" ]]; then
-            printf 'SPIR-V baseline updated: new shader %s = %s bytes\n' "$shader" "$size"
-            jq --arg shader "$shader" --argjson size "$size" '.shaders[$shader] = $size' "$baseline" > "$updated"
-            mv "$updated" "$baseline"
-            updated_baseline=1
-        else
-            printf 'SPIR-V baseline missing for new shader %s (%s bytes). Run scripts/update_spirv_baseline.sh and commit the updated baseline.\n' "$shader" "$size" >&2
-            failed=1
-        fi
+        printf 'SPIR-V baseline missing for new shader %s (%s bytes). Run scripts/update_spirv_baseline.sh and commit the updated baseline.\n' "$shader" "$size" >&2
+        failed=1
         continue
     fi
 

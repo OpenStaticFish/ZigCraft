@@ -34,20 +34,32 @@ pub const RegionError = error{
     CompressionError,
     DecompressionError,
     FileTooShort,
+    ReadOnly,
 };
 
 pub const RegionFile = struct {
     file: fs.File,
     closed: bool = false,
+    read_only: bool = false,
     header: [HEADER_ENTRIES]LocationEntry,
     allocator: Allocator,
 
     pub fn open(allocator: Allocator, path: []const u8) !RegionFile {
-        const file = try fs.cwd().openFile(path, .{ .mode = .read_write });
+        return openExisting(allocator, path, false);
+    }
+
+    /// Opens an existing file without creating it or requiring write access.
+    pub fn openReadOnly(allocator: Allocator, path: []const u8) !RegionFile {
+        return openExisting(allocator, path, true);
+    }
+
+    fn openExisting(allocator: Allocator, path: []const u8, read_only: bool) !RegionFile {
+        const file = try fs.cwd().openFile(path, .{ .mode = if (read_only) .read_only else .read_write });
         errdefer file.close();
 
         var region = RegionFile{
             .file = file,
+            .read_only = read_only,
             .header = @splat(.{ .offset = 0, .sector_count = 0 }),
             .allocator = allocator,
         };
@@ -102,6 +114,7 @@ pub const RegionFile = struct {
         if (chunk_len < 1 or chunk_len > max_bytes)
             return RegionError.InvalidHeader;
         if (byte_offset + 4 + chunk_len > stat.size) return RegionError.FileTooShort;
+        if (@as(u64, chunk_len) + 4 > max_bytes) return RegionError.InvalidHeader;
 
         var comp_type_buf: [1]u8 = undefined;
         if (try self.file.preadAll(&comp_type_buf, byte_offset + 4) != comp_type_buf.len) return RegionError.FileTooShort;
@@ -120,6 +133,7 @@ pub const RegionFile = struct {
     }
 
     pub fn writeChunk(self: *RegionFile, local_x: u5, local_z: u5, data: []const u8) !void {
+        if (self.read_only) return RegionError.ReadOnly;
         const compressed = try compressZlib(self.allocator, data);
         defer self.allocator.free(compressed);
 
@@ -175,6 +189,7 @@ pub const RegionFile = struct {
     }
 
     pub fn deleteChunk(self: *RegionFile, local_x: u5, local_z: u5) !void {
+        if (self.read_only) return RegionError.ReadOnly;
         const idx = @as(u32, local_z) * 32 + @as(u32, local_x);
         self.header[idx] = .{ .offset = 0, .sector_count = 0 };
         try self.writeHeader();
@@ -186,11 +201,12 @@ pub const RegionFile = struct {
         if (stat.size < HEADER_SIZE) return RegionError.InvalidHeader;
 
         var buf: [HEADER_SIZE]u8 = undefined;
-        _ = try self.file.preadAll(&buf, 0);
+        if (try self.file.preadAll(&buf, 0) != buf.len) return RegionError.InvalidHeader;
 
         for (&self.header, 0..HEADER_ENTRIES) |*entry, i| {
             const raw = std.mem.readInt(u32, buf[i * 4 ..][0..4], .big);
             entry.* = @bitCast(raw);
+            if ((entry.offset == 0) != (entry.sector_count == 0)) return RegionError.InvalidHeader;
         }
     }
 
@@ -276,8 +292,13 @@ test "RegionFile round-trip write and read" {
 
             region.close();
 
-            var region2 = try RegionFile.open(testing.allocator, full_path);
+            var region2 = try RegionFile.openReadOnly(testing.allocator, full_path);
             defer region2.close();
+
+            try testing.expect(region2.read_only);
+            try testing.expectError(RegionError.ReadOnly, region2.writeChunk(0, 0, "must not replace data"));
+            try testing.expectError(RegionError.ReadOnly, region2.deleteChunk(0, 0));
+            try testing.expect(region2.hasChunk(0, 0));
 
             const read_data = try region2.readChunk(0, 0, testing.allocator);
             defer testing.allocator.free(read_data);

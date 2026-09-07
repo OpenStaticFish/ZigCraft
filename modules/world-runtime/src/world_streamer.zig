@@ -45,6 +45,7 @@
 //! - This improves perceived loading speed during fast travel
 
 const std = @import("std");
+const fs = @import("fs");
 const Vec3 = @import("engine-math").Vec3;
 const world_core = @import("world-core");
 const Chunk = world_core.Chunk;
@@ -79,6 +80,47 @@ const build_options = @import("world_runtime_options");
 
 pub const PlayerMovement = @import("world-lod").lod_streaming_coordinator.PlayerMovement;
 
+/// Identifies only the synchronous, pre-persistence origin preview, not an
+/// arbitrary generated chunk that happens to occupy the origin later.
+const StartupWarmup = struct {
+    chunk: *const Chunk,
+    job_token: u32,
+    content_revision: u64,
+    light_revision: u64,
+
+    fn capture(chunk: *const Chunk) StartupWarmup {
+        return .{
+            .chunk = chunk,
+            .job_token = chunk.job_token,
+            .content_revision = chunk.content_revision.load(.acquire),
+            .light_revision = chunk.light_revision.load(.acquire),
+        };
+    }
+
+    fn isPristine(self: StartupWarmup, chunk: *const Chunk, frame_serial: u64) bool {
+        return frame_serial == 0 and self.chunk == chunk and self.job_token == chunk.job_token and
+            self.content_revision == chunk.content_revision.load(.acquire) and
+            self.light_revision == chunk.light_revision.load(.acquire) and chunk.generated and !chunk.isPinned() and
+            switch (chunk.state) {
+                .generated, .mesh_ready, .renderable => true,
+                else => false,
+            };
+    }
+
+    fn savedAction(self: StartupWarmup, chunk: *const Chunk, frame_serial: u64, sm: *SaveManager, allocator: std.mem.Allocator) !enum { preserve, clean, reload } {
+        if (!self.isPristine(chunk, frame_serial)) return .preserve;
+        const scratch = try allocator.create(Chunk);
+        defer allocator.destroy(scratch);
+        scratch.* = Chunk.init(0, 0);
+        return switch (sm.readSavedChunk(0, 0, scratch)) {
+            .not_found => .clean,
+            .success, .success_relight_required => .reload,
+            .read_error => error.SavedSourceReadFailed,
+            .corrupt_data => error.SavedSourceCorrupt,
+        };
+    }
+};
+
 pub const WorldStreamer = struct {
     allocator: std.mem.Allocator,
     storage: *ChunkStorage,
@@ -96,7 +138,9 @@ pub const WorldStreamer = struct {
     vertex_allocator: *GlobalVertexAllocator,
 
     paused: bool = false,
+    workers_joined: bool = false,
     save_manager: ?*SaveManager = null,
+    startup_warmup: ?StartupWarmup = null,
 
     frame_counter: u64 = 0,
     has_scanned_missing_chunks: bool = false,
@@ -193,14 +237,19 @@ pub const WorldStreamer = struct {
         return streamer;
     }
 
-    pub fn deinit(self: *WorldStreamer) void {
+    pub fn stopWorkersAndJoin(self: *WorldStreamer) void {
+        if (self.workers_joined) return;
+        self.workers_joined = true;
         if (self.gpu_acceleration.gpu_mesher) |mesher| mesher.setRemeshCallback(null, null);
         self.gen_queue.stop();
         self.mesh_queue.stop();
 
         self.gen_pool.deinit();
         self.mesh_pool.deinit();
+    }
 
+    pub fn deinit(self: *WorldStreamer) void {
+        self.stopWorkersAndJoin();
         self.gen_queue.deinit();
         self.mesh_queue.deinit();
         self.allocator.destroy(self.gen_queue);
@@ -290,6 +339,7 @@ pub const WorldStreamer = struct {
                     continue;
                 }
                 data.chunk.state = .generated;
+                if (cx == 0 and cz == 0) self.startup_warmup = StartupWarmup.capture(&data.chunk);
             }
         }
 
@@ -338,6 +388,7 @@ pub const WorldStreamer = struct {
                 .resolve_fn = resolveChunkFromStorage,
                 .capture_near_fn = captureNearChunkFromStorage,
             });
+            mgr.scene_resolver = .{ .ptr = self, .capture_scene_fn = captureSceneChunkFromStorage };
             // Warmup predates SaveManager attachment and has not checked disk.
             // Do not promote its origin chunk to authoritative near source.
         }
@@ -348,8 +399,42 @@ pub const WorldStreamer = struct {
         self.queue_coordinator.setSaveManager(sm);
     }
 
+    /// Main-thread attachment barrier, before exposing sm to any workers.
+    /// Errors retain the preview and leave sm unborrowed, so its caller may
+    /// destroy it safely. Late attachment never discards resident world data.
+    pub fn prepareStartupPersistence(self: *WorldStreamer, sm: *SaveManager, frame_serial: u64) !void {
+        const warmup = self.startup_warmup orelse return;
+        if (self.frame_counter != 0 or frame_serial != 0) {
+            self.startup_warmup = null;
+            return;
+        }
+        self.storage.lighting_mutex.lock();
+        defer self.storage.lighting_mutex.unlock();
+        self.storage.chunks_mutex.lock();
+        defer self.storage.chunks_mutex.unlock();
+        if (self.storage.chunks.get(.{ .x = 0, .z = 0 })) |data| {
+            switch (try warmup.savedAction(&data.chunk, frame_serial, sm, self.allocator)) {
+                .preserve => {},
+                .clean => data.chunk.modified = false,
+                .reload => {
+                    // ChunkMesh.deinit retires GPU ranges through the normal
+                    // deferred allocator. Never enqueue this preview for save.
+                    self.gpu_acceleration.freeChunk(0, 0);
+                    _ = self.storage.removeUnlocked(0, 0, self.vertex_allocator);
+                    self.has_scanned_missing_chunks = false;
+                    self.lod_coordinator.forceRescan();
+                },
+            }
+        }
+        self.startup_warmup = null;
+    }
+
     pub fn requestDirtyRemesh(self: *WorldStreamer, center_cx: i32, center_cz: i32) void {
         self.queue_coordinator.requestDirtyRemesh(center_cx, center_cz);
+        if (self.lod_coordinator.lod_manager) |manager| if (manager.usesCanonicalSource()) {
+            manager.requestIngestion(center_cx, center_cz, .edited);
+            self.queue_coordinator.requestResidentSceneRefresh(center_cx, center_cz);
+        };
     }
 
     pub fn enqueueMutationLighting(self: *WorldStreamer, mutation: *WorldMutationCoordinator, result: WorldMutationCoordinator.MutationResult) !void {
@@ -674,7 +759,7 @@ pub const WorldStreamer = struct {
                 if (self.lod_coordinator.lod_manager) |manager| {
                     const retain_pending = manager.isInRange(key.x, key.z);
                     const pending_mask = manager.flushEditedChunkForUnload(key.x, key.z, chunk, retain_pending);
-                    defer_unload = retain_pending and pending_mask != 0;
+                    defer_unload = (retain_pending or manager.usesCanonicalSource()) and pending_mask != 0;
                 }
             }
 
@@ -693,15 +778,25 @@ pub const WorldStreamer = struct {
                 continue;
             }
 
-            const save_enqueued = chunk.modified and chunk.generated and self.save_manager != null;
-            if (save_enqueued) self.save_manager.?.enqueueSave(chunk);
+            self.storage.lighting_mutex.lock();
+            self.storage.chunks_mutex.lock();
+            const needs_save = chunk.modified and chunk.generated and self.save_manager != null;
+            const save_enqueued = needs_save and self.save_manager.?.tryEnqueueSave(chunk);
+            if (needs_save and !save_enqueued) {
+                chunk.state = unload_candidate.previous_state;
+                chunk.unpin();
+                self.storage.chunks_mutex.unlock();
+                self.storage.lighting_mutex.unlock();
+                continue;
+            }
+            if (save_enqueued) chunk.modified = false;
+            self.storage.chunks_mutex.unlock();
 
             self.gpu_acceleration.freeChunk(key.x, key.z);
 
             self.storage.chunks_mutex.lock();
             if (self.storage.chunks.get(key)) |data| {
                 if (&data.chunk == chunk and data.chunk.state == .unloading) {
-                    if (save_enqueued) data.chunk.modified = false;
                     data.chunk.unpin();
                     _ = self.storage.removeUnlocked(key.x, key.z, self.vertex_allocator);
                 } else {
@@ -711,6 +806,7 @@ pub const WorldStreamer = struct {
                 chunk.unpin();
             }
             self.storage.chunks_mutex.unlock();
+            self.storage.lighting_mutex.unlock();
         }
     }
 
@@ -826,6 +922,12 @@ fn processMutationLighting(raw_context: *anyopaque) void {
         log.log.warn("BLOCK_LIGHTING_ERROR: ({},{}) update failed: {}", .{ context.result.chunk_x, context.result.chunk_z, err });
     };
     context.queue_coordinator.requestDirtyRemesh(context.result.chunk_x, context.result.chunk_z);
+    if (context.queue_coordinator.lod_manager) |manager| if (manager.usesCanonicalSource()) {
+        // Main-thread captures acquire lighting -> storage after this worker
+        // completes. No source reduction or RHI calls run in this job.
+        manager.requestIngestion(context.result.chunk_x, context.result.chunk_z, .edited);
+        context.queue_coordinator.requestResidentSceneRefresh(context.result.chunk_x, context.result.chunk_z);
+    };
     const allocator = context.allocator;
     allocator.destroy(context);
 }
@@ -870,6 +972,32 @@ fn captureNearChunkFromStorage(ptr: *anyopaque, cx: i32, cz: i32) ?LODManager.Ne
     return LODManager.NearChunkSummary.capture(&entry.chunk);
 }
 
+fn captureSceneChunkFromStorage(ptr: *anyopaque, cx: i32, cz: i32, allocator: std.mem.Allocator) !?LODManager.SceneSummary {
+    const streamer: *WorldStreamer = @ptrCast(@alignCast(ptr));
+    const manager = streamer.lod_coordinator.lod_manager orelse return null;
+    const source = manager.source_hierarchy orelse return null;
+    const storage = streamer.storage;
+    storage.lighting_mutex.lock();
+    defer storage.lighting_mutex.unlock();
+    storage.chunks_mutex.lockShared();
+    defer storage.chunks_mutex.unlockShared();
+    const entry = storage.chunks.get(.{ .x = cx, .z = cz }) orelse return null;
+    switch (entry.chunk.state) {
+        .missing, .queued_for_generation, .generating => return null,
+        else => {},
+    }
+    if (!entry.chunk.generated) return null;
+    const revision = source.reserveRevision();
+    var summary = try LODManager.SceneSummary.capture(allocator, &entry.chunk);
+    summary.origin = switch (entry.chunk.source_kind) {
+        .generated => .generated,
+        .saved => .saved,
+        .edited => .live,
+    };
+    summary.revision = revision;
+    return summary;
+}
+
 test "near source resolver rejects generating chunks and returns value ownership after unload" {
     const testing = std.testing;
     const summary = capture: {
@@ -892,6 +1020,90 @@ test "near source resolver rejects generating chunks and returns value ownership
     defer source.deinit();
     try testing.expectEqual(@as(u32, 256), summary.apply(&source, 0, 0, 0, 0, 32, .edited));
     try testing.expectEqual(@as(f32, 11), source.getHeight(0, 0));
+}
+
+test "canonical resident observations preserve lineage and skip absent neighbors" {
+    const testing = std.testing;
+    var storage = ChunkStorage.init(testing.allocator);
+    defer storage.deinitWithoutRHI();
+    var queue = JobQueue.init(testing.allocator);
+    defer queue.deinit();
+    var manager = try LODManager.initCacheTestManager(testing.allocator, "");
+    defer manager.cache_io.deinit();
+    defer manager.ingestion_queue.deinit(testing.allocator);
+    const source = try LODManager.SourceHierarchy.init(testing.allocator, .{
+        .ptr = &storage,
+        .generate_heightmap_only = undefined,
+        .maybe_recenter_cache = undefined,
+        .seed = 0,
+        .identity_hash = 0,
+        .version = 1,
+    }, &queue, 16 * 1024 * 1024);
+    defer source.deinit();
+    manager.source_hierarchy = source;
+    var streamer: WorldStreamer = undefined;
+    streamer.storage = &storage;
+    streamer.lod_coordinator = .init(16);
+    streamer.setLODManager(&manager);
+    var coordinator: ChunkQueueCoordinator = undefined;
+    coordinator.storage = &storage;
+    coordinator.lod_manager = &manager;
+
+    // A travelling saved arrival with no published neighbors creates no work.
+    for (0..1024) |x| coordinator.requestResidentSceneRefresh(@intCast(x), 0);
+    try testing.expectEqual(@as(usize, 0), manager.ingestion_queue.pending_ingestions.items.len);
+    try testing.expectEqual(@as(u32, 0), manager.ingestion_queue.edit_dirty.count());
+    const neighbor = try storage.getOrCreate(1, 0);
+    neighbor.chunk.generated = true;
+    neighbor.chunk.state = .generating;
+    coordinator.requestResidentSceneRefresh(0, 0);
+    try testing.expectEqual(@as(usize, 0), manager.ingestion_queue.pending_ingestions.items.len);
+
+    neighbor.chunk.state = .renderable;
+    neighbor.chunk.setBlock(0, 1, 0, .stone);
+    neighbor.chunk.source_kind = .saved;
+    neighbor.chunk.markLightChanged();
+    coordinator.requestResidentSceneRefresh(0, 0);
+    try testing.expectEqual(@as(usize, 1), manager.ingestion_queue.pending_ingestions.items.len);
+    try testing.expectEqual(world_core.LODColumnProvenance.chunk_derived, manager.ingestion_queue.pending_ingestions.items[0].provenance);
+    // OOM retains the existing bounded observation request for another attempt.
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    manager.allocator = failing.allocator();
+    manager.drainPendingIngestionsNow();
+    manager.allocator = testing.allocator;
+    try testing.expectEqual(@as(usize, 1), manager.ingestion_queue.pending_ingestions.items.len);
+    manager.drainPendingIngestionsNow();
+    try testing.expectEqual(@as(usize, 0), manager.ingestion_queue.pending_ingestions.items.len);
+    const provider = source.provider();
+    const lease = blk: {
+        provider.lock_fn(provider.ptr);
+        defer provider.unlock_fn(provider.ptr);
+        break :blk provider.acquire_fn(provider.ptr, 1, 0).?;
+    };
+    defer lease.release();
+    try testing.expectEqual(world_core.lod_scene.Origin.saved, lease.summary.origin);
+
+    for (std.enums.values(Chunk.SourceKind)) |kind| {
+        neighbor.chunk.source_kind = kind;
+        var summary = (try captureSceneChunkFromStorage(&streamer, 1, 0, testing.allocator)).?;
+        defer summary.deinit();
+        const expected: world_core.lod_scene.Origin = switch (kind) {
+            .generated => .generated,
+            .saved => .saved,
+            .edited => .live,
+        };
+        try testing.expectEqual(expected, summary.origin);
+    }
+    // Genuine edits keep their durable provenance across temporary unavailability.
+    manager.requestIngestion(1, 0, .edited);
+    neighbor.chunk.state = .generating;
+    manager.drainPendingIngestionsNow();
+    try testing.expectEqual(@as(usize, 1), manager.ingestion_queue.pending_ingestions.items.len);
+    try testing.expectEqual(world_core.LODColumnProvenance.edited, manager.ingestion_queue.pending_ingestions.items[0].provenance);
+    neighbor.chunk.state = .renderable;
+    manager.drainPendingIngestionsNow();
+    try testing.expectEqual(@as(usize, 0), manager.ingestion_queue.pending_ingestions.items.len);
+    try testing.expectEqual(@as(u32, 0), manager.ingestion_queue.edit_dirty.count());
 }
 
 test "near source manager attachment does not capture warmup before save lookup" {
@@ -919,4 +1131,108 @@ test "near source manager attachment does not capture warmup before save lookup"
     try testing.expectEqual(@as(usize, 0), manager.near_sources.count());
     try testing.expectEqual(@as(usize, 0), manager.near_source_retries.items.len);
     try testing.expect(manager.ingestion_queue.chunk_resolver != null);
+}
+
+test "startup warmup reconciliation requires original identity revisions and frame zero" {
+    const testing = std.testing;
+    var chunk = Chunk.init(0, 0);
+    chunk.generated = true;
+    chunk.state = .renderable;
+    chunk.setBlock(0, 20, 0, .stone);
+    const warmup = StartupWarmup.capture(&chunk);
+    // Worldgen itself sets modified; it is not evidence of a later user edit.
+    try testing.expect(chunk.modified);
+    try testing.expect(warmup.isPristine(&chunk, 0));
+    try testing.expect(!warmup.isPristine(&chunk, 1));
+    var replacement = chunk;
+    try testing.expect(!warmup.isPristine(&replacement, 0));
+    chunk.pin();
+    try testing.expect(!warmup.isPristine(&chunk, 0));
+    chunk.unpin();
+    chunk.setBlock(0, 20, 0, .air);
+    chunk.setBlock(0, 20, 0, .stone);
+    try testing.expect(!warmup.isPristine(&chunk, 0));
+    const after_edit = StartupWarmup.capture(&chunk);
+    _ = chunk.light_revision.fetchAdd(1, .acq_rel);
+    try testing.expect(!after_edit.isPristine(&chunk, 0));
+}
+
+test "startup warmup saved authority chooses reload without overwriting saved blocks" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = fs.Dir{ .inner = tmp.dir };
+    var path_buffer: [fs.max_path_bytes]u8 = undefined;
+    const path = try dir.realpath(".", &path_buffer);
+    const sm = try SaveManager.init(testing.allocator, path, "warmup-priority", 42, "test");
+    defer sm.deinit();
+    var saved = Chunk.init(0, 0);
+    saved.generated = true;
+    saved.lighting_valid = true;
+    saved.setBlock(0, 20, 0, .gold_ore);
+    saved.pin();
+    defer saved.unpin();
+    try testing.expect(sm.tryEnqueueSave(&saved));
+    const failed = sm.flush();
+    defer sm.allocator.free(failed);
+    try testing.expectEqual(@as(usize, 0), failed.len);
+
+    var preview = Chunk.init(0, 0);
+    preview.generated = true;
+    preview.state = .renderable;
+    preview.setBlock(0, 20, 0, .stone);
+    const warmup = StartupWarmup.capture(&preview);
+    try testing.expect((try warmup.savedAction(&preview, 0, sm, testing.allocator)) == .reload);
+    try testing.expect((try warmup.savedAction(&preview, 1, sm, testing.allocator)) == .preserve);
+    preview.setBlock(0, 21, 0, .dirt);
+    try testing.expect((try warmup.savedAction(&preview, 0, sm, testing.allocator)) == .preserve);
+    var disk = Chunk.init(0, 0);
+    try testing.expectEqual(@import("world-persistence").LoadResult.success, sm.readSavedChunk(0, 0, &disk));
+    try testing.expectEqual(world_core.BlockType.gold_ore, disk.getBlock(0, 20, 0));
+    try testing.expectEqual(world_core.BlockType.air, disk.getBlock(0, 21, 0));
+}
+
+test "startup persistence cleans confirmed absent preview but preserves it on read errors" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = fs.Dir{ .inner = tmp.dir };
+    var path_buffer: [fs.max_path_bytes]u8 = undefined;
+    const path = try dir.realpath(".", &path_buffer);
+    const sm = try SaveManager.init(testing.allocator, path, "warmup-read-error", 42, "test");
+    defer sm.deinit();
+    var storage = ChunkStorage.init(testing.allocator);
+    defer storage.deinitWithoutRHI();
+    const origin = try storage.getOrCreate(0, 0);
+    origin.chunk.generated = true;
+    origin.chunk.state = .renderable;
+    origin.chunk.setBlock(0, 20, 0, .stone);
+    var streamer: WorldStreamer = undefined;
+    streamer.allocator = testing.allocator;
+    streamer.storage = &storage;
+    streamer.frame_counter = 0;
+    streamer.startup_warmup = StartupWarmup.capture(&origin.chunk);
+    // Confirmed absence never reaches GPU retirement or worker queues.
+    try streamer.prepareStartupPersistence(sm, 0);
+    try testing.expect(!origin.chunk.modified);
+    try testing.expect(streamer.startup_warmup == null);
+    try testing.expectEqual(origin, storage.get(0, 0).?);
+
+    origin.chunk.setBlock(0, 21, 0, .dirt);
+    streamer.startup_warmup = StartupWarmup.capture(&origin.chunk);
+    try sm.save_dir.makePath("regions");
+    const malformed = try sm.save_dir.createFile("regions/r.0.0.mca", .{});
+    defer malformed.close();
+    try malformed.writeAll("not a region header");
+    try testing.expectError(error.SavedSourceReadFailed, streamer.prepareStartupPersistence(sm, 0));
+    try testing.expect(origin.chunk.modified);
+    try testing.expect(streamer.startup_warmup != null);
+    try testing.expectEqual(origin, storage.get(0, 0).?);
+    try testing.expectEqual(world_core.BlockType.dirt, origin.chunk.getBlock(0, 21, 0));
+    // An already-streaming world is not startup reconciliation, even if a
+    // caller supplies frame serial zero. Its live edits must remain intact.
+    streamer.frame_counter = 1;
+    try streamer.prepareStartupPersistence(sm, 0);
+    try testing.expect(origin.chunk.modified);
+    try testing.expectEqual(origin, storage.get(0, 0).?);
 }

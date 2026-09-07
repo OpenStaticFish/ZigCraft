@@ -486,6 +486,11 @@ fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4, color: Vec3, mask_radius: f3
     render_state.setModelMatrix(ctx, model, color, mask_radius);
 }
 
+fn setLODOwnershipBounds(ctx_ptr: *anyopaque, bounds: [4]f32) void {
+    const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.draw.current_lod_ownership_bounds = bounds;
+}
+
 fn setInstanceBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     render_state.setInstanceBuffer(ctx, handle);
@@ -1119,6 +1124,7 @@ fn getStateContext(ctx_ptr: *anyopaque) rhi.IRenderStateContext {
 
 const VULKAN_STATE_CONTEXT_VTABLE = rhi.IRenderStateContext.VTable{
     .setModelMatrix = setModelMatrix,
+    .setLODOwnershipBounds = setLODOwnershipBounds,
     .setInstanceBuffer = setInstanceBuffer,
     .setLODInstanceBuffer = setLODInstanceBuffer,
     .setLODDescriptorStream = setLODDescriptorStream,

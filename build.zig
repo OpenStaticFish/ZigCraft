@@ -710,6 +710,9 @@ fn defineBuildSteps(
     inline for (.{
         .{ "engine-graphics", "modules/engine-graphics/src/tests.zig", engine_graphics },
         .{ "game-core", "modules/game-core/src/tests.zig", game_core },
+        .{ "world-core", "modules/world-core/src/tests.zig", modules.world_core },
+        .{ "world-persistence", "modules/world-persistence/src/tests.zig", modules.world_persistence },
+        .{ "world-runtime", "modules/world-runtime/src/tests.zig", modules.world_runtime },
     }) |entry| {
         const module_test_root = b.createModule(.{
             .root_source_file = b.path(entry[1]),
@@ -790,9 +793,11 @@ fn defineBuildSteps(
         .root_module = worldgen_overworld_test_root,
         .filters = test_filters,
     });
+    worldgen_overworld_tests.root_module.link_libc = true;
     const run_worldgen_overworld_tests = addRunArtifact(b, worldgen_overworld_tests);
     run_worldgen_overworld_tests.setEnvironmentVariable("ZIGCRAFT_LOG_LEVEL", "fatal");
     test_step.dependOn(&run_worldgen_overworld_tests.step);
+    b.step("test-worldgen-overworld", "Run CPU-only Overworld tests").dependOn(&run_worldgen_overworld_tests.step);
 
     const benchmark_phase5_gate_root = b.createModule(.{
         .root_source_file = b.path("phase5_benchmark_gate_tests.zig"),

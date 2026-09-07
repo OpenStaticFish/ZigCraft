@@ -67,8 +67,34 @@ pub const JobType = enum {
     generic,
 };
 
+/// Fixed weighted service order. A default-initialized wheel is disabled.
+pub const ServiceWheel = struct {
+    order: [16]u3 = @splat(0),
+    len: usize = 0,
+    cursor: usize = 0,
+
+    pub fn init(order: []const u3) ServiceWheel {
+        std.debug.assert(order.len > 0 and order.len <= 16);
+        var wheel: ServiceWheel = .{};
+        @memcpy(wheel.order[0..order.len], order);
+        wheel.len = order.len;
+        return wheel;
+    }
+
+    pub fn next(self: *ServiceWheel) u3 {
+        std.debug.assert(self.len > 0);
+        const lane = self.order[self.cursor];
+        self.cursor = (self.cursor + 1) % self.len;
+        return lane;
+    }
+};
+
 pub const Job = struct {
     type: JobType,
+
+    service_lane: u3 = 0,
+    /// Queue-owned arrival ticket, assigned only with service lanes enabled.
+    service_sequence: u64 = 0,
 
     // Priority value for generic jobs (lower = higher priority)
     priority: i32 = 0,
@@ -166,6 +192,8 @@ pub const JobQueue = struct {
     needs_reprioritize: bool = false,
     // Threshold: only reprioritize if queue has this many items
     reprioritize_threshold: usize = REPRIORITIZE_THRESHOLD,
+    service_wheel: ServiceWheel = .{},
+    next_service_sequence: u64 = 0,
 
     fn compareJobs(context: void, a: Job, b: Job) std.math.Order {
         _ = context;
@@ -190,6 +218,15 @@ pub const JobQueue = struct {
         self.jobs.deinit(self.allocator);
     }
 
+    /// Opt in on an empty queue before starting workers or submitting jobs.
+    /// Repeated lanes receive proportionally more service opportunities.
+    pub fn enableServiceLanes(self: *JobQueue, order: []const u3) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        std.debug.assert(self.jobs.count() == 0);
+        self.service_wheel = ServiceWheel.init(order);
+    }
+
     pub fn push(self: *JobQueue, job: Job) !void {
         _ = try self.tryPush(job);
     }
@@ -199,7 +236,12 @@ pub const JobQueue = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         if (self.stopped or self.paused) return false;
-        try self.jobs.push(self.allocator, job);
+        var queued_job = job;
+        if (self.service_wheel.len != 0) {
+            queued_job.service_sequence = self.next_service_sequence;
+        }
+        try self.jobs.push(self.allocator, queued_job);
+        if (self.service_wheel.len != 0) self.next_service_sequence += 1;
         self.cond.signal();
         return true;
     }
@@ -220,12 +262,42 @@ pub const JobQueue = struct {
 
         if (self.stopped and self.jobs.count() == 0) return null;
 
+        return self.popLocked();
+    }
+
+    /// Returns immediately when no job is available.
+    pub fn tryPop(self: *JobQueue) ?Job {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.popLocked();
+    }
+
+    fn popLocked(self: *JobQueue) ?Job {
+        if (self.paused or self.jobs.count() == 0) return null;
+
         // Lazy reprioritization: only rebuild if marked dirty and queue is large
         if (self.needs_reprioritize and self.jobs.count() >= self.reprioritize_threshold) {
             self.doReprioritize();
             self.needs_reprioritize = false;
         }
 
+        if (self.service_wheel.len != 0) {
+            // Heap position and distance can change; arrival tickets cannot.
+            var oldest: [8]?usize = @splat(null);
+            for (self.jobs.items, 0..) |job, index| {
+                if (oldest[job.service_lane]) |previous| {
+                    if (job.service_sequence >= self.jobs.items[previous].service_sequence) continue;
+                }
+                oldest[job.service_lane] = index;
+            }
+            for (0..self.service_wheel.len) |_| {
+                if (oldest[self.service_wheel.next()]) |index| {
+                    return self.jobs.popIndex(index);
+                }
+            }
+        }
+
+        // Unscheduled lanes retain heap service when all scheduled lanes are empty.
         return self.jobs.pop();
     }
 

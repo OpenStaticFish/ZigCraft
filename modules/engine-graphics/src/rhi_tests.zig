@@ -600,6 +600,7 @@ const MockContext = struct {
 
     const MOCK_STATE_VTABLE = rhi.IRenderStateContext.VTable{
         .setModelMatrix = undefined,
+        .setLODOwnershipBounds = undefined,
         .setInstanceBuffer = undefined,
         .setLODInstanceBuffer = undefined,
         .setLODDescriptorStream = undefined,

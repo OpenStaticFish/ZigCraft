@@ -383,8 +383,6 @@ pub const TerrainShapeGenerator = struct {
         phase_data: *ChunkPhaseData,
         world_x: i32,
         world_z: i32,
-        cache_center_x: i32,
-        cache_center_z: i32,
         stop_flag: ?*const bool,
     ) bool {
         const controls = region_pkg.RegionControlCorners.init(
@@ -506,41 +504,41 @@ pub const TerrainShapeGenerator = struct {
 
         const EDGE_GRID_SIZE = CHUNK_SIZE_X / biome_mod.EDGE_STEP;
 
-        if (isNearCacheCenter(world_x, world_z, cache_center_x, cache_center_z)) {
-            var gz: u32 = 0;
-            while (gz < EDGE_GRID_SIZE) : (gz += 1) {
-                if (stop_flag) |sf| if (sf.*) return false;
-                var gx: u32 = 0;
-                while (gx < EDGE_GRID_SIZE) : (gx += 1) {
-                    const sample_x = gx * biome_mod.EDGE_STEP + biome_mod.EDGE_STEP / 2;
-                    const sample_z = gz * biome_mod.EDGE_STEP + biome_mod.EDGE_STEP / 2;
-                    const sample_idx = sample_x + sample_z * CHUNK_SIZE_X;
-                    const base_biome = phase_data.biome_ids[sample_idx];
-                    const sample_wx = addWorldOffset(world_x, sample_x);
-                    const sample_wz = addWorldOffset(world_z, sample_z);
-                    const edge_info = self.detectBiomeEdge(sample_wx, sample_wz, base_biome);
+        // Transitions affect final blocks and decorations, not just LOD detail.
+        // Full chunks must use the same rules regardless of cache/camera location.
+        var gz: u32 = 0;
+        while (gz < EDGE_GRID_SIZE) : (gz += 1) {
+            if (stop_flag) |sf| if (sf.*) return false;
+            var gx: u32 = 0;
+            while (gx < EDGE_GRID_SIZE) : (gx += 1) {
+                const sample_x = gx * biome_mod.EDGE_STEP + biome_mod.EDGE_STEP / 2;
+                const sample_z = gz * biome_mod.EDGE_STEP + biome_mod.EDGE_STEP / 2;
+                const sample_idx = sample_x + sample_z * CHUNK_SIZE_X;
+                const base_biome = phase_data.biome_ids[sample_idx];
+                const sample_wx = addWorldOffset(world_x, sample_x);
+                const sample_wz = addWorldOffset(world_z, sample_z);
+                const edge_info = self.detectBiomeEdge(sample_wx, sample_wz, base_biome);
 
-                    if (edge_info.edge_band != .none) {
-                        if (edge_info.neighbor_biome) |neighbor| {
-                            if (biome_mod.getTransitionBiome(base_biome, neighbor)) |transition_biome| {
-                                var cell_z: u32 = 0;
-                                while (cell_z < biome_mod.EDGE_STEP) : (cell_z += 1) {
-                                    var cell_x: u32 = 0;
-                                    while (cell_x < biome_mod.EDGE_STEP) : (cell_x += 1) {
-                                        const lx = gx * biome_mod.EDGE_STEP + cell_x;
-                                        const lz = gz * biome_mod.EDGE_STEP + cell_z;
-                                        if (lx < CHUNK_SIZE_X and lz < CHUNK_SIZE_Z) {
-                                            const cell_idx = lx + lz * CHUNK_SIZE_X;
-                                            const original_biome = phase_data.biome_ids[cell_idx];
-                                            phase_data.secondary_biome_ids[cell_idx] = original_biome;
-                                            phase_data.biome_ids[cell_idx] = transition_biome;
-                                            phase_data.biome_blends[cell_idx] = switch (edge_info.edge_band) {
-                                                .inner => 0.3,
-                                                .middle => 0.2,
-                                                .outer => 0.1,
-                                                .none => 0.0,
-                                            };
-                                        }
+                if (edge_info.edge_band != .none) {
+                    if (edge_info.neighbor_biome) |neighbor| {
+                        if (biome_mod.getTransitionBiome(base_biome, neighbor)) |transition_biome| {
+                            var cell_z: u32 = 0;
+                            while (cell_z < biome_mod.EDGE_STEP) : (cell_z += 1) {
+                                var cell_x: u32 = 0;
+                                while (cell_x < biome_mod.EDGE_STEP) : (cell_x += 1) {
+                                    const lx = gx * biome_mod.EDGE_STEP + cell_x;
+                                    const lz = gz * biome_mod.EDGE_STEP + cell_z;
+                                    if (lx < CHUNK_SIZE_X and lz < CHUNK_SIZE_Z) {
+                                        const cell_idx = lx + lz * CHUNK_SIZE_X;
+                                        const original_biome = phase_data.biome_ids[cell_idx];
+                                        phase_data.secondary_biome_ids[cell_idx] = original_biome;
+                                        phase_data.biome_ids[cell_idx] = transition_biome;
+                                        phase_data.biome_blends[cell_idx] = switch (edge_info.edge_band) {
+                                            .inner => 0.3,
+                                            .middle => 0.2,
+                                            .outer => 0.1,
+                                            .none => 0.0,
+                                        };
                                     }
                                 }
                             }
@@ -723,14 +721,6 @@ pub const TerrainShapeGenerator = struct {
 
 fn addWorldOffset(base: i32, offset: anytype) i32 {
     return clampI32(@as(i64, base) + @as(i64, @intCast(offset)));
-}
-
-fn isNearCacheCenter(world_x: i32, world_z: i32, cache_center_x: i32, cache_center_z: i32) bool {
-    const dx = @as(i64, world_x) - @as(i64, cache_center_x);
-    const dz = @as(i64, world_z) - @as(i64, cache_center_z);
-    if (dx <= -256 or dx >= 256 or dz <= -256 or dz >= 256) return false;
-
-    return dx * dx + dz * dz < 256 * 256;
 }
 
 fn floatToI32(value: f32) i32 {

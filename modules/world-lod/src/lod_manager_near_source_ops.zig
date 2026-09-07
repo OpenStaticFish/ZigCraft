@@ -13,6 +13,7 @@ pub fn memoryBytes(self: *const Self) usize {
 }
 
 pub fn captureResolved(self: *Self, cx: i32, cz: i32, kind: Self.NearSourceKind) bool {
+    if (self.usesCanonicalSource()) return false;
     if (!self.near_source_enabled or self.benchmark_fixture_active) return false;
     self.ingestion_queue.mutex.lock();
     const resolver = self.ingestion_queue.chunk_resolver;
@@ -28,6 +29,7 @@ pub fn captureResolved(self: *Self, cx: i32, cz: i32, kind: Self.NearSourceKind)
 }
 
 pub fn submit(self: *Self, cx: i32, cz: i32, capture: Self.NearSourceCapture) bool {
+    if (self.usesCanonicalSource()) return false;
     if (!self.near_source_enabled or self.benchmark_fixture_active) return false;
     self.mutex.lock();
     defer self.mutex.unlock();

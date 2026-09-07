@@ -179,12 +179,21 @@ pub const CompactLODTile = struct {
     neighbor_apron_mask: u8 = 0,
     samples: []CompactLODSample,
 
-    pub const Support = enum { supported, invalid_lod, invalid_source, vertical_spans, water_topology };
+    pub const Support = enum { supported, invalid_lod, invalid_source, canonical_scene, vertical_spans, vegetation_topology, water_topology };
 
     pub fn support(source: *const LODSimplifiedData, lod_level: LODLevel) Support {
+        // V1's heightfield cannot reproduce canonical occupancy, strata,
+        // per-span RGB light, or partial footprints. Preserve the source and
+        // select expanded topology, regardless of descriptor qualification.
+        if (source.scene_grid != null) return .canonical_scene;
         if (lod_level != .lod3 and lod_level != .lod4) return .invalid_lod;
         if (!LODSimplifiedData.isSupportedGridSize(lod_level, source.width)) return .invalid_source;
         if (hasUnsupportedVerticalSpans(source)) return .vertical_spans;
+        // Encoding a vegetation hint does not render it: V1 emits only the
+        // terrain/water grid. Forests need expanded geometry even without spans.
+        for (source.vegetation) |vegetation| {
+            if (vegetation.tree_coverage > 0) return .vegetation_topology;
+        }
         if (hasUnsupportedWaterTopology(source)) return .water_topology;
         return .supported;
     }
@@ -194,7 +203,7 @@ pub const CompactLODTile = struct {
             .supported => {},
             .invalid_lod => return TileError.InvalidLod,
             .invalid_source => return TileError.InvalidSourceData,
-            .vertical_spans, .water_topology => return TileError.UnsupportedSourceFeatures,
+            .canonical_scene, .vertical_spans, .vegetation_topology, .water_topology => return TileError.UnsupportedSourceFeatures,
         }
         const source_count = squareCount(source.width) orelse return TileError.InvalidSourceData;
         if (source.heightmap.len != source_count or
@@ -546,6 +555,10 @@ test "CompactLODTile round trips its versioned little-endian payload" {
     source.setColumn(2, 3, 123.125, .plains, .{ .surface = .grass, .subsurface = .dirt, .foundation = .stone }, 0xaabb_ccdd, .{ .is_surface = true, .surface_height = 124.25, .depth = 3.5, .coverage = 1.0 }, .{ .sky_light = 15, .block_light = 7, .ambient_occlusion = 0.5 }, .{ .tree_coverage = 0.5, .avg_tree_height = 12.5, .offset_x = 0.25, .offset_z = 0.75, .trunk = .wood, .leaves = .leaves });
     source.setColumnProvenance(2, 3, .edited);
 
+    try std.testing.expectError(TileError.UnsupportedSourceFeatures, CompactLODTile.initFromSimplified(allocator, .lod3, &source));
+    try std.testing.expectEqual(@as(f32, 0.5), source.vegetation[2 + 3 * source.width].tree_coverage);
+    source.vegetation[2 + 3 * source.width] = .empty;
+
     var tile = try CompactLODTile.initFromSimplified(allocator, .lod3, &source);
     defer tile.deinit();
     const wire = try tile.serialize(allocator);
@@ -569,10 +582,10 @@ test "CompactLODTile clamps and rounds quantized source values deterministically
     source.setColumn(0, 0, 1.07, .plains, LODMaterialLayers.default(.stone), 0, .{ .is_surface = true, .surface_height = 9999.0, .depth = 9999.0, .coverage = 2.0 }, .{ .sky_light = 255, .block_light = 99, .ambient_occlusion = -1.0 }, .{ .tree_coverage = 2.0, .avg_tree_height = 999.0, .offset_x = 0.0, .offset_z = 0.0, .trunk = .air, .leaves = .air });
     source.setHeight(1, 0, -9999.0);
 
-    var tile = try CompactLODTile.initFromSimplified(allocator, .lod4, &source);
-    defer tile.deinit();
-    const first = tile.sample(0, 0).?.decode();
-    const second = tile.sample(1, 0).?.decode();
+    try std.testing.expectError(TileError.UnsupportedSourceFeatures, CompactLODTile.initFromSimplified(allocator, .lod4, &source));
+    // Wire quantizers remain testable independently of render eligibility.
+    const first = packSourceColumn(&source, 0).decode();
+    const second = packSourceColumn(&source, 1).decode();
     try std.testing.expectEqual(@as(f32, 1.125), first.terrain_height);
     try std.testing.expectEqual(@as(f32, 4095.875), first.water.surface_height);
     try std.testing.expectEqual(@as(f32, 63.75), first.water.depth);

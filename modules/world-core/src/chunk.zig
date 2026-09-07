@@ -16,6 +16,9 @@ pub const MAX_LIGHT = @import("chunk_constants.zig").MAX_LIGHT;
 pub const PackedLight = @import("light.zig").PackedLight;
 
 pub const Chunk = struct {
+    /// Runtime geometry lineage, independent of derived lighting and save admission.
+    pub const SourceKind = enum { generated, saved, edited };
+
     pub const State = enum {
         missing,
         queued_for_generation,
@@ -50,6 +53,9 @@ pub const Chunk = struct {
     force_cpu_mesh: bool = false,
     generated: bool = false,
     modified: bool = false,
+    source_kind: SourceKind = .generated,
+    /// In-process canonical snapshot order; never serialized as world authority.
+    canonical_save_order: u64 = 0,
     /// Persisted with chunk format v3; v2 chunks are treated as stale lighting.
     lighting_valid: bool = false,
     pin_count: std.atomic.Value(u32),

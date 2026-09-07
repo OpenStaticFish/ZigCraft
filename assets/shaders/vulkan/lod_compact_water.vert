@@ -12,6 +12,9 @@ layout(location = 8) out float vViewDepth;
 layout(location = 9) out vec4 vClipPos;
 layout(location = 10) out float vMaskRadius;
 layout(location = 11) out float vLODFade;
+layout(location = 18) out vec2 vLODLocalXZ;
+layout(location = 19) flat out vec4 vLODOwnershipBounds;
+layout(location = 20) flat out vec2 vLODLocalNormalXZ;
 
 layout(set = 0, binding = 0) uniform Global {
     mat4 view_proj;
@@ -35,7 +38,7 @@ layout(set = 0, binding = 0) uniform Global {
 layout(set = 0, binding = 16) readonly buffer Samples {
     uvec4 sample_words[];
 } samples;
-struct CompactInstance { mat4 model; vec4 params; uvec4 words; };
+struct CompactInstance { mat4 model; vec4 params; uvec4 words; vec4 ownership_bounds; };
 layout(set = 0, binding = 17) readonly buffer CompactInstances {
     CompactInstance items[];
 } compact_instances;
@@ -51,6 +54,7 @@ layout(push_constant) uniform CompactDraw {
     uint layer;
     float skirt_depth;
     uint edge_masks;
+    vec4 ownership_bounds;
 } draw_data;
 
 bool indirectMode() { return draw_data.layer == 2u; }
@@ -109,6 +113,9 @@ void collapsePrimitiveVertex() {
     vClipPos = gl_Position;
     vMaskRadius = 0.0;
     vLODFade = 0.0;
+    vLODLocalXZ = vec2(0.0);
+    vLODOwnershipBounds = vec4(0.0);
+    vLODLocalNormalXZ = vec2(0.0);
 }
 
 void main() {
@@ -137,6 +144,9 @@ void main() {
     }
 
     float water_height = float(decodeSigned16(packed.x, 16u)) * (1.0 / 8.0);
+    vLODLocalXZ = vec2(float(x), float(z)) * params.z;
+    vLODLocalNormalXZ = vec2(0.0);
+    vLODOwnershipBounds = indirectMode() ? compact_instances.items[gl_InstanceIndex].ownership_bounds : draw_data.ownership_bounds;
     vec4 world_pos = tileModel() * vec4(float(x) * params.z, water_height, float(z) * params.z, 1.0);
     vec4 clip_pos = global.view_proj * world_pos;
     gl_Position = clip_pos;

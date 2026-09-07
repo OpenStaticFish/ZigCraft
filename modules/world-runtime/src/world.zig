@@ -90,7 +90,8 @@ const LoadResult = @import("world-persistence").LoadResult;
 const GpuBlockBuffer = world_meshing.GpuBlockBuffer;
 const WorldMutationCoordinator = @import("world_mutation.zig").WorldMutationCoordinator;
 
-fn lodGeneratorFromGenerator(generator: Generator) LODGenerator {
+fn lodGeneratorFromGenerator(world: *World) LODGenerator {
+    const generator = world.generator;
     return .{
         .ptr = generator.ptr,
         .generate_heightmap_only = generator.vtable.generateHeightmapOnly,
@@ -98,7 +99,501 @@ fn lodGeneratorFromGenerator(generator: Generator) LODGenerator {
         .seed = generator.getSeed(),
         .identity_hash = std.hash.Wyhash.hash(0, generator.info.name),
         .version = generator.info.version,
+        .summary_context = world,
+        .load_chunk_summary = loadCanonicalSummary,
+        .generate_chunk_summary = generateCanonicalSummary,
+        .saved_source_epoch = canonicalSavedEpoch,
     };
+}
+
+fn loadCanonicalSummary(ptr: *anyopaque, cx: i32, cz: i32, allocator: std.mem.Allocator) !?world_core.lod_scene.ChunkSummary {
+    const world: *World = @ptrCast(@alignCast(ptr));
+    const sm = world.save_manager orelse return null;
+    const scratch = try allocator.create(Chunk);
+    defer allocator.destroy(scratch);
+    scratch.* = Chunk.init(cx, cz);
+    switch (sm.readSavedChunk(cx, cz, scratch)) {
+        .not_found => return null,
+        .read_error => return error.SavedSourceReadFailed,
+        .corrupt_data => return error.SavedSourceCorrupt,
+        .success => {},
+        .success_relight_required => {
+            // Strict reads retain stale light bytes. Rebuild only this worker's
+            // saved scratch, using generation's chunk-local lighting passes;
+            // never reconcile against mutable resident chunks or regenerate blocks.
+            try gen_interface.LightingComputer.computeSkylight(scratch, allocator);
+            try gen_interface.LightingComputer.computeBlockLight(scratch, allocator);
+            scratch.lighting_valid = true;
+        },
+    }
+    var summary = try world_core.lod_scene.ChunkSummary.capture(allocator, scratch);
+    summary.origin = .saved;
+    return summary;
+}
+
+fn generateCanonicalSummary(ptr: *anyopaque, cx: i32, cz: i32, allocator: std.mem.Allocator, cancel: ?*const std.atomic.Value(bool)) !world_core.lod_scene.ChunkSummary {
+    const world: *World = @ptrCast(@alignCast(ptr));
+    if (cancel) |flag| if (flag.load(.acquire)) return error.Cancelled;
+    const scratch = try allocator.create(Chunk);
+    defer allocator.destroy(scratch);
+    scratch.* = Chunk.init(cx, cz);
+    // Generator's legacy bool pointer is not atomic. Check at one-chunk
+    // boundaries rather than aliasing atomic storage through that API.
+    try world.generator.generate(scratch, null);
+    if (cancel) |flag| if (flag.load(.acquire)) return error.Cancelled;
+    if (!scratch.generated) return error.IncompleteGeneration;
+    var summary = try world_core.lod_scene.ChunkSummary.capture(allocator, scratch);
+    summary.origin = .generated;
+    return summary;
+}
+
+fn canonicalSavedEpoch(ptr: *anyopaque) u64 {
+    const world: *World = @ptrCast(@alignCast(ptr));
+    return if (world.save_manager) |sm| sm.sourceEpoch() else 0;
+}
+
+fn canonicalSnapshotOrder(ptr: *anyopaque) u64 {
+    const source: *LODManager.SourceHierarchy = @ptrCast(@alignCast(ptr));
+    return source.reserveRevision();
+}
+
+fn canonicalChunkCommitted(ptr: *anyopaque, chunk: *const Chunk) void {
+    const world: *World = @ptrCast(@alignCast(ptr));
+    const source = if (world.lod) |lod| lod.manager.source_hierarchy else null;
+    // Publish the durable ordering fence even when allocating a summary fails.
+    if (source) |hierarchy| hierarchy.noteCommitted(.{ .cx = chunk.chunk_x, .cz = chunk.chunk_z }, chunk.canonical_save_order, null);
+    // Save callbacks run after region/queue locks are released. Geometry
+    // lineage can become saved even when newer derived lighting is dirty.
+    world.storage.lighting_mutex.lock();
+    world.storage.chunks_mutex.lockShared();
+    if (world.storage.chunks.get(.{ .x = chunk.chunk_x, .z = chunk.chunk_z })) |data| {
+        switch (data.chunk.state) {
+            .missing, .queued_for_generation, .generating => {},
+            else => if (data.chunk.source_kind == .edited and
+                data.chunk.content_revision.load(.acquire) == chunk.content_revision.load(.acquire))
+            {
+                data.chunk.source_kind = .saved;
+            },
+        }
+    }
+    world.storage.chunks_mutex.unlockShared();
+    world.storage.lighting_mutex.unlock();
+
+    const lod = world.lod orelse return;
+    const manager = lod.manager;
+    const hierarchy = source orelse return;
+    // SaveManager lends the same immutable snapshot that just committed.
+    var summary = LODManager.SceneSummary.capture(manager.allocator, chunk) catch |err| {
+        log.log.warn("Canonical committed capture failed ({}, {}): {}", .{ chunk.chunk_x, chunk.chunk_z, err });
+        return;
+    };
+    summary.origin = .saved;
+    summary.revision = chunk.canonical_save_order;
+    hierarchy.commitSaved(summary);
+}
+
+test "canonical save callback preserves newer edits and independent lighting revisions" {
+    const testing = std.testing;
+    var world: World = undefined;
+    world.storage = ChunkStorage.init(testing.allocator);
+    defer world.storage.deinitWithoutRHI();
+    world.lod = null;
+    const resident = try world.storage.getOrCreate(0, 0);
+    resident.chunk.generated = true;
+    resident.chunk.state = .renderable;
+    resident.chunk.source_kind = .saved;
+    var mutation = WorldMutationCoordinator.init(&world.storage, testing.allocator, null, false);
+    _ = try mutation.applyBlockMutation(0, 0, 0, .stone);
+    const old = resident.chunk;
+    _ = try mutation.applyBlockMutation(1, 0, 0, .gold_ore);
+    canonicalChunkCommitted(&world, &old);
+    try testing.expectEqual(Chunk.SourceKind.edited, resident.chunk.source_kind);
+    try testing.expect(resident.chunk.modified);
+
+    const current = resident.chunk;
+    resident.chunk.markLightChanged();
+    canonicalChunkCommitted(&world, &current);
+    try testing.expectEqual(Chunk.SourceKind.saved, resident.chunk.source_kind);
+    try testing.expectEqual(@as(u64, 1), resident.chunk.light_revision.load(.acquire));
+    try testing.expectEqual(current.content_revision.load(.acquire), resident.chunk.content_revision.load(.acquire));
+    try testing.expect(resident.chunk.modified);
+    try testing.expectEqual(BlockType.gold_ore, resident.chunk.getBlock(1, 0, 0));
+}
+
+const CanonicalOrderFixture = struct {
+    const a = std.testing.allocator;
+    tmp: std.testing.TmpDir,
+    world: World = undefined,
+    lod: WorldLOD = undefined,
+    streamer: WorldStreamer = undefined,
+    manager: LODManager = undefined,
+    queue: JobQueue,
+    sm: *SaveManager,
+    chunk: *Chunk = undefined,
+
+    fn init() !*@This() {
+        const self = try a.create(@This());
+        errdefer a.destroy(self);
+        var tmp = std.testing.tmpDir(.{});
+        errdefer tmp.cleanup();
+        const fs = @import("fs");
+        const dir = fs.Dir{ .inner = tmp.dir };
+        var path: [fs.max_path_bytes]u8 = undefined;
+        const sm = try SaveManager.init(a, try dir.realpath(".", &path), "snapshot-order", 0, "test");
+        errdefer sm.deinit();
+        self.* = .{ .tmp = tmp, .queue = JobQueue.init(a), .sm = sm };
+        errdefer self.queue.deinit();
+        self.world.storage = ChunkStorage.init(a);
+        errdefer self.world.storage.deinitWithoutRHI();
+        self.world.save_manager = sm;
+        self.world.lod = &self.lod;
+        self.manager = try LODManager.initCacheTestManager(a, "");
+        errdefer self.manager.cache_io.deinit();
+        self.manager.source_hierarchy = try LODManager.SourceHierarchy.init(a, .{
+            .ptr = &self.world,
+            .generate_heightmap_only = undefined,
+            .maybe_recenter_cache = undefined,
+            .seed = 0,
+            .identity_hash = 0,
+            .version = 1,
+            .load_chunk_summary = loadCanonicalSummary,
+            .saved_source_epoch = canonicalSavedEpoch,
+        }, &self.queue, 16 * 1024 * 1024);
+        errdefer self.manager.source_hierarchy.?.deinit();
+        self.lod.manager = &self.manager;
+        self.streamer.storage = &self.world.storage;
+        self.streamer.lod_coordinator = .init(16);
+        self.streamer.setLODManager(&self.manager);
+        self.chunk = &(try self.world.storage.getOrCreate(0, 0)).chunk;
+        self.chunk.generated = true;
+        self.chunk.state = .renderable;
+        self.chunk.lighting_valid = true;
+        sm.setSnapshotOrderProvider(self.manager.source_hierarchy.?, canonicalSnapshotOrder);
+        sm.setSavedCallback(&self.world, canonicalChunkCommitted);
+        return self;
+    }
+
+    fn deinit(self: *@This()) void {
+        self.sm.deinit();
+        self.queue.stop();
+        self.manager.source_hierarchy.?.deinit();
+        self.manager.ingestion_queue.deinit(a);
+        self.manager.cache_io.deinit();
+        self.queue.deinit();
+        self.world.storage.deinitWithoutRHI();
+        self.tmp.cleanup();
+        a.destroy(self);
+    }
+
+    fn edit(self: *@This(), block: BlockType) !void {
+        var mutation = WorldMutationCoordinator.init(&self.world.storage, a, null, false);
+        _ = try mutation.applyBlockMutation(0, 0, 0, block);
+    }
+
+    fn enqueue(self: *@This()) !void {
+        self.world.storage.lighting_mutex.lock();
+        defer self.world.storage.lighting_mutex.unlock();
+        self.chunk.pin();
+        defer self.chunk.unpin();
+        try std.testing.expect(self.sm.tryEnqueueSave(self.chunk));
+    }
+
+    fn flush(self: *@This()) !void {
+        const failed = self.sm.flush();
+        defer a.free(failed);
+        try std.testing.expectEqual(@as(usize, 0), failed.len);
+        try std.testing.expectEqual(@as(usize, 0), self.sm.pending_saves.load(.acquire));
+    }
+
+    fn prepare(self: *@This()) !void {
+        const provider = self.manager.source_hierarchy.?.provider();
+        try provider.prepare_fn(provider.ptr, 0, 0, 0, 0, true, null);
+    }
+
+    fn acquire(self: *@This()) ?LODManager.SourceHierarchy.Lease {
+        const provider = self.manager.source_hierarchy.?.provider();
+        provider.lock_fn(provider.ptr);
+        defer provider.unlock_fn(provider.ptr);
+        return provider.acquire_fn(provider.ptr, 0, 0);
+    }
+};
+
+test "canonical saved relight repairs missing stale and legacy lights before cache persistence" {
+    const testing = std.testing;
+    const a = testing.allocator;
+    const persistence = @import("world-persistence");
+    const fs = @import("fs");
+    const identity: persistence.summary_store.Identity = .{ .seed = 0, .generator_hash = 0, .generator_version = 1 };
+    for ([_]enum { missing, stale, legacy }{ .missing, .stale, .legacy }) |mode| {
+        const f = try CanonicalOrderFixture.init();
+        defer f.deinit();
+        // A roof, an elevated saved emitter and a floating block with air gaps.
+        // Leave the heightmap at zero: relighting must inspect actual saved blocks.
+        for (0..CHUNK_SIZE_Z) |z| for (0..CHUNK_SIZE_X) |x| {
+            f.chunk.setBlock(@intCast(x), 120, @intCast(z), .stone);
+        };
+        f.chunk.setBlock(8, 100, 8, .glowstone);
+        f.chunk.setBlock(8, 64, 8, .gold_ore);
+        f.chunk.setBiome(8, 8, .desert);
+        if (mode != .missing) @memset(&f.chunk.light, world_core.PackedLight.initRGB(3, 15, 15, 15));
+        f.chunk.lighting_valid = mode == .legacy;
+        const bytes = try persistence.chunk_serializer.serializeChunk(f.chunk, a);
+        defer a.free(bytes);
+        if (mode == .legacy) bytes[4] = 2;
+        const path = try fs.path.join(a, &.{ f.sm.save_dir_path, "regions/r.0.0.mca" });
+        defer a.free(path);
+        var region = try persistence.RegionFile.create(a, path);
+        defer region.close();
+        try region.writeChunk(0, 0, bytes);
+
+        const scratch = try a.create(Chunk);
+        defer a.destroy(scratch);
+        scratch.* = Chunk.init(0, 0);
+        try testing.expectEqual(LoadResult.success_relight_required, f.sm.readSavedChunk(0, 0, scratch));
+        var stale = try world_core.lod_scene.ChunkSummary.capture(a, scratch);
+        defer stale.deinit();
+        stale.origin = .saved;
+        try persistence.summary_store.write(a, f.sm.save_dir_path, identity, &stale);
+        const epoch = f.sm.sourceEpoch();
+
+        // Both cold repair and a fresh hierarchy over its persisted sidecar must
+        // use the strict saved callback, not trust lighting-free fingerprints.
+        for (0..2) |_| {
+            const source = try LODManager.SourceHierarchy.init(a, f.manager.source_hierarchy.?.generator, &f.queue, 16 * 1024 * 1024);
+            defer source.deinit();
+            defer while (f.queue.tryPop()) |job| job.data.generic.process_fn(job.data.generic.context);
+            try source.setPersistence(f.sm.save_dir_path);
+            const provider = source.provider();
+            try provider.prepare_fn(provider.ptr, 0, 0, 0, 0, true, null);
+            provider.lock_fn(provider.ptr);
+            const lease = provider.acquire_fn(provider.ptr, 0, 0).?;
+            provider.unlock_fn(provider.ptr);
+            defer lease.release();
+            try testing.expectEqual(world_core.lod_scene.Origin.saved, lease.summary.origin);
+            try testing.expectEqual(stale.fingerprint(), lease.summary.fingerprint());
+            const roof = lease.summary.column(0, 0)[0];
+            try testing.expectEqualDeep(world_core.PackedLight.init(15, 0), roof.light_top);
+            try testing.expectEqualDeep(world_core.PackedLight.init(0, 0), roof.light_bottom);
+            const emitter = lease.summary.column(8, 8)[1];
+            const rgb = block_registry.getBlockDefinition(.glowstone).light_emission;
+            const emitted = world_core.PackedLight.initRGB(0, rgb[0] - 1, rgb[1] - 1, rgb[2] - 1);
+            try testing.expectEqualDeep(emitted, emitter.light_top);
+            try testing.expectEqualDeep(emitted, emitter.light_bottom);
+            try testing.expectEqualDeep(world_core.PackedLight.init(0, 0), lease.summary.column(8, 8)[0].light_top);
+
+            try testing.expect(f.queue.count() > 0);
+            while (f.queue.tryPop()) |job| job.data.generic.process_fn(job.data.generic.context);
+            var cached = (try persistence.summary_store.read(a, f.sm.save_dir_path, identity, 0, 0)).?;
+            defer cached.deinit();
+            try testing.expectEqual(world_core.lod_scene.Origin.saved, cached.origin);
+            try testing.expectEqualDeep(lease.summary.columns, cached.columns);
+            try testing.expectEqualDeep(lease.summary.runs, cached.runs);
+        }
+        const after = try region.readChunk(0, 0, a);
+        defer a.free(after);
+        try testing.expectEqualSlices(u8, bytes, after);
+        try testing.expectEqual(epoch, f.sm.sourceEpoch());
+        try testing.expectEqual(@as(usize, 0), f.sm.pending_saves.load(.acquire));
+        try testing.expectEqual(LoadResult.success_relight_required, f.sm.readSavedChunk(0, 0, scratch));
+        try testing.expectEqualSlices(BlockType, &f.chunk.blocks, &scratch.blocks);
+        try testing.expectEqualDeep(f.chunk.light, scratch.light);
+    }
+}
+
+test "canonical saved relight preserves current lighting including omitted zero light payloads" {
+    const testing = std.testing;
+    for ([_]bool{ false, true }) |has_light| {
+        const f = try CanonicalOrderFixture.init();
+        defer f.deinit();
+        f.sm.setSavedCallback(null, null);
+        f.chunk.setBlock(8, 64, 8, .stone);
+        if (has_light) f.chunk.setLight(8, 65, 8, world_core.PackedLight.initRGB(2, 3, 4, 5));
+        f.chunk.lighting_valid = true;
+        var expected = try world_core.lod_scene.ChunkSummary.capture(testing.allocator, f.chunk);
+        defer expected.deinit();
+        try f.enqueue();
+        try f.flush();
+        // Resident edits must not replace strict disk authority or get relit.
+        f.chunk.setBlock(8, 64, 8, .glowstone);
+        f.chunk.setLight(8, 65, 8, world_core.PackedLight.init(15, 15));
+        var summary = (try loadCanonicalSummary(&f.world, 0, 0, testing.allocator)).?;
+        defer summary.deinit();
+        try testing.expectEqual(world_core.lod_scene.Origin.saved, summary.origin);
+        try testing.expectEqualDeep(expected.columns, summary.columns);
+        try testing.expectEqualDeep(expected.runs, summary.runs);
+        try testing.expectEqual(BlockType.glowstone, f.chunk.getBlock(8, 64, 8));
+        try testing.expectEqualDeep(world_core.PackedLight.init(15, 15), f.chunk.getLight(8, 65, 8));
+    }
+}
+
+test "canonical saved relight propagates allocation failures without publishing partial lighting" {
+    const testing = std.testing;
+    const f = try CanonicalOrderFixture.init();
+    defer f.deinit();
+    f.sm.setSavedCallback(null, null);
+    @memset(&f.chunk.blocks, .stone);
+    for (0..CHUNK_SIZE_Z) |z| for (0..CHUNK_SIZE_X) |x| {
+        f.chunk.setBlock(@intCast(x), 255, @intCast(z), .air);
+    };
+    f.chunk.setBlock(8, 254, 8, .glowstone);
+    @memset(&f.chunk.light, world_core.PackedLight.init(1, 15));
+    f.chunk.lighting_valid = false;
+    try f.enqueue();
+    try f.flush();
+    const epoch = f.sm.sourceEpoch();
+    try testing.checkAllAllocationFailures(testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator, world: *World) !void {
+            var summary = (try loadCanonicalSummary(world, 0, 0, allocator)).?;
+            defer summary.deinit();
+            try testing.expectEqual(world_core.lod_scene.Origin.saved, summary.origin);
+            try testing.expectEqual(@as(u4, 15), summary.column(8, 8)[1].light_top.getSkyLight());
+            const emission = block_registry.getBlockDefinition(.glowstone).light_emission;
+            try testing.expectEqual(emission[0] - 1, summary.column(8, 8)[1].light_top.getBlockLightR());
+        }
+    }.run, .{&f.world});
+    try testing.expectEqual(epoch, f.sm.sourceEpoch());
+    try testing.expectEqual(@as(usize, 0), f.sm.pending_saves.load(.acquire));
+    try testing.expect(f.acquire() == null);
+}
+
+test "canonical snapshot ordering commits uncaptured B and rejects old callbacks against live C" {
+    const testing = std.testing;
+    const f = try CanonicalOrderFixture.init();
+    defer f.deinit();
+    const source = f.manager.source_hierarchy.?;
+    try f.edit(.stone);
+    try testing.expect(f.manager.captureResolvedScene(0, 0));
+    const a = f.acquire().?;
+    defer a.release();
+    try f.edit(.gold_ore);
+    const order_b = source.next_revision.load(.acquire);
+    try f.enqueue();
+    // No B capture exists when its real SaveManager callback arrives.
+    try f.flush();
+    try testing.expectEqual(Chunk.SourceKind.saved, f.chunk.source_kind);
+    const b = f.acquire().?;
+    defer b.release();
+    try testing.expectEqual(order_b, b.summary.revision);
+    try testing.expectEqual(BlockType.gold_ore, b.summary.runs[0].block);
+    try testing.expect(f.manager.captureResolvedScene(0, 0));
+    try f.prepare();
+    try testing.expectEqual(BlockType.stone, a.summary.runs[0].block);
+    try testing.expectEqual(world_core.lod_scene.Origin.live, a.summary.origin);
+
+    {
+        // Hold disk I/O, not the source or mutation locks, to order the actual
+        // writer callback after a newer unsaved capture without scheduler sleeps.
+        f.sm.region_cache_mutex.lock();
+        defer f.sm.region_cache_mutex.unlock();
+        try f.enqueue();
+        try f.edit(.dirt);
+        try testing.expect(f.manager.captureResolvedScene(0, 0));
+    }
+    try f.flush();
+    try f.prepare();
+    const c = f.acquire().?;
+    defer c.release();
+    try testing.expectEqual(BlockType.dirt, c.summary.runs[0].block);
+    try testing.expectEqual(world_core.lod_scene.Origin.live, c.summary.origin);
+    try testing.expectEqual(Chunk.SourceKind.edited, f.chunk.source_kind);
+    try testing.expectEqual(BlockType.gold_ore, b.summary.runs[0].block);
+}
+
+test "canonical snapshot ordering repairs callback capture and publication OOM before saved recapture" {
+    const testing = std.testing;
+    for ([_]bool{ false, true }) |fail_capture| {
+        const f = try CanonicalOrderFixture.init();
+        defer f.deinit();
+        const source = f.manager.source_hierarchy.?;
+        try f.edit(.stone);
+        try testing.expect(f.manager.captureResolvedScene(0, 0));
+        const old = f.acquire().?;
+        defer old.release();
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+        {
+            f.sm.region_cache_mutex.lock();
+            defer f.sm.region_cache_mutex.unlock();
+            try f.edit(.gold_ore);
+            try f.enqueue();
+            if (fail_capture) f.manager.allocator = failing.allocator() else source.allocator = failing.allocator();
+        }
+        try f.flush();
+        f.manager.allocator = testing.allocator;
+        source.allocator = testing.allocator;
+        try testing.expectEqual(Chunk.SourceKind.saved, f.chunk.source_kind);
+        try testing.expect(f.acquire() == null);
+        // Exercise both repair paths, not just successful callback publication.
+        if (fail_capture) {
+            try testing.expect(f.manager.captureResolvedScene(0, 0));
+            try f.prepare();
+        } else {
+            try f.prepare();
+            try testing.expect(f.manager.captureResolvedScene(0, 0));
+            try f.prepare();
+        }
+        const repaired = f.acquire().?;
+        defer repaired.release();
+        try testing.expectEqual(BlockType.gold_ore, repaired.summary.runs[0].block);
+        try testing.expectEqual(world_core.lod_scene.Origin.saved, repaired.summary.origin);
+        try testing.expectEqual(BlockType.stone, old.summary.runs[0].block);
+    }
+}
+
+test "canonical snapshot ordering preserves newer light through callback epoch and repairs newer light commit OOM" {
+    const testing = std.testing;
+    const f = try CanonicalOrderFixture.init();
+    defer f.deinit();
+    const source = f.manager.source_hierarchy.?;
+    const light_a = world_core.PackedLight.init(15, 0);
+    const light_b = world_core.PackedLight.initRGB(2, 9, 7, 5);
+    const light_c = world_core.PackedLight.initRGB(3, 1, 2, 3);
+    try f.edit(.stone);
+    f.chunk.setLight(0, 1, 0, light_a);
+    try testing.expect(f.manager.captureResolvedScene(0, 0));
+    const a = f.acquire().?;
+    defer a.release();
+    {
+        f.sm.region_cache_mutex.lock();
+        defer f.sm.region_cache_mutex.unlock();
+        try f.enqueue();
+        f.chunk.setLight(0, 1, 0, light_b);
+        f.chunk.markLightChanged();
+        try testing.expect(f.manager.captureResolvedScene(0, 0));
+    }
+    const b = f.acquire().?;
+    defer b.release();
+    try f.flush();
+    const committed = f.acquire().?;
+    defer committed.release();
+    try testing.expectEqualDeep(light_b, committed.summary.runs[0].light_top);
+    try testing.expectEqual(b.summary.revision, committed.summary.revision);
+    try testing.expectEqual(world_core.lod_scene.Origin.saved, committed.summary.origin);
+    // SaveManager has advanced its epoch after the callback. Strict disk
+    // revalidation must not promote disk light A to a newer observation.
+    try f.prepare();
+    const revalidated = f.acquire().?;
+    defer revalidated.release();
+    try testing.expectEqualDeep(light_b, revalidated.summary.runs[0].light_top);
+    try testing.expectEqual(b.summary.revision, revalidated.summary.revision);
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    {
+        f.sm.region_cache_mutex.lock();
+        defer f.sm.region_cache_mutex.unlock();
+        f.chunk.setLight(0, 1, 0, light_c);
+        f.chunk.markLightChanged();
+        try f.enqueue();
+        source.allocator = failing.allocator();
+    }
+    try f.flush();
+    source.allocator = testing.allocator;
+    try testing.expect(f.acquire() == null);
+    try f.prepare();
+    const repaired = f.acquire().?;
+    defer repaired.release();
+    try testing.expectEqualDeep(light_c, repaired.summary.runs[0].light_top);
+    try testing.expectEqualDeep(light_a, a.summary.runs[0].light_top);
+    try testing.expectEqualDeep(light_b, b.summary.runs[0].light_top);
+    try testing.expectEqualDeep(light_b, revalidated.summary.runs[0].light_top);
 }
 
 /// Buffer distance beyond render_distance for chunk unloading.
@@ -720,7 +1215,7 @@ pub const World = struct {
         errdefer world.streamer.deinit();
 
         if (options.lod_config) |lod_config| {
-            world.lod = try WorldLOD.init(allocator, options.rhi, lod_config, lodGeneratorFromGenerator(world.generator), options.atlas);
+            world.lod = try WorldLOD.init(allocator, options.rhi, lod_config, lodGeneratorFromGenerator(world), options.atlas);
             world.lod_enabled = true;
             world.streamer.setLODManager(world.lod.?.manager);
         }
@@ -730,16 +1225,19 @@ pub const World = struct {
     /// Stops world jobs and releases streaming, meshing, LOD, rendering, and persistence resources.
     /// No borrowed world sub-interfaces may be used after this returns.
     pub fn deinit(self: *World) void {
-        // Pause generation first: clears the gen/mesh/LOD job queues so worker
-        // threads stop pulling new jobs. (In-flight LOD heightmap jobs are
-        // aborted later by LODManager.stop_flag, set at the top of lod.deinit().)
         self.pauseGeneration();
+        // Workers borrow SaveManager, generator and storage. Join both pools
+        // before flushing or destroying any of these owners.
+        self.streamer.stopWorkersAndJoin();
+        if (self.lod) |lod| lod.manager.stopWorkersAndJoin();
 
         self.rhi.query().waitIdle();
 
         if (self.save_manager) |sm| {
             self.saveAllModifiedChunks();
             sm.deinit();
+            self.save_manager = null;
+            self.streamer.setSaveManager(null);
         }
 
         self.streamer.deinit();
@@ -784,11 +1282,24 @@ pub const World = struct {
     /// Attaches persistence to the world using a save directory and world name.
     /// May load metadata or create save structures; call before relying on autosave. Propagates errors from streaming, persistence, meshing, or mutation subsystems.
     pub fn enableSaveManager(self: *World, save_dir_path: []const u8, world_name: []const u8) !void {
+        if (self.save_manager != null) return error.PersistenceAlreadyEnabled;
         const seed = self.generator.getSeed();
         const gen_name = self.generator.info.name;
-        self.save_manager = try SaveManager.init(self.allocator, save_dir_path, world_name, seed, gen_name);
-        self.streamer.setSaveManager(self.save_manager);
+        const sm = try SaveManager.init(self.allocator, save_dir_path, world_name, seed, gen_name);
+        self.streamer.prepareStartupPersistence(sm, self.renderer.frame_serial) catch |err| {
+            // No callbacks or worker borrows exist before this barrier.
+            sm.deinit();
+            return err;
+        };
+        self.save_manager = sm;
+        sm.setSavedCallback(self, canonicalChunkCommitted);
+        if (self.lod) |lod| if (lod.manager.source_hierarchy) |source| {
+            sm.setSnapshotOrderProvider(source, canonicalSnapshotOrder);
+        };
+        self.streamer.setSaveManager(sm);
         if (self.lod) |lod| {
+            // Once published, World retains sm even if cache setup fails.
+            // Only World.deinit may destroy it, after joining every borrower.
             try lod.enableCache(save_dir_path);
         }
     }
@@ -803,6 +1314,8 @@ pub const World = struct {
     fn enqueueModifiedChunks(self: *World, sm: *SaveManager) std.ArrayListUnmanaged(ChunkKey) {
         var dirty_keys = std.ArrayListUnmanaged(ChunkKey).empty;
 
+        self.storage.lighting_mutex.lock();
+        defer self.storage.lighting_mutex.unlock();
         self.storage.chunks_mutex.lock();
         var iter = self.storage.iteratorUnsafe();
         while (iter.next()) |entry| {
@@ -814,8 +1327,7 @@ pub const World = struct {
                 };
 
                 chunk.pin();
-                sm.enqueueSave(chunk);
-                chunk.modified = false;
+                if (sm.tryEnqueueSave(chunk)) chunk.modified = false;
                 chunk.unpin();
             }
         }
@@ -869,6 +1381,7 @@ pub const World = struct {
         defer dirty_keys.deinit(self.allocator);
 
         const failed = sm.flush();
+        defer sm.allocator.free(failed);
         const failure_count = sm.takeFailedSaveCount();
         if (failure_count > 0) {
             log.log.warn("{} save failure(s) occurred while saving modified chunks", .{failure_count});
@@ -888,6 +1401,7 @@ pub const World = struct {
         defer dirty_keys.deinit(self.allocator);
 
         const failed = sm.flush();
+        defer sm.allocator.free(failed);
         sm.markAutoSaved();
         const failure_count = sm.takeFailedSaveCount();
         if (failure_count > 0) {
@@ -1100,6 +1614,9 @@ pub const World = struct {
     /// Advances world streaming, generation, meshing, autosave, and runtime queues for one frame.
     /// `player_pos` drives chunk residency; `dt` is frame time in seconds. Propagates errors from streaming, persistence, meshing, or mutation subsystems.
     pub fn update(self: *World, player_pos: Vec3, dt: f32) !void {
+        // RHI frame begin has completed the current slot fence. Orchestration
+        // increments WorldRenderer's serial inside update, before streaming.
+        if (self.lod) |lod| lod.manager.gpu_bridge.beginFrame(self.renderer.frame_serial + 1);
         try WorldOrchestration.update(self.renderer, self.streamer, self, player_pos, dt);
     }
 

@@ -7,7 +7,7 @@
 //! - LOD3 (64-100 chunks): 8x simplified, 16x16 chunks merged, heightmap only
 //!
 //! Key principles:
-//! - Near/fine LODs are queued first so coarse parents do not dominate mid-ground
+//! - Persistent weighted service shares progress between near detail and horizon
 //! - Coarse LODs remain available as fallback while finer children stream
 //! - Smooth transitions via fog masking
 //!
@@ -63,6 +63,7 @@ const LODRenderLayer = lod_gpu.LODRenderLayer;
 const MeshMap = lod_gpu.MeshMap;
 const RegionMap = lod_gpu.RegionMap;
 const lod_scheduler = @import("lod_scheduler.zig");
+const lod_service = @import("lod_service.zig");
 const lod_cache = @import("lod_cache.zig");
 const lod_store = @import("lod_store.zig");
 const lod_ingest = @import("lod_ingest.zig");
@@ -130,10 +131,39 @@ pub const LODMeshDisposalQueue = struct {
 
 pub const LODMemoryGovernor = struct {
     used_bytes: usize = 0,
+    pressure_pending: bool = false,
+    required_upload_bytes: usize = 0,
+    /// A configured-horizon upload is allowed to reclaim stale outer work down
+    /// to its background reserve. Unlike a generic background/refinement task,
+    /// this is required to maintain the advertised horizon rather than optional
+    /// detail refinement.
+    required_horizon_upload_bytes: usize = 0,
+    /// One urgent CPU admission may ask eviction to make room before the hard
+    /// cap is reached. Background lanes never populate this request.
+    required_admission_bytes: usize = 0,
+    required_admission_lane: u3 = @intFromEnum(lod_service.Class.refinement),
+    maintenance_staging_bytes: usize = 0,
     /// Exact known allocations plus conservative reservations for admitted
     /// regions. This is the value checked before accepting new work.
     logical_admission_bytes: usize = 0,
+    /// Actual allocations owned exclusively by local/near regions. Shared
+    /// source caches and pooled GPU backing are global accounting and cannot
+    /// consume the near reserve for background-service policy purposes.
+    near_exclusive_bytes: usize = 0,
     radius_shrink_chunks: [LODLevel.count]i32 = [_]i32{0} ** LODLevel.count,
+    /// Monotonic deadline, armed only while work and allocations stay settled.
+    reexpand_after_ms: ?i64 = null,
+    reexpand_logical_bytes: usize = 0,
+
+    pub fn requestAdmissionRecovery(self: *LODMemoryGovernor, lane: u3, bytes: usize) void {
+        if (bytes == 0) return;
+        if (self.required_admission_bytes == 0 or lane < self.required_admission_lane or
+            (lane == self.required_admission_lane and bytes < self.required_admission_bytes))
+        {
+            self.required_admission_bytes = bytes;
+            self.required_admission_lane = lane;
+        }
+    }
 };
 
 pub const LODJobDispatcher = struct {
@@ -149,6 +179,21 @@ pub const LODJobDispatcher = struct {
 pub const LODManager = struct {
     const Self = @This();
 
+    pub const SourceHierarchy = @import("lod_source_hierarchy.zig").SourceHierarchy;
+    pub const SceneSummary = world_core.lod_scene.ChunkSummary;
+    pub const SceneResolver = struct {
+        ptr: *anyopaque,
+        capture_scene_fn: *const fn (*anyopaque, i32, i32, std.mem.Allocator) anyerror!?SceneSummary,
+    };
+    pub const CanonicalDiagnostics = struct {
+        enabled: bool = false,
+        source_epoch: u64 = 0,
+        known_chunks: usize = 0,
+        source_bytes: usize = 0,
+        refresh_outstanding: usize = 0,
+        replacement_and_scratch_bytes: usize = 0,
+    };
+
     pub const NearChunkSummary = @import("lod_near_source.zig").NearChunkSummary;
     pub const NearSourceKind = enum(u8) { generated, loaded, edited };
     pub const NearSourceCapture = struct {
@@ -161,6 +206,18 @@ pub const LODManager = struct {
         cz: i32,
         capture: NearSourceCapture,
     };
+
+    source_hierarchy: ?*SourceHierarchy = null,
+    scene_resolver: ?SceneResolver = null,
+    canonical_refresh_count: std.atomic.Value(usize) = .init(0),
+    canonical_background_refresh_count: std.atomic.Value(usize) = .init(0),
+    canonical_refresh_bytes: std.atomic.Value(usize) = .init(0),
+    canonical_completion_mutex: sync.Mutex = .{},
+    canonical_completions: [8]?*lod_manager_generation_ops.CanonicalRefresh = @splat(null),
+    canonical_refresh_level: usize = 0,
+    canonical_upload_attempted: bool = false,
+    canonical_upload_failed: bool = false,
+    canonical_required_upload_bytes: usize = 0,
 
     // The experiment flag is immutable after initialization. The map uses the manager mutex,
     // never the ingestion or storage locks, and retains no full-detail pins.
@@ -194,6 +251,19 @@ pub const LODManager = struct {
     player_cx: std.atomic.Value(i32),
     player_cz: std.atomic.Value(i32),
     scan_states: [LODLevel.count]LODScanState,
+    // Local/near scans have separate cursors; horizon/refinement reuse per-level
+    // scans. Movement updates scan origins, never resets either service wheel.
+    service_admission_wheel: JobSystem.ServiceWheel = JobSystem.ServiceWheel.init(&lod_service.WHEEL),
+    service_upload_wheel: JobSystem.ServiceWheel = JobSystem.ServiceWheel.init(&lod_service.WHEEL),
+    service_upload_owed: ?lod_manager_context.LifecycleToken = null,
+    service_upload_level_cursor: [lod_service.CLASS_COUNT]usize = @splat(0),
+    service_counters: lod_service.Counters = .{},
+    local_fallback_scan_state: LODScanState = .{},
+    near_scan_states: [2]LODScanState = @splat(.{}),
+    refinement_level_cursor: usize = 0,
+    service_opportunities: [lod_service.CLASS_COUNT]u64 = @splat(0),
+    service_pending_blocked: [lod_service.CLASS_COUNT]u64 = @splat(0),
+    service_memory_blocked: [lod_service.CLASS_COUNT]u64 = @splat(0),
 
     // Stats
     stats: LODStats,
@@ -262,6 +332,47 @@ pub const LODManager = struct {
 
     // Callback type to check if a regular chunk is loaded and renderable
     pub const ChunkChecker = lod_gpu.ChunkChecker;
+
+    pub fn usesCanonicalSource(self: *const Self) bool {
+        return self.source_hierarchy != null;
+    }
+
+    pub fn getCanonicalDiagnostics(self: *Self) CanonicalDiagnostics {
+        const source = self.source_hierarchy orelse return .{};
+        return .{
+            .enabled = true,
+            .source_epoch = source.epoch(),
+            .known_chunks = source.countKnown(),
+            .source_bytes = source.memoryBytes(),
+            .refresh_outstanding = self.canonical_refresh_count.load(.acquire),
+            .replacement_and_scratch_bytes = self.canonical_refresh_bytes.load(.acquire),
+        };
+    }
+
+    /// Callback captures under runtime lighting -> storage locks, without a manager lock.
+    pub fn captureResolvedScene(self: *Self, cx: i32, cz: i32) bool {
+        const source = self.source_hierarchy orelse return false;
+        const resolver = self.scene_resolver orelse return false;
+        const revision = source.reserveRevision();
+        var summary = (resolver.capture_scene_fn(resolver.ptr, cx, cz, self.allocator) catch return false) orelse return false;
+        summary.revision = revision;
+        return source.trySubmit(summary);
+    }
+
+    /// Caller holds generation/mutation ownership and reserves before capture.
+    pub fn captureSceneChunk(self: *Self, chunk: *const Chunk, origin: world_core.lod_scene.Origin) !SceneSummary {
+        const source = self.source_hierarchy orelse return error.CanonicalDisabled;
+        const revision = source.reserveRevision();
+        var summary = try SceneSummary.capture(self.allocator, chunk);
+        summary.origin = origin;
+        summary.revision = revision;
+        return summary;
+    }
+
+    /// Leaves source/storage alive for SaveManager's final committed callbacks.
+    pub fn stopWorkersAndJoin(self: *Self) void {
+        lod_manager_core.stopWorkersAndJoin(self);
+    }
 
     // ----------------------------------------------------------------------
     // Chunk-derived LOD ingestion (issue #752 Phase 2)
@@ -523,7 +634,7 @@ pub const LODManager = struct {
     }
 
     pub fn usesNearSource(self: *const Self, lod: LODLevel) bool {
-        return self.near_source_enabled and @intFromEnum(lod) <= 1;
+        return !self.usesCanonicalSource() and self.near_source_enabled and @intFromEnum(lod) <= 1;
     }
 
     pub fn sourceSampleDensity(self: *const Self, lod: LODLevel) f32 {
@@ -531,13 +642,14 @@ pub const LODManager = struct {
     }
 
     pub fn sourceRequiresSpans(self: *Self, lod: LODLevel) bool {
+        if (self.usesCanonicalSource()) return false;
         return self.usesNearSource(lod) or (self.config.getVerticalSpanBudget() > 0 and self.effectiveMeshPath(lod) == .column_spans);
     }
 
     /// Caller owns block mutation synchronization and chunk lifetime. Scans
     /// outside the manager lock; submit only after generation is publishable.
     pub fn captureNearChunk(self: *Self, chunk: *const Chunk, kind: NearSourceKind) ?NearSourceCapture {
-        if (!self.near_source_enabled or self.benchmark_fixture_active) return null;
+        if (self.usesCanonicalSource() or !self.near_source_enabled or self.benchmark_fixture_active) return null;
         const sequence = self.near_source_sequence.fetchAdd(1, .monotonic);
         return .{ .summary = NearChunkSummary.capture(chunk), .kind = kind, .sequence = sequence };
     }
@@ -665,6 +777,12 @@ pub const LODManager = struct {
         return lod_manager_generation_ops.queueLODRegions(self, lod, velocity, chunk_checker, checker_ctx);
     }
 
+    /// One bounded service opportunity using the configured full-detail collar,
+    /// not the temporarily reduced startup render radius.
+    pub fn queueLODService(self: *Self, lod: LODLevel, lane: u3, scan_state: *LODScanState, max_scan_steps: usize, velocity: Vec3, chunk_checker: ?ChunkChecker, checker_ctx: ?*anyopaque) !lod_scheduler.ScheduleResult {
+        return lod_manager_generation_ops.queueLODService(self, lod, lane, scan_state, max_scan_steps, velocity, chunk_checker, checker_ctx);
+    }
+
     /// Drains completed generation jobs and schedules mesh work for accepted source data.
     /// Errors report mesh allocation or queueing failures.
     pub fn processQueuedGenerations(self: *Self, velocity: Vec3) !void {
@@ -708,14 +826,31 @@ pub const LODManager = struct {
 
     /// Uploads queued LOD meshes using the configured per-frame upload budget.
     /// Must run on the render/update thread that owns the GPU bridge.
+    pub fn beginUploadFrame(self: *Self, upload_budget_bytes: usize) void {
+        self.canonical_upload_attempted = false;
+        self.canonical_upload_failed = false;
+        self.memory_governor.maintenance_staging_bytes = if (upload_budget_bytes == 0) std.math.maxInt(usize) else upload_budget_bytes;
+    }
+
     pub fn processUploads(self: *Self) void {
-        return lod_manager_upload_ops.processUploads(self);
+        if (!self.canonical_upload_attempted) lod_manager_upload_ops.processUploads(self);
+        if (self.canonical_required_upload_bytes != 0) {
+            self.memory_governor.required_upload_bytes = @max(self.memory_governor.required_upload_bytes, self.canonical_required_upload_bytes);
+            self.memory_governor.pressure_pending = true;
+        }
     }
 
     /// Uploads queued LOD meshes until `upload_budget_bytes` is exhausted.
     /// Chunks that cannot be uploaded within the budget are left queued for later frames.
     pub fn processUploadsWithBudget(self: *Self, upload_budget_bytes: usize) void {
-        return lod_manager_upload_ops.processUploadsWithBudget(self, upload_budget_bytes);
+        if (self.usesCanonicalSource() and self.canonical_upload_attempted) return;
+        lod_manager_upload_ops.processUploadsWithBudget(self, upload_budget_bytes);
+        if (self.usesCanonicalSource()) {
+            // The ordinary path already debited the shared allowance. A later
+            // refresh must not get another first-upload staging exception.
+            self.canonical_upload_attempted = true;
+            if (self.memory_governor.maintenance_staging_bytes == 0) self.canonical_upload_failed = true;
+        }
     }
 
     /// Recovers compact draw failures on the update thread through the normal
@@ -750,6 +885,11 @@ pub const LODManager = struct {
     /// Reports whether a region should contribute visible geometry in the current hierarchy state.
     /// Excludes empty, covered, or non-renderable regions that should not affect parent readiness.
     pub fn regionContributesGeometry(self: *Self, key: LODRegionKey, chunk: *const LODChunk) bool {
+        if (self.usesCanonicalSource()) {
+            if (chunk.getState() != .renderable) return false;
+            const mesh = self.meshes[@intFromEnum(key.lod)].get(key) orelse return false;
+            return mesh.isCoverageReady();
+        }
         return lod_manager_upload_ops.regionContributesGeometry(self, key, chunk);
     }
 
@@ -780,6 +920,10 @@ pub const LODManager = struct {
     /// Demotes a renderable region back to mesh/upload work after its source data changes.
     /// Parent readiness is updated before the region leaves the renderable set.
     pub fn demoteRegionForRemesh(self: *Self, key: LODRegionKey, chunk: *LODChunk) void {
+        if (self.usesCanonicalSource()) {
+            chunk.canonical_refresh_requested.store(true, .release);
+            return;
+        }
         return lod_manager_upload_ops.demoteRegionForRemesh(self, key, chunk);
     }
 

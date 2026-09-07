@@ -56,6 +56,8 @@ pub const LODProfilingSnapshot = struct {
     deferred_deletion_bytes: u64 = 0,
     deferred_deletion_cpu_bytes: u64 = 0,
     pool_gpu_capacity_bytes: u64 = 0,
+    pool_gpu_retired_bytes: u64 = 0,
+    direct_gpu_retired_bytes: u64 = 0,
     pool_gpu_allocated_bytes: u64 = 0,
     pool_gpu_slack_bytes: u64 = 0,
     pool_cpu_shadow_bytes: u64 = 0,
@@ -202,6 +204,8 @@ pub const LODProfilingCollector = struct {
     deferred_deletion_bytes: AtomicU64 = AtomicU64.init(0),
     deferred_deletion_cpu_bytes: AtomicU64 = AtomicU64.init(0),
     pool_gpu_capacity_bytes: AtomicU64 = AtomicU64.init(0),
+    pool_gpu_retired_bytes: AtomicU64 = AtomicU64.init(0),
+    direct_gpu_retired_bytes: AtomicU64 = AtomicU64.init(0),
     pool_gpu_allocated_bytes: AtomicU64 = AtomicU64.init(0),
     pool_gpu_slack_bytes: AtomicU64 = AtomicU64.init(0),
     pool_cpu_shadow_bytes: AtomicU64 = AtomicU64.init(0),
@@ -267,6 +271,16 @@ pub const LODProfilingCollector = struct {
     pub fn setPendingCpuUploadBytes(self: *LODProfilingCollector, bytes: usize) void {
         if (!self.enabled) return;
         self.pending_cpu_upload_bytes.store(@intCast(bytes), .monotonic);
+    }
+
+    pub fn setRetiredPoolGpuBytes(self: *LODProfilingCollector, bytes: usize) void {
+        if (!self.enabled) return;
+        self.pool_gpu_retired_bytes.store(@intCast(bytes), .monotonic);
+    }
+
+    pub fn setRetiredDirectGpuBytes(self: *LODProfilingCollector, bytes: usize) void {
+        if (!self.enabled) return;
+        self.direct_gpu_retired_bytes.store(@intCast(bytes), .monotonic);
     }
 
     pub fn setMemoryAccounting(self: *LODProfilingCollector, pool_gpu_capacity: usize, pool_gpu_allocated: usize, pool_gpu_slack: usize, pool_cpu_shadow: usize, compact_pool_capacity: usize, compact_pool_allocated: usize, compact_pool_free: usize, compact_pool_retired: usize, direct_mesh_gpu: usize, known_memory: usize) void {
@@ -412,6 +426,8 @@ pub const LODProfilingCollector = struct {
     /// land immediately before or after this reset, but snapshots are always
     /// race-free and never contain torn values.
     pub fn reset(self: *LODProfilingCollector) void {
+        self.pool_gpu_retired_bytes.store(0, .monotonic);
+        self.direct_gpu_retired_bytes.store(0, .monotonic);
         inline for (.{
             &self.update_ns,                                &self.scheduling_ns,                     &self.cache_ns,
             &self.generation_dispatch_ns,                   &self.state_transition_ns,               &self.upload_prep_ns,
@@ -472,6 +488,8 @@ pub const LODProfilingCollector = struct {
             .deferred_deletion_bytes = self.deferred_deletion_bytes.load(.monotonic),
             .deferred_deletion_cpu_bytes = self.deferred_deletion_cpu_bytes.load(.monotonic),
             .pool_gpu_capacity_bytes = self.pool_gpu_capacity_bytes.load(.monotonic),
+            .pool_gpu_retired_bytes = self.pool_gpu_retired_bytes.load(.monotonic),
+            .direct_gpu_retired_bytes = self.direct_gpu_retired_bytes.load(.monotonic),
             .pool_gpu_allocated_bytes = self.pool_gpu_allocated_bytes.load(.monotonic),
             .pool_gpu_slack_bytes = self.pool_gpu_slack_bytes.load(.monotonic),
             .pool_cpu_shadow_bytes = self.pool_cpu_shadow_bytes.load(.monotonic),
@@ -535,6 +553,8 @@ fn nsToMs(ns: u64) f64 {
 
 /// Statistics for LOD system monitoring.
 pub const LODStats = struct {
+    /// Lifetime progress by admission lane, independent of per-frame resets.
+    service: @import("lod_service.zig").Snapshot = .{},
     /// Cumulative opt-in CPU, upload, and pressure telemetry snapshot.
     profiling: LODProfilingSnapshot = .{},
     loaded: [LODLevel.count]u32 = [_]u32{0} ** LODLevel.count,
@@ -549,6 +569,8 @@ pub const LODStats = struct {
     /// for compatibility and is this value rounded down to MiB.
     memory_used_bytes: u64 = 0,
     pool_gpu_capacity_bytes: u64 = 0,
+    pool_gpu_retired_bytes: u64 = 0,
+    direct_gpu_retired_bytes: u64 = 0,
     pool_gpu_allocated_bytes: u64 = 0,
     pool_gpu_slack_bytes: u64 = 0,
     pool_cpu_shadow_bytes: u64 = 0,
@@ -559,6 +581,10 @@ pub const LODStats = struct {
     direct_mesh_gpu_bytes: u64 = 0,
     source_data_cpu_bytes: u64 = 0,
     resident_region_count: u64 = 0,
+    /// Unused capacity reserved for the canonical immutable-source cache. The
+    /// cache can fill asynchronously while a region is building, so admission
+    /// must reserve its configured capacity rather than only sampling bytes.
+    source_cache_reservation_bytes: u64 = 0,
     logical_admission_reservation_bytes: u64 = 0,
     logical_admission_bytes: u64 = 0,
     pending_cpu_upload_bytes: u64 = 0,
@@ -628,6 +654,8 @@ pub const LODStats = struct {
         self.memory_used_mb = 0;
         self.memory_used_bytes = 0;
         self.pool_gpu_capacity_bytes = 0;
+        self.pool_gpu_retired_bytes = 0;
+        self.direct_gpu_retired_bytes = 0;
         self.pool_gpu_allocated_bytes = 0;
         self.pool_gpu_slack_bytes = 0;
         self.pool_cpu_shadow_bytes = 0;
@@ -638,6 +666,7 @@ pub const LODStats = struct {
         self.direct_mesh_gpu_bytes = 0;
         self.source_data_cpu_bytes = 0;
         self.resident_region_count = 0;
+        self.source_cache_reservation_bytes = 0;
         self.logical_admission_reservation_bytes = 0;
         self.logical_admission_bytes = 0;
         self.pending_cpu_upload_bytes = 0;

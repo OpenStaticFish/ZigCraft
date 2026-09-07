@@ -1,4 +1,8 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "distance_appearance.glsl"
+#include "lod_ownership.glsl"
 
 layout(location = 0) in vec3 vColor;
 layout(location = 1) flat in vec3 vNormal;
@@ -37,7 +41,10 @@ layout(set = 0, binding = 0) uniform Global {
     vec4 lpv_origin;
 } global;
 
+#include "lod_water_appearance.glsl"
+
 void main() {
+    discardOutsideLODOwnership();
     float lodMaskAlpha = 1.0;
     if (abs(vMaskRadius) >= 1.0) {
         // A negative radius carries the outer edge of the ready detail disk;
@@ -51,23 +58,6 @@ void main() {
         // overlap instead of changing its contribution at a hard circle.
         lodMaskAlpha = smoothstep(maskRadius, maskRadius + LOD_MASK_BLEND_WIDTH, maskDistance);
     }
-    // Far water deliberately avoids scene-depth, reflection, SSR, atlas, and
-    // thickness reads. It uses stable low-frequency waves and atmospheric fog.
-    float wave = sin(vFragPosWorld.x * 0.012 + global.params.x * 0.55) *
-                 cos(vFragPosWorld.z * 0.010 - global.params.x * 0.43);
-    vec3 normal = normalize(vec3(wave * 0.08, 1.0, wave * 0.06));
-    vec3 light_dir = normalize(-global.sun_dir.xyz);
-    float diffuse = max(dot(normal, light_dir), 0.0);
-    float light_level = clamp(max(vSkyLight, max(vBlockLight.r, max(vBlockLight.g, vBlockLight.b))), 0.35, 1.0);
-    vec3 base = mix(vec3(0.025, 0.16, 0.30), vec3(0.08, 0.38, 0.64), diffuse * 0.45);
-    base = mix(base, vColor, 0.12) * light_level;
-    base += global.sun_color.rgb * diffuse * global.params.w * 0.06;
-
-    if (global.params.z > 0.5) {
-        float rawFog = clamp(1.0 - exp(-vDistance * global.params.y), 0.0, 1.0);
-        float fog = rawFog * rawFog * 0.65;
-        base = mix(base, global.fog_color.rgb, fog);
-    }
-
-    outColor = vec4(base, 0.78 * clamp(vLODFade, 0.0, 1.0) * lodMaskAlpha);
+    outColor = lodWaterAppearance(vColor, vNormal, vFragPosWorld, vSkyLight, vBlockLight);
+    outColor.a *= lodMaskAlpha;
 }
