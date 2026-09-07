@@ -14,5 +14,3 @@ pub const LPV_TEXTURE_G = 12; // LPV SH Green channel
 pub const LPV_TEXTURE_B = 13; // LPV SH Blue channel
 pub const WATER_REFLECTION_TEXTURE = 14; // Water planar reflection color
 pub const SCENE_DEPTH_TEXTURE = 15; // Scene depth for water refraction
-pub const COMPACT_LOD_SAMPLES = 16; // 16-byte far-LOD samples, vertex stage
-pub const COMPACT_LOD_INSTANCES = 17; // compact indirect instances, vertex stage

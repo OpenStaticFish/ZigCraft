@@ -346,8 +346,7 @@ pub const GPass = struct {
         const atlas = self.material_system.getAtlasHandles(ctx.env_map_handle);
         ctx.render_ctx.bindTexture(atlas.diffuse, 1);
         const view_proj = ctx.camera.getJitteredProjectionMatrixReverseZ(ctx.aspect, ctx.viewport_width, ctx.viewport_height, ctx.taa_enabled).multiply(ctx.camera.getViewMatrixOriginCentered());
-        const render_lod = engine_core.envFlag("ZIGCRAFT_LOD_GPASS", false);
-        ctx.world.renderOpaque(view_proj, ctx.camera.position, render_lod);
+        ctx.world.renderOpaque(view_proj, ctx.camera.position);
         ctx.render_ctx.endGPass();
     }
 };
@@ -474,20 +473,7 @@ pub const OpaquePass = struct {
         ctx.render_ctx.bindTexture(ctx.lpv_textures.green, 12);
         ctx.render_ctx.bindTexture(ctx.lpv_textures.blue, 13);
         const view_proj = ctx.camera.getJitteredProjectionMatrixReverseZ(ctx.aspect, ctx.viewport_width, ctx.viewport_height, ctx.taa_enabled).multiply(ctx.camera.getViewMatrixOriginCentered());
-        ctx.world.renderOpaque(view_proj, ctx.camera.position, true);
-    }
-};
-
-/// Must execute while no graphics pass is active so Vulkan can place the
-/// compute-to-indirect/storage barriers in the same frame command buffer.
-pub const LODCullingPass = struct {
-    const VTABLE = IRenderPass.VTable{ .name = "LODCullingPass", .needs_main_pass = false, .execute = execute };
-    pub fn pass(self: *LODCullingPass) IRenderPass {
-        return .{ .ptr = self, .vtable = &VTABLE };
-    }
-    fn execute(_: *anyopaque, ctx: SceneContext) anyerror!void {
-        const view_proj = ctx.camera.getJitteredProjectionMatrixReverseZ(ctx.aspect, ctx.viewport_width, ctx.viewport_height, ctx.taa_enabled).multiply(ctx.camera.getViewMatrixOriginCentered());
-        ctx.world.prepareLODCulling(view_proj, ctx.camera.position);
+        ctx.world.renderOpaque(view_proj, ctx.camera.position);
     }
 };
 
@@ -636,7 +622,7 @@ pub const WaterReflectionPass = struct {
         ctx.render_ctx.bindTexture(ctx.lpv_textures.green, 12);
         ctx.render_ctx.bindTexture(ctx.lpv_textures.blue, 13);
 
-        ctx.world.renderOpaque(reflected_vp, ctx.camera.position, false);
+        ctx.world.renderOpaque(reflected_vp, ctx.camera.position);
     }
 };
 
@@ -668,8 +654,7 @@ pub const WaterPass = struct {
         ctx.render_ctx.bindTexture(scene_depth_handle, 15);
 
         const view_proj = ctx.camera.getJitteredProjectionMatrixReverseZ(ctx.aspect, ctx.viewport_width, ctx.viewport_height, ctx.taa_enabled).multiply(ctx.camera.getViewMatrixOriginCentered());
-        const render_lod_water = engine_core.envFlag("ZIGCRAFT_LOD_WATER", true);
-        ctx.world.renderFluid(view_proj, ctx.camera.position, render_lod_water);
+        ctx.world.renderFluid(view_proj, ctx.camera.position);
     }
 };
 

@@ -21,9 +21,7 @@ layout(location = 10) out vec3 vBitangent;
 layout(location = 11) out float vAO;
 layout(location = 12) out vec4 vClipPosCurrent;
 layout(location = 13) out vec4 vClipPosPrev;
-layout(location = 14) out float vMaskRadius;
 layout(location = 15) out float vCloud;
-layout(location = 16) out float vLODFade;
 
 layout(set = 0, binding = 0) uniform GlobalUniforms {
     mat4 view_proj;
@@ -46,10 +44,6 @@ layout(set = 0, binding = 0) uniform GlobalUniforms {
 
 struct InstanceData {
     mat4 model;
-    float mask_radius;
-    float lod_fade;
-    float _pad1;
-    float _pad2;
 };
 
 layout(set = 0, binding = 5) readonly buffer InstanceBuffer {
@@ -59,7 +53,6 @@ layout(set = 0, binding = 5) readonly buffer InstanceBuffer {
 layout(push_constant) uniform ModelUniforms {
     mat4 model;
     vec4 color_override;
-    float mask_radius;
 } model_data;
 
 vec3 decodeColor(uint c) {
@@ -85,22 +78,15 @@ vec3 decodeNormal(uint packed) {
 
 void main() {
     mat4 model;
-    float mask_radius;
-    float lod_fade;
     vec3 color_override;
 
-    // Color alpha is reserved as the indirect-draw sentinel. Signed mask
-    // radii encode the dynamic ready-detail disk and are valid direct values.
+    // Color alpha is reserved as the indirect-draw sentinel.
     if (model_data.color_override.w < 0.0) {
         InstanceData inst = instance_buf.instances[gl_InstanceIndex];
         model = inst.model;
-        mask_radius = inst.mask_radius;
-        lod_fade = inst.lod_fade;
         color_override = vec3(1.0);
     } else {
         model = model_data.model;
-        mask_radius = model_data.mask_radius;
-        lod_fade = 1.0;
         color_override = model_data.color_override.xyz;
     }
 
@@ -131,7 +117,7 @@ void main() {
     vColor = decodedColor * color_override;
     vNormal = decodedNormal;
     vTexCoord = aTexCoord;
-    vTileID = (tile_id_u16 == 0xFFFFu) ? -1 : int(tile_id_u16);
+    vTileID = int(tile_id_u16);
     vDistance = length(worldPos.xyz);
     vSkyLight = skylight;
     vBlockLight = blocklight;
@@ -141,9 +127,6 @@ void main() {
     // clipPos.w is the positive forward view distance with our reverse-Z projection.
     vViewDepth = clipPos.w;
     vAO = ao;
-    vMaskRadius = mask_radius;
-    vLODFade = clamp(lod_fade, 0.0, 1.0);
-
     vec3 absNormal = abs(decodedNormal);
     if (absNormal.y > 0.9) {
         vTangent = vec3(1.0, 0.0, 0.0);

@@ -20,13 +20,10 @@ const WorldMap = gen_interface.WorldMap;
 const registry = @import("world-worldgen").registry;
 const rhi_mod = @import("engine-rhi").rhi;
 const RHI = rhi_mod.RHI;
-const WorldLOD = @import("world-lod").WorldLOD(RHI);
-const LODGenerator = @import("world-lod").LODGenerator;
 
 fn getenv(name: [:0]const u8) ?[]const u8 {
     return runtime_env.getenv(name);
 }
-const LODManager = @import("world-lod").LODManager;
 const math = @import("engine-math");
 const Vec3 = math.Vec3;
 const Mat4 = math.Mat4;
@@ -66,11 +63,9 @@ pub const WorldOrchestration = struct {
         world.checkAutoSave();
     }
 
-    /// Renders all enabled world layers for the current camera.
-    /// LOD rendering is controlled by `render_lod` and the world configuration; call after `update` has advanced queues.
-    pub fn render(renderer: anytype, streamer: anytype, lod_manager: anytype, lod_enabled: bool, view_proj: Mat4, camera_pos: Vec3, render_lod: bool, layer: anytype) void {
-        const allow_lod = lod_enabled and render_lod;
-        renderer.render(view_proj, camera_pos, streamer.getActiveRenderDistance(), lod_manager, allow_lod, layer);
+    /// Renders the full-detail chunk stream for the current camera.
+    pub fn render(renderer: anytype, streamer: anytype, view_proj: Mat4, camera_pos: Vec3, layer: anytype) void {
+        renderer.render(view_proj, camera_pos, streamer.getActiveRenderDistance(), layer);
     }
 };
 const engine_core = @import("engine-core");
@@ -81,25 +76,11 @@ const RingBuffer = engine_core.ring_buffer.RingBuffer;
 const log = engine_core.log;
 const runtime_env = engine_core.runtime_env;
 
-const LODConfig = @import("world-lod").lod_chunk.LODConfig;
-const ILODConfig = @import("world-lod").lod_chunk.ILODConfig;
-const LODLevel = @import("world-lod").LODLevel;
 const CHUNK_UNLOAD_BUFFER = world_core.CHUNK_UNLOAD_BUFFER;
 const SaveManager = @import("world-persistence").SaveManager;
 const LoadResult = @import("world-persistence").LoadResult;
 const GpuBlockBuffer = world_meshing.GpuBlockBuffer;
 const WorldMutationCoordinator = @import("world_mutation.zig").WorldMutationCoordinator;
-
-fn lodGeneratorFromGenerator(generator: Generator) LODGenerator {
-    return .{
-        .ptr = generator.ptr,
-        .generate_heightmap_only = generator.vtable.generateHeightmapOnly,
-        .maybe_recenter_cache = generator.vtable.maybeRecenterCache,
-        .seed = generator.getSeed(),
-        .identity_hash = std.hash.Wyhash.hash(0, generator.info.name),
-        .version = generator.info.version,
-    };
-}
 
 /// Buffer distance beyond render_distance for chunk unloading.
 /// Prevents thrashing when player moves near chunk boundaries.
@@ -120,14 +101,12 @@ pub const IWorld = struct {
 
     pub const VTable = struct {
         update: *const fn (ptr: *anyopaque, player_pos: Vec3, dt: f32) anyerror!void,
-        render: *const fn (ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void,
-        renderOpaque: *const fn (ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void,
-        renderFluid: *const fn (ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void,
+        render: *const fn (ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3) void,
+        renderOpaque: *const fn (ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3) void,
+        renderFluid: *const fn (ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3) void,
         deinit: *const fn (ptr: *anyopaque) void,
         getRenderStats: *const fn (ptr: *anyopaque) RenderStats,
         getStats: *const fn (ptr: *anyopaque) WorldStatsData,
-        getLODStats: *const fn (ptr: *anyopaque) ?@import("world-lod").LODStats,
-        isLODEnabled: *const fn (ptr: *anyopaque) bool,
         shadowScene: *const fn (ptr: *anyopaque) IShadowScene,
         enableSaveManager: *const fn (ptr: *anyopaque, save_dir_path: []const u8, world_name: []const u8) anyerror!void,
         takeSaveFailureWarningCount: *const fn (ptr: *anyopaque) usize,
@@ -143,10 +122,6 @@ pub const IWorld = struct {
         getGeneratorName: *const fn (ptr: *anyopaque) []const u8,
         getRenderDistance: *const fn (ptr: *anyopaque) i32,
         setRenderDistance: *const fn (ptr: *anyopaque, distance: i32) void,
-        getHorizonDistance: *const fn (ptr: *anyopaque) i32,
-        setHorizonDistance: *const fn (ptr: *anyopaque, distance: i32) void,
-        isLODRenderingEnabled: *const fn (ptr: *anyopaque) bool,
-        toggleLODRendering: *const fn (ptr: *anyopaque) bool,
         getChunkStateCounts: *const fn (ptr: *anyopaque) ChunkStateCounts,
         isStartupBusy: *const fn (ptr: *anyopaque) bool,
         getWorldStateData: *const fn (ptr: *anyopaque) WorldStateData,
@@ -163,24 +138,23 @@ pub const IWorld = struct {
     }
 
     /// Renders all enabled world layers for the current camera.
-    /// LOD rendering is controlled by `render_lod` and the world configuration; call after `update` has advanced queues.
-    pub fn render(self: IWorld, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void {
-        self.vtable.render(self.ptr, view_proj, camera_pos, render_lod);
+    pub fn render(self: IWorld, view_proj: Mat4, camera_pos: Vec3) void {
+        self.vtable.render(self.ptr, view_proj, camera_pos);
     }
 
     /// Renders opaque terrain and world geometry for the current camera.
     /// Fluid and transparent passes are intentionally excluded.
-    pub fn renderOpaque(self: IWorld, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void {
-        self.vtable.renderOpaque(self.ptr, view_proj, camera_pos, render_lod);
+    pub fn renderOpaque(self: IWorld, view_proj: Mat4, camera_pos: Vec3) void {
+        self.vtable.renderOpaque(self.ptr, view_proj, camera_pos);
     }
 
     /// Renders fluid surfaces for the current camera.
     /// Opaque depth and reflection resources should already be prepared by the renderer.
-    pub fn renderFluid(self: IWorld, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void {
-        self.vtable.renderFluid(self.ptr, view_proj, camera_pos, render_lod);
+    pub fn renderFluid(self: IWorld, view_proj: Mat4, camera_pos: Vec3) void {
+        self.vtable.renderFluid(self.ptr, view_proj, camera_pos);
     }
 
-    /// Stops world jobs and releases streaming, meshing, LOD, rendering, and persistence resources.
+    /// Stops world jobs and releases streaming, meshing, rendering, and persistence resources.
     /// No borrowed world sub-interfaces may be used after this returns.
     pub fn deinit(self: IWorld) void {
         self.vtable.deinit(self.ptr);
@@ -196,18 +170,6 @@ pub const IWorld = struct {
     /// The values reflect the current world manager state.
     pub fn getStats(self: IWorld) WorldStatsData {
         return self.vtable.getStats(self.ptr);
-    }
-
-    /// Returns distant-terrain LOD statistics when LOD is available.
-    /// Returns `null` when the world has no active LOD manager.
-    pub fn getLODStats(self: IWorld) ?@import("world-lod").LODStats {
-        return self.vtable.getLODStats(self.ptr);
-    }
-
-    /// Reports whether the world was constructed with LOD support.
-    /// This is a capability flag, separate from runtime LOD render toggles.
-    pub fn isLODEnabled(self: IWorld) bool {
-        return self.vtable.isLODEnabled(self.ptr);
     }
 
     /// Returns the world shadow-scene interface used by the shadow renderer.
@@ -300,30 +262,6 @@ pub const IWorld = struct {
         self.vtable.setRenderDistance(self.ptr, distance);
     }
 
-    /// Returns the distant-terrain horizon distance in chunks.
-    /// Used by LOD scheduling and settings UI.
-    pub fn getHorizonDistance(self: IWorld) i32 {
-        return self.vtable.getHorizonDistance(self.ptr);
-    }
-
-    /// Changes the distant-terrain horizon distance.
-    /// LOD queues and visibility update on subsequent world ticks.
-    pub fn setHorizonDistance(self: IWorld, distance: i32) void {
-        self.vtable.setHorizonDistance(self.ptr, distance);
-    }
-
-    /// Reports whether LOD drawing is currently enabled.
-    /// This runtime toggle is separate from LOD subsystem availability.
-    pub fn isLODRenderingEnabled(self: IWorld) bool {
-        return self.vtable.isLODRenderingEnabled(self.ptr);
-    }
-
-    /// Toggles LOD drawing and returns the new enabled state.
-    /// Does not destroy LOD data; it only changes render participation.
-    pub fn toggleLODRendering(self: IWorld) bool {
-        return self.vtable.toggleLODRendering(self.ptr);
-    }
-
     /// Returns counts of chunks in each streaming/meshing state.
     /// Used for diagnostics and startup-busy checks.
     pub fn getChunkStateCounts(self: IWorld) ChunkStateCounts {
@@ -393,7 +331,7 @@ pub const IWorldSimulation = struct {
         try self.world.update(player_pos, dt);
     }
 
-    /// Stops world jobs and releases streaming, meshing, LOD, rendering, and persistence resources.
+    /// Stops world jobs and releases streaming, meshing, rendering, and persistence resources.
     /// No borrowed world sub-interfaces may be used after this returns.
     pub fn deinit(self: IWorldSimulation) void {
         self.world.deinit();
@@ -446,21 +384,20 @@ pub const IWorldRenderView = struct {
     world: IWorld,
 
     /// Renders all enabled world layers for the current camera.
-    /// LOD rendering is controlled by `render_lod` and the world configuration; call after `update` has advanced queues.
-    pub fn render(self: IWorldRenderView, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void {
-        self.world.render(view_proj, camera_pos, render_lod);
+    pub fn render(self: IWorldRenderView, view_proj: Mat4, camera_pos: Vec3) void {
+        self.world.render(view_proj, camera_pos);
     }
 
     /// Renders opaque terrain and world geometry for the current camera.
     /// Fluid and transparent passes are intentionally excluded.
-    pub fn renderOpaque(self: IWorldRenderView, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void {
-        self.world.renderOpaque(view_proj, camera_pos, render_lod);
+    pub fn renderOpaque(self: IWorldRenderView, view_proj: Mat4, camera_pos: Vec3) void {
+        self.world.renderOpaque(view_proj, camera_pos);
     }
 
     /// Renders fluid surfaces for the current camera.
     /// Opaque depth and reflection resources should already be prepared by the renderer.
-    pub fn renderFluid(self: IWorldRenderView, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void {
-        self.world.renderFluid(view_proj, camera_pos, render_lod);
+    pub fn renderFluid(self: IWorldRenderView, view_proj: Mat4, camera_pos: Vec3) void {
+        self.world.renderFluid(view_proj, camera_pos);
     }
 
     /// Returns the world shadow-scene interface used by the shadow renderer.
@@ -503,18 +440,6 @@ pub const IWorldTelemetry = struct {
         return self.world.getStats();
     }
 
-    /// Returns distant-terrain LOD statistics when LOD is available.
-    /// Returns `null` when the world has no active LOD manager.
-    pub fn getLODStats(self: IWorldTelemetry) ?@import("world-lod").LODStats {
-        return self.world.getLODStats();
-    }
-
-    /// Reports whether the world was constructed with LOD support.
-    /// This is a capability flag, separate from runtime LOD render toggles.
-    pub fn isLODEnabled(self: IWorldTelemetry) bool {
-        return self.world.isLODEnabled();
-    }
-
     /// Returns the active chunk render distance in chunks.
     /// Used by streaming, renderer masks, and settings UI.
     pub fn getRenderDistance(self: IWorldTelemetry) i32 {
@@ -525,30 +450,6 @@ pub const IWorldTelemetry = struct {
     /// The streamer reconciles loaded chunks on subsequent updates.
     pub fn setRenderDistance(self: IWorldTelemetry, distance: i32) void {
         self.world.setRenderDistance(distance);
-    }
-
-    /// Returns the distant-terrain horizon distance in chunks.
-    /// Used by LOD scheduling and settings UI.
-    pub fn getHorizonDistance(self: IWorldTelemetry) i32 {
-        return self.world.getHorizonDistance();
-    }
-
-    /// Changes the distant-terrain horizon distance.
-    /// LOD queues and visibility update on subsequent world ticks.
-    pub fn setHorizonDistance(self: IWorldTelemetry, distance: i32) void {
-        self.world.setHorizonDistance(distance);
-    }
-
-    /// Reports whether LOD drawing is currently enabled.
-    /// This runtime toggle is separate from LOD subsystem availability.
-    pub fn isLODRenderingEnabled(self: IWorldTelemetry) bool {
-        return self.world.isLODRenderingEnabled();
-    }
-
-    /// Toggles LOD drawing and returns the new enabled state.
-    /// Does not destroy LOD data; it only changes render participation.
-    pub fn toggleLODRendering(self: IWorldTelemetry) bool {
-        return self.world.toggleLODRendering();
     }
 
     /// Returns counts of chunks in each streaming/meshing state.
@@ -610,7 +511,6 @@ pub const World = struct {
         rhi: RHI,
         atlas: *const TextureAtlas,
         generator_index: usize = 0,
-        lod_config: ?ILODConfig = null,
     };
 
     storage: ChunkStorage,
@@ -619,17 +519,11 @@ pub const World = struct {
     allocator: std.mem.Allocator,
     generator: Generator,
     render_distance: i32,
-    lod_chunk_render_radius_limit: i32,
-    horizon_distance: i32,
     rhi: RHI,
     paused: bool = false,
     safe_mode: bool,
     safe_render_distance: i32,
     map_mutation_revision: std.atomic.Value(u64) = .init(0),
-
-    // LOD System (Issue #114, #293)
-    lod: ?*WorldLOD,
-    lod_enabled: bool, // Runtime toggle for LOD rendering
 
     // Save system (Issue #380)
     save_manager: ?*SaveManager,
@@ -643,7 +537,7 @@ pub const World = struct {
     // LPV lighting grid builder (Issue #789)
     lpv_grid_builder: LpvGridBuilder,
 
-    /// Creates a world runtime with chunk storage, streaming, meshing, rendering, and optional LOD support.
+    /// Creates a world runtime with full-detail chunk streaming, meshing, rendering, and persistence.
     /// The allocator, generator, and RHI-backed resources must remain valid for the world lifetime. Propagates errors from streaming, persistence, meshing, or mutation subsystems.
     pub fn init(options: InitOptions) !*World {
         const allocator = options.allocator;
@@ -654,10 +548,7 @@ pub const World = struct {
         const safe_mode = runtime_env.safeModeEnabled();
         const strict_safe_mode = runtime_env.strictSafeModeEnabled();
         const safe_render_distance: i32 = @max(options.render_distance, 2);
-        const streamer_render_distance: i32 = if (options.lod_config) |lod_config|
-            effectiveChunkRenderRadius(safe_render_distance, lod_config.getChunkRenderRadius(), true)
-        else
-            effectiveChunkRenderRadius(safe_render_distance, safe_render_distance, false);
+        const streamer_render_distance = safe_render_distance;
         const max_uploads: usize = if (strict_safe_mode)
             @as(usize, 4)
         else if (safe_mode)
@@ -674,16 +565,12 @@ pub const World = struct {
             .renderer = undefined,
             .allocator = allocator,
             .render_distance = safe_render_distance,
-            .lod_chunk_render_radius_limit = streamer_render_distance,
-            .horizon_distance = if (options.lod_config) |lod_config| lod_config.getRadii()[LODLevel.count - 1] else LODConfig.default_horizon_radius,
             .generator = try registry.createGenerator(options.generator_index, options.seed, allocator),
             .rhi = options.rhi,
             .paused = false,
             .safe_mode = safe_mode,
             .safe_render_distance = safe_render_distance,
             .map_mutation_revision = .init(0),
-            .lod = null,
-            .lod_enabled = false,
             .save_manager = null,
             .gpu_block_buffer = null,
             .mutation = undefined,
@@ -716,23 +603,15 @@ pub const World = struct {
         );
 
         log.log.info("World.init: initializing WorldStreamer (render_distance={}, requested={})", .{ streamer_render_distance, safe_render_distance });
-        world.streamer = try WorldStreamer.init(allocator, &world.storage, world.generator, options.atlas, streamer_render_distance, options.lod_config != null, world.renderer.vertex_allocator, max_uploads, world.gpu_block_buffer, world.renderer.getGpuMesher());
+        world.streamer = try WorldStreamer.init(allocator, &world.storage, world.generator, options.atlas, streamer_render_distance, world.renderer.vertex_allocator, max_uploads, world.gpu_block_buffer, world.renderer.getGpuMesher());
         errdefer world.streamer.deinit();
 
-        if (options.lod_config) |lod_config| {
-            world.lod = try WorldLOD.init(allocator, options.rhi, lod_config, lodGeneratorFromGenerator(world.generator), options.atlas);
-            world.lod_enabled = true;
-            world.streamer.setLODManager(world.lod.?.manager);
-        }
         return world;
     }
 
-    /// Stops world jobs and releases streaming, meshing, LOD, rendering, and persistence resources.
+    /// Stops world jobs and releases streaming, meshing, rendering, and persistence resources.
     /// No borrowed world sub-interfaces may be used after this returns.
     pub fn deinit(self: *World) void {
-        // Pause generation first: clears the gen/mesh/LOD job queues so worker
-        // threads stop pulling new jobs. (In-flight LOD heightmap jobs are
-        // aborted later by LODManager.stop_flag, set at the top of lod.deinit().)
         self.pauseGeneration();
 
         self.rhi.query().waitIdle();
@@ -750,10 +629,6 @@ pub const World = struct {
         self.storage.deinitWithoutRHI();
         self.renderer.deinit();
 
-        if (self.lod) |lod| {
-            lod.deinit();
-        }
-
         self.generator.deinit(self.allocator);
 
         self.allocator.destroy(self);
@@ -764,10 +639,6 @@ pub const World = struct {
     pub fn pauseGeneration(self: *World) void {
         self.paused = true;
         self.streamer.setPaused(true);
-
-        if (self.lod) |lod| {
-            lod.pause();
-        }
     }
 
     /// Resumes background chunk generation after a pause.
@@ -775,10 +646,6 @@ pub const World = struct {
     pub fn resumeGeneration(self: *World) void {
         self.paused = false;
         self.streamer.setPaused(false);
-
-        if (self.lod) |lod| {
-            lod.unpause();
-        }
     }
 
     /// Attaches persistence to the world using a save directory and world name.
@@ -788,9 +655,6 @@ pub const World = struct {
         const gen_name = self.generator.info.name;
         self.save_manager = try SaveManager.init(self.allocator, save_dir_path, world_name, seed, gen_name);
         self.streamer.setSaveManager(self.save_manager);
-        if (self.lod) |lod| {
-            try lod.enableCache(save_dir_path);
-        }
     }
 
     /// Returns and clears the accumulated save-failure warning count.
@@ -834,36 +698,10 @@ pub const World = struct {
         self.storage.chunks_mutex.unlock();
     }
 
-    /// Applies pending block edits to LOD source data and waits for the
-    /// corresponding source-store writes. Full-detail save points call this
-    /// while resident chunks are still available to the ingestion resolver.
-    fn flushLODEditsForPersistence(self: *World) void {
-        const lod = self.lod orelse return;
-        lod.manager.flushEditedChunksNow();
-        lod.manager.drainPendingIngestionsNow();
-        lod.manager.flushDirtyStoresNow();
-        // In-flight or currently missing target regions cannot accept the
-        // authoritative edit yet. Remove their settled old payloads so reload
-        // regenerates them instead of briefly displaying stale distant terrain.
-        lod.manager.invalidatePendingEditedStoresNow();
-    }
-
-    /// Starts bounded LOD persistence work without waiting for cache storage.
-    /// Autosave uses this path to avoid turning a slow source-store write into
-    /// an unbounded frame stall; explicit saves still use the full barrier.
-    fn queueLODEditsForPersistence(self: *World) void {
-        const lod = self.lod orelse return;
-        lod.manager.flushEditedChunksBounded();
-        lod.manager.drainPendingIngestions();
-        lod.manager.flushDirtyStores();
-    }
-
     /// Synchronously saves chunks marked dirty by mutations or streaming.
     /// Returns errors from persistence and leaves unsaved chunks dirty for later retry.
     pub fn saveAllModifiedChunks(self: *World) void {
         const sm = self.save_manager orelse return;
-
-        self.flushLODEditsForPersistence();
 
         var dirty_keys = self.enqueueModifiedChunks(sm);
         defer dirty_keys.deinit(self.allocator);
@@ -881,8 +719,6 @@ pub const World = struct {
     pub fn checkAutoSave(self: *World) void {
         const sm = self.save_manager orelse return;
         if (!sm.shouldAutoSave()) return;
-
-        self.queueLODEditsForPersistence();
 
         var dirty_keys = self.enqueueModifiedChunks(sm);
         defer dirty_keys.deinit(self.allocator);
@@ -918,57 +754,8 @@ pub const World = struct {
         }
     }
 
-    /// Updates the full-detail streaming radius limit. Presets seed this value
-    /// during startup; the live World setting then synchronizes it to the
-    /// explicitly requested full-detail radius.
-    pub fn setLODChunkRenderRadiusLimit(self: *World, limit: i32) void {
-        const target = @max(limit, 1);
-        if (self.lod_chunk_render_radius_limit == target) return;
-        self.lod_chunk_render_radius_limit = target;
-        self.applyRenderDistance();
-    }
-
     fn applyRenderDistance(self: *World) void {
-        const chunk_render_radius = effectiveChunkRenderRadius(self.render_distance, self.lod_chunk_render_radius_limit, self.lod != null);
-        self.streamer.setRenderDistance(chunk_render_radius);
-
-        if (self.lod) |lod| {
-            const radii = effectiveLODRadii(self.render_distance, self.lod_chunk_render_radius_limit, self.horizon_distance);
-            lod.setChunkRenderRadius(chunk_render_radius);
-            lod.setRadii(radii);
-        }
-    }
-
-    pub fn effectiveChunkRenderRadius(render_distance: i32, preset_limit: i32, lod_enabled: bool) i32 {
-        const requested = @max(render_distance, 2);
-        return if (lod_enabled) @max(@min(requested, preset_limit), 2) else requested;
-    }
-
-    /// Builds the live LOD ladder from the same capped near-detail radius used
-    /// by chunk streaming. The requested horizon remains independent.
-    pub fn effectiveLODRadii(render_distance: i32, preset_limit: i32, horizon_distance: i32) [LODLevel.count]i32 {
-        const chunk_render_radius = effectiveChunkRenderRadius(render_distance, preset_limit, true);
-        return LODConfig.radiiForDistances(chunk_render_radius, horizon_distance);
-    }
-
-    /// Changes the distant-terrain horizon distance.
-    /// LOD queues and visibility update on subsequent world ticks.
-    pub fn setHorizonDistance(self: *World, distance: i32) void {
-        const target = LODConfig.normalizeHorizonDistance(self.render_distance, distance);
-        if (self.horizon_distance == target) return;
-        log.log.info("Horizon distance changed: {} -> {}", .{ self.horizon_distance, target });
-        self.horizon_distance = target;
-        if (self.lod) |lod| {
-            const radii = effectiveLODRadii(self.render_distance, self.lod_chunk_render_radius_limit, target);
-            lod.setRadii(radii);
-        }
-    }
-
-    /// Installs the bounded benchmark-only LOD source set used to exercise the
-    /// production compute/indirect culling path at high cardinality.
-    pub fn installGpuCullingScaleFixture(self: *World) !void {
-        const lod = self.lod orelse return error.LODDisabled;
-        try lod.installGpuCullingScaleFixture();
+        self.streamer.setRenderDistance(self.render_distance);
     }
 
     /// Returns a resident chunk or creates storage for it.
@@ -1024,12 +811,6 @@ pub const World = struct {
             try self.mutation.updateLighting(result);
             self.streamer.requestDirtyRemesh(result.chunk_x, result.chunk_z);
         };
-        // Notify the LOD system so distant terrain reflects player edits after
-        // the player teleports away. Coalesced on a debounce inside LODManager.
-        if (self.lod) |lod| {
-            const wc = world_core.worldToChunk(world_x, world_z);
-            lod.manager.markChunkEdited(wc.chunk_x, wc.chunk_z);
-        }
     }
 
     pub fn getMapSurfaceRevision(self: *const World) u64 {
@@ -1103,34 +884,20 @@ pub const World = struct {
         try WorldOrchestration.update(self.renderer, self.streamer, self, player_pos, dt);
     }
 
-    /// Renders all enabled world layers for the current camera.
-    /// LOD rendering is controlled by `render_lod` and the world configuration; call after `update` has advanced queues.
-    pub fn render(self: *World, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void {
-        const lod_mgr: ?*LODManager = if (self.lod) |lod| lod.manager else null;
-        WorldOrchestration.render(self.renderer, self.streamer, lod_mgr, self.lod_enabled, view_proj, camera_pos, render_lod, .all);
-    }
-
-    /// Render-graph prepass entry point: dispatch LOD compute before a graphics
-    /// render pass becomes active. Normal rendering remains a CPU fallback.
-    pub fn prepareLODCulling(self: *World, view_proj: Mat4, camera_pos: Vec3) void {
-        if (self.lod) |lod| {
-            const detail_render_radius = @min(self.streamer.getActiveRenderDistance(), lod.manager.config.getChunkRenderRadius());
-            lod.manager.prepareFrame(self.renderer.frame_serial, view_proj, camera_pos, ChunkStorage.isChunkTerrainReadyForHandoff, @ptrCast(&self.storage), lod.manager.getHorizonRenderRadius(), detail_render_radius);
-        }
+    pub fn render(self: *World, view_proj: Mat4, camera_pos: Vec3) void {
+        WorldOrchestration.render(self.renderer, self.streamer, view_proj, camera_pos, .all);
     }
 
     /// Renders opaque terrain and world geometry for the current camera.
     /// Fluid and transparent passes are intentionally excluded.
-    pub fn renderOpaque(self: *World, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void {
-        const lod_mgr: ?*LODManager = if (self.lod) |lod| lod.manager else null;
-        WorldOrchestration.render(self.renderer, self.streamer, lod_mgr, self.lod_enabled, view_proj, camera_pos, render_lod, .terrain);
+    pub fn renderOpaque(self: *World, view_proj: Mat4, camera_pos: Vec3) void {
+        WorldOrchestration.render(self.renderer, self.streamer, view_proj, camera_pos, .terrain);
     }
 
     /// Renders fluid surfaces for the current camera.
     /// Opaque depth and reflection resources should already be prepared by the renderer.
-    pub fn renderFluid(self: *World, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void {
-        const lod_mgr: ?*LODManager = if (self.lod) |lod| lod.manager else null;
-        WorldOrchestration.render(self.renderer, self.streamer, lod_mgr, self.lod_enabled, view_proj, camera_pos, render_lod, .fluid);
+    pub fn renderFluid(self: *World, view_proj: Mat4, camera_pos: Vec3) void {
+        WorldOrchestration.render(self.renderer, self.streamer, view_proj, camera_pos, .fluid);
     }
 
     /// Renders world geometry into the active shadow pass.
@@ -1267,8 +1034,6 @@ pub const World = struct {
         .deinit = ideinit,
         .getRenderStats = igetRenderStats,
         .getStats = igetStats,
-        .getLODStats = igetLODStats,
-        .isLODEnabled = iisLODEnabled,
         .shadowScene = ishadowScene,
         .enableSaveManager = ienableSaveManager,
         .takeSaveFailureWarningCount = itakeSaveFailureWarningCount,
@@ -1284,10 +1049,6 @@ pub const World = struct {
         .getGeneratorName = igetGeneratorName,
         .getRenderDistance = igetRenderDistance,
         .setRenderDistance = isetRenderDistance,
-        .getHorizonDistance = igetHorizonDistance,
-        .setHorizonDistance = isetHorizonDistance,
-        .isLODRenderingEnabled = iisLODRenderingEnabled,
-        .toggleLODRendering = itoggleLODRendering,
         .getChunkStateCounts = igetChunkStateCounts,
         .isStartupBusy = iisStartupBusy,
         .getWorldStateData = igetWorldStateData,
@@ -1298,35 +1059,29 @@ pub const World = struct {
     };
 
     const WORLD_RENDER_VIEW_VTABLE = GraphicsWorldRenderView.VTable{
-        .prepareLODCulling = iprepareLODCulling,
         .render = irender,
         .renderOpaque = irenderOpaque,
         .renderFluid = irenderFluid,
     };
-
-    fn iprepareLODCulling(ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3) void {
-        const self: *World = @ptrCast(@alignCast(ptr));
-        self.prepareLODCulling(view_proj, camera_pos);
-    }
 
     fn iupdate(ptr: *anyopaque, player_pos: Vec3, dt: f32) anyerror!void {
         const self: *World = @ptrCast(@alignCast(ptr));
         return self.update(player_pos, dt);
     }
 
-    fn irender(ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void {
+    fn irender(ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3) void {
         const self: *World = @ptrCast(@alignCast(ptr));
-        self.render(view_proj, camera_pos, render_lod);
+        self.render(view_proj, camera_pos);
     }
 
-    fn irenderOpaque(ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void {
+    fn irenderOpaque(ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3) void {
         const self: *World = @ptrCast(@alignCast(ptr));
-        self.renderOpaque(view_proj, camera_pos, render_lod);
+        self.renderOpaque(view_proj, camera_pos);
     }
 
-    fn irenderFluid(ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void {
+    fn irenderFluid(ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3) void {
         const self: *World = @ptrCast(@alignCast(ptr));
-        self.renderFluid(view_proj, camera_pos, render_lod);
+        self.renderFluid(view_proj, camera_pos);
     }
 
     fn ideinit(ptr: *anyopaque) void {
@@ -1342,16 +1097,6 @@ pub const World = struct {
     fn igetStats(ptr: *anyopaque) WorldStatsData {
         const self: *World = @ptrCast(@alignCast(ptr));
         return self.getStats();
-    }
-
-    fn igetLODStats(ptr: *anyopaque) ?@import("world-lod").LODStats {
-        const self: *World = @ptrCast(@alignCast(ptr));
-        return self.getLODStats();
-    }
-
-    fn iisLODEnabled(ptr: *anyopaque) bool {
-        const self: *World = @ptrCast(@alignCast(ptr));
-        return self.isLODEnabled();
     }
 
     fn ishadowScene(ptr: *anyopaque) IShadowScene {
@@ -1429,27 +1174,6 @@ pub const World = struct {
         self.setRenderDistance(distance);
     }
 
-    fn igetHorizonDistance(ptr: *anyopaque) i32 {
-        const self: *World = @ptrCast(@alignCast(ptr));
-        return self.horizon_distance;
-    }
-
-    fn isetHorizonDistance(ptr: *anyopaque, distance: i32) void {
-        const self: *World = @ptrCast(@alignCast(ptr));
-        self.setHorizonDistance(distance);
-    }
-
-    fn iisLODRenderingEnabled(ptr: *anyopaque) bool {
-        const self: *World = @ptrCast(@alignCast(ptr));
-        return self.lod_enabled;
-    }
-
-    fn itoggleLODRendering(ptr: *anyopaque) bool {
-        const self: *World = @ptrCast(@alignCast(ptr));
-        self.lod_enabled = !self.lod_enabled;
-        return self.lod_enabled;
-    }
-
     fn igetChunkStateCounts(ptr: *anyopaque) ChunkStateCounts {
         const self: *World = @ptrCast(@alignCast(ptr));
         return self.getChunkStateCounts();
@@ -1496,18 +1220,5 @@ pub const World = struct {
         const self: *World = @ptrCast(@alignCast(ptr));
         const block = self.getBlock(x, y, z);
         return block_registry.getBlockDefinition(block).is_solid;
-    }
-
-    /// Get LOD system statistics (returns null if LOD not enabled)
-    pub fn getLODStats(self: *World) ?@import("world-lod").LODStats {
-        if (self.lod) |lod| {
-            return lod.getStats();
-        }
-        return null;
-    }
-
-    /// Check if LOD system is enabled
-    pub fn isLODEnabled(self: *const World) bool {
-        return self.lod != null;
     }
 };

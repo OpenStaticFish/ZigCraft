@@ -1,8 +1,8 @@
-//! Biome color lookup for LOD rendering and minimap.
+//! Biome color lookup for maps.
 
 const BiomeId = @import("biome_registry.zig").BiomeId;
 
-/// Get biome color for LOD rendering (packed RGB)
+/// Get a packed RGB biome color.
 /// Colors adjusted to match textured output (grass/surface colors)
 pub fn getBiomeColor(biome_id: BiomeId) u32 {
     return switch (biome_id) {

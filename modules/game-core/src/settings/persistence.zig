@@ -50,41 +50,30 @@ pub fn load(allocator: std.mem.Allocator) Settings {
     };
     defer allocator.free(content);
 
-    const parsed = std.json.parseFromSlice(Settings, allocator, content, .{
-        .ignore_unknown_fields = true,
-    }) catch |err| {
+    const settings = parseSettingsJson(allocator, content) catch |err| {
         log.log.warn("Failed to parse settings JSON: {}. Using defaults.", .{err});
         return .{};
     };
-    defer parsed.deinit();
-
-    var settings = parsed.value;
-
-    // Deep copy string fields so they survive parsed.deinit()
-    const texture_pack = dupStringField(allocator, settings.texture_pack) catch {
-        log.log.warn("Failed to allocate texture_pack string, using default", .{});
-        settings.texture_pack = "default";
-        settings.environment_map = "default";
-        return settings;
-    };
-
-    const environment_map = dupStringField(allocator, settings.environment_map) catch {
-        log.log.warn("Failed to allocate environment_map string, using default", .{});
-        freeStringField(allocator, texture_pack); // Clean up successful first allocation
-        settings.texture_pack = "default";
-        settings.environment_map = "default";
-        return settings;
-    };
-
-    settings.texture_pack = texture_pack;
-    settings.environment_map = environment_map;
-
-    if (data.sanitizeRuntimeConflicts(&settings)) {
-        log.log.warn("Disabling TAA for loaded settings because it currently jitters distant LOD terrain", .{});
-    }
 
     log.log.info("Settings loaded from ~/{s}", .{config_path});
     return settings;
+}
+
+fn parseSettingsJson(allocator: std.mem.Allocator, content: []const u8) !Settings {
+    const parsed = try std.json.parseFromSlice(Settings, allocator, content, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    var settings = parsed.value;
+    settings.texture_pack = try dupStringField(allocator, settings.texture_pack);
+    errdefer freeStringField(allocator, settings.texture_pack);
+    settings.environment_map = try dupStringField(allocator, settings.environment_map);
+    return settings;
+}
+
+fn stringifySettings(allocator: std.mem.Allocator, settings: *const Settings) ![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, settings.*, .{ .whitespace = .indent_2 });
 }
 
 pub fn deinit(settings: *Settings, allocator: std.mem.Allocator) void {
@@ -129,10 +118,33 @@ pub fn save(settings: *const Settings, allocator: std.mem.Allocator) !void {
     defer file.close();
 
     // Serialize settings to JSON and write to file
-    const json_str = try std.json.Stringify.valueAlloc(allocator, settings.*, .{ .whitespace = .indent_2 });
+    const json_str = try stringifySettings(allocator, settings);
     defer allocator.free(json_str);
 
     try file.writeAll(json_str);
 
     log.log.info("Settings saved to ~/{s}", .{config_path});
+}
+
+test "settings JSON ignores removed LOD fields and omits them when saved" {
+    const allocator = std.testing.allocator;
+    const legacy_json =
+        \\{
+        \\  "render_distance": 23,
+        \\  "vsync": false,
+        \\  "horizon_distance": 512,
+        \\  "lod_enabled": true
+        \\}
+    ;
+
+    var settings = try parseSettingsJson(allocator, legacy_json);
+    defer deinit(&settings, allocator);
+    try std.testing.expectEqual(@as(i32, 23), settings.render_distance);
+    try std.testing.expect(!settings.vsync);
+
+    const saved_json = try stringifySettings(allocator, &settings);
+    defer allocator.free(saved_json);
+    try std.testing.expect(std.mem.indexOf(u8, saved_json, "render_distance") != null);
+    try std.testing.expect(std.mem.indexOf(u8, saved_json, "horizon_distance") == null);
+    try std.testing.expect(std.mem.indexOf(u8, saved_json, "lod_enabled") == null);
 }

@@ -86,16 +86,9 @@ pub const Job = struct {
         x: i32,
         z: i32,
         job_token: u32,
-        lod_level: u3 = 0,
-        /// Converts x/z into chunk coordinates for distance reprioritization.
-        /// Normal chunk jobs use chunk coords directly (1); LOD jobs store
-        /// region coords and set this to that LOD's chunks-per-side.
-        coord_scale: i32 = 1,
         /// Keep an explicitly assigned bootstrap order instead of replacing
         /// its low priority bits when the player position changes.
         preserve_priority: bool = false,
-        /// Immutable LOD config snapshot captured when a generation job is queued.
-        lod_radius: i32 = 0,
         use_vertical_spans: bool = false,
     };
 
@@ -243,20 +236,13 @@ pub const JobQueue = struct {
 
             // Only update distance for chunk-based jobs
             if (job.getChunkCoords()) |coords| if (!job.data.chunk.preserve_priority) {
-                const scale: i32 = @max(updated_job.data.chunk.coord_scale, 1);
-                // Compute squared distance in i64 then clamp, matching
-                // lod_manager/lod_scheduler — i32 dx*dx can overflow at large
-                // render/LOD distances.
-                const dx: i64 = @as(i64, coords.x) * @as(i64, scale) - @as(i64, self.player_cx);
-                const dz: i64 = @as(i64, coords.z) * @as(i64, scale) - @as(i64, self.player_cz);
+                // Compute squared distance in i64 before clamping so distant
+                // chunk coordinates cannot overflow the queue priority.
+                const dx: i64 = @as(i64, coords.x) - @as(i64, self.player_cx);
+                const dz: i64 = @as(i64, coords.z) - @as(i64, self.player_cz);
                 const new_dist_i64: i64 = dx * dx + dz * dz;
                 const new_dist: i32 = @intCast(@min(new_dist_i64, @as(i64, 0x0FFFFFFF)));
-                // Preserve the LOD-bias high bits; only refresh the low 28
-                // distance bits. Overwriting dist_sq wholesale would flatten
-                // all LOD levels into one distance space and break cross-level
-                // ordering.
-                const bias_bits = updated_job.dist_sq & ~@as(i32, 0x0FFFFFFF);
-                updated_job.dist_sq = bias_bits | new_dist;
+                updated_job.dist_sq = new_dist;
             };
 
             temp.append(self.allocator, updated_job) catch {
@@ -524,22 +510,22 @@ test "Job.cleanup idempotency survives queue drain after OOM-style drop" {
     try testing.expectEqual(@as(usize, 1), cleanup_count);
 }
 
-test "JobQueue reprioritizes region-scaled chunk jobs" {
+test "JobQueue reprioritizes chunk jobs" {
     var queue = JobQueue.init(testing.allocator);
     defer queue.deinit();
 
     try queue.push(.{
         .type = .chunk_generation,
         .dist_sq = 0,
-        .data = .{ .chunk = .{ .x = 60, .z = 0, .job_token = 1, .lod_level = 0, .coord_scale = 2 } },
+        .data = .{ .chunk = .{ .x = 60, .z = 0, .job_token = 1 } },
     });
     try queue.push(.{
         .type = .chunk_generation,
         .dist_sq = 0,
-        .data = .{ .chunk = .{ .x = 50, .z = 0, .job_token = 2, .lod_level = 0, .coord_scale = 2 } },
+        .data = .{ .chunk = .{ .x = 50, .z = 0, .job_token = 2 } },
     });
 
-    try queue.updatePlayerPos(100, 0);
+    try queue.updatePlayerPos(52, 0);
 
     const first = queue.pop() orelse return error.TestExpectedEqual;
     try testing.expectEqual(@as(u32, 2), first.data.chunk.job_token);

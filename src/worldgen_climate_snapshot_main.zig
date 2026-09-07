@@ -64,7 +64,7 @@ fn writeUsage(init: std.process.Init) !void {
         \\  --width <u32>          Sample width (default: 128)
         \\  --depth <u32>          Sample depth (default: 128)
         \\  --step <f32>           World-space distance between samples (default: 4)
-        \\  --reduction <u8>       LOD noise reduction level (default: 0)
+        \\  --reduction <u8>       Noise octave reduction level (default: 0)
         \\  --format <json|ppm>    Output format (default: json)
         \\  --field <name>         PPM field: temperature, humidity, continentalness, erosion, ruggedness, river_mask, ridge_mask, cave_region, elevation, height
         \\  --output <path|->      Output file or stdout (default: zig-out/worldgen-climate-snapshot.json)

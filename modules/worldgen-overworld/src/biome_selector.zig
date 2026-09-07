@@ -1,4 +1,4 @@
-//! Biome selection algorithms: Voronoi, score-based, blended, and LOD-simplified.
+//! Biome selection algorithms: Voronoi, score-based, and blended.
 //! All selection functions are pure — they read from the registry but have no side effects.
 
 const std = @import("std");
@@ -304,18 +304,4 @@ pub fn selectBiomeWithConstraintsAndRiver(climate: ClimateParams, structural: St
         return .river;
     }
     return selectBiomeWithConstraints(climate, structural);
-}
-
-// ============================================================================
-// LOD-optimized Biome Functions (Issue #114)
-// ============================================================================
-
-/// Simplified biome selection for LOD2+ paths that only have climate params.
-///
-/// Keep this aligned with the full registry scoring path so distant biome color
-/// and material choices use the same climate, elevation, continentalness,
-/// ruggedness, and ridge signals as LOD0 where structural height/slope filters
-/// are not available.
-pub fn selectBiomeSimple(climate: ClimateParams) BiomeId {
-    return selectBiome(climate);
 }

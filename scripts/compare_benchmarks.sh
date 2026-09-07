@@ -44,7 +44,7 @@ read_json() {
     jq -r "$1" "$2"
 }
 
-[[ -n "$preset" && -n "$scenario" ]] || { printf 'Schema-v2 comparison requires --preset and --scenario.\n' >&2; exit 2; }
+[[ -n "$preset" && -n "$scenario" ]] || { printf 'Schema-v4 comparison requires --preset and --scenario.\n' >&2; exit 2; }
 python3 scripts/benchmark_baseline.py validate "$baseline"
 bash scripts/validate_benchmark_artifact.sh --result "$new"
 python3 scripts/benchmark_baseline.py compatibility "$baseline" "$new" --preset "$preset" --scenario "$scenario"

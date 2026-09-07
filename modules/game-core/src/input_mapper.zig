@@ -17,7 +17,7 @@ pub const MovementVector = input_interfaces.MovementVector;
 
 /// Default bindings for all actions. Stored as a static array to avoid heap allocation.
 pub const DEFAULT_BINDINGS = blk: {
-    var bindings: [GameAction.count]ActionBinding = undefined;
+    var bindings = [_]ActionBinding{ActionBinding.init(.{ .none = {} })} ** GameAction.count;
 
     // Movement
     bindings[@intFromEnum(GameAction.move_forward)] = ActionBinding.init(.{ .key = .w });
@@ -62,7 +62,6 @@ pub const DEFAULT_BINDINGS = blk: {
     bindings[@intFromEnum(GameAction.toggle_creative)] = ActionBinding.init(.{ .key = .f12 });
     bindings[@intFromEnum(GameAction.toggle_debug_menu)] = ActionBinding.init(.{ .key = .f3 });
     bindings[@intFromEnum(GameAction.toggle_timing_overlay)] = ActionBinding.init(.{ .key = .f4 });
-    bindings[@intFromEnum(GameAction.toggle_lod_render)] = ActionBinding.init(.{ .key = .f6 });
     bindings[@intFromEnum(GameAction.toggle_gpass_render)] = ActionBinding.init(.{ .key = .f7 });
     bindings[@intFromEnum(GameAction.toggle_ssao)] = ActionBinding.init(.{ .key = .f8 });
     bindings[@intFromEnum(GameAction.toggle_fog)] = ActionBinding.init(.{ .key = .f10 });
@@ -282,4 +281,12 @@ test "InputMapper resetActionToDefault" {
 
     mapper.resetActionToDefault(.move_forward);
     try std.testing.expect(mapper.getBinding(.move_forward).primary.key == .w);
+}
+
+test "InputMapper binds the timing overlay to F4 by default" {
+    const mapper = InputMapper.init();
+    const binding = mapper.getBinding(.toggle_timing_overlay);
+
+    try std.testing.expect(binding.primary == .key);
+    try std.testing.expectEqual(.f4, binding.primary.key);
 }

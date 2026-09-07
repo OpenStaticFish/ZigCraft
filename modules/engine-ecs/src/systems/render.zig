@@ -136,7 +136,7 @@ pub const RenderSystem = struct {
             const model = boxModel(registry, entity_id, transform, camera_pos);
 
             if (self.buffer_handle != rhi_pkg.InvalidBufferHandle) {
-                ctx.setModelMatrix(model, mesh.color, 0);
+                ctx.setModelMatrix(model, mesh.color);
                 ctx.draw(self.buffer_handle, wireframe_line_vertex_count, .lines);
             }
         }
@@ -160,7 +160,7 @@ pub const RenderSystem = struct {
             const max = min.add(size);
             if (max.x < caster_min.x or min.x > caster_max.x or max.y < caster_min.y or min.y > caster_max.y or max.z < caster_min.z or min.z > caster_max.z) continue;
 
-            ctx.setModelMatrix(boxModel(registry, row.entity, transform, camera_pos), Vec3.one, 0);
+            ctx.setModelMatrix(boxModel(registry, row.entity, transform, camera_pos), Vec3.one);
             ctx.drawOffset(self.solid_buffer_handle, solid_box_vertex_count, .triangles, 0);
         }
     }

@@ -41,8 +41,6 @@ pub const PipelineManager = struct {
     rml_ui_pipeline: c.VkPipeline = null,
     rml_ui_tex_pipeline: c.VkPipeline = null,
     water_pipeline: c.VkPipeline = null,
-    compact_lod_terrain_pipeline: c.VkPipeline = null,
-    compact_lod_water_pipeline: c.VkPipeline = null,
 
     // Swapchain UI pipelines
     ui_swapchain_pipeline: c.VkPipeline = null,
@@ -222,8 +220,6 @@ pub const PipelineManager = struct {
         if (self.rml_ui_pipeline) |p| c.vkDestroyPipeline(vk_device, p, null);
         if (self.rml_ui_tex_pipeline) |p| c.vkDestroyPipeline(vk_device, p, null);
         if (self.water_pipeline) |p| c.vkDestroyPipeline(vk_device, p, null);
-        if (self.compact_lod_terrain_pipeline) |p| c.vkDestroyPipeline(vk_device, p, null);
-        if (self.compact_lod_water_pipeline) |p| c.vkDestroyPipeline(vk_device, p, null);
         if (self.ui_swapchain_pipeline) |p| c.vkDestroyPipeline(vk_device, p, null);
         if (self.ui_swapchain_tex_pipeline) |p| c.vkDestroyPipeline(vk_device, p, null);
         if (self.rml_ui_swapchain_pipeline) |p| c.vkDestroyPipeline(vk_device, p, null);
@@ -244,8 +240,6 @@ pub const PipelineManager = struct {
         self.rml_ui_pipeline = null;
         self.rml_ui_tex_pipeline = null;
         self.water_pipeline = null;
-        self.compact_lod_terrain_pipeline = null;
-        self.compact_lod_water_pipeline = null;
         self.ui_swapchain_pipeline = null;
         self.ui_swapchain_tex_pipeline = null;
         self.rml_ui_swapchain_pipeline = null;
@@ -343,8 +337,6 @@ pub const PipelineManager = struct {
 
         // Terrain Pipeline
         try self.createTerrainPipeline(allocator, vk_device, hdr_render_pass, &viewport_state, &dynamic_state, &input_assembly, &rasterizer, &terrain_multisampling, &depth_stencil, &terrain_color_blending, sample_count, g_render_pass);
-        try pipeline_specialized.createCompactLODPipeline(self, allocator, vk_device, hdr_render_pass, &viewport_state, &dynamic_state, &input_assembly, &rasterizer, &terrain_multisampling, &depth_stencil, &terrain_color_blending, shader_registry.COMPACT_LOD_TERRAIN_VERT, shader_registry.COMPACT_LOD_TERRAIN_FRAG, false, &self.compact_lod_terrain_pipeline);
-        try pipeline_specialized.createCompactLODPipeline(self, allocator, vk_device, hdr_render_pass, &viewport_state, &dynamic_state, &input_assembly, &rasterizer, &terrain_multisampling, &depth_stencil, &terrain_color_blending, shader_registry.COMPACT_LOD_WATER_VERT, shader_registry.COMPACT_LOD_WATER_FRAG, true, &self.compact_lod_water_pipeline);
 
         // Sky Pipeline
         try self.createSkyPipeline(allocator, vk_device, hdr_render_pass, &viewport_state, &dynamic_state, &input_assembly, &rasterizer, &multisampling, &depth_stencil, &terrain_color_blending);

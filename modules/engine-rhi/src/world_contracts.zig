@@ -25,26 +25,21 @@ pub const IWorldRenderView = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        prepareLODCulling: *const fn (ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3) void,
-        render: *const fn (ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void,
-        renderOpaque: *const fn (ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void,
-        renderFluid: *const fn (ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void,
+        render: *const fn (ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3) void,
+        renderOpaque: *const fn (ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3) void,
+        renderFluid: *const fn (ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3) void,
     };
 
-    pub fn prepareLODCulling(self: IWorldRenderView, view_proj: Mat4, camera_pos: Vec3) void {
-        self.vtable.prepareLODCulling(self.ptr, view_proj, camera_pos);
+    pub fn render(self: IWorldRenderView, view_proj: Mat4, camera_pos: Vec3) void {
+        self.vtable.render(self.ptr, view_proj, camera_pos);
     }
 
-    pub fn render(self: IWorldRenderView, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void {
-        self.vtable.render(self.ptr, view_proj, camera_pos, render_lod);
+    pub fn renderOpaque(self: IWorldRenderView, view_proj: Mat4, camera_pos: Vec3) void {
+        self.vtable.renderOpaque(self.ptr, view_proj, camera_pos);
     }
 
-    pub fn renderOpaque(self: IWorldRenderView, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void {
-        self.vtable.renderOpaque(self.ptr, view_proj, camera_pos, render_lod);
-    }
-
-    pub fn renderFluid(self: IWorldRenderView, view_proj: Mat4, camera_pos: Vec3, render_lod: bool) void {
-        self.vtable.renderFluid(self.ptr, view_proj, camera_pos, render_lod);
+    pub fn renderFluid(self: IWorldRenderView, view_proj: Mat4, camera_pos: Vec3) void {
+        self.vtable.renderFluid(self.ptr, view_proj, camera_pos);
     }
 };
 

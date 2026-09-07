@@ -41,7 +41,6 @@ modules/
   world-core/       # chunk, block, block_registry, coordinates, lighting
   world-worldgen/   # terrain generation, biomes, caves, decorations
   world-meshing/    # chunk_storage, chunk_mesh, meshing/, GPU block buffers
-  world-lod/        # LOD chunks, meshes, scheduler, renderer, manager
   world-runtime/    # world facade, streaming, renderer, mutation, GPU mesher
   world-persistence/# level data, region files, save manager
 src/

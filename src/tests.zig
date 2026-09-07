@@ -2,7 +2,8 @@
 //!
 //! This file imports all test modules. Individual tests live in their
 //! respective modules (math_tests, noise_tests, etc.) or in dedicated
-//! test files alongside the source they validate.
+//! test files alongside the source they validate. Module-owned test blocks
+//! are registered from direct source roots in build.zig.
 //!
 //! Run with: zig build test
 
@@ -11,6 +12,43 @@ const std = @import("std");
 pub const std_options: std.Options = .{
     .log_level = .err,
 };
+
+test "WorldStreamer prioritizes chunks in the player movement direction" {
+    const PlayerMovement = @import("world-runtime").PlayerMovement;
+    const Vec3 = @import("engine-math").Vec3;
+
+    var movement = PlayerMovement{};
+    try std.testing.expect(movement.update(Vec3.init(8, 0, 0), 1.0));
+    try std.testing.expect(movement.priorityWeight(1, 0) < movement.priorityWeight(-1, 0));
+}
+
+test "benchmark warmup waits for stable geometry before sampling" {
+    const BenchmarkRunner = @import("game-core").BenchmarkRunner;
+    const GpuTimingResults = @import("engine-rhi").GpuTimingResults;
+    const WorldStats = @import("engine-ui").WorldStats;
+
+    var runner = try BenchmarkRunner.init(std.testing.allocator, "low", "stationary", 6, 1, 1, "Debug", "test", "unused.json");
+    defer runner.deinit();
+    const world_stats = WorldStats{
+        .chunks_total = 1,
+        .chunks_rendered = 1,
+        .chunks_culled = 0,
+        .vertices_rendered = 3,
+        .gen_queue = 0,
+        .mesh_queue = 0,
+        .upload_queue = 0,
+    };
+    const gpu_timing = std.mem.zeroes(GpuTimingResults);
+
+    try runner.recordFrame(0.5, 120, gpu_timing, world_stats, 1, 1);
+    try std.testing.expect(!runner.warmup_ready);
+    try runner.recordFrame(0.5, 120, gpu_timing, world_stats, 1, 1);
+    try std.testing.expect(runner.warmup_ready);
+    try std.testing.expectEqual(@as(usize, 0), runner.samples.items.len);
+
+    try runner.recordFrame(0.5, 120, gpu_timing, world_stats, 1, 1);
+    try std.testing.expectEqual(@as(usize, 1), runner.samples.items.len);
+}
 
 test {
     // Inline module test files (Issue #551)
@@ -49,7 +87,6 @@ test {
     _ = @import("engine-graphics").utils_tests;
     _ = @import("vulkan_tests.zig");
     _ = @import("engine-graphics").rhi_tests;
-    _ = @import("engine-graphics").lod_culling_system;
     _ = @import("engine-rhi").rhi_contract_tests;
     _ = @import("engine-rhi").culling;
     _ = @import("engine-clouds").cloud_system;
@@ -90,7 +127,6 @@ test {
     _ = @import("world-persistence").chunk_serializer;
     _ = @import("world-persistence").level_data;
     _ = @import("world-persistence").save_manager;
-    _ = @import("world-meshing").meshing.quadric_simplifier;
     _ = @import("world-meshing").chunk_storage_tests;
     _ = @import("world-meshing").chunk_storage_extended_tests;
     _ = @import("world-meshing").gpu_block_buffer_tests;

@@ -81,7 +81,6 @@ pub fn applyChangedSetting(comptime name: []const u8, settings: *Settings, rs: a
 }
 
 pub fn applyPresetSideEffects(settings: *Settings, rs: anytype) void {
-    _ = settings_pkg.sanitizeRuntimeConflicts(settings);
     rs.setAnisotropicFiltering(settings.anisotropic_filtering);
     rs.setTexturesEnabled(settings.textures_enabled);
     rs.setShadowResolution(settings.getShadowResolution());

@@ -339,9 +339,6 @@ test "RHI contract declares RenderContext.setModelMatrix" {
 test "RHI contract declares RenderContext.setInstanceBuffer" {
     try std.testing.expect(@hasDecl(rhi.RenderContext, "setInstanceBuffer"));
 }
-test "RHI contract declares RenderContext.setLODInstanceBuffer" {
-    try std.testing.expect(@hasDecl(rhi.RenderContext, "setLODInstanceBuffer"));
-}
 test "RHI contract declares RenderContext.setTerrainPipelineBound" {
     try std.testing.expect(@hasDecl(rhi.RenderContext, "setTerrainPipelineBound"));
 }
@@ -496,13 +493,6 @@ test "RHI contract declares IRenderStateContext.setModelMatrix" {
 }
 test "RHI contract declares IRenderStateContext.setInstanceBuffer" {
     try std.testing.expect(@hasDecl(rhi.IRenderStateContext, "setInstanceBuffer"));
-}
-test "RHI contract declares IRenderStateContext.setLODInstanceBuffer" {
-    try std.testing.expect(@hasDecl(rhi.IRenderStateContext, "setLODInstanceBuffer"));
-}
-
-test "RHI contract declares IRenderStateContext.setLODDescriptorStream" {
-    try std.testing.expect(@hasDecl(rhi.IRenderStateContext, "setLODDescriptorStream"));
 }
 test "RHI contract declares IRenderStateContext.setTerrainPipelineBound" {
     try std.testing.expect(@hasDecl(rhi.IRenderStateContext, "setTerrainPipelineBound"));
@@ -664,9 +654,6 @@ test "RHI contract declares IDeviceQuery.supportsIndirectFirstInstance" {
     try std.testing.expect(@hasDecl(rhi.IDeviceQuery, "supportsIndirectFirstInstance"));
 }
 
-test "RHI contract declares compact GPU-culling safety capability" {
-    try std.testing.expect(@hasDecl(rhi.IDeviceQuery, "supportsCompactLODGpuCulling"));
-}
 test "RHI contract declares IDeviceQuery.getFaultCount" {
     try std.testing.expect(@hasDecl(rhi.IDeviceQuery, "getFaultCount"));
 }

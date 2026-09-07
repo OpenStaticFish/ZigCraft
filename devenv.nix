@@ -329,7 +329,7 @@ let
   rmluiBridge = pkgs.llvmPackages.libcxxStdenv.mkDerivation {
     pname = "zigcraft-rmlui-bridge";
     version = "6.2";
-    src = ./.;
+    src = ./libs/rmlui_bridge;
 
     nativeBuildInputs = [ pkgs.pkg-config ];
     buildInputs = [ pkgs.sdl3 pkgs.freetype rmlui ];
@@ -337,8 +337,8 @@ let
 
     buildPhase = ''
       runHook preBuild
-      $CXX -std=c++17 -DRMLUI_STATIC_LIB -O2 -fPIC -I$src/libs/rmlui_bridge -I${rmlui}/include $(pkg-config --cflags sdl3) \
-        -c $src/libs/rmlui_bridge/zigcraft_rmlui.cpp -o zigcraft_rmlui.o
+      $CXX -std=c++17 -DRMLUI_STATIC_LIB -O2 -fPIC -I$src -I${rmlui}/include $(pkg-config --cflags sdl3) \
+        -c $src/zigcraft_rmlui.cpp -o zigcraft_rmlui.o
       ar rcs libzigcraft_rmlui_bridge.a zigcraft_rmlui.o
       runHook postBuild
     '';
@@ -346,7 +346,7 @@ let
     installPhase = ''
       runHook preInstall
       mkdir -p $out/include/zigcraft $out/lib/pkgconfig
-      cp $src/libs/rmlui_bridge/zigcraft_rmlui.h $out/include/zigcraft/
+      cp $src/zigcraft_rmlui.h $out/include/zigcraft/
       cp libzigcraft_rmlui_bridge.a $out/lib/
       cat > $out/lib/pkgconfig/zigcraft-rmlui-bridge.pc <<EOF
       prefix=$out
@@ -460,7 +460,7 @@ in
     };
 
     # CI graphics shell: mesa (Lavapipe) + weston headless compositor.
-    # Used by integration-test, phase5-*, benchmark, profiling, visual-test.
+    # Used by integration tests, benchmarks, profiling, and visual tests.
     graphics.module = { pkgs, ... }: {
       packages = [
         pkgs.mesa

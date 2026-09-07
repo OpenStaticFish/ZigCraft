@@ -10,8 +10,6 @@ const CHUNK_SIZE_X = world_core.CHUNK_SIZE_X;
 const CHUNK_SIZE_Y = world_core.CHUNK_SIZE_Y;
 const CHUNK_SIZE_Z = world_core.CHUNK_SIZE_Z;
 const BlockType = world_core.BlockType;
-const LODLevel = world_core.LODLevel;
-const LODSimplifiedData = world_core.LODSimplifiedData;
 const LightingComputer = @import("worldgen-common").LightingComputer;
 
 pub const FlatWorldGenerator = struct {
@@ -19,7 +17,6 @@ pub const FlatWorldGenerator = struct {
     allocator: std.mem.Allocator,
 
     const FLAT_HEIGHT: i32 = 64;
-    const GRASS_COLOR: u32 = 0xFF40A040;
 
     pub const INFO = GeneratorInfo{
         .name = "Flat World",
@@ -65,40 +62,6 @@ pub const FlatWorldGenerator = struct {
         chunk.dirty = true;
     }
 
-    pub fn generateHeightmapOnly(self: *const FlatWorldGenerator, data: *LODSimplifiedData, region_x: i32, region_z: i32, lod_level: LODLevel, stop_flag: ?*const std.atomic.Value(bool)) void {
-        _ = self;
-        _ = region_x;
-        _ = region_z;
-        _ = lod_level;
-        _ = stop_flag;
-
-        @memset(data.heightmap, @floatFromInt(FLAT_HEIGHT));
-        @memset(data.biomes, .plains);
-        @memset(data.top_blocks, .grass);
-        @memset(data.colors, GRASS_COLOR);
-        @memset(data.material_layers, .{ .surface = .grass, .subsurface = .dirt, .foundation = .stone });
-        @memset(data.water, world_core.LODWaterState.empty);
-        @memset(data.lighting, world_core.LODLightingHint.daylight);
-        @memset(data.vegetation, world_core.LODVegetationHint.empty);
-
-        if (data.hasVerticalSpans()) {
-            var gz: u32 = 0;
-            while (gz < data.width) : (gz += 1) {
-                var gx: u32 = 0;
-                while (gx < data.width) : (gx += 1) {
-                    data.setGeneratedColumn(gx, gz, @floatFromInt(FLAT_HEIGHT), .plains, .{ .surface = .grass, .subsurface = .dirt, .foundation = .stone }, GRASS_COLOR, world_core.LODWaterState.empty, world_core.LODLightingHint.daylight, world_core.LODVegetationHint.empty);
-                }
-            }
-        }
-    }
-
-    pub fn maybeRecenterCache(self: *FlatWorldGenerator, player_x: i32, player_z: i32) bool {
-        _ = self;
-        _ = player_x;
-        _ = player_z;
-        return false;
-    }
-
     pub fn getSeed(self: *const FlatWorldGenerator) u64 {
         return self.seed;
     }
@@ -121,8 +84,6 @@ pub const FlatWorldGenerator = struct {
 
     const VTABLE = Generator.VTable{
         .generate = generateWrapper,
-        .generateHeightmapOnly = generateHeightmapOnlyWrapper,
-        .maybeRecenterCache = maybeRecenterCacheWrapper,
         .getSeed = getSeedWrapper,
         .getRegionInfo = getRegionInfoWrapper,
         .getColumnInfo = getColumnInfoWrapper,
@@ -133,16 +94,6 @@ pub const FlatWorldGenerator = struct {
     fn generateWrapper(ptr: *anyopaque, chunk: *Chunk, stop_flag: ?*const bool) worldgen_api.WorldgenError!void {
         const self: *FlatWorldGenerator = @ptrCast(@alignCast(ptr));
         try self.generate(chunk, stop_flag);
-    }
-
-    fn generateHeightmapOnlyWrapper(ptr: *anyopaque, data: *LODSimplifiedData, region_x: i32, region_z: i32, lod_level: LODLevel, stop_flag: ?*const std.atomic.Value(bool)) void {
-        const self: *FlatWorldGenerator = @ptrCast(@alignCast(ptr));
-        self.generateHeightmapOnly(data, region_x, region_z, lod_level, stop_flag);
-    }
-
-    fn maybeRecenterCacheWrapper(ptr: *anyopaque, player_x: i32, player_z: i32) bool {
-        const self: *FlatWorldGenerator = @ptrCast(@alignCast(ptr));
-        return self.maybeRecenterCache(player_x, player_z);
     }
 
     fn getSeedWrapper(ptr: *anyopaque) u64 {

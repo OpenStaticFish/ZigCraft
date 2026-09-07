@@ -78,7 +78,7 @@ pub const CloudSystem = struct {
             -(camera_pos.y - self.mesh_camera_pos.y),
             (self.origin_z - self.mesh_origin_z) - (camera_pos.z - self.mesh_camera_pos.z),
         );
-        ctx.setModelMatrix(Mat4.translate(smooth_offset), Vec3.one, 0);
+        ctx.setModelMatrix(Mat4.translate(smooth_offset), Vec3.one);
         ctx.drawOffset(self.vertex_buffer, self.vertex_count, .triangles, 0);
         // Force OpaquePass to rebind terrain state after clouds use the same pipeline.
         ctx.setTerrainPipelineBound(false);
@@ -96,7 +96,7 @@ pub const CloudSystem = struct {
             -(camera_pos.y - self.mesh_camera_pos.y),
             (self.origin_z - self.mesh_origin_z) - (camera_pos.z - self.mesh_camera_pos.z),
         );
-        ctx.setModelMatrix(Mat4.translate(smooth_offset), Vec3.one, 0);
+        ctx.setModelMatrix(Mat4.translate(smooth_offset), Vec3.one);
         ctx.drawOffset(self.vertex_buffer, self.vertex_count, .triangles, 0);
     }
 
@@ -177,12 +177,12 @@ pub const CloudSystem = struct {
     }
 
     fn emitQuad(self: *CloudSystem, vertices: *std.ArrayListUnmanaged(rhi.Vertex), a: [3]f32, b: [3]f32, c: [3]f32, d: [3]f32, color: [3]f32, normal: [3]f32) !void {
-        try vertices.append(self.allocator, rhi.Vertex.initCloud(a, color, normal, .{ 0.0, 1.0 }, rhi.Vertex.LOD_TILE_ID, 1.0, .{ 0.0, 0.0, 0.0 }, 1.0));
-        try vertices.append(self.allocator, rhi.Vertex.initCloud(b, color, normal, .{ 1.0, 1.0 }, rhi.Vertex.LOD_TILE_ID, 1.0, .{ 0.0, 0.0, 0.0 }, 1.0));
-        try vertices.append(self.allocator, rhi.Vertex.initCloud(c, color, normal, .{ 1.0, 0.0 }, rhi.Vertex.LOD_TILE_ID, 1.0, .{ 0.0, 0.0, 0.0 }, 1.0));
-        try vertices.append(self.allocator, rhi.Vertex.initCloud(c, color, normal, .{ 1.0, 0.0 }, rhi.Vertex.LOD_TILE_ID, 1.0, .{ 0.0, 0.0, 0.0 }, 1.0));
-        try vertices.append(self.allocator, rhi.Vertex.initCloud(d, color, normal, .{ 0.0, 0.0 }, rhi.Vertex.LOD_TILE_ID, 1.0, .{ 0.0, 0.0, 0.0 }, 1.0));
-        try vertices.append(self.allocator, rhi.Vertex.initCloud(a, color, normal, .{ 0.0, 1.0 }, rhi.Vertex.LOD_TILE_ID, 1.0, .{ 0.0, 0.0, 0.0 }, 1.0));
+        try vertices.append(self.allocator, rhi.Vertex.initCloud(a, color, normal, .{ 0.0, 1.0 }, rhi.Vertex.CLOUD_TILE_ID, 1.0, .{ 0.0, 0.0, 0.0 }, 1.0));
+        try vertices.append(self.allocator, rhi.Vertex.initCloud(b, color, normal, .{ 1.0, 1.0 }, rhi.Vertex.CLOUD_TILE_ID, 1.0, .{ 0.0, 0.0, 0.0 }, 1.0));
+        try vertices.append(self.allocator, rhi.Vertex.initCloud(c, color, normal, .{ 1.0, 0.0 }, rhi.Vertex.CLOUD_TILE_ID, 1.0, .{ 0.0, 0.0, 0.0 }, 1.0));
+        try vertices.append(self.allocator, rhi.Vertex.initCloud(c, color, normal, .{ 1.0, 0.0 }, rhi.Vertex.CLOUD_TILE_ID, 1.0, .{ 0.0, 0.0, 0.0 }, 1.0));
+        try vertices.append(self.allocator, rhi.Vertex.initCloud(d, color, normal, .{ 0.0, 0.0 }, rhi.Vertex.CLOUD_TILE_ID, 1.0, .{ 0.0, 0.0, 0.0 }, 1.0));
+        try vertices.append(self.allocator, rhi.Vertex.initCloud(a, color, normal, .{ 0.0, 1.0 }, rhi.Vertex.CLOUD_TILE_ID, 1.0, .{ 0.0, 0.0, 0.0 }, 1.0));
     }
 
     fn uploadMesh(self: *CloudSystem) !void {

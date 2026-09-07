@@ -305,7 +305,6 @@ pub fn beginMainPassInternal(ctx: anytype) void {
 
         c.vkCmdBeginRenderPass(command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
         ctx.runtime.main_pass_active = true;
-        ctx.draw.lod_mode = false;
     }
 
     const main_extent = ctx.dynamic_resolution.getRenderExtent();

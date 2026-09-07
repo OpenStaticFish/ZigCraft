@@ -403,13 +403,6 @@ pub fn createSSAOResources(ctx: anytype) !void {
         main_ssao_write.descriptorCount = 1;
         main_ssao_write.pImageInfo = &main_ssao_info;
         c.vkUpdateDescriptorSets(ctx.vulkan_device.vk_device, 1, &main_ssao_write, 0, null);
-
-        main_ssao_write.dstSet = ctx.descriptors.lod_descriptor_sets[i];
-        c.vkUpdateDescriptorSets(ctx.vulkan_device.vk_device, 1, &main_ssao_write, 0, null);
-        for (ctx.descriptors.lod_descriptor_snapshots[i]) |snapshot| {
-            main_ssao_write.dstSet = snapshot;
-            c.vkUpdateDescriptorSets(ctx.vulkan_device.vk_device, 1, &main_ssao_write, 0, null);
-        }
     }
 
     const ssao_images = [_]c.VkImage{ ctx.ssao_system.image, ctx.ssao_system.blur_image };

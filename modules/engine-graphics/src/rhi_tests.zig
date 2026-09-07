@@ -17,6 +17,7 @@ const MockContext = struct {
     dynamic_resolution_max_scale: f32 = 0.0,
     dynamic_resolution_target_fps: u32 = 0,
     resolution_scale: f32 = 1.0,
+    clear_color: Vec3 = Vec3.zero,
 
     fn bindTexture(ptr: *anyopaque, handle: rhi.TextureHandle, slot: u32) void {
         const self: *MockContext = @ptrCast(@alignCast(ptr));
@@ -155,6 +156,11 @@ const MockContext = struct {
         return .{ .ptr = ptr, .vtable = &MOCK_STATE_VTABLE };
     }
 
+    fn setClearColor(ptr: *anyopaque, color: Vec3) void {
+        const self: *MockContext = @ptrCast(@alignCast(ptr));
+        self.clear_color = color;
+    }
+
     fn isTimingEnabled(ptr: *anyopaque) bool {
         _ = ptr;
         return false;
@@ -196,10 +202,6 @@ const MockContext = struct {
         _ = max_chunks;
         return null;
     }
-    fn createLODCullingSystem(_: *anyopaque, _: std.mem.Allocator, _: usize) anyerror!?rhi.ILODCullingSystem {
-        return null;
-    }
-
     fn getRenderResolution(ptr: *anyopaque) rhi.RenderResolution {
         _ = ptr;
         return .{ .width = 1920, .height = 1080 };
@@ -335,7 +337,7 @@ const MockContext = struct {
         .requestSwapchainRecreate = undefined,
         .getEncoder = MockContext.getEncoder,
         .getStateContext = MockContext.getStateContext,
-        .setClearColor = undefined,
+        .setClearColor = setClearColor,
     };
 
     const MOCK_PASSES_VTABLE = rhi.IPassOrchestrationContext.VTable{
@@ -478,7 +480,6 @@ const MockContext = struct {
         .getFrameIndex = undefined,
         .supportsIndirectFirstInstance = undefined,
         .supportsIndirectCount = undefined,
-        .supportsCompactLODGpuCulling = undefined,
         .getMaxAnisotropy = undefined,
         .getMaxMSAASamples = undefined,
         .getFaultCount = undefined,
@@ -487,6 +488,24 @@ const MockContext = struct {
         .getDeviceLocalVramBytes = undefined,
         .getRenderResolution = getRenderResolution,
         .waitIdle = undefined,
+    };
+
+    const MOCK_COMPUTE_VTABLE = rhi.IComputeContext.VTable{
+        .bindComputePipeline = bindComputePipeline,
+        .bindDescriptorSet = bindDescriptorSet,
+        .createComputeBuffer = createComputeBuffer,
+        .destroyComputeBuffer = destroyComputeBuffer,
+        .createComputePipeline = createComputePipeline,
+        .updateComputeDescriptors = updateComputeDescriptors,
+        .destroyComputePipeline = destroyComputePipeline,
+        .dispatch = dispatchCompute,
+        .pushConstants = pushComputeConstants,
+        .fillBuffer = fillComputeBuffer,
+        .copyBuffer = copyComputeBuffer,
+        .pipelineBarrier = computePipelineBarrier,
+        .bufferBarrier = computeBufferBarrier,
+        .waitForFrameFence = waitForFrameFence,
+        .hasCommandBuffer = hasCommandBuffer,
     };
 
     const MOCK_SHADOW_VTABLE = rhi.IShadowContext.VTable{
@@ -508,79 +527,72 @@ const MockContext = struct {
         .setScissorRegion = undefined,
     };
 
+    const MOCK_TIMING_VTABLE = rhi.IDeviceTiming.VTable{
+        .beginPassTiming = beginPassTiming,
+        .endPassTiming = endPassTiming,
+        .getTimingResults = getTimingResults,
+        .isTimingEnabled = isTimingEnabled,
+        .setTimingEnabled = setTimingEnabled,
+    };
+
+    const MOCK_QUALITY_VTABLE = rhi.IRenderQualityOptions.VTable{
+        .setWireframe = undefined,
+        .setTexturesEnabled = undefined,
+        .setDebugShadowView = undefined,
+        .setShadowDebugChannel = undefined,
+        .setVSync = undefined,
+        .setAnisotropicFiltering = undefined,
+        .setVolumetricDensity = undefined,
+        .setShadowResolution = undefined,
+        .setMSAA = undefined,
+        .setFXAA = undefined,
+        .setBloom = undefined,
+        .setBloomIntensity = undefined,
+        .setVignetteEnabled = undefined,
+        .setVignetteIntensity = undefined,
+        .setFilmGrainEnabled = undefined,
+        .setFilmGrainIntensity = undefined,
+        .setColorGradingEnabled = undefined,
+        .setColorGradingIntensity = undefined,
+        .setTAABlendFactor = undefined,
+        .setTAAVelocityRejection = undefined,
+        .setDynamicResolution = setDynamicResolution,
+        .getResolutionScale = getResolutionScale,
+    };
+
+    const MOCK_RECOVERY_VTABLE = rhi.IDeviceRecovery.VTable{
+        .recover = undefined,
+    };
+
+    const MOCK_CULLING_FACTORY_VTABLE = rhi.ICullingSystemFactory.VTable{
+        .createCullingSystem = createCullingSystem,
+    };
+
+    const MOCK_SCREENSHOT_VTABLE = rhi.IScreenshotContext.VTable{
+        .captureFrame = undefined,
+    };
+
     const MOCK_VULKAN_RHI_VTABLE = rhi.RHI.VTable{
         .init = undefined,
         .deinit = undefined,
-        .resources = MOCK_RESOURCES_VTABLE,
-        .render = MOCK_RENDER_VTABLE,
-        .passes = MOCK_PASSES_VTABLE,
-        .post_process = MOCK_POST_PROCESS_VTABLE,
-        .effects = MOCK_EFFECTS_VTABLE,
-        .vulkan = MOCK_NATIVE_VTABLE,
-        .ssao = MOCK_SSAO_VTABLE,
-        .debug_overlay = MOCK_DEBUG_OVERLAY_VTABLE,
-        .shadow = MOCK_SHADOW_VTABLE,
-        .water = MOCK_WATER_VTABLE,
-        .compute = .{
-            .bindComputePipeline = bindComputePipeline,
-            .bindDescriptorSet = bindDescriptorSet,
-            .createComputeBuffer = createComputeBuffer,
-            .destroyComputeBuffer = destroyComputeBuffer,
-            .createComputePipeline = createComputePipeline,
-            .updateComputeDescriptors = updateComputeDescriptors,
-            .destroyComputePipeline = destroyComputePipeline,
-            .dispatch = dispatchCompute,
-            .pushConstants = pushComputeConstants,
-            .fillBuffer = fillComputeBuffer,
-            .copyBuffer = copyComputeBuffer,
-            .pipelineBarrier = computePipelineBarrier,
-            .bufferBarrier = computeBufferBarrier,
-            .waitForFrameFence = waitForFrameFence,
-            .hasCommandBuffer = hasCommandBuffer,
-        },
-        .ui = MOCK_UI_VTABLE,
-        .query = MOCK_QUERY_VTABLE,
-        .timing = .{
-            .beginPassTiming = beginPassTiming,
-            .endPassTiming = endPassTiming,
-            .getTimingResults = getTimingResults,
-            .isTimingEnabled = isTimingEnabled,
-            .setTimingEnabled = setTimingEnabled,
-        },
-        .quality = .{
-            .setWireframe = undefined,
-            .setTexturesEnabled = undefined,
-            .setDebugShadowView = undefined,
-            .setShadowDebugChannel = undefined,
-            .setVSync = undefined,
-            .setAnisotropicFiltering = undefined,
-            .setVolumetricDensity = undefined,
-            .setShadowResolution = undefined,
-            .setMSAA = undefined,
-            .setFXAA = undefined,
-            .setBloom = undefined,
-            .setBloomIntensity = undefined,
-            .setVignetteEnabled = undefined,
-            .setVignetteIntensity = undefined,
-            .setFilmGrainEnabled = undefined,
-            .setFilmGrainIntensity = undefined,
-            .setColorGradingEnabled = undefined,
-            .setColorGradingIntensity = undefined,
-            .setTAABlendFactor = undefined,
-            .setTAAVelocityRejection = undefined,
-            .setDynamicResolution = MockContext.setDynamicResolution,
-            .getResolutionScale = MockContext.getResolutionScale,
-        },
-        .recovery = .{
-            .recover = undefined,
-        },
-        .culling_factory = .{
-            .createCullingSystem = MockContext.createCullingSystem,
-            .createLODCullingSystem = MockContext.createLODCullingSystem,
-        },
-        .screenshot = .{
-            .captureFrame = undefined,
-        },
+        .resources = &MOCK_RESOURCES_VTABLE,
+        .render = &MOCK_RENDER_VTABLE,
+        .passes = &MOCK_PASSES_VTABLE,
+        .post_process = &MOCK_POST_PROCESS_VTABLE,
+        .effects = &MOCK_EFFECTS_VTABLE,
+        .vulkan = &MOCK_NATIVE_VTABLE,
+        .ssao = &MOCK_SSAO_VTABLE,
+        .debug_overlay = &MOCK_DEBUG_OVERLAY_VTABLE,
+        .shadow = &MOCK_SHADOW_VTABLE,
+        .water = &MOCK_WATER_VTABLE,
+        .compute = &MOCK_COMPUTE_VTABLE,
+        .ui = &MOCK_UI_VTABLE,
+        .query = &MOCK_QUERY_VTABLE,
+        .timing = &MOCK_TIMING_VTABLE,
+        .quality = &MOCK_QUALITY_VTABLE,
+        .recovery = &MOCK_RECOVERY_VTABLE,
+        .culling_factory = &MOCK_CULLING_FACTORY_VTABLE,
+        .screenshot = &MOCK_SCREENSHOT_VTABLE,
     };
 
     const MOCK_ENCODER_VTABLE = rhi.IGraphicsCommandEncoder.VTable{
@@ -590,8 +602,6 @@ const MockContext = struct {
         .draw = draw,
         .drawOffset = drawOffset,
         .drawIndexed = drawIndexed,
-        .drawCompactLOD = undefined,
-        .drawCompactLODIndirectCount = undefined,
         .drawIndirect = drawIndirect,
         .drawIndirectCount = drawIndirectCount,
         .drawInstance = drawInstance,
@@ -601,10 +611,6 @@ const MockContext = struct {
     const MOCK_STATE_VTABLE = rhi.IRenderStateContext.VTable{
         .setModelMatrix = undefined,
         .setInstanceBuffer = undefined,
-        .setLODInstanceBuffer = undefined,
-        .setLODDescriptorStream = undefined,
-        .setLODCompactSampleBuffer = undefined,
-        .setLODCompactInstanceBuffer = undefined,
         .setTerrainPipelineBound = undefined,
         .setSelectionMode = undefined,
         .updateGlobalUniforms = undefined,
@@ -636,11 +642,10 @@ test "IRenderContext getEncoder" {
     try testing.expectEqual(&MockContext.MOCK_STATE_VTABLE, state.vtable);
 }
 
-test "indirect model uniforms use alpha sentinel without consuming mask sign" {
+test "indirect model uniforms use the instance-data alpha sentinel" {
     const uniforms = @import("vulkan/rhi_draw_submission.zig").indirectModelUniforms();
 
     try testing.expect(uniforms.color[3] < 0.0);
-    try testing.expectEqual(@as(f32, 0.0), uniforms.mask_radius);
 }
 
 test "AtmosphereSystem.renderSky with null handles" {

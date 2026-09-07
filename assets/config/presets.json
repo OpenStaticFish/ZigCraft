@@ -25,9 +25,7 @@
     "ssao_enabled": false,
     "clouds_enabled": false,
     "clouds_3d_enabled": false,
-    "lod_enabled": true,
     "render_distance": 6,
-    "render_distance_preset": 0,
     "fxaa_enabled": true,
     "bloom_enabled": false,
     "bloom_intensity": 0.3
@@ -54,9 +52,7 @@
     "volumetric_steps": 8,
     "volumetric_scattering": 0.7,
     "ssao_enabled": true,
-    "lod_enabled": true,
     "render_distance": 10,
-    "render_distance_preset": 1,
     "fxaa_enabled": true,
     "bloom_enabled": true,
     "bloom_intensity": 0.25
@@ -83,9 +79,7 @@
     "volumetric_steps": 12,
     "volumetric_scattering": 0.75,
     "ssao_enabled": true,
-    "lod_enabled": true,
     "render_distance": 12,
-    "render_distance_preset": 2,
     "fxaa_enabled": true,
     "bloom_enabled": true,
     "bloom_intensity": 0.3
@@ -112,9 +106,7 @@
     "volumetric_steps": 16,
     "volumetric_scattering": 0.8,
     "ssao_enabled": true,
-    "lod_enabled": true,
     "render_distance": 14,
-    "render_distance_preset": 3,
     "fxaa_enabled": true,
     "bloom_enabled": true,
     "bloom_intensity": 0.4
@@ -141,9 +133,7 @@
     "volumetric_steps": 16,
     "volumetric_scattering": 0.8,
     "ssao_enabled": true,
-    "lod_enabled": true,
     "render_distance": 16,
-    "render_distance_preset": 4,
     "fxaa_enabled": true,
     "bloom_enabled": true,
     "bloom_intensity": 0.45

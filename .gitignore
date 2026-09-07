@@ -30,8 +30,6 @@ zigcraft-minidumps/
 *.spv
 !assets/shaders/vulkan/lpv_inject.comp.spv
 !assets/shaders/vulkan/lpv_propagate.comp.spv
-!assets/shaders/vulkan/lod_compact_terrain.frag.spv
-!assets/shaders/vulkan/lod_compact_water.frag.spv
 !assets/shaders/vulkan/water.frag.spv
 !assets/shaders/vulkan/water.vert.spv
 wiki/

@@ -3,15 +3,12 @@ const UISystem = @import("engine-ui").UISystem;
 const Font = @import("engine-ui").font;
 const Theme = @import("../menu_theme.zig");
 const SettingsUi = @import("../settings_ui.zig");
-const Color = Theme.Color;
 const Rect = Theme.Rect;
 const Screen = @import("../screen.zig");
 const IScreen = Screen.IScreen;
 const EngineContext = Screen.EngineContext;
 const settings_pkg = @import("game-core").settings;
 const Settings = settings_pkg.Settings;
-const render_settings_mod = @import("engine-rhi").render_settings;
-const RenderDistancePreset = render_settings_mod.RenderDistancePreset;
 
 const PANEL_WIDTH_MAX = 1280.0;
 const StepResult = SettingsUi.StepResult;
@@ -81,7 +78,7 @@ pub const GraphicsScreen = struct {
         const panel_h: f32 = screen_h - margin * 2.0;
         const panel_x: f32 = (screen_w - panel_w) * 0.5;
         const panel_y: f32 = margin;
-        const shell = Theme.drawShell(ui, .{ .x = panel_x, .y = panel_y, .width = panel_w, .height = panel_h }, ui_scale, "RENDER", "VISUALS", "Lighting, materials, fog, bloom, and distant terrain.");
+        const shell = Theme.drawShell(ui, .{ .x = panel_x, .y = panel_y, .width = panel_w, .height = panel_h }, ui_scale, "RENDER", "VISUALS", "Lighting, materials, fog, and bloom.");
 
         const content_top = shell.content.y;
         const content_bottom = shell.content.y + shell.content.height;
@@ -93,17 +90,14 @@ pub const GraphicsScreen = struct {
         const scroll_dy = ctx.input.getScrollDelta().y;
         self.scroll_offset -= scroll_dy * 36.0 * ui_scale;
 
-        var total_rows: usize = 2;
+        var total_rows: usize = 1;
         inline for (comptime std.meta.declarations(Settings.metadata)) |decl| {
             if (comptime std.mem.eql(u8, decl.name, "msaa_samples")) continue;
-            if (comptime std.mem.eql(u8, decl.name, "render_distance_preset")) continue;
             if (comptime std.mem.eql(u8, decl.name, "render_distance")) continue;
-            if (comptime std.mem.eql(u8, decl.name, "horizon_distance")) continue;
             total_rows += 1;
         }
         const section_extra = @as(f32, @floatFromInt(countSettingSections())) * 34.0 * ui_scale;
-        const warning_extra: f32 = if (render_settings_mod.getPresetConfig(settings.render_distance_preset).show_warning) 38.0 * ui_scale else 0.0;
-        const total_content_h: f32 = @as(f32, @floatFromInt(total_rows)) * (row_height + 8.0 * ui_scale) + 40.0 * ui_scale + section_extra + warning_extra;
+        const total_content_h: f32 = @as(f32, @floatFromInt(total_rows)) * (row_height + 8.0 * ui_scale) + 40.0 * ui_scale + section_extra;
         const max_scroll = @max(0.0, total_content_h - content_h);
         self.scroll_offset = @max(0.0, @min(self.scroll_offset, max_scroll));
 
@@ -139,40 +133,11 @@ pub const GraphicsScreen = struct {
         }
         sy += row_height + 8.0 * ui_scale;
 
-        if (rowFullyVisible(sy, row_height, content_top, content_bottom)) {
-            const current_rdp: u32 = @intFromEnum(settings.render_distance_preset);
-            const rdp_label = settings.render_distance_preset.label();
-            const rdp_count = @as(u32, RenderDistancePreset.count);
-            const step = drawStepperRow(ui, .{ .x = row_x, .y = sy, .width = row_w, .height = row_height }, "RENDER DISTANCE", "LOD radius profile and streamer pressure.", rdp_label, label_scale, value_scale, button_scale, mouse_x, mouse_y, mouse_clicked, ui_scale);
-            if (step == .previous or step == .next) {
-                const next_value = if (step == .previous) if (current_rdp == 0) rdp_count - 1 else current_rdp - 1 else (current_rdp + 1) % rdp_count;
-                settings.render_distance_preset = @enumFromInt(next_value);
-                const preset_cfg = render_settings_mod.getPresetConfig(settings.render_distance_preset);
-                settings.render_distance = preset_cfg.lod_radii[0];
-                settings.horizon_distance = preset_cfg.horizon_radius;
-            }
-        }
-        sy += row_height + 8.0 * ui_scale;
-
-        {
-            const preset_cfg = render_settings_mod.getPresetConfig(settings.render_distance_preset);
-            if (preset_cfg.show_warning) {
-                if (rowFullyVisible(sy, 30.0 * ui_scale, content_top, content_bottom)) {
-                    ui.drawRect(.{ .x = row_x, .y = sy, .width = row_w, .height = 30.0 * ui_scale }, Color.rgba(0.28, 0.040, 0.030, 0.92));
-                    ui.drawRect(.{ .x = row_x, .y = sy, .width = 5.0 * ui_scale, .height = 30.0 * ui_scale }, Theme.danger);
-                    Font.drawText(ui, "EXTREME DISTANCE CAN DESTABILIZE GPUS BELOW 8GB VRAM", row_x + 16.0 * ui_scale, sy + 8.0 * ui_scale, 0.82 * ui_scale, Theme.title);
-                }
-                sy += 38.0 * ui_scale;
-            }
-        }
-
         var buf: [64]u8 = undefined;
 
         inline for (comptime std.meta.declarations(Settings.metadata)) |decl| {
             if (comptime std.mem.eql(u8, decl.name, "msaa_samples")) continue;
-            if (comptime std.mem.eql(u8, decl.name, "render_distance_preset")) continue;
             if (comptime std.mem.eql(u8, decl.name, "render_distance")) continue;
-            if (comptime std.mem.eql(u8, decl.name, "horizon_distance")) continue;
 
             sy = drawSectionBoundary(ui, decl.name, row_x, sy, content_top, content_bottom, ui_scale);
 
@@ -263,9 +228,7 @@ pub const GraphicsScreen = struct {
             }
 
             if (val_ptr.* != old_val) {
-                const sanitized_conflict = settings_pkg.sanitizeRuntimeConflicts(settings);
                 SettingsUi.applyChangedSetting(decl.name, settings, rs);
-                if (sanitized_conflict) rs.setFXAA(settings.fxaa_enabled and !settings.taa_enabled);
             }
 
             sy += row_height + 8.0 * ui_scale;
@@ -318,9 +281,7 @@ fn countSettingSections() usize {
     comptime var count: usize = 0;
     inline for (comptime std.meta.declarations(Settings.metadata)) |decl| {
         if (comptime std.mem.eql(u8, decl.name, "msaa_samples")) continue;
-        if (comptime std.mem.eql(u8, decl.name, "render_distance_preset")) continue;
         if (comptime std.mem.eql(u8, decl.name, "render_distance")) continue;
-        if (comptime std.mem.eql(u8, decl.name, "horizon_distance")) continue;
         if (comptime sectionBoundaryLabel(decl.name).len > 0) count += 1;
     }
     return count;

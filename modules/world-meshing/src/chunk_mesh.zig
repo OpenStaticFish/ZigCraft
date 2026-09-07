@@ -241,7 +241,7 @@ pub const ChunkMesh = struct {
                 total += @intCast(verts.len);
                 for (verts) |v| {
                     const tid: u16 = @intCast(v.packed_meta & 0xFFFF);
-                    if (tid == 0 and tid != Vertex.LOD_TILE_ID) tile0 += 1;
+                    if (tid == 0) tile0 += 1;
                 }
             }
         }

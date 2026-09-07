@@ -1,5 +1,4 @@
 const std = @import("std");
-const LODConfig = @import("world-lod").lod_chunk.LODConfig;
 const UISystem = @import("engine-ui").UISystem;
 const Screen = @import("../screen.zig");
 const IScreen = Screen.IScreen;
@@ -27,7 +26,6 @@ const Font = @import("engine-ui").font;
 const Color = @import("engine-ui").Color;
 const Rect = @import("engine-ui").Rect;
 const WorldStats = @import("engine-ui").WorldStats;
-const LODStatsDisplay = @import("engine-ui").LODStatsDisplay;
 const log = @import("engine-core").log;
 const CSM = @import("engine-graphics").csm;
 const settings_data = @import("game-core").settings.data;
@@ -95,34 +93,16 @@ pub const WorldScreen = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, context: EngineContext, seed: u64, generator_index: usize) !*WorldScreen {
-        return initWithDistance(allocator, context, seed, generator_index, context.settings.render_distance, context.settings.horizon_distance, context.settings.lod_enabled, true, false);
+        return initWithDistance(allocator, context, seed, generator_index, context.settings.render_distance, false);
     }
 
     pub fn initMenuPreview(allocator: std.mem.Allocator, context: EngineContext, seed: u64, generator_index: usize) !*WorldScreen {
-        // Keep the distant hierarchy in the rotating preview, but use its
-        // expanded fallback: continuously streaming compact tiles underneath a
-        // retained RmlUi overlay can trigger a RADV rejection on RDNA1.
-        return initWithDistance(
-            allocator,
-            context,
-            seed,
-            generator_index,
-            context.settings.render_distance,
-            context.settings.horizon_distance,
-            context.settings.lod_enabled,
-            false,
-            true,
-        );
+        return initWithDistance(allocator, context, seed, generator_index, context.settings.render_distance, true);
     }
 
-    fn initWithDistance(allocator: std.mem.Allocator, context: EngineContext, seed: u64, generator_index: usize, render_distance: i32, horizon_distance: i32, lod_enabled: bool, compact_tiles_enabled: bool, menu_preview: bool) !*WorldScreen {
+    fn initWithDistance(allocator: std.mem.Allocator, context: EngineContext, seed: u64, generator_index: usize, render_distance: i32, menu_preview: bool) !*WorldScreen {
         const render_system = context.render_system;
-        const diagnostic_horizon = context.benchmark_runner != null or context.build_config.phase5_visual_scene.len > 0 or context.build_config.benchmark_fixture.len > 0;
-        const effective_horizon_distance = if (diagnostic_horizon)
-            LODConfig.normalizeHorizonDistance(render_distance, horizon_distance)
-        else
-            LODConfig.normalizeUserHorizonDistance(render_distance, horizon_distance);
-        const session = try GameSession.init(allocator, render_system.getRHI(), render_system.getAtlas(), seed, render_distance, effective_horizon_distance, lod_enabled, compact_tiles_enabled, generator_index, context.settings.render_distance_preset, context.build_config);
+        const session = try GameSession.init(allocator, render_system.getRHI(), render_system.getAtlas(), seed, render_distance, generator_index, context.build_config);
         errdefer session.deinit();
         const world = session.world.interface();
 
@@ -183,24 +163,10 @@ pub const WorldScreen = struct {
         const cam = &self.session.player.camera;
         if (!self.menu_preview) {
             // Keep persisted/manual values aligned with the supported UI range
-            // so the displayed Distant LOD Limit matches the runtime radius.
-            const diagnostic_horizon = benchmark_mode or ctx.build_config.phase5_visual_scene.len > 0 or ctx.build_config.benchmark_fixture.len > 0;
-            ctx.settings.horizon_distance = if (diagnostic_horizon)
-                LODConfig.normalizeHorizonDistance(ctx.settings.render_distance, ctx.settings.horizon_distance)
-            else
-                LODConfig.normalizeUserHorizonDistance(ctx.settings.render_distance, ctx.settings.horizon_distance);
-            // The World settings control is explicitly the full-detail chunk
-            // radius. Presets seed startup budgets, but a live manual value
-            // must be allowed to raise or lower that radius after the menu
-            // closes instead of remaining silently capped by the preset.
-            self.session.world.setLODChunkRenderRadiusLimit(ctx.settings.render_distance);
-            cam.far = @import("game-core").session.cameraFarPlaneForDistances(ctx.settings.render_distance, ctx.settings.horizon_distance);
+            cam.far = @import("game-core").session.cameraFarPlaneForRenderDistance(ctx.settings.render_distance);
             const world_telemetry = self.world.telemetry();
             if (world_telemetry.getRenderDistance() != ctx.settings.render_distance) {
                 world_telemetry.setRenderDistance(ctx.settings.render_distance);
-            }
-            if (world_telemetry.getHorizonDistance() != ctx.settings.horizon_distance) {
-                world_telemetry.setHorizonDistance(ctx.settings.horizon_distance);
             }
         }
         ctx.audio_system.setListener(cam.position, cam.forward, cam.up);
@@ -273,15 +239,6 @@ pub const WorldScreen = struct {
             options.setShadowDebugChannel(resolveShadowDebugChannel(ctx.settings));
             self.last_debug_toggle_time = now;
         }
-        if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input, .toggle_lod_render)) {
-            if (!self.world.isLODEnabled()) {
-                log.log.warn("LOD toggle requested but LOD system is not initialized", .{});
-            } else {
-                const enabled = self.world.telemetry().toggleLODRendering();
-                log.log.info("LOD rendering {s}", .{if (enabled) "enabled" else "disabled"});
-            }
-            self.last_debug_toggle_time = now;
-        }
         if (can_toggle_debug and ctx.input_mapper.isActionPressed(ctx.input, .toggle_gpass_render)) {
             const new_val = !render_system.getDisableGPassDraw();
             render_system.setDisableGPassDraw(new_val);
@@ -328,14 +285,12 @@ pub const WorldScreen = struct {
         const stats = world_telemetry.getStats();
         const render_stats = world_telemetry.getRenderStats();
         const state_counts = world_telemetry.getChunkStateCounts();
-        const lod_stats = world_telemetry.getLODStats();
-        const lod_radii = self.session.lod_config.radii;
         const elapsed = now - self.startup_diagnostic_start;
         const frames_elapsed = self.context.time.frame_count - self.startup_diagnostic_start_frame;
         const avg_fps = if (elapsed > 0.001) @as(f32, @floatFromInt(frames_elapsed)) / elapsed else self.context.time.fps;
 
         log.log.warn(
-            "STARTUP_DIAG: generator='{s}' elapsed={d:.2}s fps={d:.1} avg_fps={d:.1} frames={} rd={} lod0={} chunks_loaded={} chunks_total={} chunks_rendered={} chunks_culled={} gen_queue={} mesh_queue={} upload_queue={} lod_loaded={}",
+            "STARTUP_DIAG: generator='{s}' elapsed={d:.2}s fps={d:.1} avg_fps={d:.1} frames={} rd={} chunks_loaded={} chunks_total={} chunks_rendered={} chunks_culled={} gen_queue={} mesh_queue={} upload_queue={}",
             .{
                 world_telemetry.getGeneratorName(),
                 elapsed,
@@ -343,7 +298,6 @@ pub const WorldScreen = struct {
                 avg_fps,
                 frames_elapsed,
                 world_telemetry.getRenderDistance(),
-                lod_radii[0],
                 stats.chunks_loaded,
                 render_stats.chunks_total,
                 render_stats.chunks_rendered,
@@ -351,7 +305,6 @@ pub const WorldScreen = struct {
                 stats.gen_queue,
                 stats.mesh_queue,
                 stats.upload_queue,
-                if (lod_stats) |ls| ls.totalLoaded() else @as(u32, 0),
             },
         );
         log.log.warn(
@@ -367,28 +320,6 @@ pub const WorldScreen = struct {
                 render_stats.vertices_rendered,
             },
         );
-        if (lod_stats) |ls| {
-            log.log.warn(
-                "STARTUP_DIAG_LOD_STATES: loaded=[{},{},{},{},{}] generating=[{},{},{},{},{}] generated=[{},{},{},{},{}] meshing=[{},{},{},{},{}]",
-                .{
-                    ls.loaded[0],     ls.loaded[1],     ls.loaded[2],     ls.loaded[3],     ls.loaded[4],
-                    ls.generating[0], ls.generating[1], ls.generating[2], ls.generating[3], ls.generating[4],
-                    ls.generated[0],  ls.generated[1],  ls.generated[2],  ls.generated[3],  ls.generated[4],
-                    ls.meshing[0],    ls.meshing[1],    ls.meshing[2],    ls.meshing[3],    ls.meshing[4],
-                },
-            );
-            log.log.warn(
-                "STARTUP_DIAG_LOD_QUEUES: mesh_ready=[{},{},{},{},{}] uploading=[{},{},{},{},{}] meshes=[{},{},{},{},{}] genQ={} uploadQ=[{},{},{},{},{}] memory_mb={} cache_hit/miss={}/{} store_hit/miss={}/{}",
-                .{
-                    ls.mesh_ready[0],                               ls.mesh_ready[1],         ls.mesh_ready[2],         ls.mesh_ready[3],         ls.mesh_ready[4],
-                    ls.uploading[0],                                ls.uploading[1],          ls.uploading[2],          ls.uploading[3],          ls.uploading[4],
-                    ls.mesh_count[0],                               ls.mesh_count[1],         ls.mesh_count[2],         ls.mesh_count[3],         ls.mesh_count[4],
-                    ls.gen_queue_depth[ls.gen_queue_depth.len - 1], ls.upload_queue_depth[0], ls.upload_queue_depth[1], ls.upload_queue_depth[2], ls.upload_queue_depth[3],
-                    ls.upload_queue_depth[4],                       ls.memory_used_mb,        ls.cache_hits,            ls.cache_misses,          ls.store_hits,
-                    ls.store_misses,
-                },
-            );
-        }
         self.startup_diagnostic_logged = true;
         self.context.input.setShouldQuit(true);
     }
@@ -674,7 +605,6 @@ pub const WorldScreen = struct {
         if (self.debug_ui.menuEnabled()) {
             const debug_state = world_debug.ScreenDebugState{
                 .session = self.session,
-                .world_telemetry = world_telemetry,
                 .last_debug_toggle_time = &self.last_debug_toggle_time,
                 .chunk_inspector_overlay = &self.chunk_inspector_overlay,
             };
@@ -687,20 +617,6 @@ pub const WorldScreen = struct {
     }
 
     fn drawBackground(ptr: *anyopaque, ui: *UISystem) !void {
-        const self: *@This() = @ptrCast(@alignCast(ptr));
-        const telemetry = self.world.telemetry();
-        const restore_lod = telemetry.isLODRenderingEnabled();
-
-        // Compact vertex-pulling draws beneath a retained menu overlay can make
-        // RADV on RDNA1 reject the combined command stream. The nearby
-        // full-detail world remains a useful pause backdrop, so omit distant LOD
-        // only while this screen is rendered as another screen's background and
-        // restore the user's setting before leaving the draw call.
-        if (restore_lod) _ = telemetry.toggleLODRendering();
-        defer {
-            if (restore_lod) _ = telemetry.toggleLODRendering();
-        }
-
         try draw(ptr, ui);
     }
 
@@ -722,105 +638,6 @@ pub const WorldScreen = struct {
         const ws = self.world.telemetry();
         const rs = ws.getRenderStats();
         const stats = ws.getStats();
-        var lod_display: ?LODStatsDisplay = null;
-        var lod_renderable_regions: u64 = 0;
-        if (ws.getLODStats()) |ls| {
-            for (ls.loaded) |count| lod_renderable_regions += count;
-            lod_display = .{
-                .loaded = ls.loaded,
-                .memory_used_mb = ls.memory_used_mb,
-                .memory_used_bytes = ls.memory_used_bytes,
-                .pool_gpu_capacity_bytes = ls.pool_gpu_capacity_bytes,
-                .pool_gpu_allocated_bytes = ls.pool_gpu_allocated_bytes,
-                .pool_gpu_slack_bytes = ls.pool_gpu_slack_bytes,
-                .pool_cpu_shadow_bytes = ls.pool_cpu_shadow_bytes,
-                .compact_pool_capacity_bytes = ls.compact_pool_capacity_bytes,
-                .compact_pool_allocated_bytes = ls.compact_pool_allocated_bytes,
-                .compact_pool_free_bytes = ls.compact_pool_free_bytes,
-                .compact_pool_retired_bytes = ls.compact_pool_retired_bytes,
-                .direct_mesh_gpu_bytes = ls.direct_mesh_gpu_bytes,
-                .source_data_cpu_bytes = ls.source_data_cpu_bytes,
-                .pending_cpu_upload_bytes = ls.pending_cpu_upload_bytes,
-                .deferred_deletion_gpu_bytes = ls.deferred_deletion_gpu_bytes,
-                .deferred_deletion_cpu_bytes = ls.deferred_deletion_cpu_bytes,
-                .profiling = .{
-                    .enabled = ls.profiling.enabled,
-                    .update_ms = ls.profiling.update_ms,
-                    .scheduling_ms = ls.profiling.scheduling_ms,
-                    .cache_ms = ls.profiling.cache_ms,
-                    .generation_dispatch_ms = ls.profiling.generation_dispatch_ms,
-                    .state_transition_ms = ls.profiling.state_transition_ms,
-                    .upload_prep_ms = ls.profiling.upload_prep_ms,
-                    .upload_submission_ms = ls.profiling.upload_submission_ms,
-                    .visibility_ms = ls.profiling.visibility_ms,
-                    .coverage_ms = ls.profiling.coverage_ms,
-                    .eviction_ms = ls.profiling.eviction_ms,
-                    .worker_generation_ms = ls.profiling.worker_generation_ms,
-                    .worker_mesh_construction_ms = ls.profiling.worker_mesh_construction_ms,
-                    .worker_far_expanded_mesh_construction_ms = ls.profiling.worker_far_expanded_mesh_construction_ms,
-                    .worker_compact_encode_ms = ls.profiling.worker_compact_encode_ms,
-                    .manager_lock_wait_ms = ls.profiling.manager_lock_wait_ms,
-                    .manager_lock_hold_ms = ls.profiling.manager_lock_hold_ms,
-                    .upload_bytes = ls.profiling.upload_bytes,
-                    .far_expanded_upload_bytes = ls.profiling.far_expanded_upload_bytes,
-                    .compact_upload_bytes = ls.profiling.compact_upload_bytes,
-                    .pending_cpu_upload_bytes = ls.profiling.pending_cpu_upload_bytes,
-                    .staging_pressure_count = ls.profiling.staging_pressure_count,
-                    .visible_count = ls.profiling.visible_count,
-                    .rejected_count = ls.profiling.rejected_count,
-                    .coverage_count = ls.profiling.coverage_count,
-                    .visibility_levels = blk: {
-                        var levels: [@import("engine-ui").LOD_VISIBILITY_LEVEL_COUNT]@import("engine-ui").LODVisibilityLevelDisplay = undefined;
-                        for (&levels, 0..) |*level, index| level.* = .{
-                            .candidates = ls.profiling.visibility_levels[index].candidates,
-                            .accepted = ls.profiling.visibility_levels[index].accepted,
-                            .rejected_no_draw = ls.profiling.visibility_levels[index].rejected_no_draw,
-                            .rejected_not_ready = ls.profiling.visibility_levels[index].rejected_not_ready,
-                            .rejected_missing_region = ls.profiling.visibility_levels[index].rejected_missing_region,
-                            .rejected_not_renderable = ls.profiling.visibility_levels[index].rejected_not_renderable,
-                            .rejected_finer_coverage = ls.profiling.visibility_levels[index].rejected_finer_coverage,
-                            .rejected_range = ls.profiling.visibility_levels[index].rejected_range,
-                            .rejected_frustum = ls.profiling.visibility_levels[index].rejected_frustum,
-                            .rejected_chunk_coverage = ls.profiling.visibility_levels[index].rejected_chunk_coverage,
-                            .coverage_checks = ls.profiling.visibility_levels[index].coverage_checks,
-                        };
-                        break :blk levels;
-                    },
-                    .deferred_deletion_bytes = ls.profiling.deferred_deletion_bytes,
-                    .deferred_deletion_cpu_bytes = ls.profiling.deferred_deletion_cpu_bytes,
-                    .pool_gpu_capacity_bytes = ls.profiling.pool_gpu_capacity_bytes,
-                    .pool_gpu_allocated_bytes = ls.profiling.pool_gpu_allocated_bytes,
-                    .pool_gpu_slack_bytes = ls.profiling.pool_gpu_slack_bytes,
-                    .pool_cpu_shadow_bytes = ls.profiling.pool_cpu_shadow_bytes,
-                    .compact_pool_capacity_bytes = ls.profiling.compact_pool_capacity_bytes,
-                    .compact_pool_allocated_bytes = ls.profiling.compact_pool_allocated_bytes,
-                    .compact_pool_free_bytes = ls.profiling.compact_pool_free_bytes,
-                    .compact_pool_retired_bytes = ls.profiling.compact_pool_retired_bytes,
-                    .direct_mesh_gpu_bytes = ls.profiling.direct_mesh_gpu_bytes,
-                    .known_memory_bytes = ls.profiling.known_memory_bytes,
-                    .wait_idle_count = ls.profiling.wait_idle_count,
-                    .wait_idle_ms = ls.profiling.wait_idle_ms,
-                    .gpu_culling_overflows = ls.profiling.gpu_culling_overflows,
-                    .gpu_culling_validation_mismatches = ls.profiling.gpu_culling_validation_mismatches,
-                    .gpu_culling_requested = ls.profiling.gpu_culling_requested,
-                    .gpu_culling_threshold = ls.profiling.gpu_culling_threshold,
-                    .gpu_culling_candidate_count = ls.profiling.gpu_culling_candidate_count,
-                    .gpu_culling_candidate_count_max = ls.profiling.gpu_culling_candidate_count_max,
-                    .gpu_culling_draw_submissions = ls.profiling.gpu_culling_draw_submissions,
-                    .gpu_culling_validation_generation = ls.profiling.gpu_culling_validation_generation,
-                    .gpu_culling_validation_completed_generation = ls.profiling.gpu_culling_validation_completed_generation,
-                    .gpu_culling_validation_completed_count = ls.profiling.gpu_culling_validation_completed_count,
-                    .compact_selected = ls.profiling.compact_selected,
-                    .compact_build_rejected = ls.profiling.compact_build_rejected,
-                    .compact_upload_failures = ls.profiling.compact_upload_failures,
-                    .compact_draw_unavailable = ls.profiling.compact_draw_unavailable,
-                    .compact_draw_failures = ls.profiling.compact_draw_failures,
-                    .compact_submissions = ls.profiling.compact_submissions,
-                    .compact_recoveries = ls.profiling.compact_recoveries,
-                    .compact_disabled = ls.profiling.compact_disabled,
-                },
-            };
-        }
         return .{
             .chunks_total = rs.chunks_total,
             .chunks_rendered = rs.chunks_rendered,
@@ -829,8 +646,6 @@ pub const WorldScreen = struct {
             .gen_queue = stats.gen_queue,
             .mesh_queue = stats.mesh_queue,
             .upload_queue = stats.upload_queue,
-            .lod_renderable_regions = lod_renderable_regions,
-            .lod = lod_display,
         };
     }
 
@@ -978,8 +793,6 @@ pub const WorldScreen = struct {
         states[@intFromEnum(DebugFeature.sky_fill_debug)] = ctx.settings.debug_sky_fill_active;
         states[@intFromEnum(DebugFeature.block_light_debug)] = ctx.settings.debug_block_light_active;
         states[@intFromEnum(DebugFeature.outdoor_factor_debug)] = ctx.settings.debug_outdoor_factor_active;
-        states[@intFromEnum(DebugFeature.timing_overlay)] = ctx.ui_manager.timing_overlay.enabled;
-        states[@intFromEnum(DebugFeature.lod_render)] = self.world.telemetry().isLODRenderingEnabled();
         states[@intFromEnum(DebugFeature.gpass_render)] = !render_system.getDisableGPassDraw();
         states[@intFromEnum(DebugFeature.ssao)] = !render_system.getDisableSSAO();
         states[@intFromEnum(DebugFeature.fog)] = self.session.atmosphere.fog_enabled;
@@ -1103,18 +916,6 @@ pub const WorldScreen = struct {
                 ctx.settings.debug_outdoor_factor_active = enable;
                 options.setDebugShadowView(settings_data.anyTerrainDebugActive(ctx.settings));
                 options.setShadowDebugChannel(resolveShadowDebugChannel(ctx.settings));
-            },
-            .timing_overlay => {
-                ctx.ui_manager.timing_overlay.toggle();
-                rhi.timing().setTimingEnabled(ctx.ui_manager.timing_overlay.enabled);
-            },
-            .lod_render => {
-                const telemetry = self.world.telemetry();
-                if (!telemetry.isLODEnabled()) {
-                    log.log.warn("LOD toggle requested but LOD system is not initialized", .{});
-                } else {
-                    _ = telemetry.toggleLODRendering();
-                }
             },
             .gpass_render => {
                 const new_val = !render_system.getDisableGPassDraw();

@@ -166,26 +166,12 @@ const DrawState = struct {
     descriptors_dirty: [MAX_FRAMES_IN_FLIGHT]bool,
     terrain_pipeline_bound: bool = false,
     descriptors_updated: bool = false,
-    lod_mode: bool = false,
-    lod_descriptor_stream: rhi.LODDescriptorStream = .terrain_standard_direct,
-    /// False when the selected immutable snapshot could not acquire the current
-    /// material revision. LOD setters and draws remain no-ops until another
-    /// stream is selected successfully.
-    lod_descriptor_stream_valid: bool = false,
     bound_instance_buffer: [MAX_FRAMES_IN_FLIGHT]rhi.BufferHandle = .{ 0, 0 },
-    lod_snapshot_bindings: [MAX_FRAMES_IN_FLIGHT]@import("descriptor_manager.zig").LODDescriptorSnapshotBindings = .{ .{}, .{} },
-    /// A snapshot is immutable from its first bind until the corresponding
-    /// frame slot fence has completed and prepareFrameState reopens it.
-    lod_snapshot_seals: [MAX_FRAMES_IN_FLIGHT]@import("descriptor_manager.zig").LODDescriptorSnapshotSeal = .{ .{}, .{} },
     texture_state_revision: u64 = 0,
     pending_instance_buffer: rhi.BufferHandle = 0,
-    pending_lod_instance_buffer: rhi.BufferHandle = 0,
-    pending_lod_compact_sample_buffer: rhi.BufferHandle = 0,
-    pending_lod_compact_instance_buffer: rhi.BufferHandle = 0,
     current_view_proj: Mat4 = Mat4.identity,
     current_model: Mat4 = Mat4.identity,
     current_color: [4]f32 = .{ 1.0, 1.0, 1.0, 1.0 },
-    current_mask_radius: f32 = 0.0,
 };
 
 const RuntimeState = struct {

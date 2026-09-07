@@ -9,7 +9,6 @@ layout(location = 9) in vec3 vTangent;
 layout(location = 10) in vec3 vBitangent;
 layout(location = 12) in vec4 vClipPosCurrent;
 layout(location = 13) in vec4 vClipPosPrev;
-layout(location = 14) in float vMaskRadius;
 
 layout(location = 0) out vec3 outNormal;
 layout(location = 1) out vec2 outVelocity;
@@ -36,40 +35,22 @@ layout(set = 0, binding = 0) uniform GlobalUniforms {
     vec4 lpv_origin;
 } global;
 
-const float LOD_CHUNK_SIZE = 16.0;
-
-bool shouldDiscardLODFragment(float encodedMaskRadius, vec2 cameraRelativeXZ) {
-    float maskRadius = abs(encodedMaskRadius);
-    if (maskRadius < 1.0) return false;
-
-    bool readyDiskMask = encodedMaskRadius < 0.0;
-    vec2 cameraChunkLocal = mod(global.cam_pos.xz, LOD_CHUNK_SIZE);
-    vec2 chunkDelta = floor((cameraRelativeXZ + cameraChunkLocal) / LOD_CHUNK_SIZE);
-    float detailRadiusChunks = floor(maskRadius / LOD_CHUNK_SIZE) + (readyDiskMask ? 0.0 : 2.0);
-    return dot(chunkDelta, chunkDelta) <= detailRadiusChunks * detailRadiusChunks;
-}
-
 void main() {
-    bool isLOD = vTileID < 0 || abs(vMaskRadius) > 0.0;
-    if (shouldDiscardLODFragment(vMaskRadius, vFragPosWorld.xz)) discard;
-
     vec3 N = normalize(vNormal);
-    if (!isLOD) {
-        // Calculate UV coordinates in atlas
-        vec2 atlasSize = vec2(16.0, 16.0);
-        vec2 tileSize = 1.0 / atlasSize;
-        vec2 tilePos = vec2(mod(float(vTileID), atlasSize.x), floor(float(vTileID) / atlasSize.x));
-        vec2 tiledUV = fract(vTexCoord);
-        tiledUV = clamp(tiledUV, 0.001, 0.999);
-        vec2 uv = (tilePos + tiledUV) * tileSize;
+    // Calculate UV coordinates in atlas
+    vec2 atlasSize = vec2(16.0, 16.0);
+    vec2 tileSize = 1.0 / atlasSize;
+    vec2 tilePos = vec2(mod(float(vTileID), atlasSize.x), floor(float(vTileID) / atlasSize.x));
+    vec2 tiledUV = fract(vTexCoord);
+    tiledUV = clamp(tiledUV, 0.001, 0.999);
+    vec2 uv = (tilePos + tiledUV) * tileSize;
 
-        if (texture(uTexture, uv).a < 0.1) discard;
+    if (texture(uTexture, uv).a < 0.1) discard;
 
-        if (global.lighting.z > 0.5 && global.pbr_params.x > 1.5) {
-            vec3 normalMapValue = texture(uNormalMap, uv).rgb * 2.0 - 1.0;
-            mat3 TBN = mat3(normalize(vTangent), normalize(vBitangent), N);
-            N = normalize(TBN * normalMapValue);
-        }
+    if (global.lighting.z > 0.5 && global.pbr_params.x > 1.5) {
+        vec3 normalMapValue = texture(uNormalMap, uv).rgb * 2.0 - 1.0;
+        mat3 TBN = mat3(normalize(vTangent), normalize(vBitangent), N);
+        N = normalize(TBN * normalMapValue);
     }
 
     // Convert normal from [-1, 1] to [0, 1] for storage in UNORM texture

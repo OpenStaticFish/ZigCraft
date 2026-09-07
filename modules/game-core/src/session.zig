@@ -18,13 +18,8 @@ const Texture = @import("engine-rhi").Texture;
 const TextureAtlas = @import("engine-graphics").TextureAtlas;
 const Input = @import("engine-input").Input;
 const IRawInputProvider = @import("engine-input").IRawInputProvider;
-const LODConfig = @import("world-lod").lod_chunk.LODConfig;
-const LODLevel = @import("world-lod").LODLevel;
-const render_settings = @import("engine-rhi").render_settings;
-const RenderDistancePreset = render_settings.RenderDistancePreset;
 const log = @import("engine-core").log;
 const runtime_env = @import("engine-core").runtime_env;
-const BlockType = @import("world-core").BlockType;
 const input_mapper_pkg = @import("input_mapper.zig");
 const InputMapper = input_mapper_pkg.InputMapper;
 const IInputMapper = input_mapper_pkg.IInputMapper;
@@ -39,32 +34,14 @@ fn getenv(name: [:0]const u8) ?[]const u8 {
     return std.mem.span(value);
 }
 
-var phase5_capture_ready = std.atomic.Value(bool).init(false);
-
-/// Narrow bridge from the production-world fixture session to App's screenshot
-/// exit condition. Only deterministic Phase 5 captures consult this state.
-pub fn phase5CaptureReady() bool {
-    return phase5_capture_ready.load(.acquire);
-}
-
-fn resetPhase5CaptureReady() void {
-    phase5_capture_ready.store(false, .release);
-}
-
 pub const BuildConfig = struct {
     auto_world: []const u8 = "",
     chunk_debug_enable: []const u8 = "",
     chunk_debug_mode: bool = false,
     screenshot_path: []const u8 = "",
-    phase5_visual_scene: []const u8 = "",
-    benchmark_fixture: []const u8 = "",
-    phase5_visual_run_id: []const u8 = "",
     shadow_test_scene: bool = false,
     shadow_test_variant: []const u8 = "cave-entrance",
     startup_diagnostic_seconds: u32 = 0,
-    /// This is injected only by the benchmark executable. Zero preserves the
-    /// selected render-distance preset's normal production admission budget.
-    benchmark_lod_memory_budget_mb: u32 = 0,
 };
 
 const ECSManager = @import("engine-ecs").manager;
@@ -81,20 +58,9 @@ const SpawnColumn = struct {
     info: @import("world-worldgen").ColumnInfo,
 };
 
-/// Keeps the projection volume large enough for the configured coarsest LOD
-/// radius plus one outer-region margin. A fixed 10,000-block far plane clips a
-/// 1,024-chunk horizon at roughly 625 chunks even when those regions are loaded.
-pub fn cameraFarPlaneForHorizon(horizon_distance_chunks: i32) f32 {
-    const horizon_chunks: i64 = @max(horizon_distance_chunks, 1);
-    const horizon_blocks = horizon_chunks * 16;
-    const outer_region_margin: i64 = 1024;
-    return @floatFromInt(@max(horizon_blocks + outer_region_margin, 10_000));
-}
-
-/// Uses the effective horizon so a manually lowered horizon setting cannot
-/// clip a larger full-detail render distance.
-pub fn cameraFarPlaneForDistances(render_distance_chunks: i32, horizon_distance_chunks: i32) f32 {
-    return cameraFarPlaneForHorizon(@max(render_distance_chunks, horizon_distance_chunks));
+pub fn cameraFarPlaneForRenderDistance(render_distance_chunks: i32) f32 {
+    const blocks: i64 = @max(render_distance_chunks, 1) * 16;
+    return @floatFromInt(@max(blocks + 256, 10_000));
 }
 
 pub const GameSession = struct {
@@ -117,7 +83,6 @@ pub const GameSession = struct {
 
     atmosphere: Atmosphere,
 
-    lod_config: LODConfig,
     creative_mode: bool,
 
     debug_show_fps: bool = false,
@@ -125,103 +90,25 @@ pub const GameSession = struct {
     debug_shadows: bool = false,
     debug_cascade_idx: usize = 0,
     build_config: BuildConfig = .{},
-    phase5_water_fixture_observations: u32 = 0,
-    phase5_water_fixture_evidence_emitted: bool = false,
-    phase5_fixture_applied: bool = false,
-    phase5_gpu_evidence_emitted: bool = false,
-    phase5_settle_frames: u32 = 0,
-    phase5_ready_evidence_emitted: bool = false,
-    phase5_gpu_validation_complete_emitted: bool = false,
-    phase5_save_flushed: bool = false,
-    phase5_save_loaded: bool = false,
-    phase5_compact_wet_dry_evidence_emitted: bool = false,
-    phase5_motion_frames: u32 = 0,
-    phase5_motion_complete: bool = false,
-    phase5_motion_evidence_emitted: bool = false,
-    gpu_culling_scale_fixture_installed: bool = false,
 
-    pub fn init(allocator: std.mem.Allocator, rhi: *RHI, atlas: *const TextureAtlas, seed: u64, render_distance: i32, horizon_distance: i32, lod_enabled: bool, compact_tiles_enabled: bool, generator_index: usize, render_distance_preset: RenderDistancePreset, build_config: BuildConfig) !*GameSession {
+    pub fn init(allocator: std.mem.Allocator, rhi: *RHI, atlas: *const TextureAtlas, seed: u64, render_distance: i32, generator_index: usize, build_config: BuildConfig) !*GameSession {
         const session = try allocator.create(GameSession);
         errdefer allocator.destroy(session);
-        if (phase5EvidenceEnabled(build_config)) resetPhase5CaptureReady();
 
         const safe_mode = runtime_env.safeModeEnabled();
         const strict_safe_mode = runtime_env.strictSafeModeEnabled();
         const effective_render_distance: i32 = render_distance;
-        const chunk_debug_restore_lod = chunkDebugRestoreEnabled(build_config, "lod");
-        const effective_lod_enabled = if (build_config.chunk_debug_mode)
-            chunk_debug_restore_lod
-        else
-            lod_enabled;
 
         if (strict_safe_mode) {
             log.log.warn("ZIGCRAFT_SAFE_MODE enabled: keeping render distance {} with reduced GPU pressure", .{effective_render_distance});
         } else if (safe_mode) {
-            log.log.warn("Wayland stability profile active: keeping configured render distance {} and LOD behavior", .{effective_render_distance});
+            log.log.warn("Wayland stability profile active: keeping configured render distance {}", .{effective_render_distance});
         }
         if (build_config.chunk_debug_mode) {
             log.log.warn("CHUNK DEBUG MODE enabled: restore='{s}'", .{build_config.chunk_debug_enable});
         }
 
-        const preset_cfg = render_settings.getPresetConfig(render_distance_preset);
-
-        const effective_horizon_distance = LODConfig.normalizeHorizonDistance(effective_render_distance, horizon_distance);
-        const manual_distance_expanded = effective_render_distance > preset_cfg.lod_radii[0] or effective_horizon_distance != preset_cfg.horizon_radius;
-        const chunk_render_radius = if (strict_safe_mode)
-            @min(effective_render_distance, 8)
-        else if (effective_lod_enabled and manual_distance_expanded)
-            @min(effective_render_distance, preset_cfg.lod_radii[0])
-        else
-            effective_render_distance;
-        var preset_radii = if (strict_safe_mode)
-            LODConfig.radiiForDistances(chunk_render_radius, @max(effective_horizon_distance, 64))
-        else if (effective_lod_enabled and manual_distance_expanded)
-            LODConfig.radiiForDistances(chunk_render_radius, effective_horizon_distance)
-        else
-            preset_cfg.lod_radii;
-
-        const active_count = preset_cfg.active_lod_count;
-        if (active_count < LODLevel.count) {
-            var i: usize = active_count;
-            while (i < LODLevel.count) : (i += 1) {
-                preset_radii[i] = preset_radii[active_count - 1];
-            }
-        }
-
-        var lod_config = if (strict_safe_mode)
-            LODConfig{
-                .chunk_render_radius = chunk_render_radius,
-                .radii = preset_radii,
-                .memory_budget_mb = @min(preset_cfg.memory_budget_mb, 256),
-                .max_uploads_per_frame = @min(preset_cfg.max_uploads_per_frame, 8),
-                .compact_tiles_enabled = compact_tiles_enabled,
-            }
-        else
-            LODConfig{
-                .chunk_render_radius = chunk_render_radius,
-                .radii = preset_radii,
-                .fog_start_percent = preset_cfg.fog_start_percent,
-                .horizontal_detail = preset_cfg.horizontal_detail,
-                .sample_density = preset_cfg.sample_density,
-                .compact_tiles_enabled = compact_tiles_enabled,
-                .vertical_span_budget = preset_cfg.vertical_span_budget,
-                .mesh_path = preset_cfg.mesh_path,
-                .qem_triangle_targets = preset_cfg.qem_targets,
-                .memory_budget_mb = preset_cfg.memory_budget_mb,
-                .lod_store_size_cap_mb = preset_cfg.lod_store_size_cap_mb,
-                .max_uploads_per_frame = preset_cfg.max_uploads_per_frame,
-                .skip_cutout_lod2 = preset_cfg.skip_cutout_lod2,
-                .skip_lighting_lod3 = preset_cfg.skip_lighting_lod3,
-                .active_lod_count = active_count,
-            };
-
-        if (build_config.benchmark_lod_memory_budget_mb > 0) {
-            lod_config.memory_budget_mb = build_config.benchmark_lod_memory_budget_mb;
-            log.log.info("BENCHMARK: overriding LOD memory budget to {} MiB", .{lod_config.memory_budget_mb});
-        }
-
         session.* = undefined;
-        session.lod_config = lod_config;
 
         const world = try World.init(.{
             .allocator = allocator,
@@ -230,7 +117,6 @@ pub const GameSession = struct {
             .rhi = rhi.*,
             .atlas = atlas,
             .generator_index = generator_index,
-            .lod_config = if (effective_lod_enabled) session.lod_config.interface() else null,
         });
         errdefer world.deinit();
 
@@ -263,7 +149,7 @@ pub const GameSession = struct {
         const spawn = findActualSpawnColumn(world_sim, seed_spawn.x, seed_spawn.z) orelse seed_spawn;
         const spawn_y: f32 = @floatFromInt(spawn.info.height + 16);
         var player = Player.init(Vec3.init(@floatFromInt(spawn.x), spawn_y, @floatFromInt(spawn.z)), true);
-        player.camera.far = cameraFarPlaneForDistances(effective_render_distance, effective_horizon_distance);
+        player.camera.far = cameraFarPlaneForRenderDistance(effective_render_distance);
         // Aim toward the terrain so the first frame shows the ground.
         player.camera.setYawPitch(player.camera.yaw, -std.math.degreesToRadians(35.0));
 
@@ -272,11 +158,6 @@ pub const GameSession = struct {
         if (build_config.shadow_test_scene) {
             const scene = lightingBaselineScene(build_config.shadow_test_variant);
             atmosphere.setTimeOfDay(scene.time_of_day);
-            atmosphere.time.time_scale = 0.0;
-            player.position = scene.position;
-            player.camera.position = player.getEyePosition();
-            player.camera.setYawPitch(scene.yaw, scene.pitch);
-        } else if (phase5VisualScene(build_config.phase5_visual_scene)) |scene| {
             atmosphere.time.time_scale = 0.0;
             player.position = scene.position;
             player.camera.position = player.getEyePosition();
@@ -299,7 +180,6 @@ pub const GameSession = struct {
             .ecs_render_system = ecs_render_system,
             .rhi = rhi,
             .atmosphere = atmosphere,
-            .lod_config = session.lod_config,
             .creative_mode = true,
             .build_config = build_config,
         };
@@ -407,93 +287,8 @@ pub const GameSession = struct {
             }
 
             if (!skip_world) {
-                if (!self.gpu_culling_scale_fixture_installed and std.ascii.eqlIgnoreCase(self.build_config.benchmark_fixture, "gpu-culling-scale")) {
-                    // The Vulkan transfer queue is frame-owned. Install after
-                    // App begins this frame so all 1024 compact-pool uploads
-                    // use the production lifetime/synchronization path.
-                    try self.world.installGpuCullingScaleFixture();
-                    self.gpu_culling_scale_fixture_installed = true;
-                }
-                if (phase5VisualScene(self.build_config.phase5_visual_scene)) |scene| {
-                    // This is a production flat-world launch, not the shadow
-                    // test renderer. Reapply the deterministic pose because
-                    // normal player simulation is still active in captures.
-                    // Motion scenes advance a bounded frame-script here rather
-                    // than being static labels passed to the capture runner.
-                    self.applyPhase5VisualPose(scene);
-                }
                 const world_sim = self.world.interface().simulation();
                 try world_sim.update(self.player.camera.position, dt);
-
-                if (!self.phase5_fixture_applied and (self.build_config.phase5_visual_scene.len > 0 or (self.build_config.benchmark_fixture.len > 0 and !std.ascii.eqlIgnoreCase(self.build_config.benchmark_fixture, "gpu-culling-scale")))) {
-                    try self.applyPhase5VisualFixture(world_sim);
-                }
-
-                // The Phase 5 visual gate uses the fixed test-world pool as a
-                // full-detail fluid fixture. Count resident water cells before
-                // capture so its image ROI is backed by runtime evidence, not
-                // merely a requested camera pose.
-                if (self.build_config.screenshot_path.len > 0 and (std.ascii.eqlIgnoreCase(self.build_config.phase5_visual_scene, "water") or isSavedWorldScene(self.build_config.phase5_visual_scene))) {
-                    const fixture = if (std.ascii.eqlIgnoreCase(self.build_config.phase5_visual_scene, "water")) waterFixtureCells() else savedWorldWetCells();
-                    var observed: u32 = 0;
-                    for (fixture) |cell| {
-                        if (world_sim.getBlock(cell[0], cell[1], cell[2]) == .water) observed += 1;
-                    }
-                    self.phase5_water_fixture_observations +%= observed;
-                    if (!self.phase5_water_fixture_evidence_emitted and self.phase5_water_fixture_observations >= @as(u32, @intCast(fixture.len))) {
-                        if (phase5EvidenceEnabled(self.build_config)) {
-                            log.log.warn("PHASE5_WATER_FIXTURE: run={s} scene={s} observations={} fixture_cells={}", .{ self.build_config.phase5_visual_run_id, self.build_config.phase5_visual_scene, self.phase5_water_fixture_observations, fixture.len });
-                            std.debug.print("PHASE5_WATER_FIXTURE: run={s} scene={s} observations={} fixture_cells={}\n", .{ self.build_config.phase5_visual_run_id, self.build_config.phase5_visual_scene, self.phase5_water_fixture_observations, fixture.len });
-                        }
-                        self.phase5_water_fixture_evidence_emitted = true;
-                    }
-                }
-
-                if (!self.phase5_gpu_evidence_emitted and phase5SceneRequiresGpuValidation(self.build_config.phase5_visual_scene) and (!phase5SceneHasMotion(self.build_config.phase5_visual_scene) or self.phase5_motion_complete)) {
-                    if (self.world.getLODStats()) |lod_stats| {
-                        const candidates = lod_stats.gpu_terrain_candidates + lod_stats.gpu_fluid_candidates;
-                        if (candidates > 0) {
-                            if (phase5EvidenceEnabled(self.build_config)) {
-                                log.log.warn("PHASE5_GPU_CULLING: run={s} scene={s} candidates={} validation_mismatches={} overflows={}", .{ self.build_config.phase5_visual_run_id, self.build_config.phase5_visual_scene, candidates, lod_stats.gpu_culling_validation_mismatches, lod_stats.gpu_culling_overflows });
-                                std.debug.print("PHASE5_GPU_CULLING: run={s} scene={s} candidates={} validation_mismatches={} overflows={}\n", .{ self.build_config.phase5_visual_run_id, self.build_config.phase5_visual_scene, candidates, lod_stats.gpu_culling_validation_mismatches, lod_stats.gpu_culling_overflows });
-                            }
-                            self.phase5_gpu_evidence_emitted = true;
-                        }
-                    }
-                }
-
-                if (self.phase5_gpu_evidence_emitted and !self.phase5_gpu_validation_complete_emitted and getenv("ZIGCRAFT_LOD_GPU_CULLING_VALIDATE") != null) {
-                    // A queued generation is not validation evidence. The RHI
-                    // advances these counters only after consuming the mapped
-                    // readback when its frame slot is reused.
-                    if (phase5EvidenceEnabled(self.build_config)) if (self.world.getLODStats()) |lod_stats| {
-                        const completed_generation = lod_stats.gpu_culling_validation_completed_generation;
-                        const completed_count = lod_stats.gpu_culling_validation_completed_count;
-                        if (completed_generation > 0 and completed_count > 0 and completed_generation <= lod_stats.gpu_culling_validation_generation) {
-                            log.log.warn("PHASE5_GPU_VALIDATION_COMPLETE: run={s} scene={s} generation={} validations={} validation_mismatches={}", .{ self.build_config.phase5_visual_run_id, self.build_config.phase5_visual_scene, completed_generation, completed_count, lod_stats.gpu_culling_validation_mismatches });
-                            std.debug.print("PHASE5_GPU_VALIDATION_COMPLETE: run={s} scene={s} generation={} validations={} validation_mismatches={}\n", .{ self.build_config.phase5_visual_run_id, self.build_config.phase5_visual_scene, completed_generation, completed_count, lod_stats.gpu_culling_validation_mismatches });
-                            self.phase5_gpu_validation_complete_emitted = true;
-                        }
-                    };
-                }
-
-                if (isSavedWorldReloadScene(self.build_config.phase5_visual_scene) and self.phase5_save_loaded and !self.phase5_compact_wet_dry_evidence_emitted) {
-                    if (self.world.getLODStats()) |lod_stats| {
-                        // The persisted wet fixture proves reload from the
-                        // save, while direct-mesh bytes keep unsupported
-                        // shoreline topology on the expanded fallback. Dry
-                        // distant terrain must have live compact residency.
-                        if (lod_stats.compact_pool_allocated_bytes > 0 and lod_stats.direct_mesh_gpu_bytes > 0) {
-                            if (phase5EvidenceEnabled(self.build_config)) {
-                                log.log.warn("PHASE5_COMPACT_WET_DRY: run={s} scene={s} dry_compact_bytes={} wet_fallback_bytes={} wet_cells={} dry_cells={}", .{ self.build_config.phase5_visual_run_id, self.build_config.phase5_visual_scene, lod_stats.compact_pool_allocated_bytes, lod_stats.direct_mesh_gpu_bytes, savedWorldWetCells().len, savedWorldDryCells().len });
-                                std.debug.print("PHASE5_COMPACT_WET_DRY: run={s} scene={s} dry_compact_bytes={} wet_fallback_bytes={} wet_cells={} dry_cells={}\n", .{ self.build_config.phase5_visual_run_id, self.build_config.phase5_visual_scene, lod_stats.compact_pool_allocated_bytes, lod_stats.direct_mesh_gpu_bytes, savedWorldWetCells().len, savedWorldDryCells().len });
-                            }
-                            self.phase5_compact_wet_dry_evidence_emitted = true;
-                        }
-                    }
-                }
-
-                self.updatePhase5CaptureReadiness();
 
                 // ECS Updates
                 ECSPhysicsSystem.update(&self.ecs_registry, world_sim.collisionWorld(), dt);
@@ -512,211 +307,7 @@ pub const GameSession = struct {
     pub fn drawHUD(self: *GameSession, ui: *UISystem, atlas: *const TextureAtlas, active_pack: ?[]const u8, fps: f32, screen_w: f32, screen_h: f32, mouse_x: f32, mouse_y: f32, mouse_clicked: bool) !void {
         try session_hud.draw(self, ui, atlas, active_pack, fps, screen_w, screen_h, mouse_x, mouse_y, mouse_clicked);
     }
-
-    fn applyPhase5VisualFixture(self: *GameSession, world_sim: IWorldSimulation) !void {
-        const scene = if (self.build_config.phase5_visual_scene.len > 0) self.build_config.phase5_visual_scene else self.build_config.benchmark_fixture;
-        // Mutations are deliberately small, local, and above the flat-world
-        // grass. They make the production launch visually identifiable while
-        // retaining the normal generator, streamer, mesher, and LOD pipeline.
-        if (std.ascii.eqlIgnoreCase(scene, "saved-world-reload")) {
-            const wet_loaded = fixtureCellsMatch(world_sim, savedWorldWetCells(), .water);
-            const dry_loaded = fixtureCellsMatch(world_sim, savedWorldDryCells(), .white_terracotta);
-            if (wet_loaded and dry_loaded) {
-                self.phase5_fixture_applied = true;
-                self.phase5_save_loaded = true;
-                if (phase5EvidenceEnabled(self.build_config)) {
-                    log.log.warn("PHASE5_SAVE_LOADED: run={s} scene={s} wet_cells={} dry_cells={}", .{ self.build_config.phase5_visual_run_id, scene, savedWorldWetCells().len, savedWorldDryCells().len });
-                    std.debug.print("PHASE5_SAVE_LOADED: run={s} scene={s} wet_cells={} dry_cells={}\n", .{ self.build_config.phase5_visual_run_id, scene, savedWorldWetCells().len, savedWorldDryCells().len });
-                    log.log.warn("PHASE5_FIXTURE: run={s} scene={s} applied=1", .{ self.build_config.phase5_visual_run_id, scene });
-                    std.debug.print("PHASE5_FIXTURE: run={s} scene={s} applied=1\n", .{ self.build_config.phase5_visual_run_id, scene });
-                }
-            }
-            return;
-        } else if (std.ascii.eqlIgnoreCase(scene, "seam")) {
-            for (15..17) |x| for (4..12) |z| for (65..70) |y| {
-                try world_sim.setBlock(@intCast(x), @intCast(y), @intCast(z), if (x == 15) .stone else .white_terracotta);
-            };
-        } else if (std.ascii.eqlIgnoreCase(scene, "water")) {
-            for (20..31) |x| for (0..10) |z| {
-                try world_sim.setBlock(@intCast(x), 65, @intCast(z), .water);
-            };
-        } else if (std.ascii.eqlIgnoreCase(scene, "lod-handoff") or std.ascii.eqlIgnoreCase(scene, "lod-aerial") or std.ascii.eqlIgnoreCase(scene, "lod-handoff-traversal") or std.ascii.eqlIgnoreCase(scene, "teleport-handoff")) {
-            const motion_scene = std.ascii.eqlIgnoreCase(scene, "lod-handoff-traversal") or std.ascii.eqlIgnoreCase(scene, "teleport-handoff");
-            const base_x: i32 = if (motion_scene) -130 else -2;
-            const base_z: i32 = if (motion_scene) -24 else 8;
-            for (0..5) |x| for (0..5) |z| for (65..76) |y| {
-                if (x == 0 or x == 4 or z == 0 or z == 4 or y == 75) try world_sim.setBlock(base_x + @as(i32, @intCast(x)), @intCast(y), base_z + @as(i32, @intCast(z)), .stone);
-            };
-        } else if (std.ascii.eqlIgnoreCase(scene, "fog-rapid-turn")) {
-            // A fixed horizon landmark makes the rotation exercise visible in
-            // the production world while the changing view drives frustum/fog
-            // churn through the normal renderer.
-            for (0..5) |x| for (65..82) |y| {
-                try world_sim.setBlock(@as(i32, @intCast(x)) - 2, @intCast(y), 32, if (y % 2 == 0) .stone else .white_terracotta);
-            };
-        } else if (std.ascii.eqlIgnoreCase(scene, "saved-world-create")) {
-            for (18..33) |x| for (0..12) |z_offset| {
-                try world_sim.setBlock(@intCast(x), 65, @as(i32, @intCast(z_offset)) - 76, .water);
-            };
-            for (0..10) |x| for (0..4) |z_offset| for (65..71) |y| {
-                try world_sim.setBlock(@intCast(x), @intCast(y), @as(i32, @intCast(z_offset)) - 64, .white_terracotta);
-            };
-            for (savedWorldWetCells()) |cell| try world_sim.setBlock(cell[0], cell[1], cell[2], .water);
-            for (savedWorldDryCells()) |cell| try world_sim.setBlock(cell[0], cell[1], cell[2], .white_terracotta);
-        } else {
-            log.log.warn("Unknown Phase 5 visual scene '{s}'", .{scene});
-            return;
-        }
-        const fixture_applied = if (std.ascii.eqlIgnoreCase(scene, "saved-world-create"))
-            fixtureCellsMatch(world_sim, savedWorldWetCells(), .water) and fixtureCellsMatch(world_sim, savedWorldDryCells(), .white_terracotta)
-        else blk: {
-            const expected = if (std.ascii.eqlIgnoreCase(scene, "seam")) BlockType.stone else if (std.ascii.eqlIgnoreCase(scene, "water")) BlockType.water else BlockType.stone;
-            const probe = if (std.ascii.eqlIgnoreCase(scene, "seam")) [3]i32{ 15, 65, 4 } else if (std.ascii.eqlIgnoreCase(scene, "water")) [3]i32{ 25, 65, 4 } else if (std.ascii.eqlIgnoreCase(scene, "fog-rapid-turn")) [3]i32{ -2, 66, 32 } else if (std.ascii.eqlIgnoreCase(scene, "lod-handoff-traversal") or std.ascii.eqlIgnoreCase(scene, "teleport-handoff")) [3]i32{ -130, 65, -24 } else [3]i32{ -2, 65, 8 };
-            break :blk world_sim.getBlock(probe[0], probe[1], probe[2]) == expected;
-        };
-        if (fixture_applied) {
-            self.phase5_fixture_applied = true;
-            if (phase5EvidenceEnabled(self.build_config)) {
-                log.log.warn("PHASE5_FIXTURE: run={s} scene={s} applied=1", .{ self.build_config.phase5_visual_run_id, scene });
-                std.debug.print("PHASE5_FIXTURE: run={s} scene={s} applied=1\n", .{ self.build_config.phase5_visual_run_id, scene });
-            }
-            if (std.ascii.eqlIgnoreCase(scene, "saved-world-create")) {
-                self.world.saveAllModifiedChunks();
-                const failures = self.world.takeSaveFailureWarningCount();
-                if (failures == 0) {
-                    self.phase5_save_flushed = true;
-                    if (phase5EvidenceEnabled(self.build_config)) {
-                        log.log.warn("PHASE5_SAVE_FLUSH: run={s} scene={s} saved=1 failures=0", .{ self.build_config.phase5_visual_run_id, scene });
-                        std.debug.print("PHASE5_SAVE_FLUSH: run={s} scene={s} saved=1 failures=0\n", .{ self.build_config.phase5_visual_run_id, scene });
-                    }
-                }
-            }
-        }
-    }
-
-    fn updatePhase5CaptureReadiness(self: *GameSession) void {
-        if (self.build_config.phase5_visual_scene.len == 0) return;
-        const scene = phase5VisualScene(self.build_config.phase5_visual_scene) orelse {
-            self.phase5_settle_frames = 0;
-            return;
-        };
-
-        const world_stats = self.world.getStats();
-        const render_stats = self.world.getRenderStats();
-        const lod_stats = self.world.getLODStats() orelse {
-            self.phase5_settle_frames = 0;
-            return;
-        };
-        const queues_settled = world_stats.gen_queue == 0 and world_stats.mesh_queue == 0 and world_stats.upload_queue == 0 and
-            allZero(lod_stats.generating) and allZero(lod_stats.generated) and allZero(lod_stats.meshing) and allZero(lod_stats.mesh_ready) and allZero(lod_stats.uploading) and
-            allZero(lod_stats.gen_queue_depth) and allZero(lod_stats.upload_queue_depth) and lod_stats.upgrades_pending == 0 and lod_stats.downgrades_pending == 0 and lod_stats.ingestion_backlog == 0;
-        const renderable = render_stats.chunks_rendered > 0 and lod_stats.totalLoaded() > 0;
-        const motion_ready = scene.motion == .fixed or self.phase5_motion_complete;
-        const saved_world_ready = if (std.ascii.eqlIgnoreCase(self.build_config.phase5_visual_scene, "saved-world-create"))
-            self.phase5_save_flushed
-        else if (isSavedWorldReloadScene(self.build_config.phase5_visual_scene))
-            self.phase5_save_loaded and self.phase5_compact_wet_dry_evidence_emitted and self.phase5_gpu_validation_complete_emitted
-        else if (phase5SceneRequiresGpuValidation(self.build_config.phase5_visual_scene))
-            self.phase5_gpu_validation_complete_emitted
-        else
-            true;
-        if (!self.phase5_fixture_applied or !motion_ready or !queues_settled or !renderable or !saved_world_ready) {
-            self.phase5_settle_frames = 0;
-            return;
-        }
-
-        self.phase5_settle_frames +|= 1;
-        if (self.phase5_settle_frames < phase5SettleFrameTarget()) return;
-        phase5_capture_ready.store(true, .release);
-        if (!self.phase5_ready_evidence_emitted and phase5EvidenceEnabled(self.build_config)) {
-            log.log.warn("PHASE5_READY: run={s} scene={s} stable_frames={} chunks_rendered={} lod_loaded={}", .{ self.build_config.phase5_visual_run_id, self.build_config.phase5_visual_scene, self.phase5_settle_frames, render_stats.chunks_rendered, lod_stats.totalLoaded() });
-            std.debug.print("PHASE5_READY: run={s} scene={s} stable_frames={} chunks_rendered={} lod_loaded={}\n", .{ self.build_config.phase5_visual_run_id, self.build_config.phase5_visual_scene, self.phase5_settle_frames, render_stats.chunks_rendered, lod_stats.totalLoaded() });
-            self.phase5_ready_evidence_emitted = true;
-        }
-    }
-
-    fn applyPhase5VisualPose(self: *GameSession, scene: Phase5VisualScene) void {
-        const pose = phase5VisualPoseAtFrame(scene, self.phase5_motion_frames);
-        self.player.position = pose.position;
-        self.player.camera.position = self.player.getEyePosition();
-        self.player.camera.setYawPitch(pose.yaw, pose.pitch);
-        self.camera = self.player.camera;
-
-        // Hold the initial pose until the identifying fixture is actually
-        // resident and verified. Advancing immediately can stream the origin
-        // out before `setBlock` succeeds, making readiness impossible no
-        // matter how long the screenshot waits.
-        if (scene.motion == .fixed or self.phase5_motion_complete or !self.phase5_fixture_applied) return;
-
-        self.phase5_motion_frames +|= 1;
-        if (self.phase5_motion_frames < phase5MotionFrameTarget(scene.motion)) return;
-
-        self.phase5_motion_complete = true;
-        if (!self.phase5_motion_evidence_emitted and phase5EvidenceEnabled(self.build_config)) {
-            const movement = phase5MotionEvidence(scene.motion);
-            log.log.warn("PHASE5_MOTION: run={s} scene={s} kind={s} completed=1 frames={} distance={d:.1} yaw_degrees={d:.1}", .{ self.build_config.phase5_visual_run_id, self.build_config.phase5_visual_scene, scene.motion.name(), self.phase5_motion_frames, movement.distance, movement.yaw_degrees });
-            std.debug.print("PHASE5_MOTION: run={s} scene={s} kind={s} completed=1 frames={} distance={d:.1} yaw_degrees={d:.1}\n", .{ self.build_config.phase5_visual_run_id, self.build_config.phase5_visual_scene, scene.motion.name(), self.phase5_motion_frames, movement.distance, movement.yaw_degrees });
-            self.phase5_motion_evidence_emitted = true;
-        }
-    }
 };
-
-fn allZero(values: anytype) bool {
-    for (values) |value| if (value != 0) return false;
-    return true;
-}
-
-fn waterFixtureCells() []const [3]i32 {
-    return &.{ .{ 22, 65, 4 }, .{ 25, 65, 4 }, .{ 28, 65, 4 } };
-}
-
-/// These cells span a wet pool and a contrasting dry wall in two persisted
-/// chunks. Reload probes every one, so generated-world coincidence cannot
-/// satisfy the saved-world qualification.
-fn savedWorldWetCells() []const [3]i32 {
-    return &.{ .{ 20, 65, -72 }, .{ 25, 65, -72 }, .{ 30, 65, -72 } };
-}
-
-fn savedWorldDryCells() []const [3]i32 {
-    return &.{ .{ 0, 65, -64 }, .{ 4, 67, -64 }, .{ 8, 69, -64 } };
-}
-
-fn fixtureCellsMatch(world_sim: IWorldSimulation, cells: []const [3]i32, expected: BlockType) bool {
-    for (cells) |cell| {
-        if (world_sim.getBlock(cell[0], cell[1], cell[2]) != expected) return false;
-    }
-    return true;
-}
-
-fn isSavedWorldScene(scene: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(scene, "saved-world-create") or isSavedWorldReloadScene(scene);
-}
-
-fn isSavedWorldReloadScene(scene: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(scene, "saved-world-reload");
-}
-
-fn phase5SceneRequiresGpuValidation(scene: []const u8) bool {
-    if (std.ascii.eqlIgnoreCase(scene, "lod-handoff") or isSavedWorldReloadScene(scene)) return true;
-    if (phase5VisualScene(scene)) |visual_scene| return visual_scene.motion != .fixed;
-    return false;
-}
-
-fn phase5SceneHasMotion(scene: []const u8) bool {
-    if (phase5VisualScene(scene)) |visual_scene| return visual_scene.motion != .fixed;
-    return false;
-}
-
-fn phase5SettleFrameTarget() u32 {
-    if (getenv("ZIGCRAFT_PHASE5_SETTLE_FRAMES")) |value| {
-        return std.fmt.parseInt(u32, value, 10) catch 180;
-    }
-    return 180;
-}
-
-fn phase5EvidenceEnabled(build_config: BuildConfig) bool {
-    return build_config.phase5_visual_scene.len > 0 and build_config.phase5_visual_run_id.len > 0;
-}
 
 const LightingBaselineScene = struct {
     position: Vec3,
@@ -724,99 +315,6 @@ const LightingBaselineScene = struct {
     pitch: f32,
     time_of_day: f32,
 };
-
-pub const Phase5VisualMotion = enum {
-    fixed,
-    lod_handoff_traversal,
-    fog_rapid_turn,
-    teleport_handoff,
-
-    pub fn name(self: Phase5VisualMotion) []const u8 {
-        return switch (self) {
-            .fixed => "fixed",
-            .lod_handoff_traversal => "traversal",
-            .fog_rapid_turn => "rapid-turn",
-            .teleport_handoff => "teleport",
-        };
-    }
-};
-
-pub const Phase5VisualScene = struct {
-    position: Vec3,
-    yaw: f32,
-    pitch: f32,
-    motion: Phase5VisualMotion = .fixed,
-};
-
-pub fn parsePhase5VisualScene(name: []const u8) ?Phase5VisualScene {
-    const forward_z = std.math.pi / 2.0;
-    if (std.ascii.eqlIgnoreCase(name, "seam")) return .{ .position = Vec3.init(16.0, 74.0, -18.0), .yaw = forward_z, .pitch = -std.math.degreesToRadians(15.0) };
-    if (std.ascii.eqlIgnoreCase(name, "water")) return .{ .position = Vec3.init(25.0, 75.0, -16.0), .yaw = forward_z, .pitch = -std.math.degreesToRadians(17.0) };
-    if (std.ascii.eqlIgnoreCase(name, "lod-handoff")) return .{ .position = Vec3.init(0.0, 110.0, -80.0), .yaw = forward_z, .pitch = -std.math.degreesToRadians(13.0) };
-    if (std.ascii.eqlIgnoreCase(name, "lod-aerial")) return .{ .position = Vec3.init(0.0, 900.0, -100.0), .yaw = forward_z, .pitch = -std.math.degreesToRadians(60.0) };
-    if (std.ascii.eqlIgnoreCase(name, "saved-world-create") or std.ascii.eqlIgnoreCase(name, "saved-world-reload")) return .{ .position = Vec3.init(8.0, 78.0, -88.0), .yaw = forward_z, .pitch = -std.math.degreesToRadians(18.0) };
-    if (std.ascii.eqlIgnoreCase(name, "lod-handoff-traversal")) return .{ .position = Vec3.init(-128.0, 110.0, -32.0), .yaw = 0.0, .pitch = -std.math.degreesToRadians(13.0), .motion = .lod_handoff_traversal };
-    if (std.ascii.eqlIgnoreCase(name, "fog-rapid-turn")) return .{ .position = Vec3.init(0.0, 110.0, 0.0), .yaw = -std.math.pi, .pitch = -std.math.degreesToRadians(10.0), .motion = .fog_rapid_turn };
-    if (std.ascii.eqlIgnoreCase(name, "teleport-handoff")) return .{ .position = Vec3.init(-128.0, 110.0, -32.0), .yaw = 0.0, .pitch = -std.math.degreesToRadians(13.0), .motion = .teleport_handoff };
-    return null;
-}
-
-fn phase5VisualScene(name: []const u8) ?Phase5VisualScene {
-    return parsePhase5VisualScene(name);
-}
-
-fn phase5VisualPoseAtFrame(scene: Phase5VisualScene, frame: u32) Phase5VisualScene {
-    const target_frames = phase5MotionFrameTarget(scene.motion);
-    const clamped_frame = @min(frame, target_frames);
-    const progress: f32 = @as(f32, @floatFromInt(clamped_frame)) / @as(f32, @floatFromInt(target_frames));
-    var pose = scene;
-    switch (scene.motion) {
-        .fixed => {},
-        .lod_handoff_traversal => pose.position.x += 256.0 * progress,
-        .fog_rapid_turn => pose.yaw += std.math.tau * 2.0 * progress,
-        .teleport_handoff => {
-            if (frame >= 60) pose.position = Vec3.init(128.0, 110.0, 32.0);
-        },
-    }
-    return pose;
-}
-
-fn phase5MotionFrameTarget(motion: Phase5VisualMotion) u32 {
-    return switch (motion) {
-        .fixed => 1,
-        .lod_handoff_traversal => 180,
-        .fog_rapid_turn => 160,
-        .teleport_handoff => 120,
-    };
-}
-
-fn phase5MotionEvidence(motion: Phase5VisualMotion) struct { distance: f32, yaw_degrees: f32 } {
-    return switch (motion) {
-        .fixed => .{ .distance = 0.0, .yaw_degrees = 0.0 },
-        .lod_handoff_traversal => .{ .distance = 256.0, .yaw_degrees = 0.0 },
-        .fog_rapid_turn => .{ .distance = 0.0, .yaw_degrees = 720.0 },
-        .teleport_handoff => .{ .distance = 262.9, .yaw_degrees = 0.0 },
-    };
-}
-
-test "Phase 5 visual scene parser exposes bounded motion poses" {
-    const aerial = parsePhase5VisualScene("lod-aerial").?;
-    const traversal = parsePhase5VisualScene("lod-handoff-traversal").?;
-    const turn = parsePhase5VisualScene("fog-rapid-turn").?;
-    const teleport = parsePhase5VisualScene("teleport-handoff").?;
-    try std.testing.expectEqual(Phase5VisualMotion.lod_handoff_traversal, traversal.motion);
-    try std.testing.expectEqual(Phase5VisualMotion.fog_rapid_turn, turn.motion);
-    try std.testing.expectEqual(Phase5VisualMotion.teleport_handoff, teleport.motion);
-    try std.testing.expect(aerial.position.y >= 900.0);
-    try std.testing.expect(parsePhase5VisualScene("unbounded-motion") == null);
-
-    const traversal_end = phase5VisualPoseAtFrame(traversal, phase5MotionFrameTarget(traversal.motion));
-    try std.testing.expect(traversal_end.position.x > traversal.position.x);
-    const turn_end = phase5VisualPoseAtFrame(turn, phase5MotionFrameTarget(turn.motion));
-    try std.testing.expect(turn_end.yaw > turn.yaw);
-    const teleport_end = phase5VisualPoseAtFrame(teleport, phase5MotionFrameTarget(teleport.motion));
-    try std.testing.expect(teleport_end.position.x != teleport.position.x);
-}
 
 fn lightingBaselineScene(name: []const u8) LightingBaselineScene {
     const forward_z = std.math.pi / 2.0;
@@ -828,9 +326,6 @@ fn lightingBaselineScene(name: []const u8) LightingBaselineScene {
     if (std.ascii.eqlIgnoreCase(name, "foliage-cutout")) return .{ .position = Vec3.init(12.0, 67.0, 10.0), .yaw = forward_z, .pitch = slight_down, .time_of_day = 0.5 };
     if (std.ascii.eqlIgnoreCase(name, "water")) return .{ .position = Vec3.init(25.0, 68.0, -12.0), .yaw = forward_z, .pitch = -std.math.degreesToRadians(18.0), .time_of_day = 0.5 };
     if (std.ascii.eqlIgnoreCase(name, "cross-chunk-corridor")) return .{ .position = Vec3.init(10.0, 65.0, 32.0), .yaw = 0.0, .pitch = 0.0, .time_of_day = 0.5 };
-    // Looks over the authored fixtures from a resident full-detail area into
-    // the LOD horizon. The scene keeps time fixed and has no input-driven pose.
-    if (std.ascii.eqlIgnoreCase(name, "lod-handoff")) return .{ .position = Vec3.init(0.0, 112.0, -96.0), .yaw = forward_z, .pitch = -std.math.degreesToRadians(12.0), .time_of_day = 0.5 };
     if (std.ascii.eqlIgnoreCase(name, "bend")) return .{ .position = Vec3.init(5.5, 65.0, -14.0), .yaw = forward_z, .pitch = slight_down, .time_of_day = 0.5 };
     if (std.ascii.eqlIgnoreCase(name, "noon")) return .{ .position = Vec3.init(0.0, 68.0, 18.0), .yaw = forward_z, .pitch = slight_down, .time_of_day = 0.5 };
     return .{ .position = Vec3.init(0.0, 65.0, -16.0), .yaw = forward_z, .pitch = -std.math.degreesToRadians(5.0), .time_of_day = 0.5 };
