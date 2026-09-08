@@ -17,19 +17,19 @@ test "world orchestration delegates the active chunk distance to the renderer" {
     const Renderer = struct {
         calls: u32 = 0,
         distance: i32 = 0,
-        fn render(self: *@This(), _: math.Mat4, _: math.Vec3, distance: i32, _: renderer_mod.RenderLayer) void {
+        pub fn render(self: *@This(), _: math.Mat4, _: math.Vec3, distance: i32, _: renderer_mod.RenderLayer) void {
             self.calls += 1;
             self.distance = distance;
         }
     };
     const Streamer = struct {
-        fn getActiveRenderDistance(_: *@This()) i32 {
+        pub fn getActiveRenderDistance(_: *@This()) i32 {
             return 24;
         }
     };
     var renderer = Renderer{};
     var streamer = Streamer{};
-    world.WorldOrchestration.render(&renderer, &streamer, math.Mat4.identity(), math.Vec3.zero, .terrain);
+    world.WorldOrchestration.render(&renderer, &streamer, math.Mat4.identity, math.Vec3.zero, .terrain);
     try std.testing.expectEqual(@as(u32, 1), renderer.calls);
     try std.testing.expectEqual(@as(i32, 24), renderer.distance);
 }

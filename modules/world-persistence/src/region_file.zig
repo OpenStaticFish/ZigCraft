@@ -22,6 +22,9 @@ const HEADER_SIZE: u32 = HEADER_ENTRIES * 4;
 // Matches Minecraft Anvil format: 1=GZip, 2=Zlib, 3=Uncompressed
 const COMPRESSION_ZLIB: u8 = 2;
 const MAX_SECTOR_OFFSET: u32 = (1 << 24) - 1;
+const JOURNAL_SIZE = 2 * SECTOR_SIZE;
+const JOURNAL_MAGIC = "ZCUNDO01";
+const WriteStage = enum { payload_header, payload_synced, partial_journal, journal_synced, partial_header, header_synced };
 
 const LocationEntry = packed struct(u32) {
     sector_count: u8,
@@ -41,6 +44,9 @@ pub const RegionFile = struct {
     closed: bool = false,
     header: [HEADER_ENTRIES]LocationEntry,
     allocator: Allocator,
+    needs_recovery: bool = false,
+    // Faults interrupt actual writes at transaction boundaries in regression tests.
+    interrupt_after: ?WriteStage = null,
 
     pub fn open(allocator: Allocator, path: []const u8) !RegionFile {
         const file = try fs.cwd().openFile(path, .{ .mode = .read_write });
@@ -52,6 +58,7 @@ pub const RegionFile = struct {
             .allocator = allocator,
         };
 
+        try region.recoverJournal();
         try region.readHeader();
         return region;
     }
@@ -68,6 +75,7 @@ pub const RegionFile = struct {
 
         var header_buf: [HEADER_SIZE]u8 = @splat(0);
         try file.writeAll(&header_buf);
+        try file.sync();
 
         return region;
     }
@@ -85,6 +93,10 @@ pub const RegionFile = struct {
     }
 
     pub fn readChunk(self: *RegionFile, local_x: u5, local_z: u5, allocator: Allocator) ![]u8 {
+        if (self.needs_recovery) {
+            try self.recoverJournal();
+            try self.readHeader();
+        }
         const idx = @as(u32, local_z) * 32 + @as(u32, local_x);
         const entry = self.header[idx];
 
@@ -99,7 +111,7 @@ pub const RegionFile = struct {
         if (try self.file.preadAll(&len_buf, byte_offset) != len_buf.len) return RegionError.FileTooShort;
         const chunk_len = std.mem.readInt(u32, &len_buf, .big);
 
-        if (chunk_len < 1 or chunk_len > max_bytes)
+        if (chunk_len < 1 or @as(u64, chunk_len) + 4 > max_bytes)
             return RegionError.InvalidHeader;
         if (byte_offset + 4 + chunk_len > stat.size) return RegionError.FileTooShort;
 
@@ -120,6 +132,10 @@ pub const RegionFile = struct {
     }
 
     pub fn writeChunk(self: *RegionFile, local_x: u5, local_z: u5, data: []const u8) !void {
+        if (self.needs_recovery) {
+            try self.recoverJournal();
+            try self.readHeader();
+        }
         const compressed = try compressZlib(self.allocator, data);
         defer self.allocator.free(compressed);
 
@@ -128,18 +144,11 @@ pub const RegionFile = struct {
         if (sectors_needed > std.math.maxInt(u8)) return RegionError.FileTooShort;
 
         const idx = @as(u32, local_z) * 32 + @as(u32, local_x);
-        const old_entry = self.header[idx];
-
-        const new_offset: u24 = blk: {
-            if (old_entry.offset != 0 and @as(u32, old_entry.sector_count) >= sectors_needed) {
-                break :blk old_entry.offset;
-            }
-
-            const end_sector = self.findEndSector();
-            if (end_sector + sectors_needed > MAX_SECTOR_OFFSET)
-                return RegionError.FileTooShort;
-            break :blk @intCast(end_sector);
-        };
+        // Never overwrite a committed sector, even when the replacement fits.
+        const stat = try self.file.stat();
+        const end_sector = (stat.size + SECTOR_SIZE - 1) / SECTOR_SIZE;
+        if (end_sector + sectors_needed > MAX_SECTOR_OFFSET) return RegionError.FileTooShort;
+        const new_offset: u24 = @intCast(end_sector);
 
         const byte_offset: u64 = @as(u64, new_offset) * SECTOR_SIZE;
 
@@ -149,7 +158,9 @@ pub const RegionFile = struct {
 
         const sector_bytes = @as(u64, sectors_needed) * SECTOR_SIZE;
 
+        self.needs_recovery = true;
         try self.file.writePositionalAll(&chunk_header, byte_offset);
+        try self.interrupt(.payload_header);
         try self.file.writePositionalAll(compressed, byte_offset + 5);
 
         const padding_len = sector_bytes - 4 - total_len;
@@ -165,20 +176,21 @@ pub const RegionFile = struct {
             }
         }
 
-        self.header[idx] = .{
+        try self.file.sync();
+        try self.interrupt(.payload_synced);
+        try self.publishEntry(idx, .{
             .offset = new_offset,
             .sector_count = @intCast(sectors_needed),
-        };
-
-        try self.writeHeader();
-        try self.file.sync();
+        });
     }
 
     pub fn deleteChunk(self: *RegionFile, local_x: u5, local_z: u5) !void {
+        if (self.needs_recovery) {
+            try self.recoverJournal();
+            try self.readHeader();
+        }
         const idx = @as(u32, local_z) * 32 + @as(u32, local_x);
-        self.header[idx] = .{ .offset = 0, .sector_count = 0 };
-        try self.writeHeader();
-        try self.file.sync();
+        try self.publishEntry(idx, .{ .offset = 0, .sector_count = 0 });
     }
 
     fn readHeader(self: *RegionFile) !void {
@@ -186,32 +198,68 @@ pub const RegionFile = struct {
         if (stat.size < HEADER_SIZE) return RegionError.InvalidHeader;
 
         var buf: [HEADER_SIZE]u8 = undefined;
-        _ = try self.file.preadAll(&buf, 0);
+        if (try self.file.preadAll(&buf, 0) != buf.len) return RegionError.InvalidHeader;
 
         for (&self.header, 0..HEADER_ENTRIES) |*entry, i| {
             const raw = std.mem.readInt(u32, buf[i * 4 ..][0..4], .big);
             entry.* = @bitCast(raw);
+            if ((entry.offset == 0) != (entry.sector_count == 0)) return RegionError.InvalidHeader;
+            if (entry.offset != 0 and (@as(u64, entry.offset) + entry.sector_count) * SECTOR_SIZE > stat.size) return RegionError.InvalidHeader;
         }
+        self.needs_recovery = false;
     }
 
-    fn writeHeader(self: *RegionFile) !void {
-        var buf: [HEADER_SIZE]u8 = undefined;
+    fn publishEntry(self: *RegionFile, idx: u32, replacement: LocationEntry) !void {
+        var journal: [JOURNAL_SIZE]u8 = @splat(0);
         for (&self.header, 0..HEADER_ENTRIES) |entry, i| {
             const raw: u32 = @bitCast(entry);
-            std.mem.writeInt(u32, buf[i * 4 ..][0..4], raw, .big);
+            std.mem.writeInt(u32, journal[i * 4 ..][0..4], raw, .big);
         }
-        try self.file.writePositionalAll(&buf, 0);
+        @memcpy(journal[JOURNAL_SIZE - 16 ..][0..8], JOURNAL_MAGIC);
+        std.mem.writeInt(u64, journal[JOURNAL_SIZE - 8 ..], std.hash.Wyhash.hash(0, journal[0..HEADER_SIZE]), .big);
+        const stat = try self.file.stat();
+        const journal_offset = (stat.size + SECTOR_SIZE - 1) / SECTOR_SIZE * SECTOR_SIZE;
+        self.needs_recovery = true;
+        try self.file.writePositionalAll(journal[0..HEADER_SIZE], journal_offset);
+        try self.interrupt(.partial_journal);
+        try self.file.writePositionalAll(journal[HEADER_SIZE..], journal_offset + HEADER_SIZE);
+        // The undo header lives in this same file, so no sidecar directory-entry
+        // ordering is needed. Only a complete, synced record permits publishing.
+        try self.file.sync();
+        try self.interrupt(.journal_synced);
+        var next_header: [HEADER_SIZE]u8 = journal[0..HEADER_SIZE].*;
+        std.mem.writeInt(u32, next_header[idx * 4 ..][0..4], @bitCast(replacement), .big);
+        try self.file.writePositionalAll(next_header[0 .. HEADER_SIZE / 2], 0);
+        try self.interrupt(.partial_header);
+        try self.file.writePositionalAll(next_header[HEADER_SIZE / 2 ..], HEADER_SIZE / 2);
+        try self.file.sync();
+        try self.interrupt(.header_synced);
+        // Commit by removing the undo record only after the new header is durable.
+        try self.file.setLength(journal_offset);
+        try self.file.sync();
+        self.header[idx] = replacement;
+        self.needs_recovery = false;
     }
 
-    fn findEndSector(self: *RegionFile) u32 {
-        var end: u32 = HEADER_SIZE / SECTOR_SIZE;
-        for (&self.header) |entry| {
-            if (entry.offset != 0) {
-                const e: u32 = @as(u32, entry.offset) + @as(u32, entry.sector_count);
-                if (e > end) end = e;
+    fn recoverJournal(self: *RegionFile) !void {
+        const stat = try self.file.stat();
+        if (stat.size >= HEADER_SIZE + JOURNAL_SIZE) {
+            var journal: [JOURNAL_SIZE]u8 = undefined;
+            const offset = stat.size - JOURNAL_SIZE;
+            if (try self.file.preadAll(&journal, offset) != journal.len) return RegionError.FileTooShort;
+            if (std.mem.eql(u8, journal[JOURNAL_SIZE - 16 ..][0..8], JOURNAL_MAGIC)) {
+                const hash = std.mem.readInt(u64, journal[JOURNAL_SIZE - 8 ..], .big);
+                if (hash != std.hash.Wyhash.hash(0, journal[0..HEADER_SIZE])) return error.InvalidJournal;
+                try self.file.writePositionalAll(journal[0..HEADER_SIZE], 0);
+                try self.file.sync();
+                try self.file.setLength(offset);
+                try self.file.sync();
             }
         }
-        return end;
+    }
+
+    fn interrupt(self: *RegionFile, stage: WriteStage) !void {
+        if (@import("builtin").is_test and self.interrupt_after == stage) return error.InterruptedWrite;
     }
 };
 
@@ -489,4 +537,40 @@ test "RegionFile corrupt header handling" {
             try testing.expectError(RegionError.InvalidHeader, result);
         }
     }.run);
+}
+
+test "RegionFile replacement recovers interrupted real write stages" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = fs.Dir{ .inner = tmp.dir };
+    var base_buf: [fs.max_path_bytes]u8 = undefined;
+    const base = try dir.realpath(".", &base_buf);
+    var path_buf: [fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/interrupted.mca", .{base});
+
+    inline for (std.meta.tags(WriteStage)) |stage| {
+        var region = try RegionFile.create(testing.allocator, path);
+        defer region.close();
+        try region.writeChunk(0, 0, "committed original");
+        try region.writeChunk(31, 31, "unrelated committed chunk");
+        region.interrupt_after = stage;
+        try testing.expectError(error.InterruptedWrite, region.writeChunk(0, 0, "replacement"));
+        region.close();
+
+        var recovered = try RegionFile.open(testing.allocator, path);
+        defer recovered.close();
+        const original = try recovered.readChunk(0, 0, testing.allocator);
+        defer testing.allocator.free(original);
+        const unrelated = try recovered.readChunk(31, 31, testing.allocator);
+        defer testing.allocator.free(unrelated);
+        try testing.expectEqualStrings("committed original", original);
+        try testing.expectEqualStrings("unrelated committed chunk", unrelated);
+        try recovered.writeChunk(0, 0, "successful retry");
+        recovered.close();
+        var committed = try RegionFile.open(testing.allocator, path);
+        defer committed.close();
+        const replacement = try committed.readChunk(0, 0, testing.allocator);
+        defer testing.allocator.free(replacement);
+        try testing.expectEqualStrings("successful retry", replacement);
+    }
 }

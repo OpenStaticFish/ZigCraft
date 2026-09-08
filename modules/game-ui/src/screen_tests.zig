@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const screen_mod = @import("screen.zig");
+const WorldStats = @import("engine-ui").WorldStats;
 
 const MockScreen = struct {
     update_count: u32 = 0,
@@ -11,7 +12,7 @@ const MockScreen = struct {
     background_draw_count: u32 = 0,
     last_dt: f32 = 0.0,
 
-    const vtable = screen_mod.IScreen.VTable{
+    pub const vtable = screen_mod.IScreen.VTable{
         .deinit = deinit,
         .update = update,
         .drawBackground = drawBackground,
@@ -51,9 +52,17 @@ const MockScreen = struct {
         cast(ptr).exit_count += 1;
     }
 
-    fn getWorldStats(ptr: *anyopaque) ?@import("game-core").interfaces.WorldStats {
+    fn getWorldStats(ptr: *anyopaque) ?WorldStats {
         _ = ptr;
-        return .{ .chunks_loaded = 4, .total_vertices = 64, .fps = 60.0 };
+        return .{
+            .chunks_total = 4,
+            .chunks_rendered = 4,
+            .chunks_culled = 0,
+            .vertices_rendered = 64,
+            .gen_queue = 0,
+            .mesh_queue = 0,
+            .upload_queue = 0,
+        };
     }
 };
 
@@ -66,12 +75,12 @@ test "IScreen forwards optional update and stats callbacks" {
 
     try testing.expectEqual(@as(u32, 1), mock.update_count);
     try testing.expectEqual(@as(f32, 0.25), mock.last_dt);
-    try testing.expectEqual(@as(usize, 4), stats.chunks_loaded);
+    try testing.expectEqual(@as(u32, 4), stats.chunks_total);
 }
 
 test "IScreen tolerates missing optional callbacks" {
     const Bare = struct {
-        const vtable = screen_mod.IScreen.VTable{ .deinit = deinit };
+        pub const vtable = screen_mod.IScreen.VTable{ .deinit = deinit };
         fn deinit(ptr: *anyopaque) void {
             _ = ptr;
         }
@@ -83,7 +92,7 @@ test "IScreen tolerates missing optional callbacks" {
     screen.onEnter();
     screen.onExit();
 
-    try testing.expectEqual(@as(?@import("game-core").interfaces.WorldStats, null), screen.getWorldStats());
+    try testing.expectEqual(@as(?WorldStats, null), screen.getWorldStats());
 }
 
 test "ScreenManager push enters and updates top screen" {

@@ -8,6 +8,8 @@ const FXAAPushConstants = fxaa_system_pkg.FXAAPushConstants;
 const setup = @import("rhi_resource_setup.zig");
 const screenshot = @import("screenshot.zig");
 const final_composition = @import("final_composition.zig");
+const render_state = @import("rhi_render_state.zig");
+const frame_orchestration = @import("rhi_frame_orchestration.zig");
 
 fn recordFinalComposedImage(ctx: anytype) void {
     const image_index = ctx.frames.current_image_index;
@@ -86,10 +88,10 @@ pub fn beginGPassInternal(ctx: anytype) void {
     const scissor = c.VkRect2D{ .offset = .{ .x = 0, .y = 0 }, .extent = g_extent };
     c.vkCmdSetScissor(command_buffer, 0, 1, &scissor);
 
-    const ds = ctx.descriptors.descriptor_sets[ctx.frames.current_frame];
-    if (ds == null) log.log.err("CRITICAL: descriptor_set is NULL for frame {}", .{ctx.frames.current_frame});
-
-    c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_manager.pipeline_layout, 0, 1, &ds, 0, null);
+    if (render_state.prepareDrawDescriptors(ctx)) {
+        const ds = ctx.descriptors.descriptor_sets[ctx.frames.current_frame];
+        c.vkCmdBindDescriptorSets(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_manager.pipeline_layout, 0, 1, &ds, 0, null);
+    }
 }
 
 pub fn endGPassInternal(ctx: anytype) void {
@@ -442,7 +444,7 @@ pub fn ensureNoRenderPassActiveInternal(ctx: anytype) void {
 }
 
 pub fn endFrame(ctx: anytype) void {
-    if (!ctx.frames.frame_in_progress) return;
+    if (ctx.frames.terminal_failure or !ctx.frames.frame_in_progress) return;
 
     if (ctx.runtime.main_pass_active) endMainPassInternal(ctx);
     if (ctx.shadow_system.pass_active) {
@@ -498,31 +500,14 @@ pub fn endFrame(ctx: anytype) void {
         }
     }
 
-    if (ctx.resources.transfer.is_dedicated and transfer_cb != null) {
-        ctx.resources.submitTransfer() catch |err| {
-            log.log.errWithTrace("Failed to submit transfer: {}", .{err});
-        };
-    }
-
-    const transfer_sem = ctx.resources.getTransferSemaphore();
-
-    var submitted = false;
-    if (ctx.frames.endFrame(&ctx.swapchain, transfer_cb, transfer_sem)) |_| {
-        submitted = true;
-    } else |err| {
-        log.log.errWithTrace("endFrame failed: {}", .{err});
-        if (err == error.GpuLost) {
-            ctx.runtime.gpu_fault_detected = true;
-        }
-    }
+    submitFrame(ctx, transfer_cb) catch |err| {
+        log.log.errWithTrace("endFrame failed: {}; frame slot quarantined, restart required", .{err});
+        return;
+    };
 
     if (ctx.screenshot_capture.staging != null) {
-        if (submitted) {
-            if (!screenshot.completeCapture(ctx)) {
-                log.log.err("SCREENSHOT: Failed to encode final composed frame", .{});
-            }
-        } else {
-            screenshot.discardCapture(ctx);
+        if (!screenshot.completeCapture(ctx)) {
+            log.log.err("SCREENSHOT: Failed to encode final composed frame", .{});
         }
     }
 
@@ -535,4 +520,25 @@ pub fn endFrame(ctx: anytype) void {
     }
 
     ctx.runtime.frame_index += 1;
+}
+
+pub fn submitFrame(ctx: anytype, transfer_cb: ?c.VkCommandBuffer) !void {
+    if (ctx.frames.terminal_failure) return error.GpuLost;
+    const faults_before = ctx.vulkan_device.fault_count;
+    errdefer {
+        ctx.frames.failFrame();
+        ctx.runtime.gpu_fault_detected = true;
+        // endFrame is void at the RHI boundary. Notify the app's existing fault
+        // query even for non-device-loss errors, without counting device loss twice.
+        if (ctx.vulkan_device.fault_count == faults_before) ctx.vulkan_device.fault_count +|= 1;
+        frame_orchestration.invalidateAbortedTemporalState(ctx);
+        ctx.runtime.final_composed.clear();
+        // Do not discard screenshot staging, reset transfer state, or recycle
+        // descriptors/fences here: submission or presentation may be pending.
+    }
+    if (ctx.resources.transfer.is_dedicated and transfer_cb != null) {
+        try ctx.resources.submitTransfer();
+    }
+    const transfer_sem = ctx.resources.getTransferSemaphore();
+    try ctx.frames.endFrame(&ctx.swapchain, transfer_cb, transfer_sem);
 }

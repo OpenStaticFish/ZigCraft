@@ -1,4 +1,8 @@
 pub const chunk_mesh = @import("chunk_mesh.zig");
+
+test {
+    _ = @import("test_root.zig");
+}
 pub const chunk_allocator = @import("chunk_allocator.zig");
 pub const chunk_storage = @import("chunk_storage.zig");
 pub const chunk_mesh_tests = @import("chunk_mesh_tests.zig");

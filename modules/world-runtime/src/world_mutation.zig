@@ -41,6 +41,8 @@ pub const WorldMutationCoordinator = struct {
     pub const MutationResult = struct {
         pub const LightingUpdate = enum { none, removal, recompute };
 
+        /// Borrowed for immediate main-thread use only. Async lighting uses the
+        /// coordinates below and reacquires/pins resident chunks itself.
         chunk_data: *ChunkData,
         chunk_x: i32,
         chunk_z: i32,
@@ -55,10 +57,12 @@ pub const WorldMutationCoordinator = struct {
 
         self.storage.lighting_mutex.lock();
         defer self.storage.lighting_mutex.unlock();
+        self.storage.chunks_mutex.lock();
+        defer self.storage.chunks_mutex.unlock();
 
         const cp = worldToChunk(world_x, world_z);
-        const data = self.storage.get(cp.chunk_x, cp.chunk_z) orelse return null;
-        if (!data.chunk.generated) return null;
+        const data = self.storage.chunks.get(.{ .x = cp.chunk_x, .z = cp.chunk_z }) orelse return null;
+        if (!data.chunk.generated or data.chunk.state == .generating or data.chunk.state == .unloading) return null;
         const local = worldToLocal(world_x, world_z);
 
         const local_y: u32 = @intCast(world_y);
@@ -85,6 +89,22 @@ pub const WorldMutationCoordinator = struct {
         else
             .none;
 
+        if (lighting_update != .none) {
+            // Match recomputeArea's loaded window, including neighbors reached
+            // by light from interior edits. Persist invalidity before the async
+            // job can be canceled or its enqueue can fail.
+            var dz: i32 = -1;
+            while (dz <= 1) : (dz += 1) {
+                var dx: i32 = -1;
+                while (dx <= 1) : (dx += 1) {
+                    const affected = self.storage.chunks.get(.{ .x = cp.chunk_x + dx, .z = cp.chunk_z + dz }) orelse continue;
+                    if (!affected.chunk.generated or affected.chunk.state == .generating or affected.chunk.state == .unloading) continue;
+                    affected.chunk.lighting_valid = false;
+                    affected.chunk.modified = true;
+                }
+            }
+        }
+
         self.invalidateNeighbors(cp.chunk_x, cp.chunk_z, local.x, local.z);
 
         return .{
@@ -107,24 +127,25 @@ pub const WorldMutationCoordinator = struct {
         }
     }
 
+    /// Caller holds chunks_mutex exclusively, including the dirty flag writes.
     fn invalidateNeighbors(self: *WorldMutationCoordinator, cx: i32, cz: i32, local_x: u32, local_z: u32) void {
         if (local_x == 0) {
-            if (self.storage.get(cx - 1, cz)) |neighbor| {
+            if (self.storage.chunks.get(.{ .x = cx - 1, .z = cz })) |neighbor| {
                 neighbor.chunk.dirty = true;
             }
         }
         if (local_x == CHUNK_SIZE_X - 1) {
-            if (self.storage.get(cx + 1, cz)) |neighbor| {
+            if (self.storage.chunks.get(.{ .x = cx + 1, .z = cz })) |neighbor| {
                 neighbor.chunk.dirty = true;
             }
         }
         if (local_z == 0) {
-            if (self.storage.get(cx, cz - 1)) |neighbor| {
+            if (self.storage.chunks.get(.{ .x = cx, .z = cz - 1 })) |neighbor| {
                 neighbor.chunk.dirty = true;
             }
         }
         if (local_z == CHUNK_SIZE_Z - 1) {
-            if (self.storage.get(cx, cz + 1)) |neighbor| {
+            if (self.storage.chunks.get(.{ .x = cx, .z = cz + 1 })) |neighbor| {
                 neighbor.chunk.dirty = true;
             }
         }
@@ -314,4 +335,175 @@ test "WorldMutationCoordinator clears stale block light after emitter removal" {
     const remove_result = (try mutation.applyBlockMutation(4, 4, 4, .air)).?;
     try mutation.updateLighting(remove_result);
     try testing.expectEqual(@as(u4, 0), data.chunk.getBlockLight(5, 4, 4));
+}
+
+test "WorldMutationCoordinator persists invalid lighting until affected chunks are reconciled" {
+    const testing = std.testing;
+    const serializer = @import("world-persistence").chunk_serializer;
+    var storage = ChunkStorage.init(testing.allocator);
+    defer storage.deinitWithoutRHI();
+    const center = try storage.getOrCreate(0, 0);
+    const east = try storage.getOrCreate(1, 0);
+    const distant = try storage.getOrCreate(2, 0);
+    for ([_]*ChunkData{ center, east, distant }) |data| {
+        data.chunk.generated = true;
+        data.chunk.fill(.stone);
+    }
+    // A sealed, initially dark tunnel crosses the chunk interface. The edit is
+    // inside the center chunk, but its emitted light will also affect the east.
+    center.chunk.setBlock(14, 4, 8, .air);
+    center.chunk.setBlock(15, 4, 8, .air);
+    east.chunk.setBlock(0, 4, 8, .air);
+    east.chunk.setBlock(1, 4, 8, .air);
+    for ([_]*ChunkData{ center, east, distant }) |data| {
+        data.chunk.lighting_valid = true;
+        data.chunk.modified = false;
+    }
+
+    var mutation = WorldMutationCoordinator.init(&storage, testing.allocator, null, false);
+    const result = (try mutation.applyBlockMutation(14, 4, 8, .torch)).?;
+    try testing.expectEqual(WorldMutationCoordinator.MutationResult.LightingUpdate.recompute, result.lighting_update);
+    try testing.expect(center.chunk.modified and east.chunk.modified);
+    try testing.expect(distant.chunk.lighting_valid and !distant.chunk.modified);
+
+    for ([_]bool{ false, true }) |reconcile| {
+        if (reconcile) {
+            var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+            var failed_mutation = WorldMutationCoordinator.init(&storage, failing.allocator(), null, false);
+            try testing.expectError(error.OutOfMemory, failed_mutation.updateLighting(result));
+            try testing.expect(!center.chunk.lighting_valid and !east.chunk.lighting_valid);
+            try mutation.updateLighting(result);
+            try testing.expect(east.chunk.getBlockLight(1, 4, 8) > 0);
+        }
+
+        // The first save represents cancellation/shutdown before the queued
+        // relight ran. Verify actual serialized flags, not just resident flags.
+        storage.lighting_mutex.lock();
+        defer storage.lighting_mutex.unlock();
+        storage.chunks_mutex.lockShared();
+        defer storage.chunks_mutex.unlockShared();
+        for ([_]*ChunkData{ center, east }) |data| {
+            const bytes = try serializer.serializeChunk(&data.chunk, testing.allocator);
+            defer testing.allocator.free(bytes);
+            const flags: serializer.HeaderFlags = @bitCast(bytes[5]);
+            try testing.expectEqual(reconcile, flags.lighting_current);
+        }
+    }
+    try testing.expect(distant.chunk.lighting_valid and !distant.chunk.modified);
+}
+
+test "WorldMutationCoordinator removal repairs earlier canceled lighting edits" {
+    const testing = std.testing;
+    var storage = ChunkStorage.init(testing.allocator);
+    defer storage.deinitWithoutRHI();
+    const data = try storage.getOrCreate(0, 0);
+    data.chunk.generated = true;
+    data.chunk.fill(.stone);
+    data.chunk.setBlock(4, 4, 4, .torch);
+    data.chunk.setBlock(5, 4, 4, .air);
+    data.chunk.setBlock(6, 4, 4, .air);
+    var lighting = WorldLightingEngine.init(&storage, testing.allocator);
+    try lighting.recomputeArea(0, 0, 4, 4);
+    try testing.expect(data.chunk.lighting_valid);
+    try testing.expect(data.chunk.getBlockLight(5, 4, 4) > 0);
+
+    var mutation = WorldMutationCoordinator.init(&storage, testing.allocator, null, false);
+    const canceled = (try mutation.applyBlockMutation(4, 4, 4, .air)).?;
+    try testing.expectEqual(WorldMutationCoordinator.MutationResult.LightingUpdate.recompute, canceled.lighting_update);
+    try testing.expect(!data.chunk.lighting_valid);
+    // Do not run the emitter-removal job. A later opaque-block removal cannot
+    // repair its stale light using the additive-only incremental algorithm.
+    const removal = (try mutation.applyBlockMutation(7, 4, 4, .air)).?;
+    try testing.expectEqual(WorldMutationCoordinator.MutationResult.LightingUpdate.removal, removal.lighting_update);
+    try mutation.updateLighting(removal);
+    try testing.expect(data.chunk.lighting_valid);
+    try testing.expectEqual(@as(u4, 0), data.chunk.getBlockLight(5, 4, 4));
+}
+
+test "WorldMutationCoordinator lighting-neutral boundary edits preserve validity" {
+    const testing = std.testing;
+    var storage = ChunkStorage.init(testing.allocator);
+    defer storage.deinitWithoutRHI();
+    const center = try storage.getOrCreate(0, 0);
+    const east = try storage.getOrCreate(1, 0);
+    center.chunk.generated = true;
+    east.chunk.generated = true;
+    center.chunk.setBlock(CHUNK_SIZE_X - 1, 4, 4, .stone);
+    center.chunk.lighting_valid = true;
+    east.chunk.lighting_valid = true;
+    east.chunk.modified = false;
+    east.chunk.dirty = false;
+
+    var mutation = WorldMutationCoordinator.init(&storage, testing.allocator, null, false);
+    const result = (try mutation.applyBlockMutation(CHUNK_SIZE_X - 1, 4, 4, .dirt)).?;
+    try testing.expectEqual(WorldMutationCoordinator.MutationResult.LightingUpdate.none, result.lighting_update);
+    try mutation.updateLighting(result);
+    try testing.expect(center.chunk.lighting_valid and east.chunk.lighting_valid);
+    try testing.expect(east.chunk.dirty and !east.chunk.modified);
+}
+
+test "WorldMutationCoordinator removal preserves external light beyond the rebuild window" {
+    const testing = std.testing;
+    var storage = ChunkStorage.init(testing.allocator);
+    defer storage.deinitWithoutRHI();
+    const center = try storage.getOrCreate(0, 0);
+    const east = try storage.getOrCreate(1, 0);
+    const source = try storage.getOrCreate(2, 0);
+    for ([_]*ChunkData{ center, east, source }) |data| {
+        data.chunk.generated = true;
+        data.chunk.fill(.stone);
+    }
+    for (10..CHUNK_SIZE_X) |x| {
+        east.chunk.setBlock(@intCast(x), 4, 4, .air);
+        east.chunk.setBlock(@intCast(x), 4, 8, .air);
+    }
+    source.chunk.setBlock(0, 4, 4, .torch);
+    for (4..world_core.CHUNK_SIZE_Y) |y| source.chunk.setBlock(0, @intCast(y), 8, .air);
+    var lighting = WorldLightingEngine.init(&storage, testing.allocator);
+    try lighting.recomputeArea(1, 0, 4, 4);
+    const rgb_before = east.chunk.getLight(14, 4, 4);
+    const sky_before = east.chunk.getSkyLight(14, 4, 8);
+    try testing.expect(rgb_before.getBlockLightR() > 0);
+    try testing.expect(sky_before > 0);
+    const source_revision = source.chunk.light_revision.load(.acquire);
+    source.chunk.modified = false;
+
+    var mutation = WorldMutationCoordinator.init(&storage, testing.allocator, null, false);
+    const removal = (try mutation.applyBlockMutation(4, 4, 4, .air)).?;
+    try testing.expect(!center.chunk.lighting_valid and !east.chunk.lighting_valid);
+    try mutation.updateLighting(removal);
+    try testing.expectEqual(rgb_before, east.chunk.getLight(14, 4, 4));
+    try testing.expectEqual(sky_before, east.chunk.getSkyLight(14, 4, 8));
+    try testing.expect(center.chunk.lighting_valid and east.chunk.lighting_valid);
+    try testing.expectEqual(source_revision, source.chunk.light_revision.load(.acquire));
+    try testing.expect(!source.chunk.modified and !source.chunk.isPinned());
+}
+
+test "WorldMutationCoordinator rebuild repairs canceled edits in external light dependencies" {
+    const testing = std.testing;
+    var storage = ChunkStorage.init(testing.allocator);
+    defer storage.deinitWithoutRHI();
+    const center = try storage.getOrCreate(0, 0);
+    const east = try storage.getOrCreate(1, 0);
+    const source = try storage.getOrCreate(2, 0);
+    for ([_]*ChunkData{ center, east, source }) |data| {
+        data.chunk.generated = true;
+        data.chunk.fill(.stone);
+    }
+    for (10..CHUNK_SIZE_X) |x| east.chunk.setBlock(@intCast(x), 4, 4, .air);
+    source.chunk.setBlock(0, 4, 4, .torch);
+    var lighting = WorldLightingEngine.init(&storage, testing.allocator);
+    try lighting.recomputeArea(1, 0, 4, 4);
+    try testing.expect(east.chunk.getBlockLight(14, 4, 4) > 0);
+
+    var mutation = WorldMutationCoordinator.init(&storage, testing.allocator, null, false);
+    // Cancel the source-removal job. Its cached boundary light is now stale.
+    _ = try mutation.applyBlockMutation(2 * CHUNK_SIZE_X, 4, 4, .air);
+    try testing.expect(!source.chunk.lighting_valid);
+    const removal = (try mutation.applyBlockMutation(4, 4, 4, .air)).?;
+    try mutation.updateLighting(removal);
+    try testing.expectEqual(@as(u4, 0), east.chunk.getBlockLight(14, 4, 4));
+    try testing.expectEqual(@as(u4, 0), source.chunk.getBlockLight(0, 4, 4));
+    try testing.expect(center.chunk.lighting_valid and east.chunk.lighting_valid and source.chunk.lighting_valid);
+    try testing.expect(!center.chunk.isPinned() and !east.chunk.isPinned() and !source.chunk.isPinned());
 }

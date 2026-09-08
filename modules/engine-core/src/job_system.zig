@@ -203,6 +203,13 @@ pub const JobQueue = struct {
         return self.jobs.count();
     }
 
+    /// Cancellation must not be read through an unlocked pointer to the flag.
+    pub fn shouldAbort(self: *JobQueue) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.abort_worker;
+    }
+
     pub fn pop(self: *JobQueue) ?Job {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -624,4 +631,17 @@ test "WorkerPool.init supports zero worker pools" {
 
     try testing.expectEqual(@as(usize, 0), pool.spawned_count);
     try testing.expectEqual(@as(usize, 0), pool.threads.len);
+}
+
+test "JobQueue cancellation follows pause and stop lifecycle" {
+    var queue = JobQueue.init(testing.allocator);
+    defer queue.deinit();
+    try testing.expect(!queue.shouldAbort());
+    queue.setPaused(true);
+    try testing.expect(queue.shouldAbort());
+    queue.setPaused(false);
+    try testing.expect(!queue.shouldAbort());
+    queue.stop();
+    queue.setPaused(false);
+    try testing.expect(queue.shouldAbort());
 }

@@ -29,7 +29,8 @@ pub const SwapchainPresenter = struct {
     skip_present: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, vulkan_device: *VulkanDevice, window: *c.SDL_Window, msaa_samples: u8, present_mode: c.VkPresentModeKHR) !SwapchainPresenter {
-        const swapchain = try VulkanSwapchain.init(allocator, vulkan_device, window, msaa_samples, present_mode);
+        var swapchain = try VulkanSwapchain.init(allocator, vulkan_device, window, msaa_samples, present_mode);
+        errdefer swapchain.deinit();
 
         // Load vkQueuePresentKHR dynamically to avoid linking issues or NULL symbols
         const fp_present = c.vkGetDeviceProcAddr(vulkan_device.vk_device, "vkQueuePresentKHR");

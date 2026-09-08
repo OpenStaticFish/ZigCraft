@@ -2,6 +2,7 @@ const std = @import("std");
 const fs = @import("fs");
 const registry = @import("world-worldgen").registry;
 const log = @import("engine-core").log;
+const LevelData = @import("world-persistence").LevelData;
 
 pub const SAVE_DIR = ".local/share/zigcraft/saves";
 
@@ -10,23 +11,40 @@ fn getenv(name: [:0]const u8) ?[]const u8 {
     return std.mem.span(value);
 }
 
+/// Creates metadata for a new world, or updates an existing world's display
+/// name and last-played time. Seed/generator arguments apply only to creation:
+/// changing them during a library rename would invalidate existing terrain.
 pub fn writeLevelDat(allocator: std.mem.Allocator, save_dir: fs.Dir, name: []const u8, seed: u64, generator_index: usize, last_played: i64) !void {
-    const generator_id = if (generator_index < registry.getGeneratorCount()) registry.getGeneratorId(generator_index) else registry.getGeneratorId(0);
-    const payload = .{
-        .name = name,
-        .seed = seed,
-        .last_played = last_played,
-        .generator_index = generator_index,
-        .generator_id = generator_id,
+    var level = LevelData.loadFromFile(allocator, save_dir) catch |err| switch (err) {
+        error.FileNotFound => blk: {
+            if (save_dir.openDir("regions", .{ .iterate = true })) |regions| {
+                defer regions.close();
+                var entries = regions.iterate();
+                if (try entries.next() != null) return error.MissingLevelData;
+            } else |region_err| {
+                if (region_err != error.FileNotFound) return region_err;
+            }
+            const safe_index = if (generator_index < registry.getGeneratorCount()) generator_index else 0;
+            const generator_id = registry.getGeneratorId(safe_index);
+            var created = LevelData.init(seed, "");
+            errdefer created.deinit(allocator);
+            created.generator_id = try allocator.dupe(u8, generator_id);
+            created.generator_name = try allocator.dupe(u8, generator_id);
+            created.generator_index = safe_index;
+            break :blk created;
+        },
+        else => return err,
     };
-    const json_str = try std.json.Stringify.valueAlloc(allocator, payload, .{ .whitespace = .indent_2 });
-    defer allocator.free(json_str);
-    const file = try save_dir.createFile("level.dat", .{});
-    defer file.close();
-    try file.writeAll(json_str);
+    defer level.deinit(allocator);
+    const name_copy = try allocator.dupe(u8, name);
+    if (level.name.len > 0) allocator.free(level.name);
+    level.name = name_copy;
+    level.last_played_timestamp = last_played;
+    try level.saveToFile(allocator, save_dir);
 }
 
-pub fn saveNewWorld(allocator: std.mem.Allocator, seed: u64, generator_index: usize, world_name: []const u8) !void {
+/// Returns an owned absolute path for the exact new world, never an existing one.
+pub fn saveNewWorld(allocator: std.mem.Allocator, seed: u64, generator_index: usize, world_name: []const u8) ![]u8 {
     const home = getenv("HOME") orelse {
         log.log.warn("Cannot save world: HOME not set", .{});
         return error.NoHome;
@@ -40,15 +58,19 @@ pub fn saveNewWorld(allocator: std.mem.Allocator, seed: u64, generator_index: us
         log.log.warn("Cannot save world: failed to create saves dir: {}", .{err});
         return err;
     };
-    var dir_name_buf: [128]u8 = undefined;
     const timestamp = std.Io.Clock.real.now(std.Options.debug_io).toMilliseconds();
-    const dir_name = std.fmt.bufPrint(&dir_name_buf, "world_{}", .{timestamp}) catch "world_new";
-    const world_dir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ SAVE_DIR, dir_name });
-    defer allocator.free(world_dir_path);
-    home_dir.makePath(world_dir_path) catch |err| {
-        log.log.warn("Cannot save world: failed to create world dir: {}", .{err});
-        return err;
-    };
+    var path_buf: [256]u8 = undefined;
+    var suffix: u32 = 0;
+    const world_dir_path = while (suffix < 1024) : (suffix += 1) {
+        const candidate = try std.fmt.bufPrint(&path_buf, "{s}/world_{}_{}", .{ SAVE_DIR, timestamp, suffix });
+        home_dir.createDir(candidate, fs.Permissions.default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => return err,
+        };
+        break candidate;
+    } else return error.WorldDirectoryCollision;
+    const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ home, world_dir_path });
+    errdefer allocator.free(full_path);
     var save_dir = home_dir.openDir(world_dir_path, .{}) catch |err| {
         log.log.warn("Cannot save world: failed to open world dir: {}", .{err});
         return err;
@@ -58,4 +80,5 @@ pub fn saveNewWorld(allocator: std.mem.Allocator, seed: u64, generator_index: us
         log.log.warn("Cannot save world: failed to write level.dat: {}", .{err});
         return err;
     };
+    return full_path;
 }

@@ -24,11 +24,11 @@ runs:
     - name: Install Nix (primary)
       id: nix_install_primary
       continue-on-error: true
-      uses: DeterminateSystems/nix-installer-action@v16
+      uses: DeterminateSystems/nix-installer-action@e50d5f73bfe71c2dd0aa4218de8f4afa59f8f81d # v16
 
     - name: Install Nix (fallback)
       if: steps.nix_install_primary.outcome == 'failure'
-      uses: cachix/install-nix-action@v31
+      uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31
       with:
         extra_nix_config: |
           experimental-features = nix-command flakes
@@ -41,14 +41,14 @@ runs:
     # Pulling from it avoids building devenv and its module dependencies.
     # Public cache: no authToken needed; skipPush because we only pull.
     - name: Configure devenv Cachix cache
-      uses: cachix/cachix-action@v16
+      uses: cachix/cachix-action@3ba601ff5bbb07c7220846facfa2cd81eeee15a1 # v16
       with:
         name: devenv
         skipPush: true
 
     - name: Install devenv
       shell: bash
-      run: nix profile add nixpkgs#devenv
+      run: timeout --kill-after=30s 10m nix profile add github:NixOS/nixpkgs/42f17a57f4f6e33b3de3dca0a2a5ea5233169d02#devenv
 
     - name: Verify devenv installation
       shell: bash
@@ -56,7 +56,7 @@ runs:
 
     - name: Cache Nix Store
       continue-on-error: true
-      uses: nix-community/cache-nix-action@v7
+      uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7
       with:
         primary-key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ hashFiles('devenv.nix', 'devenv.yaml', 'devenv.lock') }}
         restore-prefixes-first-match: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-

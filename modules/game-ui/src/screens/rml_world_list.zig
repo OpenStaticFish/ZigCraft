@@ -280,7 +280,7 @@ pub const RmlWorldListScreen = struct {
         const index = self.selected orelse return;
         if (index >= self.worlds.len) return;
         const world = self.worlds[index];
-        const world_screen = try WorldScreen.init(self.context.allocator, self.context, world.seed, world.generator_index);
+        const world_screen = try WorldScreen.initPersistent(self.context.allocator, self.context, world.seed, world.generator_index, world.dir_path);
         errdefer world_screen.deinit(world_screen);
         self.context.screen_manager.setScreen(world_screen.screen());
     }

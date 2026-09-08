@@ -62,6 +62,10 @@ pub fn supportsIndirectCount(ctx: anytype) bool {
 }
 
 pub fn recover(ctx: anytype) !void {
+    if (ctx.frames.terminal_failure) {
+        ctx.runtime.gpu_fault_detected = true;
+        return error.GpuLost;
+    }
     if (!ctx.runtime.gpu_fault_detected) return;
 
     if (ctx.vulkan_device.recovery_count >= ctx.vulkan_device.max_recovery_attempts) {

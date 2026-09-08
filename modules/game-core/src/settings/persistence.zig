@@ -28,8 +28,10 @@ fn freeStringField(allocator: std.mem.Allocator, field: []const u8) void {
     }
 }
 
-/// Load settings from ~/.config/zigcraft/settings.json
-/// Returns default settings if file doesn't exist or is invalid
+/// Loads settings from ~/.config/zigcraft/settings.json, falling back to defaults
+/// on missing HOME or any read/parse/allocation failure. Non-missing-file failures
+/// are logged. Menu metadata is not a load-time validator: it is narrower than
+/// some backend-supported ranges. Existing consumers retain their normalization.
 pub fn load(allocator: std.mem.Allocator) Settings {
     const home = getenv("HOME") orelse return .{};
 
@@ -40,23 +42,23 @@ pub fn load(allocator: std.mem.Allocator) Settings {
     };
     defer home_dir.close();
 
-    // Try to open the config file relative to home
-    const config_path = CONFIG_DIR ++ "/" ++ CONFIG_FILE;
-    const content = home_dir.readFileAlloc(config_path, allocator, 16 * 1024) catch |err| {
+    const settings = loadFromDir(home_dir, allocator) catch |err| {
         if (err != error.FileNotFound) {
-            log.log.warn("Failed to read settings file '{s}': {}", .{ config_path, err });
+            log.log.warn("Failed to load settings: {}. Using defaults.", .{err});
         }
         return .{};
     };
-    defer allocator.free(content);
 
-    const settings = parseSettingsJson(allocator, content) catch |err| {
-        log.log.warn("Failed to parse settings JSON: {}. Using defaults.", .{err});
-        return .{};
-    };
-
-    log.log.info("Settings loaded from ~/{s}", .{config_path});
+    log.log.info("Settings loaded from ~/" ++ CONFIG_DIR ++ "/" ++ CONFIG_FILE, .{});
     return settings;
+}
+
+/// Loads relative to a supplied home directory without swallowing I/O or decode
+/// errors. The returned strings are owned by the caller; release with deinit.
+pub fn loadFromDir(home_dir: fs.Dir, allocator: std.mem.Allocator) !Settings {
+    const content = try home_dir.readFileAlloc(CONFIG_DIR ++ "/" ++ CONFIG_FILE, allocator, 16 * 1024);
+    defer allocator.free(content);
+    return parseSettingsJson(allocator, content);
 }
 
 fn parseSettingsJson(allocator: std.mem.Allocator, content: []const u8) !Settings {
@@ -106,24 +108,30 @@ pub fn save(settings: *const Settings, allocator: std.mem.Allocator) !void {
     var home_dir = try fs.openDirAbsolute(home, .{});
     defer home_dir.close();
 
-    // Create config directory if it doesn't exist (idempotent).
-    home_dir.makePath(CONFIG_DIR) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    try saveToDir(settings, allocator, home_dir);
+    log.log.info("Settings saved to ~/" ++ CONFIG_DIR ++ "/" ++ CONFIG_FILE, .{});
+}
 
-    // Open/create the settings file
-    const config_path = CONFIG_DIR ++ "/" ++ CONFIG_FILE;
-    const file = try home_dir.createFile(config_path, .{});
-    defer file.close();
-
-    // Serialize settings to JSON and write to file
+/// Saves using fs.Dir operations, replacing the old file only after writing and
+/// syncing its sibling temporary file. Callers must serialize saves to the same
+/// directory. A failed save may leave the temporary file for the next attempt.
+/// This is failure-atomic replacement, not a directory-fsync durability guarantee.
+pub fn saveToDir(settings: *const Settings, allocator: std.mem.Allocator, home_dir: anytype) !void {
     const json_str = try stringifySettings(allocator, settings);
     defer allocator.free(json_str);
 
-    try file.writeAll(json_str);
+    // Create config directory if it doesn't exist (idempotent).
+    try home_dir.makePath(CONFIG_DIR);
 
-    log.log.info("Settings saved to ~/{s}", .{config_path});
+    const config_path = CONFIG_DIR ++ "/" ++ CONFIG_FILE;
+    const temp_path = config_path ++ ".tmp";
+    {
+        const file = try home_dir.createFile(temp_path, .{ .truncate = true });
+        defer file.close();
+        try file.writeAll(json_str);
+        try file.sync();
+    }
+    try home_dir.rename(temp_path, config_path);
 }
 
 test "settings JSON ignores removed LOD fields and omits them when saved" {

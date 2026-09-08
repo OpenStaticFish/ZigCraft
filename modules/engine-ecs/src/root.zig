@@ -1,4 +1,8 @@
 pub const components = @import("components.zig");
+
+test {
+    _ = @import("test_root.zig");
+}
 pub const ecs_tests = @import("ecs_tests.zig");
 pub const entity = @import("entity.zig");
 pub const manager = @import("manager.zig");

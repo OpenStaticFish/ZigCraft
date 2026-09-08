@@ -1,4 +1,8 @@
 pub const block_texture_definitions = @import("block_texture_definitions.zig");
+
+test {
+    _ = @import("test_root.zig");
+}
 pub const block_outline = @import("block_outline.zig");
 pub const benchmark = @import("benchmark.zig");
 pub const hand_renderer = @import("hand_renderer.zig");

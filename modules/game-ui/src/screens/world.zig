@@ -93,16 +93,20 @@ pub const WorldScreen = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, context: EngineContext, seed: u64, generator_index: usize) !*WorldScreen {
-        return initWithDistance(allocator, context, seed, generator_index, context.settings.render_distance, false);
+        return initWithDistance(allocator, context, seed, generator_index, context.settings.render_distance, false, .diagnostic);
+    }
+
+    pub fn initPersistent(allocator: std.mem.Allocator, context: EngineContext, seed: u64, generator_index: usize, save_dir_path: []const u8) !*WorldScreen {
+        return initWithDistance(allocator, context, seed, generator_index, context.settings.render_distance, false, .{ .directory = save_dir_path });
     }
 
     pub fn initMenuPreview(allocator: std.mem.Allocator, context: EngineContext, seed: u64, generator_index: usize) !*WorldScreen {
-        return initWithDistance(allocator, context, seed, generator_index, context.settings.render_distance, true);
+        return initWithDistance(allocator, context, seed, generator_index, context.settings.render_distance, true, .transient);
     }
 
-    fn initWithDistance(allocator: std.mem.Allocator, context: EngineContext, seed: u64, generator_index: usize, render_distance: i32, menu_preview: bool) !*WorldScreen {
+    fn initWithDistance(allocator: std.mem.Allocator, context: EngineContext, seed: u64, generator_index: usize, render_distance: i32, menu_preview: bool, persistence: GameSession.Persistence) !*WorldScreen {
         const render_system = context.render_system;
-        const session = try GameSession.init(allocator, render_system.getRHI(), render_system.getAtlas(), seed, render_distance, generator_index, context.build_config);
+        const session = try GameSession.init(allocator, render_system.getRHI(), render_system.getAtlas(), seed, render_distance, generator_index, context.build_config, persistence);
         errdefer session.deinit();
         const world = session.world.interface();
 

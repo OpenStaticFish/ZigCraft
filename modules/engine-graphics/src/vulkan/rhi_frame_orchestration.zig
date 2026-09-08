@@ -131,7 +131,7 @@ pub fn recreateSwapchainInternal(ctx: anytype) void {
     else
         ctx.draw.dummy_texture;
 
-    ctx.water_system.createWaterPipeline(ctx.allocator, ctx.vulkan_device.vk_device, ctx.render_pass_manager.hdr_render_pass) catch |err| {
+    ctx.water_system.createWaterPipeline(ctx.allocator, ctx.vulkan_device.vk_device, ctx.render_pass_manager.hdr_render_pass, ctx.options.msaa_samples) catch |err| {
         _ = markSwapchainRecreateFailed(ctx, "water pipeline", err);
         return;
     };
@@ -223,8 +223,29 @@ pub fn markSwapchainRecreateSucceeded(ctx: anytype) void {
     ctx.runtime.swapchain_recreate_failed = false;
 }
 
+pub fn startFrame(ctx: anytype) !bool {
+    if (ctx.frames.terminal_failure) return error.GpuLost;
+    const faults_before = ctx.vulkan_device.fault_count;
+    const started = ctx.frames.beginFrame(&ctx.swapchain) catch |err| {
+        if (ctx.frames.terminal_failure) {
+            ctx.runtime.gpu_fault_detected = true;
+            if (ctx.vulkan_device.fault_count == faults_before) ctx.vulkan_device.fault_count +|= 1;
+        }
+        return err;
+    };
+    // Both success and OutOfDate have retired this slot's graphics fence.
+    // Updates/uploads still run after a benign skip, so they must not keep
+    // recording into the previous slot's potentially pending transfer buffer.
+    ctx.resources.setCurrentFrame(ctx.frames.current_frame);
+    return started;
+}
+
 pub fn prepareFrameState(ctx: anytype) void {
+    if (ctx.frames.terminal_failure or !ctx.frames.frame_in_progress) return;
+    ctx.descriptors.beginFrame(ctx.frames.current_frame);
+    ctx.draw.pending_instance_buffer = 0;
     ctx.runtime.draw_call_count = 0;
+    ctx.runtime.lpv_recorded_this_frame = false;
     ctx.runtime.first_main_pass_draw_logged = false;
     ctx.runtime.main_pass_active = false;
     ctx.shadow_system.pass_active = false;
@@ -232,7 +253,7 @@ pub fn prepareFrameState(ctx: anytype) void {
     ctx.runtime.fxaa_ran_this_frame = false;
     ctx.runtime.direct_ui_composed_this_frame = false;
     ctx.runtime.final_composed.clear();
-    ctx.taa.ran_this_frame = false;
+    ctx.taa.beginFrame();
     ctx.ui.ui_using_swapchain = false;
     ctx.ui.ui_swapchain_pass_active = false;
     ctx.ui.ui_swapchain_clears_output = false;
@@ -280,7 +301,25 @@ pub fn prepareFrameState(ctx: anytype) void {
     refreshTextureDescriptors(ctx);
 }
 
+/// Invalidates CPU publication only. The caller must either discard recording
+/// commands or quarantine their slot; this never releases or resets GPU state.
+pub fn invalidateAbortedTemporalState(ctx: anytype) void {
+    if (ctx.runtime.lpv_recorded_this_frame) {
+        ctx.runtime.lpv_abort_generation +%= 1;
+        ctx.draw.current_lpv_texture = ctx.draw.dummy_texture_3d;
+        ctx.draw.current_lpv_texture_g = ctx.draw.dummy_texture_3d;
+        ctx.draw.current_lpv_texture_b = ctx.draw.dummy_texture_3d;
+    }
+    ctx.runtime.lpv_recorded_this_frame = false;
+    ctx.taa.history_valid = false;
+    ctx.taa.ran_this_frame = false;
+    ctx.taa.pass_active = false;
+    ctx.taa.output_texture = 0;
+}
+
 pub fn refreshTextureDescriptors(ctx: anytype) void {
+    if (ctx.frames.terminal_failure or !ctx.frames.frame_in_progress) return;
+    if (ctx.descriptors.snapshot_failed[ctx.frames.current_frame]) return;
     const cur_tex = ctx.draw.current_texture;
     const cur_nor = ctx.draw.current_normal_texture;
     const cur_rou = ctx.draw.current_roughness_texture;
@@ -329,6 +368,7 @@ pub fn refreshTextureDescriptors(ctx: anytype) void {
             log.log.err("CRITICAL: Descriptor set for frame {} is NULL!", .{ctx.frames.current_frame});
             return;
         }
+        if (!ctx.descriptors.ensureWritable(ctx.frames.current_frame)) return;
 
         var writes: [16]c.VkWriteDescriptorSet = undefined;
         var write_count: u32 = 0;
@@ -411,7 +451,7 @@ pub fn refreshTextureDescriptors(ctx: anytype) void {
         }
 
         if (write_count > 0) {
-            c.vkUpdateDescriptorSets(ctx.vulkan_device.vk_device, write_count, &writes[0], 0, null);
+            ctx.descriptors.writeDescriptors(writes[0..write_count]);
         }
 
         ctx.draw.descriptors_dirty[ctx.frames.current_frame] = false;

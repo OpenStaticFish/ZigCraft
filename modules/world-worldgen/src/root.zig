@@ -1,4 +1,8 @@
 pub const overworld = @import("worldgen-overworld");
+
+test {
+    _ = @import("test_root.zig");
+}
 pub const overworld_v2 = @import("worldgen-overworld-v2");
 pub const biome = overworld.biome;
 pub const biome_color_provider = overworld.biome_color_provider;

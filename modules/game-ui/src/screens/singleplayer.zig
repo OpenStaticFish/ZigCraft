@@ -236,8 +236,9 @@ pub const SingleplayerScreen = struct {
         const world_name = wizard.displayWorldName(self.name_input.items);
         const generator = registry.getGeneratorInfo(self.selected_generator_index);
         log.log.info("World seed: {} | Type: {s} | Name: {s}", .{ seed, generator.name, world_name });
-        world_save.saveNewWorld(ctx.allocator, seed, self.selected_generator_index, world_name) catch |err| log.log.warn("Failed to save level.dat for new world: {}", .{err});
-        const world_screen = try WorldScreen.init(ctx.allocator, ctx, seed, self.selected_generator_index);
+        const save_path = try world_save.saveNewWorld(ctx.allocator, seed, self.selected_generator_index, world_name);
+        defer ctx.allocator.free(save_path);
+        const world_screen = try WorldScreen.initPersistent(ctx.allocator, ctx, seed, self.selected_generator_index, save_path);
         errdefer world_screen.deinit(world_screen);
         ctx.screen_manager.setScreen(world_screen.screen());
     }

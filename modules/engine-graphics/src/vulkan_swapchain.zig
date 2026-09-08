@@ -54,6 +54,7 @@ pub const VulkanSwapchain = struct {
             .headless_mode = headless,
             .present_mode = present_mode,
         };
+        errdefer self.deinit();
         try self.create(msaa_samples);
         return self;
     }
@@ -117,6 +118,7 @@ pub const VulkanSwapchain = struct {
     }
 
     fn create(self: *VulkanSwapchain, msaa_samples: u8) !void {
+        errdefer self.cleanup();
         try self.createSwapchain();
         try self.createDepthBuffer(msaa_samples);
         try self.createMSAAResources(msaa_samples);
@@ -126,6 +128,8 @@ pub const VulkanSwapchain = struct {
 
     fn createSwapchain(self: *VulkanSwapchain) !void {
         if (self.headless_mode) {
+            try self.images.ensureUnusedCapacity(self.allocator, 1);
+            try self.image_views.ensureUnusedCapacity(self.allocator, 1);
             log.log.info("VulkanSwapchain: Initializing in HEADLESS mode (offscreen)", .{});
             self.image_format = c.VK_FORMAT_B8G8R8A8_UNORM;
             self.screenshot_capture_supported = true;
@@ -160,7 +164,7 @@ pub const VulkanSwapchain = struct {
             try checkVk(c.vkAllocateMemory(self.device.vk_device, &alloc_info, null, &self.headless_memory));
             try checkVk(c.vkBindImageMemory(self.device.vk_device, self.headless_image, self.headless_memory, 0));
 
-            try self.images.append(self.allocator, self.headless_image);
+            self.images.appendAssumeCapacity(self.headless_image);
 
             var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
             view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -170,7 +174,7 @@ pub const VulkanSwapchain = struct {
             view_info.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
             var view: c.VkImageView = null;
             try checkVk(c.vkCreateImageView(self.device.vk_device, &view_info, null, &view));
-            try self.image_views.append(self.allocator, view);
+            self.image_views.appendAssumeCapacity(view);
             return;
         }
 
@@ -267,9 +271,11 @@ pub const VulkanSwapchain = struct {
         try checkVk(c.vkCreateSwapchainKHR(self.device.vk_device, &swapchain_info, null, &self.handle));
 
         var image_count: u32 = 0;
-        _ = c.vkGetSwapchainImagesKHR(self.device.vk_device, self.handle, &image_count, null);
+        try checkVk(c.vkGetSwapchainImagesKHR(self.device.vk_device, self.handle, &image_count, null));
         try self.images.resize(self.allocator, image_count);
-        _ = c.vkGetSwapchainImagesKHR(self.device.vk_device, self.handle, &image_count, self.images.items.ptr);
+        try checkVk(c.vkGetSwapchainImagesKHR(self.device.vk_device, self.handle, &image_count, self.images.items.ptr));
+        self.images.items.len = image_count;
+        try self.image_views.ensureUnusedCapacity(self.allocator, self.images.items.len);
 
         for (self.images.items) |image| {
             var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
@@ -280,7 +286,7 @@ pub const VulkanSwapchain = struct {
             view_info.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
             var view: c.VkImageView = null;
             try checkVk(c.vkCreateImageView(self.device.vk_device, &view_info, null, &view));
-            try self.image_views.append(self.allocator, view);
+            self.image_views.appendAssumeCapacity(view);
         }
     }
 
@@ -480,6 +486,7 @@ pub const VulkanSwapchain = struct {
 
     fn createFramebuffers(self: *VulkanSwapchain, msaa_samples: u8) !void {
         const use_msaa = msaa_samples > 1;
+        try self.framebuffers.ensureUnusedCapacity(self.allocator, self.image_views.items.len);
         for (self.image_views.items) |iv| {
             var fb: c.VkFramebuffer = null;
             var fb_info = std.mem.zeroes(c.VkFramebufferCreateInfo);
@@ -500,7 +507,7 @@ pub const VulkanSwapchain = struct {
                 fb_info.pAttachments = &attachments[0];
                 try checkVk(c.vkCreateFramebuffer(self.device.vk_device, &fb_info, null, &fb));
             }
-            try self.framebuffers.append(self.allocator, fb);
+            self.framebuffers.appendAssumeCapacity(fb);
         }
     }
 

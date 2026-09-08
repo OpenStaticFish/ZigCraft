@@ -279,15 +279,9 @@ test "selectBiomeWithConstraints locks baseline climate and structural selection
         },
         .{
             .name = "wet",
-            .climate = .{ .temperature = 0.65, .humidity = 0.85, .elevation = 0.3, .continentalness = 0.45, .ruggedness = 0.1 },
-            .structural = .{ .height = 65, .slope = 2, .continentalness = 0.45, .ridge_mask = 0.1 },
+            .climate = .{ .temperature = 0.65, .humidity = 0.85, .elevation = 0.3, .continentalness = 0.6, .ruggedness = 0.1 },
+            .structural = .{ .height = 65, .slope = 2, .continentalness = 0.6, .ridge_mask = 0.1 },
             .expected = .swamp,
-        },
-        .{
-            .name = "transition-prone",
-            .climate = .{ .temperature = 0.55, .humidity = 0.5, .elevation = 0.32, .continentalness = 0.45, .ruggedness = 0.2 },
-            .structural = .{ .height = 64, .slope = 1, .continentalness = 0.45, .ridge_mask = 0.1 },
-            .expected = .coastal_plains,
         },
     };
 
@@ -302,6 +296,26 @@ test "beach transitions to coastal plains before common inland biomes" {
     try testing.expectEqual(BiomeId.coastal_plains, edge_detector.getTransitionBiome(.beach, .plains).?);
     try testing.expectEqual(BiomeId.coastal_plains, edge_detector.getTransitionBiome(.forest, .beach).?);
     try testing.expectEqual(BiomeId.coastal_plains, edge_detector.getTransitionBiome(.beach, .swamp).?);
+
+    // The former selector baseline is an edge-injection fixture, not a natural biome site.
+    const source = @import("biome_source.zig").BiomeSource.init();
+    const climate = ClimateParams{ .temperature = 0.55, .humidity = 0.5, .elevation = 0.32, .continentalness = 0.45, .ruggedness = 0.2 };
+    const structural = StructuralParams{ .height = 64, .slope = 1, .continentalness = 0.45, .ridge_mask = 0.1 };
+    const base = selectBiomeWithConstraints(climate, structural);
+    try testing.expect(base != .coastal_plains);
+    const transition = source.selectBiomeWithEdge(climate, structural, 0.0, .{
+        .base_biome = base,
+        .neighbor_biome = .beach,
+        .edge_band = .inner,
+    });
+    try testing.expectEqual(BiomeId.coastal_plains, transition.primary);
+    try testing.expectEqual(base, transition.secondary);
+    const no_edge = source.selectBiomeWithEdge(climate, structural, 0.0, .{
+        .base_biome = base,
+        .neighbor_biome = .beach,
+        .edge_band = .none,
+    });
+    try testing.expectEqual(base, no_edge.primary);
 }
 
 test "selectBiomeWithConstraintsAndRiver locks river and frozen river priority" {
@@ -356,19 +370,26 @@ test "selectBiomeWithConstraints locks structural edge cases" {
         .temperature = 0.65,
         .humidity = 0.85,
         .elevation = 0.3,
-        .continentalness = 0.45,
+        .continentalness = 0.6,
         .ruggedness = 0.1,
     };
 
     try testing.expectEqual(BiomeId.swamp, selectBiomeWithConstraints(swamp_climate, .{
         .height = 65,
-        .slope = 2,
-        .continentalness = 0.45,
+        .slope = registry.getBiomeDefinition(.swamp).max_slope,
+        .continentalness = 0.6,
         .ridge_mask = 0.1,
     }));
     try testing.expect(selectBiomeWithConstraints(swamp_climate, .{
         .height = 65,
-        .slope = 10,
+        .slope = registry.getBiomeDefinition(.swamp).max_slope + 1,
+        .continentalness = 0.6,
+        .ridge_mask = 0.1,
+    }) != .swamp);
+    // Wet climate alone cannot override the swamp's inland constraint.
+    try testing.expect(selectBiomeWithConstraints(swamp_climate, .{
+        .height = 65,
+        .slope = 2,
         .continentalness = 0.45,
         .ridge_mask = 0.1,
     }) != .swamp);
@@ -430,29 +451,30 @@ test "selectBiomeWithConstraints preserves ocean sea-level boundary" {
 }
 
 test "selectBiomeWithConstraints preserves coast and inland water boundaries" {
+    const beach = registry.getBiomeDefinition(.beach);
     const coast_climate = ClimateParams{
         .temperature = 0.6,
         .humidity = 0.5,
         .elevation = 0.3,
-        .continentalness = 0.35,
+        .continentalness = beach.continentalness.min,
         .ruggedness = 0.1,
     };
     const coast_structural = StructuralParams{
         .height = 64,
-        .slope = 1,
-        .continentalness = 0.35,
+        .slope = beach.max_slope,
+        .continentalness = beach.continentalness.min,
         .ridge_mask = 0.1,
     };
     const steep_coast = StructuralParams{
         .height = 64,
-        .slope = 3,
-        .continentalness = 0.35,
+        .slope = beach.max_slope + 1,
+        .continentalness = beach.continentalness.min,
         .ridge_mask = 0.1,
     };
     const high_coast = StructuralParams{
-        .height = 71,
+        .height = beach.max_height + 1,
         .slope = 1,
-        .continentalness = 0.35,
+        .continentalness = beach.continentalness.min,
         .ridge_mask = 0.1,
     };
     const inland_water = ClimateParams{
@@ -464,6 +486,15 @@ test "selectBiomeWithConstraints preserves coast and inland water boundaries" {
     };
 
     try testing.expectEqual(BiomeId.beach, selectBiomeWithConstraints(coast_climate, coast_structural));
+    var ocean_side = coast_structural;
+    ocean_side.continentalness = beach.continentalness.min - 0.0001;
+    try testing.expectEqual(BiomeId.ocean, selectBiomeWithConstraints(coast_climate, ocean_side));
+    var upper_beach = coast_structural;
+    upper_beach.height = beach.max_height;
+    upper_beach.continentalness = beach.continentalness.max;
+    try testing.expectEqual(BiomeId.beach, selectBiomeWithConstraints(coast_climate, upper_beach));
+    upper_beach.continentalness += 0.0001;
+    try testing.expect(selectBiomeWithConstraints(coast_climate, upper_beach) != .beach);
     try testing.expect(selectBiomeWithConstraints(coast_climate, steep_coast) != .beach);
     try testing.expect(selectBiomeWithConstraints(coast_climate, high_coast) != .beach);
     try testing.expect(selectBiomeWithConstraints(inland_water, .{
@@ -563,7 +594,9 @@ test "selectBiomeVoronoi falls back to plains when structural filters exclude al
 
 test "selectBiomeVoronoiMultiParam keeps migrated biome points selectable" {
     for (BIOME_POINTS) |point| {
-        const height = @divFloor(point.y_min + point.y_max, 2);
+        // Height bounds filter eligibility; the Voronoi site need not be their midpoint.
+        const height: i32 = @intFromFloat(@round(point.elevationCenter() * 256.0));
+        try testing.expect(height >= point.y_min and height <= point.y_max);
         const biome = selectBiomeVoronoiMultiParam(
             point.heat,
             point.humidity,

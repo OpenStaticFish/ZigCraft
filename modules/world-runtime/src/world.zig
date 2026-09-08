@@ -179,7 +179,7 @@ pub const IWorld = struct {
     }
 
     /// Attaches persistence to the world using a save directory and world name.
-    /// May load metadata or create save structures; call before relying on autosave. Propagates errors from streaming, persistence, meshing, or mutation subsystems.
+    /// Prefer World.InitOptions.save_dir_path; attaching after warmup is rejected.
     pub fn enableSaveManager(self: IWorld, save_dir_path: []const u8, world_name: []const u8) !void {
         try self.vtable.enableSaveManager(self.ptr, save_dir_path, world_name);
     }
@@ -338,7 +338,7 @@ pub const IWorldSimulation = struct {
     }
 
     /// Attaches persistence to the world using a save directory and world name.
-    /// May load metadata or create save structures; call before relying on autosave. Propagates errors from streaming, persistence, meshing, or mutation subsystems.
+    /// Prefer World.InitOptions.save_dir_path; attaching after warmup is rejected.
     pub fn enableSaveManager(self: IWorldSimulation, save_dir_path: []const u8, world_name: []const u8) !void {
         try self.world.enableSaveManager(save_dir_path, world_name);
     }
@@ -503,6 +503,145 @@ pub const IWorldTelemetry = struct {
 
 pub const ChunkPos = struct { x: i32, z: i32 };
 
+test "World voxel reads exclude unpublished payloads and release read locks" {
+    const testing = std.testing;
+    // These query methods access only storage, never graphics or streaming.
+    var world: World = undefined;
+    world.storage = ChunkStorage.init(testing.allocator);
+    defer world.storage.deinitWithoutRHI();
+    const data = try world.storage.getOrCreate(-1, -1);
+    data.chunk.setBlock(15, 64, 15, .gold_ore);
+    data.chunk.setSkyLight(15, 64, 15, 9);
+    data.chunk.setBlockLight(15, 64, 15, 7);
+    try testing.expectEqual(BlockType.air, world.getBlock(-1, 64, -1));
+    try testing.expect(world.getDebugLightInfo(-1, 64, -1) == null);
+
+    data.chunk.generated = true;
+    data.chunk.state = .renderable;
+    try testing.expectEqual(BlockType.gold_ore, world.getBlock(-1, 64, -1));
+    const light = world.getDebugLightInfo(-1, 64, -1).?;
+    try testing.expectEqual(@as(u4, 9), light.sky);
+    try testing.expectEqual(@as(u4, 7), light.block);
+    for ([_]Chunk.State{ .generating, .unloading }) |state| {
+        data.chunk.state = state;
+        try testing.expectEqual(BlockType.air, world.getBlock(-1, 64, -1));
+        try testing.expect(world.getDebugLightInfo(-1, 64, -1) == null);
+    }
+    try testing.expectEqual(BlockType.air, world.getBlock(100, 64, 100));
+    try testing.expect(world.getDebugLightInfo(100, 64, 100) == null);
+    try testing.expectEqual(BlockType.air, world.getBlock(-1, -1, -1));
+    try testing.expect(world.getDebugLightInfo(-1, 256, -1) == null);
+    try testing.expect(world.storage.lighting_mutex.tryLock());
+    world.storage.lighting_mutex.unlock();
+    try testing.expect(world.storage.chunks_mutex.tryLock());
+    world.storage.chunks_mutex.unlock();
+}
+
+test "World save sweep continues after partial failure and stops at full failed queue" {
+    const testing = std.testing;
+    const fs = @import("fs");
+    for ([_]bool{ false, true }) |all_failed| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const dir = fs.Dir{ .inner = tmp.dir };
+        var path_buf: [fs.max_path_bytes]u8 = undefined;
+        const path = try dir.realpath(".", &path_buf);
+        const sm = try SaveManager.init(testing.allocator, path, "sweep", 42, "flat");
+        defer sm.deinit();
+        // Drive the real queue synchronously so its first batch and failure
+        // count are deterministic, independent of background scheduling.
+        sm.running.store(false, .release);
+        sm.thread.?.join();
+        sm.thread = null;
+        if (all_failed) sm.queue_limit = 1;
+        const healthy_count = sm.queue_limit + 1;
+        var region_path_buf: [fs.max_path_bytes]u8 = undefined;
+
+        {
+            // Only the production storage/persistence methods below are used.
+            var world: World = undefined;
+            world.allocator = testing.allocator;
+            world.storage = ChunkStorage.init(testing.allocator);
+            defer world.storage.deinitWithoutRHI();
+            world.save_manager = sm;
+            const origin = try world.storage.getOrCreate(0, 0);
+            origin.chunk.generated = true;
+            origin.chunk.state = .generated;
+            origin.chunk.lighting_valid = true;
+            origin.chunk.setBlock(2, 3, 4, .stone);
+            try world.saveAllModifiedChunks();
+
+            // Only region (0,0) loses write access. Region (1,0), containing
+            // more healthy dirty chunks than the production queue capacity,
+            // still goes through normal serialization, journal writes and sync.
+            const region_path = try dir.realpath("regions/r.0.0.mca", &region_path_buf);
+            const read_only = try fs.openFileAbsolute(region_path, .{});
+            sm.region_cache.items[0].region.file.close();
+            sm.region_cache.items[0].region.file = read_only;
+            origin.chunk.setBlock(2, 3, 4, .gold_ore);
+            {
+                world.storage.lighting_mutex.lock();
+                defer world.storage.lighting_mutex.unlock();
+                world.storage.chunks_mutex.lock();
+                defer world.storage.chunks_mutex.unlock();
+                origin.chunk.pin();
+                defer origin.chunk.unpin();
+                // Guarantee the failed region participates in the first batch,
+                // regardless of the resident hash map's iteration order.
+                try sm.enqueueSave(&origin.chunk);
+            }
+            for (0..healthy_count) |i| {
+                const cx: i32 = if (all_failed) @intCast(i + 1) else 32 + @as(i32, @intCast(i % 16));
+                const cz: i32 = if (all_failed) 0 else @intCast(i / 16);
+                const data = try world.storage.getOrCreate(cx, cz);
+                data.chunk.generated = true;
+                data.chunk.state = .generated;
+                data.chunk.lighting_valid = true;
+                data.chunk.setBlock(2, 3, 4, .dirt);
+            }
+
+            try testing.expectError(error.SavesNotDurable, world.saveAllModifiedChunks());
+            try testing.expectEqual(@as(usize, 1), sm.queue.items.len);
+            try testing.expectEqual(@as(i32, 0), sm.queue.items[0].chunk_x);
+            if (all_failed) {
+                // No slot was freed: do not repeatedly retry a full failed queue.
+                try testing.expectEqual(@as(usize, 1), sm.takeFailedSaveCount());
+                try testing.expect(world.storage.get(1, 0).?.chunk.modified);
+                try testing.expect(world.storage.get(2, 0).?.chunk.modified);
+                try testing.expect(!sm.hasQueueCapacity());
+            } else {
+                try testing.expect(sm.takeFailedSaveCount() >= 2);
+                try testing.expect(sm.hasQueueCapacity());
+                var entries = world.storage.iteratorUnsafe();
+                while (entries.next()) |entry| try testing.expect(!entry.value_ptr.*.chunk.modified);
+            }
+        }
+
+        // Resident chunks are gone. Every healthy chunk, including those beyond
+        // the first batch, must now load from disk, not from a resident payload.
+        if (!all_failed) {
+            for (0..healthy_count) |i| {
+                const cx: i32 = 32 + @as(i32, @intCast(i % 16));
+                const cz: i32 = @intCast(i / 16);
+                var loaded = Chunk.init(cx, cz);
+                try testing.expectEqual(LoadResult.success, sm.loadChunk(cx, cz, &loaded));
+                try testing.expectEqual(BlockType.dirt, loaded.getBlock(2, 3, 4));
+            }
+        }
+        var failed = Chunk.init(0, 0);
+        try testing.expectEqual(LoadResult.success, sm.loadChunk(0, 0, &failed));
+        try testing.expectEqual(BlockType.gold_ore, failed.getBlock(2, 3, 4));
+        const region_path = try dir.realpath("regions/r.0.0.mca", &region_path_buf);
+        const writable = try fs.openFileAbsolute(region_path, .{ .mode = .read_write });
+        sm.region_cache.items[0].region.file.close();
+        sm.region_cache.items[0].region.file = writable;
+        try sm.flush();
+        try testing.expectEqual(@as(usize, 0), sm.queue.items.len);
+        try testing.expectEqual(LoadResult.success, sm.loadChunk(0, 0, &failed));
+        try testing.expectEqual(BlockType.gold_ore, failed.getBlock(2, 3, 4));
+    }
+}
+
 pub const World = struct {
     pub const InitOptions = struct {
         allocator: std.mem.Allocator,
@@ -511,6 +650,8 @@ pub const World = struct {
         rhi: RHI,
         atlas: *const TextureAtlas,
         generator_index: usize = 0,
+        /// Borrowed during initialization; persistence owns a path copy.
+        save_dir_path: ?[]const u8 = null,
     };
 
     storage: ChunkStorage,
@@ -540,9 +681,33 @@ pub const World = struct {
     /// Creates a world runtime with full-detail chunk streaming, meshing, rendering, and persistence.
     /// The allocator, generator, and RHI-backed resources must remain valid for the world lifetime. Propagates errors from streaming, persistence, meshing, or mutation subsystems.
     pub fn init(options: InitOptions) !*World {
+        if (options.generator_index >= registry.getGeneratorCount()) return error.InvalidGeneratorIndex;
         const allocator = options.allocator;
         const world = try allocator.create(World);
         errdefer allocator.destroy(world);
+
+        const save_manager = if (options.save_dir_path) |path|
+            try SaveManager.init(allocator, path, "world", options.seed, registry.getGeneratorId(options.generator_index))
+        else
+            null;
+        errdefer if (save_manager) |sm| sm.deinit();
+        var generator_index = options.generator_index;
+        if (save_manager) |sm| {
+            const level = &sm.level_data;
+            const identity = if (level.generator_id.len > 0) level.generator_id else level.generator_name;
+            if (identity.len > 0) {
+                generator_index = registry.findGeneratorIndex(identity) orelse blk: {
+                    // Legacy runtime saves used display names rather than IDs.
+                    for (0..registry.getGeneratorCount()) |i| {
+                        if (std.ascii.eqlIgnoreCase(identity, registry.getGeneratorInfo(i).name)) break :blk i;
+                    }
+                    return error.InvalidGeneratorId;
+                };
+            } else {
+                generator_index = level.generator_index orelse return error.InvalidGeneratorId;
+            }
+            if (generator_index >= registry.getGeneratorCount()) return error.InvalidGeneratorIndex;
+        }
 
         const storage = ChunkStorage.init(allocator);
         const safe_mode = runtime_env.safeModeEnabled();
@@ -565,13 +730,13 @@ pub const World = struct {
             .renderer = undefined,
             .allocator = allocator,
             .render_distance = safe_render_distance,
-            .generator = try registry.createGenerator(options.generator_index, options.seed, allocator),
+            .generator = try registry.createGenerator(generator_index, options.seed, allocator),
             .rhi = options.rhi,
             .paused = false,
             .safe_mode = safe_mode,
             .safe_render_distance = safe_render_distance,
             .map_mutation_revision = .init(0),
-            .save_manager = null,
+            .save_manager = save_manager,
             .gpu_block_buffer = null,
             .mutation = undefined,
             .lpv_grid_builder = undefined,
@@ -592,6 +757,7 @@ pub const World = struct {
 
         world.renderer = try WorldRenderer.init(allocator, options.rhi.resourceManager(), options.rhi.renderContext(), options.rhi.query(), &world.storage, options.atlas, options.rhi, &culling_system, culling_size, safe_mode);
         errdefer world.renderer.deinit();
+        errdefer world.storage.deinitWithoutRHI();
 
         world.gpu_block_buffer = world.renderer.getGpuBlockBuffer();
 
@@ -603,7 +769,7 @@ pub const World = struct {
         );
 
         log.log.info("World.init: initializing WorldStreamer (render_distance={}, requested={})", .{ streamer_render_distance, safe_render_distance });
-        world.streamer = try WorldStreamer.init(allocator, &world.storage, world.generator, options.atlas, streamer_render_distance, world.renderer.vertex_allocator, max_uploads, world.gpu_block_buffer, world.renderer.getGpuMesher());
+        world.streamer = try WorldStreamer.init(allocator, &world.storage, world.generator, options.atlas, streamer_render_distance, world.renderer.vertex_allocator, max_uploads, world.gpu_block_buffer, world.renderer.getGpuMesher(), save_manager);
         errdefer world.streamer.deinit();
 
         return world;
@@ -612,16 +778,16 @@ pub const World = struct {
     /// Stops world jobs and releases streaming, meshing, rendering, and persistence resources.
     /// No borrowed world sub-interfaces may be used after this returns.
     pub fn deinit(self: *World) void {
-        self.pauseGeneration();
+        // Stop and join generation, meshing and mutation-lighting jobs while
+        // persistence, storage, the generator and renderer are still alive.
+        self.streamer.deinit();
 
         self.rhi.query().waitIdle();
 
         if (self.save_manager) |sm| {
-            self.saveAllModifiedChunks();
+            self.saveAllModifiedChunks() catch |err| log.log.err("Failed to save world on shutdown: {}", .{err});
             sm.deinit();
         }
-
-        self.streamer.deinit();
 
         // Storage must be deinitialized before renderer because it uses the renderer's vertex_allocator
         // to free mesh buffers.
@@ -649,8 +815,14 @@ pub const World = struct {
     }
 
     /// Attaches persistence to the world using a save directory and world name.
-    /// May load metadata or create save structures; call before relying on autosave. Propagates errors from streaming, persistence, meshing, or mutation subsystems.
+    /// Prefer InitOptions.save_dir_path; attaching after warmup is rejected.
     pub fn enableSaveManager(self: *World, save_dir_path: []const u8, world_name: []const u8) !void {
+        if (self.save_manager != null) return error.PersistenceAlreadyEnabled;
+        // Attaching after warmup would allow generated chunks to replace saves.
+        self.storage.chunks_mutex.lockShared();
+        const has_chunks = self.storage.chunks.count() != 0;
+        self.storage.chunks_mutex.unlockShared();
+        if (has_chunks) return error.PersistenceMustBeConfiguredAtInit;
         const seed = self.generator.getSeed();
         const gen_name = self.generator.info.name;
         self.save_manager = try SaveManager.init(self.allocator, save_dir_path, world_name, seed, gen_name);
@@ -664,54 +836,55 @@ pub const World = struct {
         return sm.takePersistedFailedSaveCount();
     }
 
-    fn enqueueModifiedChunks(self: *World, sm: *SaveManager) std.ArrayListUnmanaged(ChunkKey) {
-        var dirty_keys = std.ArrayListUnmanaged(ChunkKey).empty;
-
+    fn enqueueModifiedChunks(self: *World, sm: *SaveManager) !void {
+        self.storage.lighting_mutex.lock();
+        defer self.storage.lighting_mutex.unlock();
         self.storage.chunks_mutex.lock();
+        defer self.storage.chunks_mutex.unlock();
         var iter = self.storage.iteratorUnsafe();
         while (iter.next()) |entry| {
             const chunk = &entry.value_ptr.*.chunk;
-            if (chunk.modified and chunk.generated) {
-                dirty_keys.append(self.allocator, entry.key_ptr.*) catch |err| {
-                    log.log.err("Failed to track dirty chunk ({}, {}) for save: {}", .{ entry.key_ptr.*.x, entry.key_ptr.*.z, err });
-                    continue;
-                };
-
+            if (chunk.modified and chunk.generated and chunk.state != .generating and chunk.state != .unloading) {
                 chunk.pin();
-                sm.enqueueSave(chunk);
+                defer chunk.unpin();
+                try sm.enqueueSave(chunk);
                 chunk.modified = false;
-                chunk.unpin();
             }
         }
-        self.storage.chunks_mutex.unlock();
-
-        return dirty_keys;
-    }
-
-    fn remarkFailedSaves(self: *World, failed: []ChunkKey) void {
-        self.storage.chunks_mutex.lock();
-        for (failed) |key| {
-            if (self.storage.chunks.get(key)) |data| {
-                data.chunk.modified = true;
-            }
-        }
-        self.storage.chunks_mutex.unlock();
     }
 
     /// Synchronously saves chunks marked dirty by mutations or streaming.
-    /// Returns errors from persistence and leaves unsaved chunks dirty for later retry.
-    pub fn saveAllModifiedChunks(self: *World) void {
+    /// Rejected snapshots remain dirty; accepted non-durable snapshots stay in
+    /// SaveManager for retry, including chunks no longer resident in storage.
+    /// Partial write failures do not prevent healthy later batches from saving.
+    pub fn saveAllModifiedChunks(self: *World) !void {
         const sm = self.save_manager orelse return;
 
-        var dirty_keys = self.enqueueModifiedChunks(sm);
-        defer dirty_keys.deinit(self.allocator);
-
-        const failed = sm.flush();
-        const failure_count = sm.takeFailedSaveCount();
-        if (failure_count > 0) {
-            log.log.warn("{} save failure(s) occurred while saving modified chunks", .{failure_count});
+        var save_error: ?anyerror = null;
+        // A quiescent sweep accepts at least one remaining chunk per continued
+        // batch. Also bound autosaves if active writers keep making chunks dirty.
+        var batches_remaining = self.storage.count() + 1;
+        while (batches_remaining > 0) : (batches_remaining -= 1) {
+            var enqueue_error: ?anyerror = null;
+            self.enqueueModifiedChunks(sm) catch |err| {
+                enqueue_error = err;
+            };
+            // Flush already accepted snapshots even if a later enqueue failed.
+            sm.flush() catch |err| {
+                save_error = save_error orelse err;
+            };
+            if (enqueue_error) |err| {
+                if (err != error.SaveQueueFull) return err;
+                if (sm.hasQueueCapacity()) continue;
+                // A full queue of failed snapshots cannot make forward progress.
+                return save_error orelse error.SavesNotDurable;
+            }
+            if (save_error) |err| {
+                return err;
+            }
+            return;
         }
-        self.remarkFailedSaves(failed);
+        return save_error orelse error.SavesNotDurable;
     }
 
     /// Runs autosave bookkeeping and persists dirty chunks when the save interval has elapsed.
@@ -720,16 +893,8 @@ pub const World = struct {
         const sm = self.save_manager orelse return;
         if (!sm.shouldAutoSave()) return;
 
-        var dirty_keys = self.enqueueModifiedChunks(sm);
-        defer dirty_keys.deinit(self.allocator);
-
-        const failed = sm.flush();
+        self.saveAllModifiedChunks() catch |err| log.log.err("Auto-save is not durable: {}", .{err});
         sm.markAutoSaved();
-        const failure_count = sm.takeFailedSaveCount();
-        if (failure_count > 0) {
-            log.log.warn("{} save failure(s) occurred during auto-save", .{failure_count});
-        }
-        self.remarkFailedSaves(failed);
     }
 
     /// Attempts to load a chunk from persistent storage.
@@ -769,7 +934,12 @@ pub const World = struct {
     pub fn getBlock(self: *World, world_x: i32, world_y: i32, world_z: i32) BlockType {
         if (world_y < 0 or world_y >= CHUNK_SIZE_Y) return .air;
         const cp = worldToChunk(world_x, world_z);
-        const data = self.getChunk(cp.chunk_x, cp.chunk_z) orelse return .air;
+        self.storage.lighting_mutex.lock();
+        defer self.storage.lighting_mutex.unlock();
+        self.storage.chunks_mutex.lockShared();
+        defer self.storage.chunks_mutex.unlockShared();
+        const data = self.storage.chunks.get(.{ .x = cp.chunk_x, .z = cp.chunk_z }) orelse return .air;
+        if (!data.chunk.generated or data.chunk.state == .generating or data.chunk.state == .unloading) return .air;
         const local = worldToLocal(world_x, world_z);
         return data.chunk.getBlock(local.x, @intCast(world_y), local.z);
     }
@@ -779,7 +949,12 @@ pub const World = struct {
     pub fn getDebugLightInfo(self: *World, world_x: i32, world_y: i32, world_z: i32) ?DebugLightInfo {
         if (world_y < 0 or world_y >= CHUNK_SIZE_Y) return null;
         const cp = worldToChunk(world_x, world_z);
-        const data = self.getChunk(cp.chunk_x, cp.chunk_z) orelse return null;
+        self.storage.lighting_mutex.lock();
+        defer self.storage.lighting_mutex.unlock();
+        self.storage.chunks_mutex.lockShared();
+        defer self.storage.chunks_mutex.unlockShared();
+        const data = self.storage.chunks.get(.{ .x = cp.chunk_x, .z = cp.chunk_z }) orelse return null;
+        if (!data.chunk.generated or data.chunk.state == .generating or data.chunk.state == .unloading) return null;
         const local = worldToLocal(world_x, world_z);
         const light = data.chunk.getLight(local.x, @intCast(world_y), local.z);
         return .{

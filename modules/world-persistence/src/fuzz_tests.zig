@@ -53,8 +53,8 @@ test "fuzz corpus: region file parser rejects malformed files without short read
     }{
         .{ .name = "empty.mca", .bytes = "", .open_error = region_file.RegionError.InvalidHeader },
         .{ .name = "short.mca", .bytes = "not a full header", .open_error = region_file.RegionError.InvalidHeader },
-        .{ .name = "dangling.mca", .bytes = &danglingRegionHeader(), .read_error = region_file.RegionError.FileTooShort },
-        .{ .name = "bad-length.mca", .bytes = &badLengthRegion(), .read_error = region_file.RegionError.FileTooShort },
+        .{ .name = "dangling.mca", .bytes = &danglingRegionHeader(), .open_error = region_file.RegionError.InvalidHeader },
+        .{ .name = "bad-length.mca", .bytes = &badLengthRegion(), .open_error = region_file.RegionError.InvalidHeader },
     };
 
     for (cases) |case| {

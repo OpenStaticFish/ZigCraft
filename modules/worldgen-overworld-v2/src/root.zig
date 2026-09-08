@@ -6,6 +6,10 @@
 //! Luanti source is LGPL-2.1-or-later; its noise helpers are BSD-style licensed.
 
 const std = @import("std");
+
+test {
+    _ = @import("test_root.zig");
+}
 const worldgen_api = @import("worldgen-api");
 const world_core = @import("world-core");
 const LightingComputer = @import("worldgen-common").LightingComputer;

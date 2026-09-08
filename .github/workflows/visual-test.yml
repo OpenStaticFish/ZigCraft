@@ -18,13 +18,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      id-token: write
       contents: read
-      issues: write
-      pull-requests: read
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup devenv
         uses: ./.github/actions/setup-devenv
@@ -32,40 +31,10 @@ jobs:
       - name: Start headless Wayland compositor
         uses: ./.github/actions/start-weston
 
-      - name: Prepare opencode cache
+      - name: Allocate fresh capture directory
         run: |
-          mkdir -p /tmp/opencode-cache
-          echo "XDG_CACHE_HOME=/tmp/opencode-cache" >> "$GITHUB_ENV"
-
-      - name: Load visual verification prompt
-        uses: ./.github/actions/load-prompt
-        with:
-          prompt-file: .github/prompts/visual-test-verify.md
-          env-var: VISUAL_VERIFY_PROMPT
-
-      - name: Load visual diagnosis prompt
-        uses: ./.github/actions/load-prompt
-        with:
-          prompt-file: .github/prompts/visual-test-diagnose.md
-          env-var: VISUAL_DIAGNOSE_PROMPT
-          variables: $WORKFLOW_URL
-        env:
-          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-      - name: Ensure visual-test label exists
-        run: |
-          if ! gh label list --json name --jq '.[].name' | grep -q '^visual-test$'; then
-            gh label create "visual-test" \
-              --description "Issues from automated visual regression tests" \
-              --color "E06C75"
-          fi
-          if ! gh label list --json name --jq '.[].name' | grep -q '^run-visual-test$'; then
-            gh label create "run-visual-test" \
-              --description "Run deterministic visual regression workflow on a PR" \
-              --color "E06C75"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.OPENCODE_PAT }}
+          capture_dir=$(mktemp -d "$RUNNER_TEMP/visual-capture.XXXXXX")
+          echo "VISUAL_CAPTURE_DIR=$capture_dir" >> "$GITHUB_ENV"
 
       - name: Setup Lavapipe Vulkan
         uses: ./.github/actions/setup-lavapipe
@@ -78,7 +47,7 @@ jobs:
           name: Visual Test
           timeout: 20m
           log-file: build-output.log
-          command: devenv shell --profile graphics -- zig build run -Dscreenshot-path=screenshot.png -Dskip-present=true
+          command: devenv shell --profile graphics -- zig build run -Dscreenshot-path="$VISUAL_CAPTURE_DIR/screenshot.png" -Dskip-present=true
         env:
           ZIG_GLOBAL_CACHE_DIR: /tmp/zig-cache-global
           XDG_RUNTIME_DIR: /tmp/runtime-runner
@@ -86,21 +55,23 @@ jobs:
           ZIGCRAFT_SMOKE_FRAMES: "5"
           ZIGCRAFT_SAFE_RENDER: "1"
 
-      - name: Check screenshot exists
+      - name: Require fresh nonempty screenshot
         id: check_screenshot
         if: always()
         run: |
-          if [ -f screenshot.png ]; then
+          if [ -n "${VISUAL_CAPTURE_DIR:-}" ] && [ -s "$VISUAL_CAPTURE_DIR/screenshot.png" ] && [ ! -L "$VISUAL_CAPTURE_DIR/screenshot.png" ]; then
             echo "screenshot_exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "screenshot_exists=false" >> "$GITHUB_OUTPUT"
+            echo "::error::Capture did not produce a fresh nonempty screenshot"
+            exit 1
           fi
 
       - name: Compare against golden image
         id: golden_diff
-        if: steps.check_screenshot.outputs.screenshot_exists == 'true'
+        if: always() && steps.screenshot.outcome == 'success' && steps.check_screenshot.outcome == 'success'
         run: |
-          nix shell nixpkgs#imagemagick -c bash scripts/compare_visual_golden.sh screenshot.png docs/visual-test/golden/menu.png visual-diff.png
+          timeout --kill-after=10s 3m nix shell github:NixOS/nixpkgs/42f17a57f4f6e33b3de3dca0a2a5ea5233169d02#imagemagick -c bash scripts/compare_visual_golden.sh "$VISUAL_CAPTURE_DIR/screenshot.png" docs/visual-test/golden/menu.png "$VISUAL_CAPTURE_DIR/visual-diff.png"
         env:
           VISUAL_DIFF_RMSE_TOLERANCE: "0.015"
 
@@ -110,8 +81,9 @@ jobs:
         with:
           name: menu-screenshot
           path: |
-            screenshot.png
-            visual-diff.png
+            ${{ env.VISUAL_CAPTURE_DIR }}/screenshot.png
+            ${{ env.VISUAL_CAPTURE_DIR }}/visual-diff.png
+          if-no-files-found: error
           retention-days: 30
 
       - name: Check build log exists
@@ -133,24 +105,14 @@ jobs:
         if: always()
         uses: ./.github/actions/stop-weston
 
-      - name: Run opencode visual verification
-        if: always() && steps.check_screenshot.outputs.screenshot_exists == 'true'
-        continue-on-error: true
-        uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a
+      - name: Require complete visual acceptance
+        if: always()
         env:
-          GITHUB_TOKEN: ${{ secrets.OPENCODE_PAT }}
-          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
-        with:
-          model: minimax-coding-plan/MiniMax-M3
-          prompt: ${{ env.VISUAL_VERIFY_PROMPT }}
-
-      - name: Run opencode failure diagnosis
-        if: failure() || steps.screenshot.outcome == 'failure' || steps.check_screenshot.outputs.screenshot_exists != 'true'
-        continue-on-error: true
-        uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a
-        env:
-          GITHUB_TOKEN: ${{ secrets.OPENCODE_PAT }}
-          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
-        with:
-          model: minimax-coding-plan/MiniMax-M3
-          prompt: ${{ env.VISUAL_DIAGNOSE_PROMPT }}
+          CAPTURE: ${{ steps.screenshot.outcome }}
+          IMAGE: ${{ steps.check_screenshot.outcome }}
+          COMPARISON: ${{ steps.golden_diff.outcome }}
+        run: |
+          if [[ "$CAPTURE" != success || "$IMAGE" != success || "$COMPARISON" != success ]]; then
+            echo "::error::Visual acceptance failed: capture=$CAPTURE image=$IMAGE comparison=$COMPARISON"
+            exit 1
+          fi

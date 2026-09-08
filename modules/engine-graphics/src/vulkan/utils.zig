@@ -45,6 +45,7 @@ pub fn findMemoryType(physical_device: c.VkPhysicalDevice, type_filter: u32, pro
 }
 
 pub fn createVulkanBuffer(device: *const VulkanDevice, size: usize, usage: c.VkBufferUsageFlags, properties: c.VkMemoryPropertyFlags) rhi.RhiError!VulkanBuffer {
+    if (size == 0) return error.InvalidState;
     var buffer_info = std.mem.zeroes(c.VkBufferCreateInfo);
     buffer_info.sType = c.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     buffer_info.size = @intCast(size);
@@ -53,6 +54,14 @@ pub fn createVulkanBuffer(device: *const VulkanDevice, size: usize, usage: c.VkB
 
     var buffer: c.VkBuffer = null;
     try checkVk(c.vkCreateBuffer(device.vk_device, &buffer_info, null, &buffer));
+    var memory: c.VkDeviceMemory = null;
+    var mapped_ptr: ?*anyopaque = null;
+    var memory_mapped = false;
+    errdefer {
+        if (memory_mapped) c.vkUnmapMemory(device.vk_device, memory);
+        c.vkDestroyBuffer(device.vk_device, buffer, null);
+        if (memory != null) c.vkFreeMemory(device.vk_device, memory, null);
+    }
 
     var mem_reqs: c.VkMemoryRequirements = undefined;
     c.vkGetBufferMemoryRequirements(device.vk_device, buffer, &mem_reqs);
@@ -62,14 +71,14 @@ pub fn createVulkanBuffer(device: *const VulkanDevice, size: usize, usage: c.VkB
     alloc_info.allocationSize = mem_reqs.size;
     alloc_info.memoryTypeIndex = try findMemoryType(device.physical_device, mem_reqs.memoryTypeBits, properties);
 
-    var memory: c.VkDeviceMemory = null;
     try checkVk(c.vkAllocateMemory(device.vk_device, &alloc_info, null, &memory));
     try checkVk(c.vkBindBufferMemory(device.vk_device, buffer, memory, 0));
 
     const is_host_visible = (properties & c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
-    var mapped_ptr: ?*anyopaque = null;
     if (is_host_visible) {
         try checkVk(c.vkMapMemory(device.vk_device, memory, 0, mem_reqs.size, 0, &mapped_ptr));
+        memory_mapped = true;
+        if (mapped_ptr == null) return error.BackendError;
     }
 
     return .{

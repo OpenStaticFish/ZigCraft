@@ -64,6 +64,12 @@ pub fn cameraFarPlaneForRenderDistance(render_distance_chunks: i32) f32 {
 }
 
 pub const GameSession = struct {
+    pub const Persistence = union(enum) {
+        transient,
+        diagnostic,
+        /// Borrowed only during init; SaveManager owns its own path copy.
+        directory: []const u8,
+    };
     allocator: std.mem.Allocator,
     world: *World,
     world_map: WorldMap,
@@ -91,7 +97,7 @@ pub const GameSession = struct {
     debug_cascade_idx: usize = 0,
     build_config: BuildConfig = .{},
 
-    pub fn init(allocator: std.mem.Allocator, rhi: *RHI, atlas: *const TextureAtlas, seed: u64, render_distance: i32, generator_index: usize, build_config: BuildConfig) !*GameSession {
+    pub fn init(allocator: std.mem.Allocator, rhi: *RHI, atlas: *const TextureAtlas, seed: u64, render_distance: i32, generator_index: usize, build_config: BuildConfig, persistence: Persistence) !*GameSession {
         const session = try allocator.create(GameSession);
         errdefer allocator.destroy(session);
 
@@ -117,6 +123,11 @@ pub const GameSession = struct {
             .rhi = rhi.*,
             .atlas = atlas,
             .generator_index = generator_index,
+            .save_dir_path = switch (persistence) {
+                .transient => null,
+                .diagnostic => getenv("ZIGCRAFT_SAVE_DIR"),
+                .directory => |path| path,
+            },
         });
         errdefer world.deinit();
 
@@ -183,13 +194,6 @@ pub const GameSession = struct {
             .creative_mode = true,
             .build_config = build_config,
         };
-
-        const save_env = getenv("ZIGCRAFT_SAVE_DIR");
-        if (save_env) |save_path| {
-            world.interface().simulation().enableSaveManager(save_path, "world") catch |err| {
-                log.log.warn("Failed to initialize save manager: {}", .{err});
-            };
-        }
 
         // Force map update initially
         session.map_controller.map_needs_update = true;

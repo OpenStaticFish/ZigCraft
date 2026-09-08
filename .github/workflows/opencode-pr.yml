@@ -1,7 +1,9 @@
 name: opencode
 
 on:
-  pull_request:
+  # Never execute the PR's workflow, scripts, actions, config, or dependencies.
+  pull_request_target:
+    branches: [dev, main]
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
@@ -18,102 +20,151 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pr_number }}
   cancel-in-progress: true
 
+permissions: {}
+
 jobs:
   opencode:
     if: >
-      (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
-      github.event_name == 'workflow_dispatch'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 45
+      (github.event_name == 'pull_request_target' && github.event.pull_request.draft == false) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
-      id-token: write
-      contents: write
-      pull-requests: write
-      issues: write
-      statuses: write
+      contents: read
+      pull-requests: read
+    outputs:
+      allowed: ${{ steps.input.outputs.allowed }}
+      pr_number: ${{ steps.input.outputs.pr_number }}
+      head_sha: ${{ steps.input.outputs.head_sha }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout trusted review tooling only
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.head_sha || github.event.pull_request.head.sha }}
-          fetch-depth: 0
-          token: ${{ github.token }}
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/static_pr_review.py
+          sparse-checkout-cone-mode: false
 
-      - name: Resolve PR context
-        id: resolve-pr
+      - name: Collect bounded read-only review input
+        id: input
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
-          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
-          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
-          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
-          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: bash scripts/resolve_pr_context.sh
-
-      - name: Configure git
-        run: bash scripts/configure_git_identity.sh "github-actions[bot]" "github-actions[bot]@users.noreply.github.com"
-
-      - name: Fetch previous opencode reviews
-        id: previous-reviews
-        run: bash scripts/fetch_previous_opencode_reviews.sh
-        env:
-          GH_TOKEN: ${{ github.token }}
-
-      - name: Setup devenv
-        uses: ./.github/actions/setup-devenv
-
-      - name: Prepare opencode cache
-        run: bash scripts/prepare_opencode_cache.sh
-
-      - name: Configure opencode CI permissions
-        run: bash scripts/configure_opencode_ci_permissions.sh
-
-      - uses: ./.github/actions/load-prompt
+          PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          EXPECTED_SHA: ${{ inputs.head_sha || github.event.pull_request.head.sha }}
         with:
-          prompt-file: .github/prompts/pr-review.md
-          variables: $PR_NUMBER $HEAD_SHA $PREVIOUS_REVIEWS
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const pull_number = Number(process.env.PR_NUMBER);
+            const expected = process.env.EXPECTED_SHA;
+            if (!Number.isSafeInteger(pull_number) || pull_number <= 0 || !/^[a-f0-9]{40}$/.test(expected)) {
+              throw new Error('Invalid PR number or head SHA');
+            }
+            const args = { ...context.repo, pull_number };
+            const { data: pr } = await github.rest.pulls.get(args);
+            if (pr.state !== 'open' || pr.draft || pr.head.sha !== expected) {
+              throw new Error('PR is closed, draft, or no longer at the requested SHA');
+            }
+            core.setOutput('pr_number', String(pull_number));
+            core.setOutput('head_sha', expected);
+            if (pr.head.repo?.full_name !== `${context.repo.owner}/${context.repo.repo}`) {
+              core.setOutput('allowed', 'false');
+              await core.summary.addRaw('Fork PR: provider review skipped. No provider secret is supplied; use human review and read-only build CI.').write();
+              return;
+            }
+            core.setOutput('allowed', 'true');
+            const { data: diff } = await github.rest.pulls.get({ ...args, mediaType: { format: 'diff' } });
+            if (typeof diff !== 'string' || !diff.trim() || Buffer.byteLength(diff) > 180000) {
+              throw new Error('Missing or oversized diff; human review required (no silent truncation)');
+            }
+            const { data: comments } = await github.rest.issues.listComments({
+              ...context.repo, issue_number: pull_number, per_page: 100,
+            });
+            const previous = comments.filter(c => c.user.login === 'github-actions[bot]' &&
+              c.body?.includes('<!-- zigcraft-static-review -->')).slice(-3).map(c => c.body.slice(0, 12000));
+            // Recheck after fetching a mutable PR diff so it is bound to this head.
+            const { data: current } = await github.rest.pulls.get(args);
+            if (current.head.sha !== expected || current.base.sha !== pr.base.sha) throw new Error('PR changed while fetching input');
+            const input = { pr_number: pull_number, head_sha: expected, title: pr.title,
+              description: (pr.body || '').slice(0, 12000), diff, previous_reviews: previous };
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'review-input.json'), JSON.stringify(input), { mode: 0o400, flag: 'wx' });
 
-      - name: Run opencode
+      - name: Run tool-free static reviewer
         id: ai_review
-        timeout-minutes: 40
-        uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a
+        if: steps.input.outputs.allowed == 'true'
+        timeout-minutes: 10
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          GH_TOKEN: ${{ github.token }}
           ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
-        with:
-          model: zhipuai-coding-plan/glm-5.2
-          variant: max
-          use_github_token: true
-          prompt: ${{ env.PROMPT }}
+        run: timeout --kill-after=10s 9m python3 -I scripts/static_pr_review.py "$RUNNER_TEMP/review-input.json" "$RUNNER_TEMP/static-review.json"
 
-      - name: Dump opencode diagnostics
-        if: always()
-        env:
-          AI_REVIEW_OUTCOME: ${{ steps.ai_review.outcome }}
-        run: bash scripts/dump_opencode_diagnostics.sh
-
-      - name: Upload opencode diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Upload review text only
+        if: steps.ai_review.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: opencode-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            /tmp/opencode-cache
-            ~/.local/share/opencode
-            ~/.cache/opencode
-          if-no-files-found: ignore
-          include-hidden-files: true
+          name: static-review
+          path: ${{ runner.temp }}/static-review.json
+          if-no-files-found: error
           retention-days: 7
 
-      - name: Evaluate AI merge gate
-        id: ai_merge_gate
-        run: bash scripts/publish_ai_merge_gate.sh
+  publish:
+    needs: opencode
+    if: always() && needs.opencode.outputs.allowed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+      statuses: write
+    steps:
+      # No checkout, local actions, provider credentials, or execution of artifact text.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.opencode.result == 'success'
+        with:
+          name: static-review
+          path: ${{ runner.temp }}/review-publication
+      - name: Publish advisory review for the exact head
+        if: needs.opencode.result == 'success'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
-          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.opencode.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.opencode.outputs.head_sha }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const file = path.join(process.env.RUNNER_TEMP, 'review-publication/static-review.json');
+            if (!fs.lstatSync(file).isFile() || fs.statSync(file).size > 60000) throw new Error('Invalid review artifact');
+            const review = JSON.parse(fs.readFileSync(file, 'utf8'));
+            const pull_number = Number(process.env.PR_NUMBER);
+            const sha = process.env.HEAD_SHA;
+            if (review.pr_number !== pull_number || review.head_sha !== sha ||
+                typeof review.body !== 'string' || !review.body.trim() || review.body.length > 45000) {
+              throw new Error('Review artifact does not match trusted PR metadata');
+            }
+            const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number });
+            if (pr.state !== 'open' || pr.head.sha !== sha || pr.head.repo?.full_name !== `${context.repo.owner}/${context.repo.repo}`) {
+              throw new Error('Refusing stale or fork review publication');
+            }
+            // Neutralize mentions and HTML; text is never interpreted as instructions or a verdict.
+            const text = review.body.replace(/@/g, '@\u200b').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const body = `<!-- zigcraft-static-review -->\n### Static AI Review\nReviewed commit: \`${sha}\`\n\nAdvisory diff-only review. No code or tests were executed. Human approval is required; this does not authorize merging.\n\n${text}`;
+            await github.rest.issues.createComment({ ...context.repo, issue_number: pull_number, body });
+            await github.rest.repos.createCommitStatus({ ...context.repo, sha, state: 'success',
+              context: 'ai-review', description: 'Advisory static review published; human approval required',
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}` });
 
-      - name: Mark AI review complete
-        if: always()
+      - name: Report review or publication failure
+        if: always() && (needs.opencode.result != 'success' || failure())
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
-          AI_REVIEW_OUTCOME: ${{ steps.ai_review.outcome }}
-          GH_TOKEN: ${{ github.token }}
-        run: bash scripts/mark_ai_review_complete.sh
+          PR_NUMBER: ${{ needs.opencode.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.opencode.outputs.head_sha }}
+        with:
+          script: |
+            const pull_number = Number(process.env.PR_NUMBER);
+            const sha = process.env.HEAD_SHA;
+            if (!Number.isSafeInteger(pull_number) || !/^[a-f0-9]{40}$/.test(sha)) throw new Error('Invalid review metadata');
+            const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number });
+            if (pr.head.sha !== sha || pr.head.repo?.full_name !== `${context.repo.owner}/${context.repo.repo}`) return;
+            await github.rest.repos.createCommitStatus({ ...context.repo, sha, state: 'failure',
+              context: 'ai-review', description: 'Static review or publication failed; no successful review claimed' });

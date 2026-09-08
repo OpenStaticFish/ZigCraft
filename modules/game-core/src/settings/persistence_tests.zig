@@ -3,6 +3,7 @@ const testing = std.testing;
 const persistence = @import("persistence.zig");
 const data = @import("data.zig");
 const Settings = data.Settings;
+const fs = @import("fs");
 
 test "setTexturePack returns early when same value" {
     const allocator = testing.allocator;
@@ -143,4 +144,148 @@ test "Settings resolution roundtrip" {
         settings.setResolutionByIndex(i);
         try testing.expectEqual(@as(usize, i), settings.getResolutionIndex());
     }
+}
+
+test "settings save preserves existing JSON on serialization and temporary file creation failures" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = fs.Dir{ .inner = tmp.dir };
+    var settings = Settings{ .render_distance = 21 };
+    try persistence.saveToDir(&settings, testing.allocator, home);
+    const before = try home.readFileAlloc(".config/zigcraft/settings.json", testing.allocator, 16 * 1024);
+    defer testing.allocator.free(before);
+
+    settings.render_distance = 6;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, persistence.saveToDir(&settings, failing.allocator(), home));
+    const after = try home.readFileAlloc(".config/zigcraft/settings.json", testing.allocator, 16 * 1024);
+    defer testing.allocator.free(after);
+    try testing.expectEqualStrings(before, after);
+
+    try home.makePath(".config/zigcraft/settings.json.tmp");
+    try testing.expectError(error.IsDir, persistence.saveToDir(&settings, testing.allocator, home));
+    const after_create_failure = try home.readFileAlloc(".config/zigcraft/settings.json", testing.allocator, 16 * 1024);
+    defer testing.allocator.free(after_create_failure);
+    try testing.expectEqualStrings(before, after_create_failure);
+}
+
+const SaveFailure = enum { write, sync, rename };
+
+// Inject failures around real filesystem operations so preservation assertions
+// inspect the actual previous settings file, not simulated file contents.
+const FailingSaveDir = struct {
+    inner: fs.Dir,
+    failure: SaveFailure,
+
+    pub fn makePath(self: @This(), path: []const u8) !void {
+        try self.inner.makePath(path);
+    }
+
+    pub fn createFile(self: @This(), path: []const u8, flags: fs.CreateFileOptions) !File {
+        return .{ .inner = try self.inner.createFile(path, flags), .failure = self.failure };
+    }
+
+    pub fn rename(self: @This(), from: []const u8, to: []const u8) !void {
+        if (self.failure == .rename) return error.AccessDenied;
+        try self.inner.rename(from, to);
+    }
+
+    const File = struct {
+        inner: fs.File,
+        failure: SaveFailure,
+
+        pub fn writeAll(self: @This(), bytes: []const u8) !void {
+            if (self.failure == .write) {
+                try self.inner.writeAll(bytes[0..@min(8, bytes.len)]);
+                return error.NoSpaceLeft;
+            }
+            try self.inner.writeAll(bytes);
+        }
+
+        pub fn sync(self: @This()) !void {
+            if (self.failure == .sync) return error.InputOutput;
+            try self.inner.sync();
+        }
+
+        pub fn close(self: @This()) void {
+            self.inner.close();
+        }
+    };
+};
+
+test "settings save preserves prior JSON on partial write sync and rename failures then replaces on retry" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = fs.Dir{ .inner = tmp.dir };
+    var settings = Settings{ .render_distance = 21 };
+    try persistence.saveToDir(&settings, testing.allocator, home);
+    const before = try home.readFileAlloc(".config/zigcraft/settings.json", testing.allocator, 16 * 1024);
+    defer testing.allocator.free(before);
+    settings.render_distance = 6;
+
+    const cases = [_]struct { failure: SaveFailure, expected_error: anyerror }{
+        .{ .failure = .write, .expected_error = error.NoSpaceLeft },
+        .{ .failure = .sync, .expected_error = error.InputOutput },
+        .{ .failure = .rename, .expected_error = error.AccessDenied },
+    };
+    for (cases) |case| {
+        try testing.expectError(case.expected_error, persistence.saveToDir(&settings, testing.allocator, FailingSaveDir{ .inner = home, .failure = case.failure }));
+        const after = try home.readFileAlloc(".config/zigcraft/settings.json", testing.allocator, 16 * 1024);
+        defer testing.allocator.free(after);
+        try testing.expectEqualStrings(before, after);
+    }
+
+    try persistence.saveToDir(&settings, testing.allocator, home);
+    var loaded = try persistence.loadFromDir(home, testing.allocator);
+    defer persistence.deinit(&loaded, testing.allocator);
+    try testing.expectEqual(@as(i32, 6), loaded.render_distance);
+    try testing.expectError(error.FileNotFound, home.access(".config/zigcraft/settings.json.tmp", .{}));
+}
+
+test "settings load propagates missing malformed and allocation failures without leaking strings" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = fs.Dir{ .inner = tmp.dir };
+    try testing.expectError(error.FileNotFound, persistence.loadFromDir(home, testing.allocator));
+
+    const settings = Settings{ .texture_pack = "custom-pack", .environment_map = "sunset.exr" };
+    try persistence.saveToDir(&settings, testing.allocator, home);
+    try testing.checkAllAllocationFailures(testing.allocator, loadOwnedStrings, .{home});
+
+    const file = try home.createFile(".config/zigcraft/settings.json", .{});
+    defer file.close();
+    try file.writeAll("{\"vsync\": []}");
+    try testing.expectError(error.UnexpectedToken, persistence.loadFromDir(home, testing.allocator));
+}
+
+fn loadOwnedStrings(allocator: std.mem.Allocator, home: fs.Dir) !void {
+    var settings = try persistence.loadFromDir(home, allocator);
+    defer persistence.deinit(&settings, allocator);
+    try testing.expectEqualStrings("custom-pack", settings.texture_pack);
+    try testing.expectEqualStrings("sunset.exr", settings.environment_map);
+}
+
+test "settings load preserves backend supported values outside menu choices" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = fs.Dir{ .inner = tmp.dir };
+    const settings = Settings{
+        .render_distance = 99,
+        .window_width = 1800,
+        .window_height = 1000,
+        .taa_blend_factor = 0.25,
+        .dynamic_resolution_min_scale = 0.3,
+        .dynamic_resolution_max_scale = 0.4,
+        .target_fps = 90,
+    };
+    try persistence.saveToDir(&settings, testing.allocator, home);
+    var loaded = try persistence.loadFromDir(home, testing.allocator);
+    defer persistence.deinit(&loaded, testing.allocator);
+    try testing.expectEqual(@as(i32, 99), loaded.render_distance);
+    try testing.expectEqual(@as(u32, 1800), loaded.window_width);
+    try testing.expectEqual(@as(u32, 1000), loaded.window_height);
+    try testing.expectEqual(@as(f32, 0.25), loaded.taa_blend_factor);
+    try testing.expectEqual(@as(f32, 0.3), loaded.dynamic_resolution_min_scale);
+    try testing.expectEqual(@as(f32, 0.4), loaded.dynamic_resolution_max_scale);
+    try testing.expectEqual(@as(u32, 90), loaded.target_fps);
 }

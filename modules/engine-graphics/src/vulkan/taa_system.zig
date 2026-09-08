@@ -15,6 +15,39 @@ pub const TAAPushConstants = extern struct {
 const DESCRIPTOR_SETS_PER_FRAME: usize = 2;
 const TAA_DESCRIPTOR_SET_COUNT: usize = rhi.MAX_FRAMES_IN_FLIGHT * DESCRIPTOR_SETS_PER_FRAME;
 
+pub fn renderPassConfig() struct { attachment: c.VkAttachmentDescription, dependencies: [2]c.VkSubpassDependency } {
+    return .{
+        .attachment = .{
+            .format = c.VK_FORMAT_R32G32B32A32_SFLOAT,
+            .samples = c.VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = c.VK_ATTACHMENT_STORE_OP_STORE,
+            .stencilLoadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = c.VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        },
+        .dependencies = .{
+            .{
+                .srcSubpass = c.VK_SUBPASS_EXTERNAL,
+                .dstSubpass = 0,
+                .srcStageMask = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                .srcAccessMask = c.VK_ACCESS_SHADER_READ_BIT | c.VK_ACCESS_TRANSFER_READ_BIT,
+                .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            },
+            .{
+                .srcSubpass = 0,
+                .dstSubpass = c.VK_SUBPASS_EXTERNAL,
+                .srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                .dstStageMask = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | c.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                .srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                .dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT | c.VK_ACCESS_TRANSFER_READ_BIT,
+            },
+        },
+    };
+}
+
 pub const TAASystem = struct {
     enabled: bool = true,
     pass_active: bool = false,
@@ -36,6 +69,14 @@ pub const TAASystem = struct {
     extent: c.VkExtent2D = .{ .width = 0, .height = 0 },
     history_index: usize = 0,
 
+    /// Called once at frame start. A graph without TAA must not preserve history
+    /// across the gap or expose last frame's output as this frame's result.
+    pub fn beginFrame(self: *TAASystem) void {
+        if (!self.ran_this_frame) self.history_valid = false;
+        self.ran_this_frame = false;
+        self.pass_active = false;
+    }
+
     pub fn ensureResources(
         self: *TAASystem,
         vk: c.VkDevice,
@@ -46,12 +87,14 @@ pub const TAASystem = struct {
     ) !void {
         if (extent.width == 0 or extent.height == 0) return;
 
-        try self.ensureRenderState(vk, allocator, descriptor_pool);
-
         if (self.extent.width == extent.width and self.extent.height == extent.height and self.history_textures[0] != 0 and self.history_textures[1] != 0) {
             return;
         }
 
+        // Replacing history invalidates framebuffers referenced by older submissions.
+        if (self.history_textures[0] != 0 or self.history_textures[1] != 0) try Utils.checkVk(c.vkDeviceWaitIdle(vk));
+        errdefer self.deinit(vk, descriptor_pool, resources);
+        try self.ensureRenderState(vk, allocator, descriptor_pool);
         self.destroyFramebuffers(vk);
         self.destroyHistoryTextures(resources);
 
@@ -85,13 +128,8 @@ pub const TAASystem = struct {
 
     fn ensureRenderState(self: *TAASystem, vk: c.VkDevice, allocator: std.mem.Allocator, descriptor_pool: c.VkDescriptorPool) !void {
         if (self.render_pass == null) {
-            var color_attachment = std.mem.zeroes(c.VkAttachmentDescription);
-            color_attachment.format = c.VK_FORMAT_R32G32B32A32_SFLOAT;
-            color_attachment.samples = c.VK_SAMPLE_COUNT_1_BIT;
-            color_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_CLEAR;
-            color_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_STORE;
-            color_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
-            color_attachment.finalLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            // Post-process and history reads cannot rely on Bloom adding a barrier.
+            const config = renderPassConfig();
 
             var color_ref = c.VkAttachmentReference{ .attachment = 0, .layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
             var subpass = std.mem.zeroes(c.VkSubpassDescription);
@@ -99,22 +137,14 @@ pub const TAASystem = struct {
             subpass.colorAttachmentCount = 1;
             subpass.pColorAttachments = &color_ref;
 
-            var dependency = std.mem.zeroes(c.VkSubpassDependency);
-            dependency.srcSubpass = c.VK_SUBPASS_EXTERNAL;
-            dependency.dstSubpass = 0;
-            dependency.srcStageMask = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-            dependency.dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-            dependency.srcAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
-            dependency.dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-
             var rp_info = std.mem.zeroes(c.VkRenderPassCreateInfo);
             rp_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
             rp_info.attachmentCount = 1;
-            rp_info.pAttachments = &color_attachment;
+            rp_info.pAttachments = &config.attachment;
             rp_info.subpassCount = 1;
             rp_info.pSubpasses = &subpass;
-            rp_info.dependencyCount = 1;
-            rp_info.pDependencies = &dependency;
+            rp_info.dependencyCount = config.dependencies.len;
+            rp_info.pDependencies = &config.dependencies[0];
 
             try Utils.checkVk(c.vkCreateRenderPass(vk, &rp_info, null, &self.render_pass));
         }
@@ -299,6 +329,8 @@ pub const TAASystem = struct {
         draw_call_count: *u32,
     ) void {
         if (!self.enabled) return;
+        if (command_buffer == null or frame_index >= rhi.MAX_FRAMES_IN_FLIGHT) return;
+        if (extent.width == 0 or extent.height == 0 or extent.width > self.extent.width or extent.height > self.extent.height) return;
         if (self.pipeline == null or self.pipeline_layout == null or self.render_pass == null) return;
         if (hdr_view == null or velocity_view == null) return;
         if (self.history_textures[0] == 0 or self.history_textures[1] == 0) return;

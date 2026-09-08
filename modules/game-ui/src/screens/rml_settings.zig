@@ -13,7 +13,6 @@ const RmlPage = @import("../rml_page.zig").Page;
 const rml_markup = @import("../rml_markup.zig");
 const SettingsUi = @import("../settings_ui.zig");
 const settings_pkg = @import("game-core").settings;
-const apply_logic = settings_pkg.apply_logic;
 const Settings = settings_pkg.Settings;
 
 const SettingsTab = enum { display, camera, world, rendering };
@@ -135,7 +134,7 @@ pub const RmlSettingsScreen = struct {
             self.context.window_manager.setSize(settings.window_width, settings.window_height);
         } else if (std.mem.eql(u8, id, "vsync-toggle")) {
             settings.vsync = !settings.vsync;
-            apply_logic.applyToRenderSettings(settings, self.context.render_settings);
+            SettingsUi.applyChangedSetting("vsync", settings, self.context.render_settings);
         } else if (std.mem.eql(u8, id, "ui-scale-prev")) {
             settings.ui_scale = settings_pkg.ui_helpers.prevUIScale(settings.ui_scale);
         } else if (std.mem.eql(u8, id, "ui-scale-next")) {
@@ -172,7 +171,7 @@ pub const RmlSettingsScreen = struct {
             self.stepOverallPreset(.next);
         } else if (std.mem.eql(u8, id, "wireframe-toggle")) {
             self.context.settings.wireframe_enabled = !self.context.settings.wireframe_enabled;
-            apply_logic.applyToRenderSettings(self.context.settings, self.context.render_settings);
+            SettingsUi.applyChangedSetting("wireframe_enabled", self.context.settings, self.context.render_settings);
         } else {
             inline for (RENDER_SETTING_NAMES) |name| {
                 if (settingActionFromId(name, id)) |action| self.applyMetadataAction(name, action);
@@ -238,9 +237,6 @@ pub const RmlSettingsScreen = struct {
 
         if (value.* != old_value) {
             SettingsUi.applyChangedSetting(name, settings, self.context.render_settings);
-            if (comptime std.mem.eql(u8, name, "msaa_samples")) {
-                self.context.render_settings.setMSAA(settings.msaa_samples);
-            }
         }
     }
 

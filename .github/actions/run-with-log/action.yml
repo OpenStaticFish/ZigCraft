@@ -31,7 +31,7 @@ runs:
         chmod +x "$COMMAND_FILE"
 
         echo "${{ inputs.name }} start: $(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee "${{ inputs.log-file }}"
-        timeout --preserve-status "${{ inputs.timeout }}" bash "$COMMAND_FILE" 2>&1 | tee -a "${{ inputs.log-file }}"
+        timeout --preserve-status --kill-after=30s "${{ inputs.timeout }}" bash -euo pipefail "$COMMAND_FILE" 2>&1 | tee -a "${{ inputs.log-file }}"
         END=$(date +%s)
         {
           echo "### ${{ inputs.name }}"

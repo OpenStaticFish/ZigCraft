@@ -9,6 +9,34 @@ const Mat4 = @import("engine-math").Mat4;
 pub const ShadowUniforms = @import("shadow_uniforms.zig").ShadowUniforms;
 const Utils = @import("utils.zig");
 
+const MAX_DESCRIPTOR_SNAPSHOTS: usize = 128;
+
+const DescriptorSnapshotSlots = struct {
+    current: usize = 0,
+    used: usize = 1,
+    sealed: bool = false,
+
+    fn seal(self: *DescriptorSnapshotSlots) void {
+        self.sealed = true;
+    }
+
+    fn writableSlot(self: *DescriptorSnapshotSlots) !?usize {
+        if (!self.sealed) return null;
+        if (self.used == MAX_DESCRIPTOR_SNAPSHOTS) return error.DescriptorSnapshotCapacityExceeded;
+        self.current = (self.current + 1) % MAX_DESCRIPTOR_SNAPSHOTS;
+        self.used += 1;
+        self.sealed = false;
+        return self.current;
+    }
+
+    fn reset(self: *DescriptorSnapshotSlots) void {
+        // Retain the latest descriptor contents, but retire all earlier binds.
+        // Starting at slot zero instead could reuse the retained set mid-frame.
+        self.used = 1;
+        self.sealed = false;
+    }
+};
+
 const GlobalUniforms = extern struct {
     view_proj: Mat4,
     view_proj_prev: Mat4,
@@ -36,6 +64,10 @@ pub const DescriptorManager = struct {
     descriptor_pool: c.VkDescriptorPool,
     descriptor_set_layout: c.VkDescriptorSetLayout,
     descriptor_sets: [rhi.MAX_FRAMES_IN_FLIGHT]c.VkDescriptorSet,
+    snapshot_sets: [rhi.MAX_FRAMES_IN_FLIGHT][MAX_DESCRIPTOR_SNAPSHOTS]c.VkDescriptorSet = .{.{null} ** MAX_DESCRIPTOR_SNAPSHOTS} ** rhi.MAX_FRAMES_IN_FLIGHT,
+    snapshot_slots: [rhi.MAX_FRAMES_IN_FLIGHT]DescriptorSnapshotSlots = [_]DescriptorSnapshotSlots{.{}} ** rhi.MAX_FRAMES_IN_FLIGHT,
+    snapshot_failed: [rhi.MAX_FRAMES_IN_FLIGHT]bool = .{false} ** rhi.MAX_FRAMES_IN_FLIGHT,
+    update_descriptor_sets_fn: @TypeOf(&c.vkUpdateDescriptorSets) = c.vkUpdateDescriptorSets,
 
     global_ubos: [rhi.MAX_FRAMES_IN_FLIGHT]VulkanBuffer,
     global_ubos_mapped: [rhi.MAX_FRAMES_IN_FLIGHT]?*anyopaque,
@@ -124,18 +156,20 @@ pub const DescriptorManager = struct {
         };
 
         // Create Descriptor Pool
-        // Increased sizes to accommodate UI texture descriptor sets (128) + FXAA (2) + Bloom (20) + main (4)
+        // Reserve a bounded set of frame-local main-layout snapshots in addition
+        // to the existing UI/post-processing budget. Allocate snapshots on demand.
+        const extra_sets: u32 = @intCast((MAX_DESCRIPTOR_SNAPSHOTS - 1) * rhi.MAX_FRAMES_IN_FLIGHT);
         var pool_sizes = [_]c.VkDescriptorPoolSize{
-            .{ .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 500 },
-            .{ .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1000 },
-            .{ .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 32 },
+            .{ .type = c.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 500 + 2 * extra_sets },
+            .{ .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1000 + 13 * extra_sets },
+            .{ .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 32 + extra_sets },
         };
 
         var pool_info = std.mem.zeroes(c.VkDescriptorPoolCreateInfo);
         pool_info.sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         pool_info.poolSizeCount = pool_sizes.len;
         pool_info.pPoolSizes = &pool_sizes[0];
-        pool_info.maxSets = 1000;
+        pool_info.maxSets = 1000 + extra_sets;
         pool_info.flags = c.VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
 
         Utils.checkVk(c.vkCreateDescriptorPool(vulkan_device.vk_device, &pool_info, null, &self.descriptor_pool)) catch |err| {
@@ -201,6 +235,7 @@ pub const DescriptorManager = struct {
                 self.deinit();
                 return err;
             };
+            self.snapshot_sets[i][0] = self.descriptor_sets[i];
 
             // Write UBO descriptors immediately (they don't change)
             var buffer_info_global = c.VkDescriptorBufferInfo{
@@ -315,6 +350,63 @@ pub const DescriptorManager = struct {
         if (self.descriptor_pool != null) c.vkDestroyDescriptorPool(device, self.descriptor_pool, null);
     }
 
+    /// Only call after this frame's fence has completed and its CB was reset.
+    pub fn beginFrame(self: *DescriptorManager, frame_index: usize) void {
+        self.snapshot_slots[frame_index].reset();
+        self.snapshot_failed[frame_index] = false;
+    }
+
+    pub fn seal(self: *DescriptorManager, frame_index: usize) void {
+        self.snapshot_slots[frame_index].seal();
+    }
+
+    pub fn writeDescriptors(self: *DescriptorManager, writes: []const c.VkWriteDescriptorSet) void {
+        self.update_descriptor_sets_fn(self.vulkan_device.vk_device, @intCast(writes.len), writes.ptr, 0, null);
+    }
+
+    /// A bound ordinary descriptor set cannot be updated, even before submit.
+    /// Copy every binding so material, LPV and instance updates preserve the rest.
+    pub fn ensureWritable(self: *DescriptorManager, frame_index: usize) bool {
+        if (self.snapshot_failed[frame_index]) return false;
+        var slots = self.snapshot_slots[frame_index];
+        const slot = (slots.writableSlot() catch |err| {
+            log.log.err("Main descriptor snapshots exhausted for frame {}: {}; skipping affected draws", .{ frame_index, err });
+            self.snapshot_failed[frame_index] = true;
+            return false;
+        }) orelse return true;
+
+        const destination = &self.snapshot_sets[frame_index][slot];
+        if (destination.* == null) {
+            var alloc_info = std.mem.zeroes(c.VkDescriptorSetAllocateInfo);
+            alloc_info.sType = c.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            alloc_info.descriptorPool = self.descriptor_pool;
+            alloc_info.descriptorSetCount = 1;
+            alloc_info.pSetLayouts = &self.descriptor_set_layout;
+            Utils.checkVk(c.vkAllocateDescriptorSets(self.vulkan_device.vk_device, &alloc_info, destination)) catch |err| {
+                log.log.err("Failed to allocate main descriptor snapshot for frame {}: {}; skipping affected draws", .{ frame_index, err });
+                destination.* = null;
+                self.snapshot_failed[frame_index] = true;
+                return false;
+            };
+        }
+
+        var copies: [16]c.VkCopyDescriptorSet = undefined;
+        for (&copies, 0..) |*copy, binding| {
+            copy.* = .{
+                .sType = c.VK_STRUCTURE_TYPE_COPY_DESCRIPTOR_SET,
+                .srcSet = self.descriptor_sets[frame_index],
+                .srcBinding = @intCast(binding),
+                .dstSet = destination.*,
+                .dstBinding = @intCast(binding),
+                .descriptorCount = 1,
+            };
+        }
+        self.update_descriptor_sets_fn(self.vulkan_device.vk_device, 0, null, copies.len, &copies);
+        self.descriptor_sets[frame_index] = destination.*;
+        self.snapshot_slots[frame_index] = slots;
+        return true;
+    }
+
     pub fn updateGlobalUniforms(self: *DescriptorManager, frame_index: usize, data: *const anyopaque) !void {
         const dest = self.global_ubos_mapped[frame_index] orelse {
             log.log.err("Failed to update global uniforms: memory not mapped", .{});
@@ -335,3 +427,163 @@ pub const DescriptorManager = struct {
     // Additional methods for binding textures would go here
     // For now, we assume VulkanContext handles the complexity of gathering textures and calling a mass update
 };
+
+test "Descriptor snapshots copy on first write after binding and coalesce unbound updates" {
+    var slots = DescriptorSnapshotSlots{};
+    try std.testing.expectEqual(@as(?usize, null), try slots.writableSlot());
+    slots.seal();
+    try std.testing.expectEqual(@as(?usize, 1), try slots.writableSlot());
+    // Albedo, normal and LPV changes before the next bind share a writable set.
+    try std.testing.expectEqual(@as(?usize, null), try slots.writableSlot());
+    slots.seal();
+    try std.testing.expectEqual(@as(?usize, 2), try slots.writableSlot());
+}
+
+test "Descriptor snapshots never recycle a bound slot on capacity exhaustion" {
+    var slots = DescriptorSnapshotSlots{};
+    for (1..MAX_DESCRIPTOR_SNAPSHOTS) |i| {
+        slots.seal();
+        try std.testing.expectEqual(@as(?usize, i), try slots.writableSlot());
+    }
+    slots.seal();
+    try std.testing.expectError(error.DescriptorSnapshotCapacityExceeded, slots.writableSlot());
+    try std.testing.expectError(error.DescriptorSnapshotCapacityExceeded, slots.writableSlot());
+    try std.testing.expectEqual(MAX_DESCRIPTOR_SNAPSHOTS - 1, slots.current);
+    try std.testing.expect(slots.sealed);
+}
+
+test "Descriptor snapshots reset the retired frame without reusing its retained set" {
+    var frames = [_]DescriptorSnapshotSlots{.{}} ** rhi.MAX_FRAMES_IN_FLIGHT;
+    frames[0].seal();
+    _ = try frames[0].writableSlot();
+    frames[0].seal();
+    frames[1].seal();
+    frames[0].reset();
+    try std.testing.expectEqual(@as(?usize, null), try frames[0].writableSlot());
+    for (0..MAX_DESCRIPTOR_SNAPSHOTS - 1) |_| {
+        frames[0].seal();
+        const next = (try frames[0].writableSlot()).?;
+        try std.testing.expect(next != 1);
+    }
+    frames[0].seal();
+    try std.testing.expectError(error.DescriptorSnapshotCapacityExceeded, frames[0].writableSlot());
+    try std.testing.expectEqual(@as(?usize, 1), try frames[1].writableSlot());
+}
+
+test "Descriptor snapshots preserve instance bindings through material changes and quarantine" {
+    const render_state = @import("rhi_render_state.zig");
+    const frame_state = @import("rhi_frame_orchestration.zig");
+    const VulkanContext = @import("rhi_context_types.zig").VulkanContext;
+    const TextureResource = @import("resource_manager.zig").TextureResource;
+    const Capture = struct {
+        bindings: [3][16]usize = .{.{0} ** 16} ** 3,
+        calls: usize = 0,
+
+        // Emulate Vulkan descriptor writes/copies, not the snapshot policy.
+        fn update(device: c.VkDevice, write_count: u32, writes: [*c]const c.VkWriteDescriptorSet, copy_count: u32, copies: [*c]const c.VkCopyDescriptorSet) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(device.?));
+            self.calls += 1;
+            if (write_count > 0) {
+                for (writes[0..write_count]) |write| {
+                    const set = @intFromPtr(write.dstSet.?) - 1;
+                    self.bindings[set][write.dstBinding] = if (write.descriptorType == c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
+                        @intFromPtr(write.pBufferInfo[0].buffer.?)
+                    else
+                        @intFromPtr(write.pImageInfo[0].imageView.?);
+                }
+            }
+            if (copy_count > 0) {
+                for (copies[0..copy_count]) |copy| {
+                    self.bindings[@intFromPtr(copy.dstSet.?) - 1][copy.dstBinding] = self.bindings[@intFromPtr(copy.srcSet.?) - 1][copy.srcBinding];
+                }
+            }
+        }
+    };
+    var capture = Capture{};
+    var ctx: VulkanContext = undefined;
+    ctx.vulkan_device.vk_device = @ptrCast(&capture);
+    ctx.frames.frame_in_progress = true;
+    ctx.frames.terminal_failure = false;
+    ctx.frames.current_frame = 0;
+    ctx.resources.buffers = std.AutoHashMap(rhi.BufferHandle, VulkanBuffer).init(std.testing.allocator);
+    defer ctx.resources.buffers.deinit();
+    for ([_]rhi.BufferHandle{ 11, 22 }) |handle| {
+        try ctx.resources.buffers.put(handle, .{ .buffer = @ptrFromInt(handle), .size = 64 });
+    }
+    ctx.resources.textures = std.AutoHashMap(rhi.TextureHandle, TextureResource).init(std.testing.allocator);
+    defer ctx.resources.textures.deinit();
+    for ([_]rhi.TextureHandle{ 100, 101, 110, 111 }) |handle| {
+        try ctx.resources.textures.put(handle, .{
+            .image = null,
+            .memory = null,
+            .view = @ptrFromInt(handle),
+            .sampler = @ptrFromInt(1),
+            .width = 1,
+            .height = 1,
+            .depth = 1,
+            .format = .rgba,
+            .config = .{},
+            .is_3d = handle >= 110,
+        });
+    }
+    ctx.draw = .{ .current_texture = 100, .current_lpv_texture = 110, .dummy_texture = 100, .dummy_texture_3d = 110 };
+    ctx.shadow_system.shadow_image_views = .{null} ** rhi.SHADOW_CASCADE_COUNT;
+    ctx.shadow_system.shadow_image_view = null;
+    ctx.shadow_system.shadow_sampler = null;
+    ctx.descriptors = .{
+        .allocator = std.testing.allocator,
+        .vulkan_device = &ctx.vulkan_device,
+        .resource_manager = &ctx.resources,
+        .descriptor_pool = null,
+        .descriptor_set_layout = null,
+        .descriptor_sets = .{null} ** rhi.MAX_FRAMES_IN_FLIGHT,
+        .global_ubos = undefined,
+        .global_ubos_mapped = undefined,
+        .shadow_ubos = undefined,
+        .shadow_ubos_mapped = undefined,
+        .dummy_instance_ssbo = undefined,
+        .dummy_texture = 100,
+        .dummy_texture_3d = 110,
+        .dummy_normal_texture = 100,
+        .dummy_roughness_texture = 100,
+        .update_descriptor_sets_fn = Capture.update,
+    };
+    for (0..3) |i| ctx.descriptors.snapshot_sets[0][i] = @ptrFromInt(i + 1);
+    ctx.descriptors.descriptor_sets[0] = ctx.descriptors.snapshot_sets[0][0];
+
+    render_state.setInstanceBuffer(&ctx, 11);
+    try std.testing.expect(render_state.prepareDrawDescriptors(&ctx));
+    const first_set = ctx.descriptors.descriptor_sets[0];
+    render_state.setInstanceBuffer(&ctx, 22);
+    try std.testing.expect(render_state.prepareDrawDescriptors(&ctx));
+    const second_set = ctx.descriptors.descriptor_sets[0];
+
+    ctx.draw.current_texture = 101;
+    ctx.draw.current_lpv_texture = 111;
+    frame_state.refreshTextureDescriptors(&ctx);
+    try std.testing.expect(render_state.prepareDrawDescriptors(&ctx));
+    const third_set = ctx.descriptors.descriptor_sets[0];
+    try std.testing.expect(first_set != second_set and second_set != third_set and first_set != third_set);
+    try std.testing.expectEqual(@as(usize, 11), capture.bindings[0][5]);
+    try std.testing.expectEqual(@as(usize, 22), capture.bindings[1][5]);
+    try std.testing.expectEqual(@as(usize, 22), capture.bindings[2][5]);
+    try std.testing.expectEqual(@as(usize, 100), capture.bindings[0][1]);
+    try std.testing.expectEqual(@as(usize, 100), capture.bindings[1][1]);
+    try std.testing.expectEqual(@as(usize, 101), capture.bindings[2][1]);
+    try std.testing.expectEqual(@as(usize, 110), capture.bindings[1][11]);
+    try std.testing.expectEqual(@as(usize, 111), capture.bindings[2][11]);
+
+    const calls = capture.calls;
+    try std.testing.expect(render_state.prepareDrawDescriptors(&ctx));
+    try std.testing.expectEqual(calls, capture.calls);
+    ctx.frames.failFrame();
+    ctx.draw.current_texture = 100;
+    render_state.setInstanceBuffer(&ctx, 11);
+    frame_state.refreshTextureDescriptors(&ctx);
+    frame_state.prepareFrameState(&ctx);
+    try std.testing.expect(!render_state.prepareDrawDescriptors(&ctx));
+    try std.testing.expectEqual(calls, capture.calls);
+    try std.testing.expectEqual(third_set, ctx.descriptors.descriptor_sets[0]);
+    try std.testing.expectEqual(@as(usize, 3), ctx.descriptors.snapshot_slots[0].used);
+    try std.testing.expect(ctx.descriptors.snapshot_slots[0].sealed);
+}

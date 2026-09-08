@@ -47,11 +47,11 @@ pub const PresetConfig = struct {
 var graphics_presets: std.ArrayListUnmanaged(PresetConfig) = .empty;
 var graphics_presets_mutex: sync.Mutex = .{};
 
+/// Reloads transactionally. Use the same allocator until deinit; borrowed preset
+/// names must not outlive a successful reload or deinit.
 pub fn initPresets(allocator: std.mem.Allocator) !void {
     graphics_presets_mutex.lock();
     defer graphics_presets_mutex.unlock();
-
-    graphics_presets = std.ArrayListUnmanaged(PresetConfig).empty;
 
     // Load from assets/config/presets.json
     const content = fs.cwd().readFileAlloc("assets/config/presets.json", allocator, 1024 * 1024) catch |err| {
@@ -63,8 +63,12 @@ pub fn initPresets(allocator: std.mem.Allocator) !void {
     const parsed = try std.json.parseFromSlice([]PresetConfig, allocator, content, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
 
-    // Ensure we clean up on error
-    errdefer deinitPresetsLocked(allocator);
+    // Keep the previous presets intact if parsing or allocation fails on reload.
+    var loaded: std.ArrayListUnmanaged(PresetConfig) = .empty;
+    errdefer {
+        for (loaded.items) |preset| allocator.free(preset.name);
+        loaded.deinit(allocator);
+    }
 
     for (parsed.value) |preset| {
         var p = preset;
@@ -120,8 +124,10 @@ pub fn initPresets(allocator: std.mem.Allocator) !void {
         }
         p.name = try allocator.dupe(u8, preset.name);
         errdefer allocator.free(p.name);
-        try graphics_presets.append(allocator, p);
+        try loaded.append(allocator, p);
     }
+    deinitPresetsLocked(allocator);
+    graphics_presets = loaded;
     log.log.info("Loaded {} graphics presets", .{graphics_presets.items.len});
 }
 
@@ -182,7 +188,7 @@ fn applyConfig(settings: *Settings, config: PresetConfig) void {
     settings.clouds_enabled = config.clouds_enabled;
     settings.clouds_3d_enabled = config.clouds_3d_enabled;
     settings.render_distance = config.render_distance;
-    settings.fxaa_enabled = config.fxaa_enabled and !config.taa_enabled;
+    settings.fxaa_enabled = data.resolveFXAAEnabled(config.taa_enabled, config.fxaa_enabled);
     settings.bloom_enabled = config.bloom_enabled;
     settings.bloom_intensity = config.bloom_intensity;
 }
@@ -222,6 +228,7 @@ fn matches(settings: *const Settings, preset: PresetConfig) bool {
         std.math.approxEqAbs(f32, settings.volumetric_density, preset.volumetric_density, epsilon) and
         settings.volumetric_steps == preset.volumetric_steps and
         std.math.approxEqAbs(f32, settings.volumetric_scattering, preset.volumetric_scattering, epsilon) and
+        settings.ssao_enabled == preset.ssao_enabled and
         settings.lpv_quality_preset == preset.lpv_quality_preset and
         settings.lpv_enabled == preset.lpv_enabled and
         std.math.approxEqAbs(f32, settings.lpv_intensity, preset.lpv_intensity, epsilon) and
@@ -230,7 +237,7 @@ fn matches(settings: *const Settings, preset: PresetConfig) bool {
         settings.lpv_propagation_iterations == preset.lpv_propagation_iterations and
         settings.clouds_enabled == preset.clouds_enabled and
         settings.clouds_3d_enabled == preset.clouds_3d_enabled and
-        settings.fxaa_enabled == preset.fxaa_enabled and
+        settings.fxaa_enabled == data.resolveFXAAEnabled(preset.taa_enabled, preset.fxaa_enabled) and
         settings.bloom_enabled == preset.bloom_enabled and
         std.math.approxEqAbs(f32, settings.bloom_intensity, preset.bloom_intensity, epsilon);
 }
@@ -262,4 +269,21 @@ pub fn findAndApplyNamed(settings: *Settings, preset_name: []const u8) ?[]const 
     }
 
     return null;
+}
+
+test "preset matching uses effective FXAA and detects SSAO edits" {
+    try initPresets(std.testing.allocator);
+    defer deinitPresets(std.testing.allocator);
+
+    graphics_presets_mutex.lock();
+    defer graphics_presets_mutex.unlock();
+    var config = graphics_presets.items[1];
+    config.taa_enabled = true;
+    config.fxaa_enabled = true;
+    var settings = Settings{};
+    applyConfig(&settings, config);
+    try std.testing.expect(!settings.fxaa_enabled);
+    try std.testing.expect(matches(&settings, config));
+    settings.ssao_enabled = !settings.ssao_enabled;
+    try std.testing.expect(!matches(&settings, config));
 }

@@ -87,6 +87,7 @@ pub const ResourceManager = struct {
         }
 
         self.staging_ring = try StagingRing.init(vulkan_device, transfer_queue.DEFAULT_STAGING_CAPACITY);
+        errdefer self.staging_ring.deinit(vulkan_device.vk_device);
         log.log.info("Staging ring initialized: {}MB", .{transfer_queue.DEFAULT_STAGING_CAPACITY / (1024 * 1024)});
 
         // Buffer resources use exclusive sharing and are consumed by graphics.
@@ -280,6 +281,11 @@ pub const ResourceManager = struct {
         const properties = c.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
         const buf = try Utils.createVulkanBuffer(self.vulkan_device, size, vk_usage, properties);
+        errdefer {
+            if (buf.mapped_ptr != null) c.vkUnmapMemory(self.vulkan_device.vk_device, buf.memory);
+            c.vkDestroyBuffer(self.vulkan_device.vk_device, buf.buffer, null);
+            c.vkFreeMemory(self.vulkan_device.vk_device, buf.memory, null);
+        }
 
         const handle = self.next_buffer_handle;
         self.next_buffer_handle += 1;

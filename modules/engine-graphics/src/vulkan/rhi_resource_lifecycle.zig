@@ -72,7 +72,6 @@ pub fn destroyPostProcessResources(ctx: anytype) void {
 pub fn destroyGPassResources(ctx: anytype) void {
     const vk = ctx.vulkan_device.vk_device;
     ctx.depth_pyramid.deinit(vk);
-    destroyVelocityResources(ctx);
     ctx.ssao_system.deinit(vk, ctx.allocator, ctx.descriptors.descriptor_pool);
     if (ctx.gpass.g_depth_handle != 0) {
         ctx.resources.destroyTexture(ctx.gpass.g_depth_handle);
@@ -86,6 +85,7 @@ pub fn destroyGPassResources(ctx: anytype) void {
         c.vkDestroyFramebuffer(vk, ctx.render_pass_manager.g_framebuffer, null);
         ctx.render_pass_manager.g_framebuffer = null;
     }
+    destroyVelocityResources(ctx);
     if (ctx.render_pass_manager.g_render_pass != null) {
         c.vkDestroyRenderPass(vk, ctx.render_pass_manager.g_render_pass, null);
         ctx.render_pass_manager.g_render_pass = null;
@@ -300,6 +300,8 @@ fn transitionImagesFromUndefined(ctx: anytype, images: []const c.VkImage, layout
 
 pub fn createHDRResources(ctx: anytype) !void {
     const extent = ctx.swapchain.getExtent();
+    if (extent.width == 0 or extent.height == 0) return error.InvalidExtent;
+    errdefer destroyHDRResources(ctx);
     const format = c.VK_FORMAT_R16G16B16A16_SFLOAT;
     const sample_count: c_uint = @intCast(switch (ctx.options.msaa_samples) {
         1 => c.VK_SAMPLE_COUNT_1_BIT,

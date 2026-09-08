@@ -3,32 +3,129 @@ const testing = std.testing;
 const c = @import("c").c;
 const VulkanDevice = @import("engine-graphics").VulkanDevice;
 
-test "VulkanDevice.submitGuarded error simulation" {
-    // This test simulates the logic flow of submitGuarded by testing the error propagation
-    // and state management that would occur during a GPU loss event.
-    // Since we cannot easily force the Vulkan driver into a lost state without a mock driver,
-    // we verify the surrounding logic.
+const SubmissionStub = struct {
+    result: c.VkResult = c.VK_SUCCESS,
+    calls: u32 = 0,
+    fault_queries: u32 = 0,
+    submit_count: u32 = 0,
+    submit_info: c.VkSubmitInfo = std.mem.zeroes(c.VkSubmitInfo),
+    fence: c.VkFence = null,
 
-    const device = VulkanDevice{
-        .allocator = testing.allocator,
-        .vk_device = null,
-        .queue = null,
-        .fault_count = 0,
-    };
+    fn submit(queue: c.VkQueue, count: u32, infos: [*c]const c.VkSubmitInfo, fence: c.VkFence) callconv(.c) c.VkResult {
+        const self: *@This() = @ptrCast(@alignCast(queue.?));
+        self.calls += 1;
+        self.submit_count = count;
+        if (count == 1) self.submit_info = infos[0];
+        self.fence = fence;
+        return self.result;
+    }
 
-    // Verify initial state
+    fn faultInfo(device: c.VkDevice, _: *c.VkDeviceFaultCountsEXT, _: ?*c.VkDeviceFaultInfoEXT) callconv(.c) c.VkResult {
+        const self: *@This() = @ptrCast(@alignCast(device.?));
+        self.fault_queries += 1;
+        return c.VK_ERROR_UNKNOWN;
+    }
+
+    fn makeDevice(self: *@This()) VulkanDevice {
+        return .{
+            .allocator = testing.allocator,
+            // These tokens go exclusively to the stubs, never the Vulkan loader.
+            .queue = @ptrCast(self),
+            .vk_device = @ptrCast(self),
+            .queue_submit_fn = submit,
+            .supports_device_fault = true,
+            .vkGetDeviceFaultInfoEXT = faultInfo,
+        };
+    }
+};
+
+test "VulkanDevice.submitGuarded forwards the submission and fence to dispatch" {
+    var stub = SubmissionStub{};
+    var device = stub.makeDevice();
+    var command_buffer: c.VkCommandBuffer = @ptrCast(&stub);
+    const fence: c.VkFence = @ptrCast(&stub);
+    var info = std.mem.zeroes(c.VkSubmitInfo);
+    info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    info.commandBufferCount = 1;
+    info.pCommandBuffers = &command_buffer;
+
+    try device.submitGuarded(info, fence);
+
+    try testing.expectEqual(@as(u32, 1), stub.calls);
+    try testing.expectEqual(@as(u32, 1), stub.submit_count);
+    try testing.expectEqual(info.sType, stub.submit_info.sType);
+    try testing.expectEqual(info.commandBufferCount, stub.submit_info.commandBufferCount);
+    try testing.expectEqual(info.pCommandBuffers, stub.submit_info.pCommandBuffers);
+    try testing.expectEqual(fence, stub.fence);
+    try testing.expectEqual(@as(u32, 0), stub.fault_queries);
     try testing.expectEqual(@as(u32, 0), device.fault_count);
+    try testing.expect(device.mutex.tryLock());
+    device.mutex.unlock();
+}
 
-    // We define a helper that returns an error union
-    const Helper = struct {
-        fn mockSubmit(simulated_result: c.VkResult) !void {
-            if (simulated_result == c.VK_ERROR_DEVICE_LOST) return error.GpuLost;
-            return error.Unknown;
-        }
+test "VulkanDevice.submitGuarded counts injected device loss despite diagnostic failure" {
+    var stub = SubmissionStub{ .result = c.VK_ERROR_DEVICE_LOST };
+    var device = stub.makeDevice();
+    const info = std.mem.zeroes(c.VkSubmitInfo);
+
+    try testing.expectError(error.GpuLost, device.submitGuarded(info, null));
+    try testing.expectEqual(@as(u32, 1), stub.calls);
+    try testing.expectEqual(@as(u32, 1), stub.fault_queries);
+    try testing.expectEqual(@as(u32, 1), device.fault_count);
+    try testing.expect(device.mutex.tryLock());
+    device.mutex.unlock();
+
+    // The second failure also exercises unlocking on the error return path.
+    try testing.expectError(error.GpuLost, device.submitGuarded(info, null));
+    try testing.expectEqual(@as(u32, 2), stub.calls);
+    try testing.expectEqual(@as(u32, 2), stub.fault_queries);
+    try testing.expectEqual(@as(u32, 2), device.fault_count);
+    try testing.expectEqual(@as(u32, 0), device.recovery_success_count);
+
+    device.vkGetDeviceFaultInfoEXT = null;
+    device.supports_device_fault = false;
+    try testing.expectError(error.GpuLost, device.submitGuarded(info, null));
+    try testing.expectEqual(@as(u32, 3), stub.calls);
+    try testing.expectEqual(@as(u32, 2), stub.fault_queries);
+    try testing.expectEqual(@as(u32, 3), device.fault_count);
+}
+
+test "VulkanDevice.submitGuarded propagates injected non-device-loss errors without faults" {
+    const cases = .{
+        .{ c.VK_ERROR_OUT_OF_HOST_MEMORY, error.OutOfMemory },
+        .{ c.VK_ERROR_OUT_OF_DEVICE_MEMORY, error.OutOfMemory },
+        .{ c.VK_ERROR_INITIALIZATION_FAILED, error.InitializationFailed },
+        .{ c.VK_ERROR_UNKNOWN, error.Unknown },
     };
+    inline for (cases) |case| {
+        var stub = SubmissionStub{ .result = case[0] };
+        var device = stub.makeDevice();
+        const info = std.mem.zeroes(c.VkSubmitInfo);
 
-    // Test: VK_ERROR_DEVICE_LOST -> error.GpuLost
-    try testing.expectError(error.GpuLost, Helper.mockSubmit(c.VK_ERROR_DEVICE_LOST));
+        try testing.expectError(case[1], device.submitGuarded(info, null));
+        try testing.expectEqual(@as(u32, 1), stub.calls);
+        try testing.expectEqual(@as(u32, 0), stub.fault_queries);
+        try testing.expectEqual(@as(u32, 0), device.fault_count);
+        try testing.expect(device.mutex.tryLock());
+        device.mutex.unlock();
+
+        stub.result = c.VK_SUCCESS;
+        try device.submitGuarded(info, null);
+        try testing.expectEqual(@as(u32, 2), stub.calls);
+        try testing.expectEqual(@as(u32, 0), device.fault_count);
+    }
+}
+
+test "guarded transfer readback rejects corruption in every payload and guard word" {
+    const verify = @import("robust_demo.zig").verifyTransferReadback;
+    const expected = [_]u32{0xA5A5A5A5} ** 4 ++ [_]u32{0xDEADBEEF} ** 8 ++ [_]u32{0xA5A5A5A5} ** 4;
+    try verify(&expected);
+    try testing.expectError(error.ReadbackSizeMismatch, verify(expected[0..15]));
+    for (0..expected.len) |i| {
+        var corrupted = expected;
+        corrupted[i] ^= 1;
+        try testing.expectError(error.ReadbackMismatch, verify(&corrupted));
+    }
 }
 
 test "VulkanDevice.checkVk comprehensive mapping" {

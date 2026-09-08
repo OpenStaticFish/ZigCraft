@@ -38,7 +38,12 @@ pub const StagingRing = struct {
             c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
             c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         );
-        if (buf.buffer == null or buf.mapped_ptr == null) return error.BackendError;
+        errdefer {
+            if (buf.mapped_ptr != null and buf.memory != null) c.vkUnmapMemory(device.vk_device, buf.memory);
+            if (buf.buffer != null) c.vkDestroyBuffer(device.vk_device, buf.buffer, null);
+            if (buf.memory != null) c.vkFreeMemory(device.vk_device, buf.memory, null);
+        }
+        if (buf.buffer == null or buf.memory == null or buf.mapped_ptr == null or buf.size < capacity) return error.BackendError;
 
         var ring = StagingRing{
             .buffer = buf.buffer,
@@ -164,6 +169,7 @@ pub const TransferQueue = struct {
             .family_index = transfer_family,
             .is_dedicated = is_dedicated,
         };
+        errdefer self.deinit(device.vk_device);
         @memset(&self.transfer_ready, false);
         @memset(&self.transfer_submitted, false);
         @memset(&self.pending_copy_count, 0);

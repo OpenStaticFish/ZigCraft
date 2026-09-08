@@ -221,7 +221,7 @@ pub const RenderSystem = struct {
             .cloud_pass = .{},
             .opaque_pass = undefined,
             .entity_pass = .{},
-            .taa_pass = .{ .enabled = !disable_taa and config.taa_enabled },
+            .taa_pass = .{ .enabled = !disable_taa },
             .bloom_pass = .{ .enabled = !disable_bloom and config.bloom_enabled },
             .post_process_pass = .{},
             .fxaa_pass = .{ .enabled = !disable_fxaa and config.fxaa_enabled },

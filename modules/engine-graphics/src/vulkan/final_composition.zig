@@ -58,8 +58,8 @@ test "full-screen replacement and overlay have distinct load contracts" {
     const replacement = attachmentContract(.full_screen_replace, layout);
     const overlay = attachmentContract(.overlay, layout);
 
-    try @import("std").testing.expectEqual(c.VK_ATTACHMENT_LOAD_OP_DONT_CARE, replacement.load_op);
-    try @import("std").testing.expectEqual(c.VK_ATTACHMENT_LOAD_OP_LOAD, overlay.load_op);
+    try @import("std").testing.expectEqual(@as(c.VkAttachmentLoadOp, c.VK_ATTACHMENT_LOAD_OP_DONT_CARE), replacement.load_op);
+    try @import("std").testing.expectEqual(@as(c.VkAttachmentLoadOp, c.VK_ATTACHMENT_LOAD_OP_LOAD), overlay.load_op);
     try @import("std").testing.expectEqual(layout, replacement.final_layout);
     try @import("std").testing.expectEqual(layout, overlay.initial_layout);
 }
@@ -71,7 +71,7 @@ test "final composition records the actual image and layout" {
     final_image.set(@ptrFromInt(1), 2, c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     try @import("std").testing.expect(final_image.isCurrentImage(2));
     try @import("std").testing.expect(!final_image.isCurrentImage(1));
-    try @import("std").testing.expectEqual(c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, final_image.layout);
+    try @import("std").testing.expectEqual(@as(c.VkImageLayout, c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL), final_image.layout);
 
     final_image.clear();
     try @import("std").testing.expect(!final_image.isCurrentImage(2));

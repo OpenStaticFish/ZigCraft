@@ -149,7 +149,7 @@ test "recordVisible records first allocated mesh with zero vertices" {
     var diagnostics = diagnostics_mod.CpuCullDiagnostics{};
     var data = makeChunkData(testing.allocator, 0, 0);
     defer deinitChunkData(&data);
-    data.render.mesh.solid_allocation = .{ .offset = 0, .count = 0 };
+    data.render.mesh.solid_allocation = .{ .offset = 0, .count = 0, .handle = 1 };
 
     diagnostics.recordVisible(11, 12, &data);
 
@@ -163,7 +163,7 @@ test "recordVisible does not flag chunks with vertices" {
     var diagnostics = diagnostics_mod.CpuCullDiagnostics{};
     var data = makeChunkData(testing.allocator, 0, 0);
     defer deinitChunkData(&data);
-    data.render.mesh.solid_allocation = .{ .offset = 0, .count = 12 };
+    data.render.mesh.solid_allocation = .{ .offset = 0, .count = 12, .handle = 1 };
 
     diagnostics.recordVisible(1, 2, &data);
 
@@ -200,7 +200,7 @@ test "collectBoundarySummary reports renderable stored and missing boundary chun
     var missing_text: [256]u8 = undefined;
 
     const renderable = try storage.getOrCreate(1, 0);
-    renderable.render.mesh.solid_allocation = .{ .offset = 0, .count = 24 };
+    renderable.render.mesh.solid_allocation = .{ .offset = 0, .count = 24, .handle = 1 };
     const no_mesh = try storage.getOrCreate(0, 1);
     no_mesh.render.mesh.ready = false;
 
@@ -241,7 +241,7 @@ test "logFrame handles missing chunk detail with and without storage entry" {
 
     const stored = try storage.getOrCreate(1, 0);
     stored.chunk.state = .renderable;
-    stored.render.mesh.solid_allocation = .{ .offset = 0, .count = 12 };
+    stored.render.mesh.solid_allocation = .{ .offset = 0, .count = 12, .handle = 1 };
 
     diagnostics.logFrame(&storage, 1, 0, 0, 1, 60, 0);
 }
@@ -252,7 +252,7 @@ test "logFrame boundary traversal handles mixed stored and missing chunks" {
     defer storage.deinitWithoutRHI();
 
     const renderable = try storage.getOrCreate(1, 0);
-    renderable.render.mesh.solid_allocation = .{ .offset = 0, .count = 24 };
+    renderable.render.mesh.solid_allocation = .{ .offset = 0, .count = 24, .handle = 1 };
     const no_mesh = try storage.getOrCreate(0, 1);
     no_mesh.render.mesh.ready = false;
 

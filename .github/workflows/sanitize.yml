@@ -37,7 +37,7 @@ jobs:
           name: Sanitizer Unit Test (${{ matrix.optimize }})
           timeout: 35m
           log-file: sanitize-${{ matrix.optimize }}.log
-          command: devenv shell --profile unit -- zig build -Dsanitize=address -Doptimize=${{ matrix.optimize }} test
+          command: devenv shell --profile unit -- zig build -Dsanitize=c -Doptimize=${{ matrix.optimize }} test
 
       - name: Upload sanitizer log
         if: failure()

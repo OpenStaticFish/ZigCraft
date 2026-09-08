@@ -160,8 +160,14 @@ test "telemetry rows do not overlap" {
 
     try testing.expect(telemetryRowY(.sun) < telemetryRowY(.role));
     try testing.expect(telemetryRowY(.role) < telemetryRowY(.gpu_faults));
-    try testing.expectEqual(@as(f32, 235.0), telemetryRowY(.role));
-    try testing.expectEqual(@as(f32, 255.0), telemetryRowY(.gpu_faults));
+    try testing.expectEqual(@as(f32, 55.0), telemetryRowY(.position));
+
+    // Removing the LOD row moved later rows up, but every row still needs its
+    // full 20-pixel slot, including the optional GPU-fault row.
+    const rows = std.enums.values(TelemetryRow);
+    for (rows[0 .. rows.len - 1], rows[1..]) |previous, next| {
+        try testing.expectEqual(@as(f32, 20.0), telemetryRowY(next) - telemetryRowY(previous));
+    }
 }
 
 test "rgba8 normalizes color channels" {

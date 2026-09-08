@@ -2,45 +2,10 @@ name: Build
 
 on:
   push:
-    branches: [dev]
-    paths:
-      - "src/**"
-      - "modules/**"
-      - "libs/**"
-      - "assets/shaders/**"
-      - "scripts/**"
-      - "docs/benchmarks/**"
-      - "build.zig"
-      - "build.zig.zon"
-      - "devenv.nix"
-      - "devenv.yaml"
-      - "devenv.lock"
-      - ".github/actions/setup-devenv/**"
-      - ".github/actions/setup-zig-cache/**"
-      - ".github/actions/setup-lavapipe/**"
-      - ".github/vulkan/**"
-      - ".github/workflows/build.yml"
-      - ".github/workflows/benchmark.yml"
+    branches: [dev, main]
+    tags: ['v*']
   pull_request:
-    branches: [dev]
-    paths:
-      - "src/**"
-      - "modules/**"
-      - "libs/**"
-      - "assets/shaders/**"
-      - "scripts/**"
-      - "docs/benchmarks/**"
-      - "build.zig"
-      - "build.zig.zon"
-      - "devenv.nix"
-      - "devenv.yaml"
-      - "devenv.lock"
-      - ".github/actions/setup-devenv/**"
-      - ".github/actions/setup-zig-cache/**"
-      - ".github/actions/setup-lavapipe/**"
-      - ".github/vulkan/**"
-      - ".github/workflows/build.yml"
-      - ".github/workflows/benchmark.yml"
+    branches: [dev, main]
   workflow_dispatch:
     inputs:
       ref:
@@ -69,7 +34,7 @@ jobs:
       pull-requests: read
     runs-on: ubuntu-latest
     outputs:
-      code_changes: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code_changes }}
+      code_changes: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'push' || github.base_ref == 'main' || steps.filter.outputs.code_changes }}
       platform_changes: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.platform_changes }}
     steps:
       - uses: actions/checkout@v4
@@ -88,14 +53,13 @@ jobs:
               - 'assets/shaders/**'
               - 'scripts/**'
               - 'docs/benchmarks/**'
+              - 'docs/shaders/**'
               - 'build.zig'
               - 'build.zig.zon'
               - 'devenv.nix'
               - 'devenv.yaml'
               - 'devenv.lock'
-              - '.github/actions/setup-devenv/**'
-              - '.github/actions/setup-zig-cache/**'
-              - '.github/actions/setup-lavapipe/**'
+              - '.github/actions/**'
               - '.github/vulkan/**'
               - '.github/workflows/build.yml'
               - '.github/workflows/benchmark.yml'
@@ -119,7 +83,7 @@ jobs:
         uses: ./.github/actions/setup-devenv
 
       - name: Check Zig formatting
-        run: devenv shell --profile unit -- zig fmt --check src/ modules/
+        run: devenv shell --profile unit -- zig fmt --check src/ modules/ build.zig
 
   build:
     permissions:
@@ -285,13 +249,24 @@ jobs:
 
       - name: Fail on Vulkan validation log errors
         if: needs.changes.outputs.code_changes == 'true'
-        run: |
-          set -euo pipefail
-          if rg -n -e 'Vulkan validation error|Validation Error:|VUID-' integration-test.log world-smoke-test.log; then
-            echo "Vulkan validation errors were found in integration logs." >&2
-            exit 1
-          fi
-          echo "No Vulkan validation errors found in integration logs."
+        run: bash scripts/check_vulkan_log.sh integration-test.log world-smoke-test.log
+
+      - name: Run present-enabled Lavapipe smoke test
+        if: needs.changes.outputs.code_changes == 'true'
+        uses: ./.github/actions/run-with-log
+        with:
+          name: Present Smoke Test
+          timeout: 10m
+          log-file: present-smoke-test.log
+          command: devenv shell --profile graphics -- zig build run -Dsmoke-test=true -Dskip-present=false -Dauto-world=test
+        env:
+          ZIGCRAFT_SMOKE_FRAMES: "3"
+          ZIGCRAFT_SAFE_MODE: "1"
+          SDL_VIDEODRIVER: wayland
+
+      - name: Validate present-enabled smoke log
+        if: needs.changes.outputs.code_changes == 'true'
+        run: bash scripts/check_vulkan_log.sh present-smoke-test.log
 
       - name: Stop headless Wayland compositor
         if: always() && needs.changes.outputs.code_changes == 'true'
@@ -305,6 +280,7 @@ jobs:
           path: |
             integration-test.log
             world-smoke-test.log
+            present-smoke-test.log
             weston.log
           if-no-files-found: ignore
           retention-days: 7

@@ -8,6 +8,8 @@
         "assets",
         "libs",
         "modules",
+        "scripts",
+        "docs",
         "build.zig",
         "build.zig.zon",
     },

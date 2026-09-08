@@ -23,7 +23,7 @@ env:
   GIT_CONFIG_COUNT: 1
   GIT_CONFIG_KEY_0: init.defaultBranch
   GIT_CONFIG_VALUE_0: main
-  BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
+  BENCHER_ENABLED: ${{ secrets.BENCHER_API_TOKEN != '' && secrets.BENCHER_PROJECT != '' }}
   BENCHER_PROJECT: ${{ secrets.BENCHER_PROJECT }}
   BENCHER_DASHBOARD_URL: ${{ vars.BENCHER_DASHBOARD_URL }}
 
@@ -111,10 +111,13 @@ jobs:
           BENCHMARK_DURATION: ${{ github.event_name == 'schedule' && '60' || github.event_name == 'workflow_dispatch' && github.event.inputs.duration || '5' }}
 
       - name: Validate benchmark results
+        id: validate_results
         if: steps.gate.outputs.run == 'true'
         run: |
-          for result in benchmark-results/*/*.json; do
-            bash scripts/validate_benchmark_artifact.sh --result "$result"
+          for preset in low medium high; do
+            for scenario in stationary traversal rapid-turn teleport-eviction; do
+              bash scripts/validate_benchmark_artifact.sh --result "benchmark-results/$preset/$scenario.json"
+            done
           done
 
       - name: Stop headless Wayland compositor
@@ -122,20 +125,31 @@ jobs:
         uses: ./.github/actions/stop-weston
 
       - name: Reject Vulkan validation errors in benchmark log
+        id: validate_vulkan
         if: steps.gate.outputs.run == 'true'
+        run: bash scripts/check_vulkan_log.sh benchmark.log
+
+      - name: Require complete benchmark acceptance
+        id: acceptance
+        if: always() && steps.gate.outputs.run == 'true'
+        env:
+          RUN: ${{ steps.run_benchmark.outcome }}
+          RESULTS: ${{ steps.validate_results.outcome }}
+          VULKAN: ${{ steps.validate_vulkan.outcome }}
         run: |
-          if rg -n -i 'vuid-|validation.*(error|failed)|(error|failed).*validation' benchmark.log; then
-            printf 'Vulkan validation errors were reported during the benchmark.\n' >&2
+          if [[ "$RUN" != success || "$RESULTS" != success || "$VULKAN" != success ]]; then
+            echo "::error::Benchmark acceptance failed: run=$RUN results=$RESULTS vulkan=$VULKAN"
             exit 1
           fi
 
       - name: Install Bencher CLI
-        if: steps.gate.outputs.run == 'true' && env.BENCHER_API_TOKEN != '' && env.BENCHER_PROJECT != ''
+        if: github.event_name != 'pull_request' && steps.acceptance.outcome == 'success' && env.BENCHER_ENABLED == 'true'
         uses: bencherdev/bencher@30a740a2e4246560b1a5fd424057d84aa2b188d6
 
       - name: Publish Bencher trends
-        if: steps.gate.outputs.run == 'true' && env.BENCHER_API_TOKEN != '' && env.BENCHER_PROJECT != ''
+        if: github.event_name != 'pull_request' && steps.acceptance.outcome == 'success' && env.BENCHER_ENABLED == 'true'
         env:
+          BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
           BENCHER_BRANCH: ${{ github.head_ref || github.ref_name }}
         run: |
           for preset in low medium high; do for scenario in stationary traversal rapid-turn teleport-eviction; do
@@ -150,7 +164,7 @@ jobs:
           done; done
 
       - name: Comment Bencher dashboard
-        if: steps.gate.outputs.run == 'true' && github.event_name == 'pull_request' && env.BENCHER_DASHBOARD_URL != ''
+        if: steps.acceptance.outcome == 'success' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && env.BENCHER_DASHBOARD_URL != ''
         uses: actions/github-script@v9
         with:
           script: |
@@ -173,22 +187,22 @@ jobs:
           retention-days: 30
 
       - name: Publish commit status
-        if: always() && steps.gate.outputs.run == 'true'
+        if: always() && steps.gate.outputs.run == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         uses: actions/github-script@v9
         env:
-          BENCHMARK_RUN_OUTCOME: ${{ steps.run_benchmark.outcome }}
+          BENCHMARK_ACCEPTANCE: ${{ steps.acceptance.outcome }}
+          BENCHMARK_JOB_STATUS: ${{ job.status }}
         with:
           script: |
-            const runOutcome = process.env.BENCHMARK_RUN_OUTCOME;
-            const failed = runOutcome === 'failure';
+            const failed = process.env.BENCHMARK_ACCEPTANCE !== 'success' || process.env.BENCHMARK_JOB_STATUS !== 'success';
             const description = failed
-              ? 'Benchmark regression or runtime failure'
-              : 'Benchmark completed';
+              ? 'Benchmark acceptance or publication failed'
+              : 'Benchmark runtime, artifacts and Vulkan checks passed';
 
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              sha: context.sha,
+              sha: context.payload.pull_request?.head.sha || context.sha,
               state: failed ? 'failure' : 'success',
               context: 'performance/benchmark',
               description,

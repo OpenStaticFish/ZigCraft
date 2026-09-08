@@ -16,6 +16,13 @@ const PUSH_CONSTANT_SIZE_WATER: u32 = 256;
 
 pub const WATER_LEVEL: f32 = 64.0;
 
+pub fn waterMultisampling(msaa_samples: u8) c.VkPipelineMultisampleStateCreateInfo {
+    var state = std.mem.zeroes(c.VkPipelineMultisampleStateCreateInfo);
+    state.sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    state.rasterizationSamples = @import("render_pass_manager.zig").getMSAASampleCountFlag(msaa_samples);
+    return state;
+}
+
 pub const WaterSystem = struct {
     allocator: std.mem.Allocator = undefined,
 
@@ -103,6 +110,7 @@ pub const WaterSystem = struct {
         if (self.initialized and self.extent.width == half_w and self.extent.height == half_h) return;
 
         self.destroyResources(device);
+        errdefer self.destroyResources(device);
         self.extent = .{ .width = half_w, .height = half_h };
 
         var color_desc = std.mem.zeroes(c.VkAttachmentDescription);
@@ -278,7 +286,7 @@ pub const WaterSystem = struct {
         log.log.info("WaterSystem: reflection target created ({}x{})", .{ half_w, half_h });
     }
 
-    pub fn createWaterPipeline(self: *WaterSystem, allocator: std.mem.Allocator, device: c.VkDevice, main_render_pass: c.VkRenderPass) !void {
+    pub fn createWaterPipeline(self: *WaterSystem, allocator: std.mem.Allocator, device: c.VkDevice, main_render_pass: c.VkRenderPass, msaa_samples: u8) !void {
         if (self.water_pipeline_layout == null) return;
         if (main_render_pass == null) return error.InvalidRenderPass;
 
@@ -332,9 +340,7 @@ pub const WaterSystem = struct {
         rasterizer.cullMode = c.VK_CULL_MODE_NONE;
         rasterizer.frontFace = c.VK_FRONT_FACE_CLOCKWISE;
 
-        var multisampling = std.mem.zeroes(c.VkPipelineMultisampleStateCreateInfo);
-        multisampling.sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-        multisampling.rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT;
+        const multisampling = waterMultisampling(msaa_samples);
 
         var depth_stencil = std.mem.zeroes(c.VkPipelineDepthStencilStateCreateInfo);
         depth_stencil.sType = c.VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -384,7 +390,14 @@ pub const WaterSystem = struct {
         pipeline_info.renderPass = main_render_pass;
         pipeline_info.subpass = 0;
 
-        try Utils.checkVk(c.vkCreateGraphicsPipelines(device, null, 1, &pipeline_info, null, &self.water_pipeline));
+        var pipeline: c.VkPipeline = null;
+        try Utils.checkVk(c.vkCreateGraphicsPipelines(device, null, 1, &pipeline_info, null, &pipeline));
+        errdefer c.vkDestroyPipeline(device, pipeline, null);
+        if (self.water_pipeline != null) {
+            try Utils.checkVk(c.vkDeviceWaitIdle(device));
+            c.vkDestroyPipeline(device, self.water_pipeline, null);
+        }
+        self.water_pipeline = pipeline;
         log.log.info("WaterSystem: water pipeline created", .{});
     }
 
@@ -469,6 +482,7 @@ pub const WaterSystem = struct {
     }
 
     pub fn beginReflectionPass(self: *WaterSystem, command_buffer: c.VkCommandBuffer) void {
+        if (command_buffer == null or self.extent.width == 0 or self.extent.height == 0) return;
         if (self.reflection_render_pass == null or self.reflection_framebuffer == null) return;
 
         self.pass_active = true;

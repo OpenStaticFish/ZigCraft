@@ -1,0 +1,2 @@
+# Runtime binaries are validated without regeneration, including on fresh clones.
+!*.spv
