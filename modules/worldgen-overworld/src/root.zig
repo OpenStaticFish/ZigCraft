@@ -1,6 +1,10 @@
 const std = @import("std");
 const worldgen_api = @import("worldgen-api");
 
+test {
+    _ = @import("test_root.zig");
+}
+
 pub const biome = @import("biome.zig");
 pub const biome_color_provider = @import("biome_color_provider.zig");
 pub const biome_edge_detector = @import("biome_edge_detector.zig");

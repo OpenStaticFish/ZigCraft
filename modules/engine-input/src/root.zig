@@ -1,4 +1,8 @@
 pub const input = @import("input.zig");
+
+test {
+    _ = @import("test_root.zig");
+}
 pub const interfaces = @import("interfaces.zig");
 pub const input_tests = @import("input_tests.zig");
 

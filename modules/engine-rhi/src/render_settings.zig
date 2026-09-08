@@ -28,8 +28,10 @@ pub const RenderSettingsAdapter = struct {
         .setFilmGrainIntensity = setFilmGrainIntensity,
         .setVolumetricDensity = setVolumetricDensity,
         .setDebugShadowView = setDebugShadowView,
+        .setShadowDebugChannel = setShadowDebugChannel,
         .setShadowResolution = setShadowResolution,
         .setMSAA = setMSAA,
+        .setDynamicResolution = setDynamicResolution,
     };
 
     fn setWireframe(ptr: *anyopaque, enabled: bool) void {
@@ -105,6 +107,16 @@ pub const RenderSettingsAdapter = struct {
     fn setDebugShadowView(ptr: *anyopaque, enabled: bool) void {
         const self: *RenderSettingsAdapter = @ptrCast(@alignCast(ptr));
         self.rhi.options().setDebugShadowView(enabled);
+    }
+
+    fn setShadowDebugChannel(ptr: *anyopaque, channel: u32) void {
+        const self: *RenderSettingsAdapter = @ptrCast(@alignCast(ptr));
+        self.rhi.options().setShadowDebugChannel(channel);
+    }
+
+    fn setDynamicResolution(ptr: *anyopaque, enabled: bool, min_scale: f32, max_scale: f32, target_fps: u32) void {
+        const self: *RenderSettingsAdapter = @ptrCast(@alignCast(ptr));
+        self.rhi.options().setDynamicResolution(enabled, min_scale, max_scale, target_fps);
     }
 
     fn setShadowResolution(ptr: *anyopaque, resolution: u32) void {

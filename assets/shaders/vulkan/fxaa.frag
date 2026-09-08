@@ -23,7 +23,8 @@ float luminance(vec3 color) {
 void main() {
     vec2 texelSize = params.texelSize;
     
-    // Sample center and 4 neighbors
+    // Keep filtered reads: sRGB sampler conversion/interpolation can differ
+    // from texelFetch even at nominal pixel centres on software Vulkan.
     vec3 rgbNW = texture(uColorBuffer, inUV + vec2(-1.0, -1.0) * texelSize).rgb;
     vec3 rgbNE = texture(uColorBuffer, inUV + vec2( 1.0, -1.0) * texelSize).rgb;
     vec3 rgbSW = texture(uColorBuffer, inUV + vec2(-1.0,  1.0) * texelSize).rgb;
@@ -55,6 +56,12 @@ void main() {
     // Scale direction based on intensity
     float rcpDirMin = 1.0 / (min(abs(dir.x), abs(dir.y)) + dirReduce);
     dir = min(vec2(params.fxaaSpanMax), max(vec2(-params.fxaaSpanMax), dir * rcpDirMin)) * texelSize;
+
+    // All four edge taps coincide with the centre only for exactly zero dir.
+    if (all(equal(dir, vec2(0.0)))) {
+        outColor = vec4(rgbM, 1.0);
+        return;
+    }
     
     // Sample along the edge direction
     vec3 rgbA = 0.5 * (

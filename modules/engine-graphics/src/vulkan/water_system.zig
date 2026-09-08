@@ -16,6 +16,13 @@ const PUSH_CONSTANT_SIZE_WATER: u32 = 256;
 
 pub const WATER_LEVEL: f32 = 64.0;
 
+pub fn waterMultisampling(msaa_samples: u8) c.VkPipelineMultisampleStateCreateInfo {
+    var state = std.mem.zeroes(c.VkPipelineMultisampleStateCreateInfo);
+    state.sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    state.rasterizationSamples = @import("render_pass_manager.zig").getMSAASampleCountFlag(msaa_samples);
+    return state;
+}
+
 pub const WaterSystem = struct {
     allocator: std.mem.Allocator = undefined,
 
@@ -103,6 +110,7 @@ pub const WaterSystem = struct {
         if (self.initialized and self.extent.width == half_w and self.extent.height == half_h) return;
 
         self.destroyResources(device);
+        errdefer self.destroyResources(device);
         self.extent = .{ .width = half_w, .height = half_h };
 
         var color_desc = std.mem.zeroes(c.VkAttachmentDescription);
@@ -278,7 +286,7 @@ pub const WaterSystem = struct {
         log.log.info("WaterSystem: reflection target created ({}x{})", .{ half_w, half_h });
     }
 
-    pub fn createWaterPipeline(self: *WaterSystem, allocator: std.mem.Allocator, device: c.VkDevice, main_render_pass: c.VkRenderPass) !void {
+    pub fn createWaterPipeline(self: *WaterSystem, allocator: std.mem.Allocator, device: c.VkDevice, main_render_pass: c.VkRenderPass, msaa_samples: u8) !void {
         if (self.water_pipeline_layout == null) return;
         if (main_render_pass == null) return error.InvalidRenderPass;
 
@@ -332,9 +340,7 @@ pub const WaterSystem = struct {
         rasterizer.cullMode = c.VK_CULL_MODE_NONE;
         rasterizer.frontFace = c.VK_FRONT_FACE_CLOCKWISE;
 
-        var multisampling = std.mem.zeroes(c.VkPipelineMultisampleStateCreateInfo);
-        multisampling.sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-        multisampling.rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT;
+        const multisampling = waterMultisampling(msaa_samples);
 
         var depth_stencil = std.mem.zeroes(c.VkPipelineDepthStencilStateCreateInfo);
         depth_stencil.sType = c.VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -384,7 +390,14 @@ pub const WaterSystem = struct {
         pipeline_info.renderPass = main_render_pass;
         pipeline_info.subpass = 0;
 
-        try Utils.checkVk(c.vkCreateGraphicsPipelines(device, null, 1, &pipeline_info, null, &self.water_pipeline));
+        var pipeline: c.VkPipeline = null;
+        try Utils.checkVk(c.vkCreateGraphicsPipelines(device, null, 1, &pipeline_info, null, &pipeline));
+        errdefer c.vkDestroyPipeline(device, pipeline, null);
+        if (self.water_pipeline != null) {
+            try Utils.checkVk(c.vkDeviceWaitIdle(device));
+            c.vkDestroyPipeline(device, self.water_pipeline, null);
+        }
+        self.water_pipeline = pipeline;
         log.log.info("WaterSystem: water pipeline created", .{});
     }
 
@@ -460,6 +473,7 @@ pub const WaterSystem = struct {
             &color_blending,
             c.VK_SAMPLE_COUNT_1_BIT,
             null,
+            true,
         );
 
         self.reflection_terrain_pipeline = owner.terrain_pipeline;
@@ -469,6 +483,7 @@ pub const WaterSystem = struct {
     }
 
     pub fn beginReflectionPass(self: *WaterSystem, command_buffer: c.VkCommandBuffer) void {
+        if (command_buffer == null or self.extent.width == 0 or self.extent.height == 0) return;
         if (self.reflection_render_pass == null or self.reflection_framebuffer == null) return;
 
         self.pass_active = true;
@@ -519,9 +534,48 @@ pub const WaterSystem = struct {
     }
 
     pub fn computeReflectedViewProj(_: *WaterSystem, view: Mat4, proj: Mat4, camera_pos: Vec3) Mat4 {
+        // terrain.vert specializes the same P * V * T * S transform without
+        // replacing the main camera's already-recorded global uniforms.
         const reflected_offset_y = 2.0 * (WATER_LEVEL - camera_pos.y);
         const reflect_matrix = Mat4.translate(Vec3.init(0.0, reflected_offset_y, 0.0)).multiply(Mat4.scale(Vec3.init(1.0, -1.0, 1.0)));
         const reflected_view = view.multiply(reflect_matrix);
         return proj.multiply(reflected_view);
     }
 };
+
+test "reflection projection matches mirrored world points and removes main TAA jitter" {
+    var water: WaterSystem = .{};
+    const proj = Mat4.perspectiveReverseZ(1.2, 16.0 / 9.0, 0.1, 1024.0);
+    const view = Mat4.lookAt(Vec3.zero, Vec3.init(0.3, -0.2, -1.0), Vec3.up);
+    for ([_]Vec3{ Vec3.init(-128.5, 80, -256.25), Vec3.init(32, 48, -16), Vec3.init(-4, 64, 7), Vec3.init(-20, -8, -30) }) |camera| {
+        const reflected = water.computeReflectedViewProj(view, proj, camera);
+        for ([_]Vec3{ Vec3.init(-140, 70, -300), Vec3.init(40, 60, -80), Vec3.init(-7, -16, -120) }) |point| {
+            const relative = point.sub(camera);
+            const mirrored = Vec3.init(relative.x, 2.0 * (WATER_LEVEL - camera.y) - relative.y, relative.z);
+            const expected = reflected.transformPoint(relative);
+            // Independent absolute-world construction: mirror geometry about sea
+            // level, then subtract the original eye and use the ordinary camera.
+            const absolute_mirror = Vec3.init(point.x, 2.0 * WATER_LEVEL - point.y, point.z);
+            const actual = proj.multiply(view).transformPoint(absolute_mirror.sub(camera));
+            try std.testing.expectApproxEqAbs(expected.x, actual.x, 0.0001);
+            try std.testing.expectApproxEqAbs(expected.y, actual.y, 0.0001);
+            try std.testing.expectApproxEqAbs(expected.z, actual.z, 0.0001);
+            for ([_]Vec3{ Vec3.zero, Vec3.init(0.5 / 1920.0, -0.75 / 1080.0, 0) }) |jitter| {
+                const vp = Mat4.translate(jitter).multiply(proj).multiply(view);
+                var ndc = vp.transformPoint(mirrored);
+                var recovered: [2]f32 = .{ 0, 0 };
+                for (0..2) |axis| for (0..3) |k| {
+                    recovered[axis] += vp.data[k][axis] * vp.data[k][3];
+                };
+                ndc.x -= recovered[0];
+                ndc.y -= recovered[1];
+                try std.testing.expectApproxEqAbs(expected.x, ndc.x, 0.0001);
+                try std.testing.expectApproxEqAbs(expected.y, ndc.y, 0.0001);
+                try std.testing.expectApproxEqAbs(expected.z, ndc.z, 0.0001);
+            }
+            const reflected_eye = Vec3.init(camera.x, 2.0 * WATER_LEVEL - camera.y, camera.z);
+            const eye_relative = Vec3.init(0, 2.0 * (WATER_LEVEL - camera.y), 0);
+            try std.testing.expectApproxEqAbs(reflected_eye.sub(point).length(), eye_relative.sub(relative).length(), 0.0001);
+        }
+    }
+}

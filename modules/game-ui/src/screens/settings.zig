@@ -8,7 +8,6 @@ const Screen = @import("../screen.zig");
 const IScreen = Screen.IScreen;
 const EngineContext = Screen.EngineContext;
 const settings_pkg = @import("game-core").settings;
-const apply_logic = settings_pkg.apply_logic;
 const Settings = settings_pkg.Settings;
 
 const PANEL_WIDTH_MAX = 1360.0;
@@ -246,7 +245,7 @@ fn drawDisplayTab(ui: *UISystem, ctx: EngineContext, settings: anytype, rs: anyt
 
     if (drawToggleRow(ui, .{ .x = layout.left_x, .y = y_left, .width = layout.col_w, .height = row_h }, "VSYNC", "Lock presentation to display refresh.", settings.vsync, label_scale, value_scale, mouse_x, mouse_y, mouse_clicked, scale)) {
         settings.vsync = !settings.vsync;
-        apply_logic.applyToRenderSettings(settings, rs);
+        SettingsUi.applyChangedSetting("vsync", settings, rs);
     }
 
     var y_right = if (layout.two_column) layout.top_y else y_left + row_h + 22.0 * scale;
@@ -336,7 +335,7 @@ fn drawRenderingTab(ui: *UISystem, self: *SettingsScreen, ctx: EngineContext, se
     if (rowVisible(y_left, row_h, top, bottom)) {
         if (drawToggleRow(ui, .{ .x = layout.left_x, .y = y_left, .width = layout.col_w, .height = row_h }, "WIREFRAME", "Debug mesh visibility.", settings.wireframe_enabled, label_scale, value_scale, mouse_x, mouse_y, mouse_clicked, scale)) {
             settings.wireframe_enabled = !settings.wireframe_enabled;
-            apply_logic.applyToRenderSettings(settings, rs);
+            SettingsUi.applyChangedSetting("wireframe_enabled", settings, rs);
         }
     }
     y_left += row_h + row_gap;

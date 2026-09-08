@@ -1,19 +1,18 @@
 const std = @import("std");
-const testing = std.testing;
-const fs = @import("fs");
-const c = @import("c").c;
 
 pub fn main(init: std.process.Init) !void {
-    std.debug.print("Running integration tests...\n", .{});
+    std.debug.print("Running guarded transfer/readback smoke (not shader robustness verification)...\n", .{});
 
     const allocator = init.gpa;
 
-    // Find the robust-demo executable
-    // Typically in zig-out/bin/robust-demo or similar
-    const robust_demo_path = try findExecutable(allocator, "robust-demo");
-    defer allocator.free(robust_demo_path);
-
-    std.debug.print("Found robust-demo at: {s}\n", .{robust_demo_path});
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len != 2) {
+        std.debug.print("Usage: test-robustness <built robust-demo artifact>\n", .{});
+        return error.MissingDemoArtifact;
+    }
+    // The build must pass addArtifactArg(robust_demo), never a stale installed binary.
+    const robust_demo_path = args[1];
+    std.debug.print("Testing robust-demo artifact: {s}\n", .{robust_demo_path});
 
     var argv_buffer: [2][]const u8 = undefined;
     const argv: []const []const u8 = if (init.environ_map.get("ZIGCRAFT_DYNAMIC_LINKER")) |dynamic_linker| blk: {
@@ -28,11 +27,33 @@ pub fn main(init: std.process.Init) !void {
         break :blk argv_buffer[0..1];
     };
 
-    // Run the demo
-    const run_result = try std.process.run(allocator, init.io, .{
+    const Outcome = union(enum) {
+        demo: anyerror!void,
+        deadline: std.Io.Cancelable!void,
+    };
+    var outcomes: [2]Outcome = undefined;
+    var race = std.Io.Select(Outcome).init(init.io, &outcomes);
+    // runDemo owns its captured output. Cancellation also kills/reaps its child,
+    // including when the child closes both pipes but has not actually exited.
+    defer race.cancelDiscard();
+    try race.concurrent(.deadline, std.Io.sleep, .{ init.io, .fromSeconds(30), .awake });
+    try race.concurrent(.demo, runDemo, .{ allocator, init.io, argv });
+    switch (try race.await()) {
+        .demo => |result| try result,
+        .deadline => |result| {
+            try result;
+            std.debug.print("Guarded transfer smoke exceeded its 30-second deadline.\n", .{});
+            return error.DemoTimeout;
+        },
+    }
+    std.debug.print("Guarded transfer/readback smoke passed; shader OOB behavior remains untested.\n", .{});
+}
+
+fn runDemo(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8) !void {
+    const run_result = try std.process.run(allocator, io, .{
         .argv = argv,
-        .stdout_limit = .limited(4096),
-        .stderr_limit = .limited(4096),
+        .stdout_limit = .limited(64 * 1024),
+        .stderr_limit = .limited(64 * 1024),
     });
     defer allocator.free(run_result.stdout);
     defer allocator.free(run_result.stderr);
@@ -40,50 +61,20 @@ pub fn main(init: std.process.Init) !void {
     const stdout = run_result.stdout;
     const stderr = run_result.stderr;
     const result = run_result.term;
+    std.debug.print("stdout:\n{s}\nstderr:\n{s}\n", .{ stdout, stderr });
 
-    // Check exit code
+    // The artifact fails on VkResult, fence, readback, and validation errors.
+    // Its exit status, not a reassuring log substring, is the test oracle.
     switch (result) {
         .exited => |code| {
             if (code != 0) {
                 std.debug.print("robust-demo failed with exit code {d}\n", .{code});
-                std.debug.print("stdout:\n{s}\nstderr:\n{s}\n", .{ stdout, stderr });
                 return error.DemoFailed;
             }
         },
         else => {
             std.debug.print("robust-demo terminated unexpectedly: {any}\n", .{result});
-            std.debug.print("stdout:\n{s}\nstderr:\n{s}\n", .{ stdout, stderr });
             return error.DemoCrashed;
         },
     }
-
-    // Verify expected output
-    const expected_msg = "[SUCCESS] Command completed successfully. Robustness2 prevented device loss.";
-    if (std.mem.indexOf(u8, stdout, expected_msg) == null and std.mem.indexOf(u8, stderr, expected_msg) == null) {
-        std.debug.print("robust-demo did not output expected success message.\n", .{});
-        std.debug.print("stdout:\n{s}\nstderr:\n{s}\n", .{ stdout, stderr });
-        return error.VerificationFailed;
-    }
-
-    std.debug.print("robust-demo exited successfully and verified robustness.\n", .{});
-}
-
-fn findExecutable(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
-    // Try current directory, zig-out/bin, etc.
-    const paths = [_][]const u8{
-        "./zig-out/bin",
-        "./zig-cache/bin",
-        ".",
-    };
-
-    for (paths) |path| {
-        const full_path = try fs.path.join(allocator, &[_][]const u8{ path, name });
-        const file = fs.cwd().openFile(full_path, .{}) catch {
-            allocator.free(full_path);
-            continue;
-        };
-        file.close();
-        return full_path;
-    }
-    return error.FileNotFound;
 }

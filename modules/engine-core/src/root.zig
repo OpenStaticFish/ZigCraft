@@ -1,4 +1,8 @@
 pub const fs = @import("fs");
+
+test {
+    _ = @import("test_root.zig");
+}
 pub const crash_handler = @import("crash_handler.zig");
 pub const interfaces = @import("interfaces.zig");
 pub const job_system = @import("job_system.zig");

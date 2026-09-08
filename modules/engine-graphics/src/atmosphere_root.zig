@@ -1,4 +1,8 @@
 pub const atmosphere = @import("atmosphere/atmosphere.zig");
+
+test {
+    _ = @import("atmosphere_test_root.zig");
+}
 pub const atmosphere_celestial = @import("atmosphere/celestial.zig");
 pub const atmosphere_config = @import("atmosphere/config.zig");
 pub const atmosphere_sky_palette = @import("atmosphere/sky_palette.zig");

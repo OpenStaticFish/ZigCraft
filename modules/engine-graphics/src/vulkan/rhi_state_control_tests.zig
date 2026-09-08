@@ -33,6 +33,7 @@ const MockShadowRuntime = struct {
 const MockFrames = struct {
     current_frame: u32 = 0,
     frame_in_progress: bool = false,
+    terminal_failure: bool = false,
     dry_run: bool = true,
     command_buffers: [3]c.VkCommandBuffer = .{ null, null, null },
 

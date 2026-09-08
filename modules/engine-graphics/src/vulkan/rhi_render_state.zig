@@ -4,6 +4,8 @@ const rhi = @import("engine-rhi").rhi;
 const Mat4 = @import("engine-math").Mat4;
 const Vec3 = @import("engine-math").Vec3;
 const bindings = @import("descriptor_bindings.zig");
+const frame_orchestration = @import("rhi_frame_orchestration.zig");
+const log = @import("engine-core").log;
 
 fn getenv(name: [:0]const u8) ?[]const u8 {
     const value = std.c.getenv(name) orelse return null;
@@ -71,9 +73,9 @@ pub fn setModelMatrix(ctx: anytype, model: Mat4, color: Vec3) void {
 }
 
 pub fn setInstanceBuffer(ctx: anytype, handle: rhi.BufferHandle) void {
-    if (!ctx.frames.frame_in_progress) return;
+    if (ctx.frames.terminal_failure or !ctx.frames.frame_in_progress) return;
     ctx.draw.pending_instance_buffer = handle;
-    applyPendingDescriptorUpdates(ctx, ctx.frames.current_frame);
+    _ = applyPendingDescriptorUpdates(ctx, ctx.frames.current_frame);
 }
 
 pub fn setTerrainPipelineBound(ctx: anytype, bound: bool) void {
@@ -84,27 +86,48 @@ pub fn setSelectionMode(ctx: anytype, enabled: bool) void {
     ctx.ui.selection_mode = enabled;
 }
 
-pub fn applyPendingDescriptorUpdates(ctx: anytype, frame_index: usize) void {
-    if (ctx.draw.pending_instance_buffer != 0 and ctx.draw.bound_instance_buffer[frame_index] != ctx.draw.pending_instance_buffer) {
-        const buf_opt = ctx.resources.buffers.get(ctx.draw.pending_instance_buffer);
-
-        if (buf_opt) |buf| {
-            var buffer_info = c.VkDescriptorBufferInfo{
-                .buffer = buf.buffer,
-                .offset = 0,
-                .range = buf.size,
+pub fn applyPendingDescriptorUpdates(ctx: anytype, frame_index: usize) bool {
+    if (ctx.frames.terminal_failure or !ctx.frames.frame_in_progress) return false;
+    if (ctx.descriptors.snapshot_failed[frame_index]) return false;
+    if (ctx.draw.bound_instance_buffer[frame_index] != ctx.draw.pending_instance_buffer) {
+        const buf = if (ctx.draw.pending_instance_buffer == 0)
+            ctx.descriptors.dummy_instance_ssbo
+        else
+            ctx.resources.buffers.get(ctx.draw.pending_instance_buffer) orelse {
+                log.log.err("Instance buffer {} is unavailable; skipping affected draws", .{ctx.draw.pending_instance_buffer});
+                ctx.descriptors.snapshot_failed[frame_index] = true;
+                return false;
             };
+        if (!ctx.descriptors.ensureWritable(frame_index)) return false;
+        var buffer_info = c.VkDescriptorBufferInfo{
+            .buffer = buf.buffer,
+            .offset = 0,
+            .range = buf.size,
+        };
 
-            var write = std.mem.zeroes(c.VkWriteDescriptorSet);
-            write.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            write.dstSet = ctx.descriptors.descriptor_sets[frame_index];
-            write.dstBinding = bindings.INSTANCE_SSBO;
-            write.descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            write.descriptorCount = 1;
-            write.pBufferInfo = &buffer_info;
+        var write = std.mem.zeroes(c.VkWriteDescriptorSet);
+        write.sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = ctx.descriptors.descriptor_sets[frame_index];
+        write.dstBinding = bindings.INSTANCE_SSBO;
+        write.descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        write.descriptorCount = 1;
+        write.pBufferInfo = &buffer_info;
 
-            c.vkUpdateDescriptorSets(ctx.vulkan_device.vk_device, 1, &write, 0, null);
-            ctx.draw.bound_instance_buffer[frame_index] = ctx.draw.pending_instance_buffer;
-        }
+        ctx.descriptors.writeDescriptors(&.{write});
+        ctx.draw.bound_instance_buffer[frame_index] = ctx.draw.pending_instance_buffer;
     }
+    return true;
+}
+
+/// All main-layout binds, including pass/effect binds before their first draw,
+/// must seal the set. Later state changes then copy instead of invalidating CBs.
+pub fn prepareDrawDescriptors(ctx: anytype) bool {
+    if (ctx.frames.terminal_failure or !ctx.frames.frame_in_progress) return false;
+    const frame = ctx.frames.current_frame;
+    if (ctx.descriptors.snapshot_failed[frame]) return false;
+    frame_orchestration.refreshTextureDescriptors(ctx);
+    if (!applyPendingDescriptorUpdates(ctx, frame)) return false;
+    if (ctx.descriptors.descriptor_sets[frame] == null) return false;
+    ctx.descriptors.seal(frame);
+    return true;
 }

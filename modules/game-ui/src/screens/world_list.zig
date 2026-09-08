@@ -41,47 +41,25 @@ pub const LevelDat = struct {
 pub const writeLevelDat = world_save.writeLevelDat;
 
 pub fn readLevelDat(allocator: std.mem.Allocator, save_dir: fs.Dir) ?LevelDat {
-    const content = save_dir.readFileAlloc("level.dat", allocator, 4096) catch return null;
-    defer allocator.free(content);
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{}) catch return null;
-    defer parsed.deinit();
-    const root = parsed.value;
-    if (root != .object) return null;
-    const obj = root.object;
-    const name_val = obj.get("name") orelse return null;
-    const seed_val = obj.get("seed") orelse return null;
-    const gen_val = obj.get("generator_index") orelse return null;
-    const gen_id_val = obj.get("generator_id");
-    const last_val = obj.get("last_played");
-    const name_str = switch (name_val) {
-        .string => |s| s,
-        else => return null,
-    };
-    const seed: u64 = switch (seed_val) {
-        .integer => |i| if (i >= 0) @intCast(i) else return null,
-        else => return null,
-    };
-    const last_played: i64 = if (last_val) |lv| switch (lv) {
-        .integer => |i| i,
-        else => 0,
-    } else 0;
-    var generator_index: usize = switch (gen_val) {
-        .integer => |i| if (i >= 0 and i < registry.getGeneratorCount()) @intCast(i) else 0,
-        else => 0,
-    };
-    const generator_id_source = if (gen_id_val) |giv| switch (giv) {
-        .string => |s| s,
-        else => "",
-    } else "";
-    if (generator_id_source.len > 0) {
-        generator_index = registry.findGeneratorIndex(generator_id_source) orelse generator_index;
+    var saved = @import("world-persistence").LevelData.loadFromFile(allocator, save_dir) catch return null;
+    defer saved.deinit(allocator);
+    const identity = if (saved.generator_id.len > 0) saved.generator_id else saved.generator_name;
+    if (saved.name.len == 0 and identity.len == 0) return null;
+    const saved_index = saved.generator_index orelse 0;
+    var generator_index = if (saved_index < registry.getGeneratorCount()) saved_index else 0;
+    if (identity.len > 0) {
+        generator_index = registry.findGeneratorIndex(identity) orelse blk: {
+            for (0..registry.getGeneratorCount()) |i| {
+                if (std.ascii.eqlIgnoreCase(identity, registry.getGeneratorInfo(i).name)) break :blk i;
+            }
+            return null;
+        };
     }
-    const name_copy = allocator.dupe(u8, name_str) catch return null;
-    errdefer allocator.free(name_copy);
+    const name_copy = allocator.dupe(u8, if (saved.name.len > 0) saved.name else "World") catch return null;
     return .{
         .name = name_copy,
-        .seed = seed,
-        .last_played = last_played,
+        .seed = saved.seed,
+        .last_played = saved.last_played_timestamp,
         .generator_index = generator_index,
     };
 }
@@ -465,7 +443,7 @@ pub const WorldListScreen = struct {
 
     fn loadWorld(self: *@This(), idx: usize) !void {
         const world = self.worlds[idx];
-        const world_screen = try WorldScreen.init(self.context.allocator, self.context, world.seed, world.generator_index);
+        const world_screen = try WorldScreen.initPersistent(self.context.allocator, self.context, world.seed, world.generator_index, world.dir_path);
         errdefer world_screen.deinit(world_screen);
         self.context.screen_manager.setScreen(world_screen.screen());
     }

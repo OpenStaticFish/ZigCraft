@@ -19,6 +19,14 @@ const MockRenderSettings = struct {
     film_grain_enabled: bool = false,
     film_grain_intensity: f32 = 0.0,
     shadow_resolution: u32 = 0,
+    wireframe_enabled: bool = false,
+    debug_shadow_view: bool = false,
+    shadow_debug_channel: u32 = 0,
+    msaa_samples: u8 = 0,
+    dynamic_resolution_enabled: bool = false,
+    dynamic_resolution_min_scale: f32 = 0.0,
+    dynamic_resolution_max_scale: f32 = 0.0,
+    target_fps: u32 = 0,
 
     pub fn setAnisotropicFiltering(self: *@This(), value: u8) void {
         self.anisotropic_filtering = value;
@@ -74,6 +82,29 @@ const MockRenderSettings = struct {
 
     pub fn setShadowResolution(self: *@This(), value: u32) void {
         self.shadow_resolution = value;
+    }
+
+    pub fn setWireframe(self: *@This(), value: bool) void {
+        self.wireframe_enabled = value;
+    }
+
+    pub fn setDebugShadowView(self: *@This(), value: bool) void {
+        self.debug_shadow_view = value;
+    }
+
+    pub fn setShadowDebugChannel(self: *@This(), value: u32) void {
+        self.shadow_debug_channel = value;
+    }
+
+    pub fn setMSAA(self: *@This(), value: u8) void {
+        self.msaa_samples = value;
+    }
+
+    pub fn setDynamicResolution(self: *@This(), enabled: bool, min_scale: f32, max_scale: f32, target_fps: u32) void {
+        self.dynamic_resolution_enabled = enabled;
+        self.dynamic_resolution_min_scale = min_scale;
+        self.dynamic_resolution_max_scale = max_scale;
+        self.target_fps = target_fps;
     }
 };
 
@@ -211,14 +242,94 @@ test "applyChangedSetting forwards film grain settings" {
     try testing.expectEqual(@as(f32, 0.25), rs.film_grain_intensity);
 }
 
-test "applyPresetSideEffects forwards stable render toggles" {
-    var settings = Settings{ .anisotropic_filtering = 4, .textures_enabled = false, .taa_blend_factor = 0.5, .taa_velocity_rejection = 0.03 };
-    var rs = MockRenderSettings{};
+test "applyPresetSideEffects forwards the complete renderer configuration" {
+    var settings = Settings{
+        .anisotropic_filtering = 4,
+        .textures_enabled = true,
+        .vsync = true,
+        .wireframe_enabled = true,
+        .debug_shadow_cascade_index = true,
+        .shadow_quality = 3,
+        .msaa_samples = 8,
+        .taa_enabled = true,
+        .fxaa_enabled = true,
+        .taa_blend_factor = 0.5,
+        .taa_velocity_rejection = 0.03,
+        .bloom_enabled = true,
+        .bloom_intensity = 0.8,
+        .vignette_enabled = true,
+        .vignette_intensity = 0.6,
+        .film_grain_enabled = true,
+        .film_grain_intensity = 0.25,
+        .volumetric_density = 0.125,
+        .dynamic_resolution_enabled = true,
+        .dynamic_resolution_min_scale = 0.6,
+        .dynamic_resolution_max_scale = 0.9,
+        .target_fps = 144,
+    };
+    var rs = MockRenderSettings{ .fxaa_enabled = true };
 
     settings_ui.applyPresetSideEffects(&settings, &rs);
 
-    try testing.expectEqual(@as(u8, 4), rs.anisotropic_filtering);
-    try testing.expect(!rs.textures_enabled);
-    try testing.expectEqual(@as(f32, 0.5), rs.taa_blend_factor);
-    try testing.expectEqual(@as(f32, 0.03), rs.taa_velocity_rejection);
+    try testing.expect(!settings.fxaa_enabled);
+    try testing.expectEqualDeep(MockRenderSettings{
+        .anisotropic_filtering = 4,
+        .textures_enabled = true,
+        .vsync = true,
+        .wireframe_enabled = true,
+        .debug_shadow_view = true,
+        .shadow_debug_channel = 2,
+        .shadow_resolution = 4096,
+        .msaa_samples = 8,
+        .fxaa_enabled = false,
+        .taa_blend_factor = 0.5,
+        .taa_velocity_rejection = 0.03,
+        .bloom_enabled = true,
+        .bloom_intensity = 0.8,
+        .vignette_enabled = true,
+        .vignette_intensity = 0.6,
+        .film_grain_enabled = true,
+        .film_grain_intensity = 0.25,
+        .volumetric_density = 0.125,
+        .dynamic_resolution_enabled = true,
+        .dynamic_resolution_min_scale = 0.6,
+        .dynamic_resolution_max_scale = 0.9,
+        .target_fps = 144,
+    }, rs);
+}
+
+test "applyChangedSetting forwards quality debug and each dynamic resolution edit" {
+    var settings = Settings{
+        .wireframe_enabled = true,
+        .msaa_samples = 2,
+        .shadow_quality = 1,
+        .debug_block_light_active = true,
+        .dynamic_resolution_enabled = true,
+        .dynamic_resolution_min_scale = 0.5,
+        .dynamic_resolution_max_scale = 0.8,
+        .target_fps = 120,
+    };
+    var rs = MockRenderSettings{};
+    settings_ui.applyChangedSetting("wireframe_enabled", &settings, &rs);
+    settings_ui.applyChangedSetting("msaa_samples", &settings, &rs);
+    settings_ui.applyChangedSetting("shadow_quality", &settings, &rs);
+    settings_ui.applyChangedSetting("debug_block_light_active", &settings, &rs);
+    try testing.expectEqualDeep(MockRenderSettings{
+        .wireframe_enabled = true,
+        .msaa_samples = 2,
+        .shadow_resolution = 1536,
+        .debug_shadow_view = true,
+        .shadow_debug_channel = 9,
+    }, rs);
+
+    inline for (.{ "dynamic_resolution_enabled", "dynamic_resolution_min_scale", "dynamic_resolution_max_scale", "target_fps" }) |name| {
+        rs = .{};
+        settings_ui.applyChangedSetting(name, &settings, &rs);
+        try testing.expectEqualDeep(MockRenderSettings{
+            .dynamic_resolution_enabled = true,
+            .dynamic_resolution_min_scale = 0.5,
+            .dynamic_resolution_max_scale = 0.8,
+            .target_fps = 120,
+        }, rs);
+    }
 }

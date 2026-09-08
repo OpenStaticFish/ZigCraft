@@ -2,9 +2,10 @@ name: Coverage
 
 on:
   pull_request:
-    branches: [dev]
+    branches: [dev, main]
   push:
-    branches: [dev]
+    branches: [dev, main]
+    tags: ["v*"]
   workflow_dispatch:
 
 concurrency:
@@ -15,13 +16,16 @@ jobs:
   kcov:
     permissions:
       contents: read
-      id-token: write
-      issues: write
-      pull-requests: write
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 35
+    outputs:
+      collection: ${{ steps.collect.outcome }}
+      artifact: ${{ steps.artifact.outcome }}
+      codecov: ${{ steps.codecov.outcome }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup devenv
         uses: ./.github/actions/setup-devenv
@@ -32,48 +36,65 @@ jobs:
           cache-key-prefix: zig-ci-coverage
 
       - name: Run kcov line coverage
-        run: |
-          set -euo pipefail
-          mkdir -p coverage/kcov
-          # kcov currently provides the stable line-coverage signal for Zig tests;
-          # branch coverage and required thresholds are deferred until a baseline exists.
-          set +e
-          devenv shell --profile unit -- kcov \
-            --include-path=src,modules,libs \
-            --exclude-path=.zig-cache,zig-cache,assets,docs \
-            coverage/kcov \
-            zig build test
-          kcov_status=$?
-          set -e
-          if [ "$kcov_status" -ne 0 ]; then
-            echo "::warning::kcov exited with status $kcov_status; rerunning tests without instrumentation to distinguish coverage tooling failures from test failures"
-            devenv shell --profile unit -- zig build test
-          fi
+        id: collect
+        run: timeout --kill-after=30s 28m devenv shell --profile unit -- bash scripts/collect_coverage.sh
 
       - name: Upload coverage artifact
+        id: artifact
         uses: actions/upload-artifact@v7
         with:
           name: kcov-report
           path: coverage/kcov
+          if-no-files-found: error
           retention-days: 14
 
       - name: Upload to Codecov
+        id: codecov
+        # PR execution gets no upload secret, including same-repository PRs.
+        if: github.event_name == 'push'
         uses: codecov/codecov-action@v5
         continue-on-error: true
         with:
-          directory: coverage/kcov
+          files: coverage/kcov/kcov-merged/cobertura.xml
+          disable_search: true
           flags: unit
           name: zigcraft-kcov
-          fail_ci_if_error: false
+          fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
 
-      - name: Comment non-blocking coverage status
-        if: github.event_name == 'pull_request'
+      - name: Summarize actual coverage status
+        if: always()
+        env:
+          COLLECTION: ${{ steps.collect.outcome }}
+          ARTIFACT: ${{ steps.artifact.outcome }}
+          CODECOV: ${{ steps.codecov.outcome }}
+        run: |
+          printf '### Coverage\n\nCollection: %s\n\nArtifact: %s\n\nCodecov: %s (push only)\n' "$COLLECTION" "$ARTIFACT" "$CODECOV" >> "$GITHUB_STEP_SUMMARY"
+
+  comment:
+    needs: kcov
+    if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      # This job never checks out or executes PR code, and only reports outcomes.
+      - name: Comment actual coverage status
+        continue-on-error: true
         uses: actions/github-script@v8
+        env:
+          COLLECTION: ${{ needs.kcov.outputs.collection }}
+          ARTIFACT: ${{ needs.kcov.outputs.artifact }}
+          CODECOV: ${{ needs.kcov.outputs.codecov }}
         with:
           script: |
             const marker = '<!-- zigcraft-kcov-status -->';
-            const body = `${marker}\n### kcov coverage\n\nLine coverage ran for this PR and uploaded a non-blocking report artifact named \`kcov-report\`. Codecov upload is configured as non-blocking while the project captures a stable baseline.`;
+            const collection = process.env.COLLECTION || 'not run';
+            const artifact = process.env.ARTIFACT === 'success'
+              ? 'Report artifact uploaded as `kcov-report`.' : 'No validated report artifact was uploaded.';
+            const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `${marker}\n### kcov coverage\n\nCollection: **${collection}**. ${artifact}\n\nCodecov: ${process.env.CODECOV || 'not run'} (uploads are push-only). No coverage threshold or branch coverage is claimed. [Run details](${url}).`;
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
             const comments = await github.paginate(github.rest.issues.listComments, {

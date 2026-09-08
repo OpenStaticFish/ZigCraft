@@ -58,7 +58,7 @@ pub const PipelineManager = struct {
     // Debug shadow pipeline (conditional)
     debug_shadow_pipeline: ?c.VkPipeline = null,
     debug_shadow_pipeline_layout: ?c.VkPipelineLayout = null,
-    debug_shadow_descriptor_set_layout: ?c.VkDescriptorSetLayout = null,
+    debug_shadow_descriptor_set_layout: ?c.VkDescriptorSetLayout = null, // Borrowed from the caller.
 
     /// Initialize the pipeline manager and create all pipeline layouts
     pub fn init(
@@ -67,6 +67,7 @@ pub const PipelineManager = struct {
         debug_shadow_layout: ?c.VkDescriptorSetLayout,
     ) !PipelineManager {
         var manager: PipelineManager = .{};
+        errdefer manager.deinit(device.vk_device);
 
         try manager.createPipelineLayouts(device, descriptor_manager, debug_shadow_layout);
 
@@ -189,7 +190,9 @@ pub const PipelineManager = struct {
                 debug_shadow_layout_full_info.pushConstantRangeCount = 1;
                 debug_shadow_layout_full_info.pPushConstantRanges = &ui_push_constant;
 
-                try Utils.checkVk(c.vkCreatePipelineLayout(vk_device, &debug_shadow_layout_full_info, null, &self.debug_shadow_pipeline_layout.?));
+                var pipeline_layout: c.VkPipelineLayout = null;
+                try Utils.checkVk(c.vkCreatePipelineLayout(vk_device, &debug_shadow_layout_full_info, null, &pipeline_layout));
+                self.debug_shadow_pipeline_layout = pipeline_layout;
             }
         }
     }
@@ -203,8 +206,14 @@ pub const PipelineManager = struct {
         if (self.ui_tex_descriptor_set_layout) |layout| c.vkDestroyDescriptorSetLayout(vk_device, layout, null);
         if (comptime build_options.debug_shadows) {
             if (self.debug_shadow_pipeline_layout) |layout| c.vkDestroyPipelineLayout(vk_device, layout, null);
-            if (self.debug_shadow_descriptor_set_layout) |layout| c.vkDestroyDescriptorSetLayout(vk_device, layout, null);
         }
+        self.pipeline_layout = null;
+        self.sky_pipeline_layout = null;
+        self.ui_pipeline_layout = null;
+        self.ui_tex_pipeline_layout = null;
+        self.ui_tex_descriptor_set_layout = null;
+        self.debug_shadow_pipeline_layout = null;
+        self.debug_shadow_descriptor_set_layout = null;
     }
 
     /// Destroy all pipelines (but not layouts)
@@ -371,7 +380,7 @@ pub const PipelineManager = struct {
         _sample_count: c.VkSampleCountFlagBits,
         g_render_pass: c.VkRenderPass,
     ) !void {
-        try pipeline_specialized.createTerrainPipeline(self, allocator, vk_device, hdr_render_pass, viewport_state, dynamic_state, input_assembly, rasterizer, multisampling, depth_stencil, color_blending, _sample_count, g_render_pass);
+        try pipeline_specialized.createTerrainPipeline(self, allocator, vk_device, hdr_render_pass, viewport_state, dynamic_state, input_assembly, rasterizer, multisampling, depth_stencil, color_blending, _sample_count, g_render_pass, false);
     }
 
     /// Create sky pipeline

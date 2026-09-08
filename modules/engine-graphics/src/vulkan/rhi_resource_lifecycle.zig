@@ -72,7 +72,6 @@ pub fn destroyPostProcessResources(ctx: anytype) void {
 pub fn destroyGPassResources(ctx: anytype) void {
     const vk = ctx.vulkan_device.vk_device;
     ctx.depth_pyramid.deinit(vk);
-    destroyVelocityResources(ctx);
     ctx.ssao_system.deinit(vk, ctx.allocator, ctx.descriptors.descriptor_pool);
     if (ctx.gpass.g_depth_handle != 0) {
         ctx.resources.destroyTexture(ctx.gpass.g_depth_handle);
@@ -86,6 +85,7 @@ pub fn destroyGPassResources(ctx: anytype) void {
         c.vkDestroyFramebuffer(vk, ctx.render_pass_manager.g_framebuffer, null);
         ctx.render_pass_manager.g_framebuffer = null;
     }
+    destroyVelocityResources(ctx);
     if (ctx.render_pass_manager.g_render_pass != null) {
         c.vkDestroyRenderPass(vk, ctx.render_pass_manager.g_render_pass, null);
         ctx.render_pass_manager.g_render_pass = null;
@@ -156,6 +156,10 @@ pub fn destroySwapchainUIResources(ctx: anytype) void {
         c.vkDestroyRenderPass(vk, rp, null);
         ctx.render_pass_manager.ui_swapchain_render_pass = null;
     }
+    if (ctx.render_pass_manager.ui_swapchain_clear_render_pass) |rp| {
+        c.vkDestroyRenderPass(vk, rp, null);
+        ctx.render_pass_manager.ui_swapchain_clear_render_pass = null;
+    }
 }
 
 pub fn destroyFXAAResources(ctx: anytype) void {
@@ -213,7 +217,7 @@ pub fn transitionImagesToShaderRead(ctx: anytype, images: []const c.VkImage, is_
         barriers[i].sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         barriers[i].oldLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
         barriers[i].newLayout = if (is_depth)
-            c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+            c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
         else
             c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         barriers[i].srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
@@ -221,10 +225,23 @@ pub fn transitionImagesToShaderRead(ctx: anytype, images: []const c.VkImage, is_
         barriers[i].image = images[i];
         barriers[i].subresourceRange = .{ .aspectMask = aspect_mask, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = layer_count };
         barriers[i].srcAccessMask = 0;
-        barriers[i].dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+        barriers[i].dstAccessMask = if (is_depth) c.VK_ACCESS_TRANSFER_WRITE_BIT else c.VK_ACCESS_SHADER_READ_BIT;
     }
 
-    c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, @intCast(count), &barriers[0]);
+    c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, if (is_depth) c.VK_PIPELINE_STAGE_TRANSFER_BIT else c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, @intCast(count), &barriers[0]);
+    if (is_depth) {
+        // Disabled shadows still have live sampled descriptors. Far depth is
+        // an unoccluded fallback, without enabling any shadow draw passes.
+        const clear = c.VkClearDepthStencilValue{ .depth = 1.0, .stencil = 0 };
+        for (barriers[0..count]) |*barrier| {
+            c.vkCmdClearDepthStencilImage(cmd, barrier.image, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1, &barrier.subresourceRange);
+            barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.newLayout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+            barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+        }
+        c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, null, 0, null, @intCast(count), &barriers[0]);
+    }
 
     try Utils.checkVk(c.vkEndCommandBuffer(cmd));
 
@@ -237,23 +254,15 @@ pub fn transitionImagesToShaderRead(ctx: anytype, images: []const c.VkImage, is_
     c.vkFreeCommandBuffers(ctx.vulkan_device.vk_device, ctx.frames.command_pool, 1, &cmd);
 }
 
-pub fn transitionImagesToPresent(ctx: anytype, images: []const c.VkImage) !void {
-    return transitionImagesFromUndefined(ctx, images, c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0);
+/// Post-processing can run before the scene pass, and disabled bloom stays bound.
+/// Initialize on both startup and resize, including safe mode, rather than sample
+/// undefined contents or rely on a producer pass that may never run.
+pub fn initializePostProcessInputs(ctx: anytype) !void {
+    const images = [_]c.VkImage{ctx.hdr.hdr_image} ++ ctx.bloom.mip_images;
+    try transitionImagesFromUndefined(ctx, &images, c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, c.VK_ACCESS_SHADER_READ_BIT, true);
 }
 
-/// Headless final-composition passes load and retain this layout between
-/// frames, so the offscreen image needs an explicit first-use transition.
-pub fn transitionImagesToColorAttachment(ctx: anytype, images: []const c.VkImage) !void {
-    return transitionImagesFromUndefined(
-        ctx,
-        images,
-        c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        c.VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-    );
-}
-
-fn transitionImagesFromUndefined(ctx: anytype, images: []const c.VkImage, layout: c.VkImageLayout, dst_stage: c.VkPipelineStageFlags, dst_access: c.VkAccessFlags) !void {
+fn transitionImagesFromUndefined(ctx: anytype, images: []const c.VkImage, layout: c.VkImageLayout, dst_stage: c.VkPipelineStageFlags, dst_access: c.VkAccessFlags, clear: bool) !void {
     if (ctx.runtime.recovering) return;
 
     var alloc_info = std.mem.zeroes(c.VkCommandBufferAllocateInfo);
@@ -276,16 +285,27 @@ fn transitionImagesFromUndefined(ctx: anytype, images: []const c.VkImage, layout
         barriers[i] = std.mem.zeroes(c.VkImageMemoryBarrier);
         barriers[i].sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         barriers[i].oldLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
-        barriers[i].newLayout = layout;
+        barriers[i].newLayout = if (clear) c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL else layout;
         barriers[i].srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
         barriers[i].dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
         barriers[i].image = images[i];
         barriers[i].subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
         barriers[i].srcAccessMask = 0;
-        barriers[i].dstAccessMask = dst_access;
+        barriers[i].dstAccessMask = if (clear) c.VK_ACCESS_TRANSFER_WRITE_BIT else dst_access;
     }
 
-    c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, dst_stage, 0, 0, null, 0, null, @intCast(count), &barriers[0]);
+    c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, if (clear) c.VK_PIPELINE_STAGE_TRANSFER_BIT else dst_stage, 0, 0, null, 0, null, @intCast(count), &barriers[0]);
+    if (clear) {
+        const black = c.VkClearColorValue{ .float32 = .{ 0, 0, 0, 0 } };
+        for (barriers[0..count]) |*barrier| {
+            c.vkCmdClearColorImage(cmd, barrier.image, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &barrier.subresourceRange);
+            barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.newLayout = layout;
+            barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = dst_access;
+        }
+        c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TRANSFER_BIT, dst_stage, 0, 0, null, 0, null, @intCast(count), &barriers[0]);
+    }
 
     try Utils.checkVk(c.vkEndCommandBuffer(cmd));
 
@@ -300,6 +320,8 @@ fn transitionImagesFromUndefined(ctx: anytype, images: []const c.VkImage, layout
 
 pub fn createHDRResources(ctx: anytype) !void {
     const extent = ctx.swapchain.getExtent();
+    if (extent.width == 0 or extent.height == 0) return error.InvalidExtent;
+    errdefer destroyHDRResources(ctx);
     const format = c.VK_FORMAT_R16G16B16A16_SFLOAT;
     const sample_count: c_uint = @intCast(switch (ctx.options.msaa_samples) {
         1 => c.VK_SAMPLE_COUNT_1_BIT,
@@ -318,7 +340,7 @@ pub fn createHDRResources(ctx: anytype) !void {
     image_info.format = format;
     image_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
     image_info.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
-    image_info.usage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT;
+    image_info.usage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT | c.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     image_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
     image_info.sharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
 

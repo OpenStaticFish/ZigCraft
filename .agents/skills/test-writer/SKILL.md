@@ -84,12 +84,12 @@ If a path cannot be tested without a real GPU/window and cannot be reached throu
 ## Where to Write Tests
 
 - Create or extend `*_tests.zig` files **alongside** the source files (same directory)
-- Example: tests for `modules/engine-graphics/src/vulkan/swapchain.zig` go in `modules/engine-graphics/src/vulkan/swapchain_tests.zig`
-- After creating a new test file, register it in `src/tests.zig`:
+- Example: tests for `modules/engine-graphics/src/vulkan/pipeline_manager.zig` go in `modules/engine-graphics/src/vulkan/pipeline_manager_tests.zig`
+- After creating a new test file, register it with a file-relative import in the owning module's `test_root.zig`:
   ```zig
-  _ = @import("engine-graphics").vulkan.swapchain_tests;
+  _ = @import("vulkan/pipeline_manager_tests.zig");
   ```
-  Prefer importing the owning module root from `src/tests.zig`.
+  Named dependency-module imports in `src/tests.zig` do not register module tests.
 
 ## What to Test — Priorities
 

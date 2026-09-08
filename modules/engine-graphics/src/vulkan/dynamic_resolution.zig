@@ -30,6 +30,15 @@ pub const DynamicResolutionState = struct {
             return;
         }
 
+        if (self.swapchain_extent.width == 0 or self.swapchain_extent.height == 0) {
+            self.render_extent = .{ .width = 0, .height = 0 };
+            return;
+        }
+        if (!std.math.isFinite(gpu_time_ms) or gpu_time_ms <= 0.0) {
+            self.computeRenderExtent();
+            return;
+        }
+
         const min_scale = @min(self.min_scale, self.max_scale);
         const max_scale = @max(self.min_scale, self.max_scale);
 
@@ -54,7 +63,7 @@ pub const DynamicResolutionState = struct {
             return;
         }
 
-        const target_ms = 1000.0 / @as(f32, @floatFromInt(self.target_fps));
+        const target_ms = 1000.0 / @as(f32, @floatFromInt(@max(self.target_fps, 1)));
 
         if (self.rolling_avg_ms > target_ms * 1.1) {
             self.current_scale = @max(self.current_scale - 0.02, min_scale);
@@ -68,6 +77,10 @@ pub const DynamicResolutionState = struct {
     }
 
     fn computeRenderExtent(self: *DynamicResolutionState) void {
+        if (self.swapchain_extent.width == 0 or self.swapchain_extent.height == 0) {
+            self.render_extent = .{ .width = 0, .height = 0 };
+            return;
+        }
         const w = @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(self.swapchain_extent.width)) * self.current_scale)));
         const h = @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(self.swapchain_extent.height)) * self.current_scale)));
         self.render_extent = .{
@@ -87,7 +100,7 @@ pub const DynamicResolutionState = struct {
     }
 
     pub fn isActive(self: *const DynamicResolutionState) bool {
-        return self.enabled and self.current_scale < ACTIVE_THRESHOLD;
+        return self.enabled and self.current_scale < ACTIVE_THRESHOLD and self.render_extent.width > 0 and self.render_extent.height > 0;
     }
 
     pub fn getRenderExtent(self: *const DynamicResolutionState) c.VkExtent2D {

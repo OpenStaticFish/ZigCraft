@@ -24,18 +24,20 @@ test "Face.getNormal returns correct normals" {
 }
 
 test "Face.getOffset returns integer offsets matching normals" {
-    try testing.expectEqual(Face.top.getOffset(), .{ .x = 0, .y = 1, .z = 0 });
-    try testing.expectEqual(Face.bottom.getOffset(), .{ .x = 0, .y = -1, .z = 0 });
-    try testing.expectEqual(Face.north.getOffset(), .{ .x = 0, .y = 0, .z = -1 });
-    try testing.expectEqual(Face.south.getOffset(), .{ .x = 0, .y = 0, .z = 1 });
-    try testing.expectEqual(Face.east.getOffset(), .{ .x = 1, .y = 0, .z = 0 });
-    try testing.expectEqual(Face.west.getOffset(), .{ .x = -1, .y = 0, .z = 0 });
+    const Offset = @TypeOf(Face.top.getOffset());
+    try testing.expectEqual(Offset{ .x = 0, .y = 1, .z = 0 }, Face.top.getOffset());
+    try testing.expectEqual(Offset{ .x = 0, .y = -1, .z = 0 }, Face.bottom.getOffset());
+    try testing.expectEqual(Offset{ .x = 0, .y = 0, .z = -1 }, Face.north.getOffset());
+    try testing.expectEqual(Offset{ .x = 0, .y = 0, .z = 1 }, Face.south.getOffset());
+    try testing.expectEqual(Offset{ .x = 1, .y = 0, .z = 0 }, Face.east.getOffset());
+    try testing.expectEqual(Offset{ .x = -1, .y = 0, .z = 0 }, Face.west.getOffset());
 }
 
 test "ALL_FACES contains exactly six distinct faces" {
     try testing.expectEqual(@as(usize, 6), voxel.ALL_FACES.len);
-    var seen = std.EnumArray(Face, bool).initEmpty();
+    var seen = std.EnumArray(Face, bool).initFill(false);
     for (voxel.ALL_FACES) |f| {
+        try testing.expect(!seen.get(f));
         seen.set(f, true);
     }
     for (comptime std.enums.values(Face)) |f| {

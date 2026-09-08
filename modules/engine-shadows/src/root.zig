@@ -12,4 +12,5 @@ pub const ShadowCascades = csm.ShadowCascades;
 pub const ShadowSystem = shadow_system.ShadowSystem;
 pub const computeCascades = csm.computeCascades;
 pub const computeCascadesWithCamera = csm.computeCascadesWithCamera;
+pub const practicalSplit = csm.practicalSplit;
 pub const validateCascades = csm.validateCascades;

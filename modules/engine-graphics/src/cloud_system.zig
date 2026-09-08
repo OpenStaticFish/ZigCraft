@@ -131,21 +131,39 @@ pub const CloudSystem = struct {
         const world_center_x = @as(f32, @floatFromInt(center_x)) * CLOUD_SIZE + self.mesh_origin_x;
         const world_center_z = @as(f32, @floatFromInt(center_z)) * CLOUD_SIZE + self.mesh_origin_z;
 
-        var z0: i32 = -radius_i;
-        while (z0 < radius_i) : (z0 += 1) {
-            var x0: i32 = -radius_i;
-            while (x0 < radius_i) : (x0 += 1) {
-                var draw_x = x0;
-                var draw_z = z0;
-                if (draw_z >= 0) draw_z = radius_i - draw_z - 1;
-                if (draw_x >= 0) draw_x = radius_i - draw_x - 1;
-                if (!self.grid.items[self.gridIndex(draw_x, draw_z)]) continue;
+        const Cell = struct {
+            x: i32,
+            z: i32,
+            cx: f32,
+            cz: f32,
 
-                const cx = world_center_x + @as(f32, @floatFromInt(draw_x)) * CLOUD_SIZE - camera_pos.x;
-                const cz = world_center_z + @as(f32, @floatFromInt(draw_z)) * CLOUD_SIZE - camera_pos.z;
-                const cy = -camera_pos.y;
-                try self.emitCell(&next_vertices, cx, cy, cz, draw_x, draw_z);
+            fn lessThan(_: void, a: @This(), b: @This()) bool {
+                const ad = a.cx * a.cx + a.cz * a.cz;
+                const bd = b.cx * b.cx + b.cz * b.cz;
+                if (ad != bd) return ad < bd;
+                return a.z < b.z or (a.z == b.z and a.x < b.x);
             }
+        };
+        var cells: std.ArrayListUnmanaged(Cell) = .empty;
+        defer cells.deinit(self.allocator);
+        try cells.ensureTotalCapacity(self.allocator, side * side);
+        z = -radius_i;
+        while (z < radius_i) : (z += 1) {
+            var x: i32 = -radius_i;
+            while (x < radius_i) : (x += 1) {
+                if (!self.grid.items[self.gridIndex(x, z)]) continue;
+                cells.appendAssumeCapacity(.{
+                    .x = x,
+                    .z = z,
+                    .cx = world_center_x + @as(f32, @floatFromInt(x)) * CLOUD_SIZE - camera_pos.x,
+                    .cz = world_center_z + @as(f32, @floatFromInt(z)) * CLOUD_SIZE - camera_pos.z,
+                });
+            }
+        }
+        // Clouds use the opaque, depth-writing terrain pipeline, not blending.
+        std.mem.sort(Cell, cells.items, {}, Cell.lessThan);
+        for (cells.items) |cell| {
+            try self.emitCell(&next_vertices, cell.cx, -camera_pos.y, cell.cz, cell.x, cell.z);
         }
 
         self.vertices.deinit(self.allocator);
@@ -305,4 +323,67 @@ test "cloud noise is deterministic" {
     const allocator = std.testing.allocator;
     var system = CloudSystem{ .allocator = allocator, .resources = undefined, .config = normalizedConfig(.{ .seed = 99 }) };
     try std.testing.expectEqual(system.gridFilled(12, -4), system.gridFilled(12, -4));
+}
+
+test "cloud mesh orders filled cells nearest first without changing triangles" {
+    const allocator = std.testing.allocator;
+    const Triangle = [3]rhi.Vertex;
+    const Order = struct {
+        fn lessThan(_: void, a: Triangle, b: Triangle) bool {
+            return std.mem.order(u8, std.mem.asBytes(&a), std.mem.asBytes(&b)) == .lt;
+        }
+    };
+    for ([_]bool{ false, true }) |enable_3d| {
+        for ([_]Vec3{ Vec3.init(-49, 10, -81), Vec3.init(0, 180, 0), Vec3.init(47, 250, 95) }) |camera| {
+            var system = CloudSystem{ .allocator = allocator, .resources = undefined, .config = normalizedConfig(.{ .radius = 8, .seed = 99, .density = 0.6, .enable_3d = enable_3d }) };
+            defer system.vertices.deinit(allocator);
+            defer system.grid.deinit(allocator);
+            system.origin_x = 4;
+            system.origin_z = -3;
+            const old_origin_x = system.mesh_origin_x;
+            const old_origin_z = system.mesh_origin_z;
+            try system.updateMesh(camera);
+            var reference: std.ArrayListUnmanaged(rhi.Vertex) = .empty;
+            defer reference.deinit(allocator);
+            const world_x = @as(f32, @floatFromInt(system.last_noise_center_x)) * CLOUD_SIZE + old_origin_x;
+            const world_z = @as(f32, @floatFromInt(system.last_noise_center_z)) * CLOUD_SIZE + old_origin_z;
+            var filled: usize = 0;
+            var z: i32 = -8;
+            while (z < 8) : (z += 1) {
+                var x: i32 = -8;
+                while (x < 8) : (x += 1) {
+                    const dx = if (x >= 0) 7 - x else x;
+                    const dz = if (z >= 0) 7 - z else z;
+                    const expected_filled = system.gridFilled(dx + system.last_noise_center_x, dz + system.last_noise_center_z);
+                    try std.testing.expectEqual(expected_filled, system.grid.items[system.gridIndex(dx, dz)]);
+                    if (!expected_filled) continue;
+                    filled += 1;
+                    try system.emitCell(&reference, world_x + @as(f32, @floatFromInt(dx)) * CLOUD_SIZE - camera.x, -camera.y, world_z + @as(f32, @floatFromInt(dz)) * CLOUD_SIZE - camera.z, dx, dz);
+                }
+            }
+            try std.testing.expect(filled > 1);
+            var previous: f32 = -1;
+            var tops: usize = 0;
+            var i: usize = 0;
+            while (i < system.vertices.items.len) : (i += 6) {
+                const quad = system.vertices.items[i .. i + 6];
+                if (quad[0].normal != reference.items[0].normal) continue;
+                const cx = (quad[0].pos[0] + quad[2].pos[0]) * 0.5;
+                const cz = (quad[0].pos[2] + quad[2].pos[2]) * 0.5;
+                const distance = cx * cx + cz * cz;
+                try std.testing.expect(distance >= previous);
+                previous = distance;
+                tops += 1;
+            }
+            try std.testing.expectEqual(filled, tops);
+            try std.testing.expectEqual(reference.items.len, system.vertex_count);
+            // Sort whole triangles, never their vertices: winding and all vertex
+            // attributes must remain byte-identical, including duplicate triangles.
+            const actual_triangles = std.mem.bytesAsSlice(Triangle, std.mem.sliceAsBytes(system.vertices.items));
+            const expected_triangles = std.mem.bytesAsSlice(Triangle, std.mem.sliceAsBytes(reference.items));
+            std.mem.sort(Triangle, actual_triangles, {}, Order.lessThan);
+            std.mem.sort(Triangle, expected_triangles, {}, Order.lessThan);
+            try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(reference.items), std.mem.sliceAsBytes(system.vertices.items));
+        }
+    }
 }

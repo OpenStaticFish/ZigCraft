@@ -9,12 +9,12 @@
   devenv shell zig build run
   devenv shell zig build -Doptimize=ReleaseFast
   ```
-- Format all Zig code, not only `src/` (the local hook is less strict than CI):
+- Format source, modules, and the build definition:
   ```bash
-  devenv shell zig fmt src/ modules/
-  devenv shell zig fmt --check src/ modules/
+  devenv shell zig fmt src/ modules/ build.zig
+  devenv shell zig fmt --check src/ modules/ build.zig
   ```
-- `zig build test` is the broad suite: aggregate/module tests, fuzz roots, shader compilation/validation, SPIR-V size checks, and shadow ABI checks.
+- `zig build test` is the broad suite: direct application/module test roots, deterministic fuzz corpus regressions, shader freshness/size checks, and shadow ABI checks. It is not a coverage-guided fuzz campaign. `zig build test-discovery` runs roots and prints named-test inventory; empty discovery fails.
   ```bash
   devenv shell zig build test
   devenv shell zig build test -Dtest-filter="name"
@@ -39,7 +39,7 @@
   ```
   Scenarios are `stationary`, `traversal`, `rapid-turn`, and `teleport-eviction`. Prefer the `headless-benchmark` skill for bounded runs.
 - Focused CPU-only tools: `devenv shell zig build worldgen-report` and `devenv shell zig build worldgen-climate-snapshot`. Pass climate snapshot arguments after `--`, e.g. `devenv shell zig build worldgen-climate-snapshot -- --seed 42 ...`.
-- Building/tests compile GLSL and write tracked `*.spv` files beside sources in `assets/shaders/vulkan/`. After intentional shader-size changes, run `./scripts/update_spirv_baseline.sh`; `docs/shaders/spirv-sizes.json` and shadow runtime SPIR-V parity are test-enforced.
+- Ordinary builds/tests validate tracked `*.spv` files without rewriting them. After intentional GLSL edits, run `devenv shell zig build shaders` to regenerate runtime SPIR-V, then `devenv shell zig build test-shaders`. After intentional shader-size changes, run `./scripts/update_spirv_baseline.sh`; `docs/shaders/spirv-sizes.json` and shadow runtime SPIR-V parity are test-enforced. Preserve stale-artifact evidence before regenerating during diagnosis.
 - New/changed textures go through `./scripts/process_textures.sh <pack> 512`; preserve licensing/attribution for placeholder assets.
 
 ## Architecture boundaries
@@ -59,7 +59,11 @@
 ## Verification and CI
 
 - Match verification to the change, but graphics/RHI/shader/runtime work normally requires: format check, `zig build test`, ReleaseFast build, integration/robustness as relevant, and the appropriate headless graphics skill. CI additionally runs Debug and ReleaseSafe tests and Lavapipe/Weston integration smoke tests.
-- Install the repo pre-push hook with `./scripts/setup-hooks.sh`, but do not treat it as CI parity: it formats only `src/` and omits ReleaseSafe and graphics jobs.
+- Install the repo pre-push hook with `./scripts/setup-hooks.sh`. Its intended format scope is `src/ modules/ build.zig`; it still omits ReleaseSafe and graphics jobs, so do not treat it as CI parity.
+- Nightly `-Dsanitize=c` enables C undefined-behavior sanitization, not ASan. Coverage collection must fail on collector failure or zero project lines; never substitute a passing uninstrumented run or an invented percentage.
+- Coverage uses `scripts/collect_coverage.sh`, which explicitly selects `-Dtest-llvm=true` for direct unit-test executables: Zig 0.16 native Debug line mappings are incomplete in kcov 43. Ordinary builds/tests retain their default backend unless that option is requested.
+- The PR AI review is static and advisory: trusted-base tooling only, no PR execution or agent tools, no provider secrets for fork reviews, and separate publication. Do not restore broad hidden agent-state artifacts or model-authorized auto-merge. See `docs/ci-review-security.md`.
+- Before promotion or redistribution, complete `docs/release-checklist.md`; placeholder-asset licensing remains an explicit review requirement.
 
 ## Git workflow
 

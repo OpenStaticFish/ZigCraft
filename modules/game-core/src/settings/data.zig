@@ -1,5 +1,9 @@
 const std = @import("std");
 
+pub fn resolveFXAAEnabled(taa_enabled: bool, fxaa_enabled: bool) bool {
+    return fxaa_enabled and !taa_enabled;
+}
+
 pub const ShadowDebugChannel = enum(u32) {
     off = 0,
     shadow_factor = 1,

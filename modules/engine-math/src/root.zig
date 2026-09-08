@@ -1,4 +1,8 @@
 pub const Vec3 = @import("vec3.zig").Vec3;
+
+test {
+    _ = @import("test_root.zig");
+}
 pub const Mat4 = @import("mat4.zig").Mat4;
 pub const AABB = @import("aabb.zig").AABB;
 pub const Frustum = @import("frustum.zig").Frustum;

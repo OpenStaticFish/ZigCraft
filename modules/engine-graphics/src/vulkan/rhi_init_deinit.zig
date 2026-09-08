@@ -23,23 +23,48 @@ const build_options = @import("engine_graphics_options");
 const MAX_FRAMES_IN_FLIGHT = rhi.MAX_FRAMES_IN_FLIGHT;
 const TOTAL_QUERY_COUNT = rhi_timing.QUERY_COUNT_PER_FRAME * MAX_FRAMES_IN_FLIGHT;
 
+pub const InitOwnership = struct {
+    attempted: bool = false,
+    vulkan_device: bool = false,
+    resources: bool = false,
+    frames: bool = false,
+    swapchain: bool = false,
+    descriptors: bool = false,
+    render_resources: bool = false,
+};
+
+/// Constructors retain responsibility for their own partial allocations. Only
+/// successfully returned managers transfer ownership to the context.
+pub fn unwindManagers(ctx: anytype) void {
+    inline for (.{ "descriptors", "swapchain", "frames", "resources", "vulkan_device" }) |name| {
+        if (@field(ctx.init_ownership, name)) {
+            @field(ctx, name).deinit();
+            @field(ctx.init_ownership, name) = false;
+        }
+    }
+}
+
 pub fn initContext(ctx: anytype, allocator: std.mem.Allocator, render_device: ?*RenderDevice) !void {
+    if (ctx.init_ownership.attempted) return error.InvalidState;
+    ctx.init_ownership.attempted = true;
     ctx.allocator = allocator;
     ctx.render_device = render_device;
+    errdefer cleanup(ctx);
 
     ctx.vulkan_device = try VulkanDevice.init(allocator, ctx.window);
+    ctx.init_ownership.vulkan_device = true;
     ctx.vulkan_device.initDebugMessenger();
     ctx.resources = try ResourceManager.init(allocator, &ctx.vulkan_device);
+    ctx.init_ownership.resources = true;
     ctx.frames = try FrameManager.init(&ctx.vulkan_device);
+    ctx.init_ownership.frames = true;
     ctx.swapchain = try SwapchainPresenter.init(allocator, &ctx.vulkan_device, ctx.window, ctx.options.msaa_samples, ctx.options.present_mode);
+    ctx.init_ownership.swapchain = true;
+    ctx.dynamic_resolution.setSwapchainExtent(ctx.swapchain.getExtent());
     ctx.descriptors = try DescriptorManager.init(allocator, &ctx.vulkan_device, &ctx.resources);
+    ctx.init_ownership.descriptors = true;
 
-    if (!ctx.swapchain.skip_present) {
-        try lifecycle.transitionImagesToPresent(ctx, ctx.swapchain.swapchain.images.items);
-    } else {
-        try lifecycle.transitionImagesToColorAttachment(ctx, ctx.swapchain.swapchain.images.items);
-    }
-
+    ctx.init_ownership.render_resources = true;
     ctx.pipeline_manager = try PipelineManager.init(&ctx.vulkan_device, &ctx.descriptors, null);
     ctx.render_pass_manager = RenderPassManager.init(ctx.allocator);
 
@@ -98,7 +123,7 @@ pub fn initContext(ctx: anytype, allocator: std.mem.Allocator, render_device: ?*
     );
 
     try setup.createWaterResources(ctx);
-    try ctx.water_system.createWaterPipeline(ctx.allocator, ctx.vulkan_device.vk_device, ctx.render_pass_manager.hdr_render_pass);
+    try ctx.water_system.createWaterPipeline(ctx.allocator, ctx.vulkan_device.vk_device, ctx.render_pass_manager.hdr_render_pass, ctx.options.msaa_samples);
     try ctx.water_system.createReflectionTerrainPipelines(ctx.allocator, ctx.vulkan_device.vk_device, ctx.pipeline_manager.pipeline_layout);
 
     try setup.createPostProcessResources(ctx);
@@ -109,6 +134,7 @@ pub fn initContext(ctx: anytype, allocator: std.mem.Allocator, render_device: ?*
     try ctx.bloom.init(&ctx.vulkan_device, ctx.allocator, ctx.descriptors.descriptor_pool, ctx.hdr.hdr_view, ctx.swapchain.getExtent().width, ctx.swapchain.getExtent().height, c.VK_FORMAT_R16G16B16A16_SFLOAT);
 
     setup.updatePostProcessDescriptorsWithBloom(ctx);
+    try lifecycle.initializePostProcessInputs(ctx);
 
     ctx.draw.dummy_texture = ctx.descriptors.dummy_texture;
     ctx.draw.dummy_texture_3d = ctx.descriptors.dummy_texture_3d;
@@ -152,24 +178,18 @@ pub fn initContext(ctx: anytype, allocator: std.mem.Allocator, render_device: ?*
     try ctx.resources.flushTransfer();
     ctx.resources.setCurrentFrame(0);
 
-    if (!ctx.options.safe_mode) {
-        if (ctx.shadow_system.shadow_image != null) {
-            try lifecycle.transitionImagesToShaderRead(ctx, &[_]c.VkImage{ctx.shadow_system.shadow_image}, true, rhi.SHADOW_CASCADE_COUNT);
-            for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
-                ctx.shadow_system.shadow_image_layouts[i] = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-            }
+    if (ctx.shadow_system.shadow_image != null) {
+        try lifecycle.transitionImagesToShaderRead(ctx, &[_]c.VkImage{ctx.shadow_system.shadow_image}, true, rhi.SHADOW_CASCADE_COUNT);
+        for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
+            ctx.shadow_system.shadow_image_layouts[i] = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
         }
+    }
 
+    if (!ctx.options.safe_mode) {
         var list: [32]c.VkImage = undefined;
         var count: usize = 0;
-        const candidates = [_]c.VkImage{ ctx.hdr.hdr_image, ctx.gpass.g_normal_image, ctx.ssao_system.image, ctx.ssao_system.blur_image, ctx.ssao_system.noise_image, ctx.velocity.velocity_image };
+        const candidates = [_]c.VkImage{ ctx.gpass.g_normal_image, ctx.ssao_system.image, ctx.ssao_system.blur_image, ctx.ssao_system.noise_image, ctx.velocity.velocity_image };
         for (candidates) |img| {
-            if (img != null) {
-                list[count] = img;
-                count += 1;
-            }
-        }
-        for (ctx.bloom.mip_images) |img| {
             if (img != null) {
                 list[count] = img;
                 count += 1;
@@ -188,10 +208,18 @@ pub fn initContext(ctx: anytype, allocator: std.mem.Allocator, render_device: ?*
 }
 
 pub fn deinit(ctx: anytype) void {
-    const vk_device: c.VkDevice = ctx.vulkan_device.vk_device;
+    cleanup(ctx);
+    ctx.allocator.destroy(ctx);
+}
 
-    if (vk_device != null) {
-        _ = c.vkDeviceWaitIdle(vk_device);
+fn cleanup(ctx: anytype) void {
+    if (!ctx.init_ownership.vulkan_device) return;
+    const vk_device: c.VkDevice = ctx.vulkan_device.vk_device;
+    _ = c.vkDeviceWaitIdle(vk_device);
+    defer unwindManagers(ctx);
+
+    if (ctx.init_ownership.render_resources) {
+        ctx.init_ownership.render_resources = false;
         screenshot.discardCapture(ctx);
 
         var compute_pipeline_iter = ctx.compute_resources.pipelines.iterator();
@@ -277,17 +305,9 @@ pub fn deinit(ctx: anytype) void {
 
         ctx.shadow_system.deinit(ctx.vulkan_device.vk_device);
 
-        ctx.descriptors.deinit();
-        ctx.swapchain.deinit();
-        ctx.frames.deinit();
-        ctx.resources.deinit();
-
         if (ctx.timing.query_pool != null) {
             c.vkDestroyQueryPool(ctx.vulkan_device.vk_device, ctx.timing.query_pool, null);
+            ctx.timing.query_pool = null;
         }
-
-        ctx.vulkan_device.deinit();
     }
-
-    ctx.allocator.destroy(ctx);
 }

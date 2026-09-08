@@ -52,19 +52,28 @@ test "readLevelDat returns null for invalid JSON" {
     try testing.expect(result == null);
 }
 
-test "writeLevelDat overwrites existing" {
+test "writeLevelDat renames existing worlds without changing generation identity" {
     const allocator = testing.allocator;
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
     const dir = fs.Dir{ .inner = tmp_dir.dir };
     try world_list.writeLevelDat(allocator, dir, "First", 100, 0, 100000);
+    // The production overwrite caller is library rename, not world reseeding.
+    // Stale caller values must not change the identity of persisted terrain.
     try world_list.writeLevelDat(allocator, dir, "Second", 200, 1, 200000);
     const result = world_list.readLevelDat(allocator, dir);
     try testing.expect(result != null);
     defer allocator.free(result.?.name);
     try testing.expectEqualStrings("Second", result.?.name);
-    try testing.expectEqual(@as(u64, 200), result.?.seed);
-    try testing.expectEqual(@as(usize, 1), result.?.generator_index);
+    try testing.expectEqual(@as(u64, 100), result.?.seed);
+    try testing.expectEqual(@as(usize, 0), result.?.generator_index);
+    try testing.expectEqual(@as(i64, 200000), result.?.last_played);
+    var saved = try @import("world-persistence").LevelData.loadFromFile(allocator, dir);
+    defer saved.deinit(allocator);
+    const generator_id = @import("world-worldgen").registry.getGeneratorId(0);
+    try testing.expectEqual(@as(?usize, 0), saved.generator_index);
+    try testing.expectEqualStrings(generator_id, saved.generator_id);
+    try testing.expectEqualStrings(generator_id, saved.generator_name);
 }
 
 test "scanWorlds reads level.dat from each world directory" {

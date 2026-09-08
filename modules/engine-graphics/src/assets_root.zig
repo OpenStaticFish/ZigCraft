@@ -1,4 +1,8 @@
 pub const material_system = @import("material_system.zig");
+
+test {
+    _ = @import("assets_test_root.zig");
+}
 pub const resource_pack = @import("resource_pack.zig");
 pub const texture_atlas = @import("texture_atlas.zig");
 

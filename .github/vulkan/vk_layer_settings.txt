@@ -1,3 +1,4 @@
 khronos_validation.validate_core = true
 khronos_validation.enables = VK_VALIDATION_FEATURE_ENABLE_BEST_PRACTICES_EXT
-khronos_validation.debug_action = VK_DBG_LAYER_ACTION_LOG_MSG
+# Keep stdout reserved for Zig's binary test protocol; the callback logs to stderr.
+khronos_validation.debug_action = VK_DBG_LAYER_ACTION_CALLBACK

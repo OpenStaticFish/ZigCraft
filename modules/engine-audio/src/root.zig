@@ -1,4 +1,8 @@
 pub const backend = @import("backend.zig");
+
+test {
+    _ = @import("test_root.zig");
+}
 pub const manager = @import("manager.zig");
 pub const sdl_audio = @import("backends/sdl_audio.zig");
 pub const system = @import("system.zig");

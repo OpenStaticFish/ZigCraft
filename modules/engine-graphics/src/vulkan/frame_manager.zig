@@ -4,7 +4,6 @@ const build_options = @import("engine_graphics_options");
 const log = @import("engine-core").log;
 const rhi = @import("engine-rhi").rhi;
 const VulkanDevice = @import("../vulkan_device.zig").VulkanDevice;
-const SwapchainPresenter = @import("swapchain_presenter.zig").SwapchainPresenter;
 const Utils = @import("utils.zig");
 
 pub const DRY_RUN_ACTIVE = if (@hasDecl(build_options, "skip_present")) build_options.skip_present else false;
@@ -23,19 +22,29 @@ pub const FrameManager = struct {
     current_frame: usize = 0,
     current_image_index: u32 = 0,
     frame_in_progress: bool = false,
+    // An aborted recording retains both the image and its unconsumed acquire
+    // semaphore. Re-record that image rather than acquiring/signaling twice.
+    image_acquired: bool = false,
+    terminal_failure: bool = false,
     dry_run: bool = false,
+    wait_for_fences_fn: *const fn (c.VkDevice, u32, [*c]const c.VkFence, c.VkBool32, u64) callconv(.c) c.VkResult = c.vkWaitForFences,
+    reset_fences_fn: *const fn (c.VkDevice, u32, [*c]const c.VkFence) callconv(.c) c.VkResult = c.vkResetFences,
+    reset_command_pool_fn: *const fn (c.VkDevice, c.VkCommandPool, c.VkCommandPoolResetFlags) callconv(.c) c.VkResult = c.vkResetCommandPool,
+    begin_command_buffer_fn: *const fn (c.VkCommandBuffer, [*c]const c.VkCommandBufferBeginInfo) callconv(.c) c.VkResult = c.vkBeginCommandBuffer,
+    end_command_buffer_fn: *const fn (c.VkCommandBuffer) callconv(.c) c.VkResult = c.vkEndCommandBuffer,
 
     pub fn init(vulkan_device: *VulkanDevice) !FrameManager {
         var self = FrameManager{
             .vulkan_device = vulkan_device,
             .command_pool = null,
             .frame_command_pools = [_]c.VkCommandPool{null} ** rhi.MAX_FRAMES_IN_FLIGHT,
-            .command_buffers = undefined,
-            .image_available_semaphores = undefined,
-            .render_finished_semaphores = undefined,
-            .in_flight_fences = undefined,
+            .command_buffers = .{null} ** rhi.MAX_FRAMES_IN_FLIGHT,
+            .image_available_semaphores = .{null} ** rhi.MAX_FRAMES_IN_FLIGHT,
+            .render_finished_semaphores = .{null} ** rhi.MAX_SWAPCHAIN_IMAGES,
+            .in_flight_fences = .{null} ** rhi.MAX_FRAMES_IN_FLIGHT,
             .dry_run = DRY_RUN_ACTIVE,
         };
+        errdefer self.deinit();
 
         var pool_info = std.mem.zeroes(c.VkCommandPoolCreateInfo);
         pool_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -96,26 +105,31 @@ pub const FrameManager = struct {
         }
     }
 
-    pub fn beginFrame(self: *FrameManager, swapchain: *SwapchainPresenter) !bool {
+    pub fn beginFrame(self: *FrameManager, swapchain: anytype) !bool {
+        if (self.terminal_failure) return error.GpuLost;
         if (self.frame_in_progress) return error.InvalidState;
+        errdefer self.failFrame();
 
         const device = self.vulkan_device.vk_device;
 
         // Wait for previous frame before reusing the command buffer.
-        _ = c.vkWaitForFences(device, 1, &self.in_flight_fences[self.current_frame], c.VK_TRUE, std.math.maxInt(u64));
+        try Utils.checkVk(self.wait_for_fences_fn(device, 1, &self.in_flight_fences[self.current_frame], c.VK_TRUE, std.math.maxInt(u64)));
 
         // Acquire image
         if (self.dry_run) {
             // In dry-run/headless mode, we skip image acquisition to avoid WSI/driver crashes.
             // We just use image 0 as our target.
             self.current_image_index = 0;
-        } else {
+        } else if (!self.image_acquired) {
             const result = swapchain.acquireNextImage(self.image_available_semaphores[self.current_frame]);
             if (result) |index| {
                 self.current_image_index = index;
+                self.image_acquired = true;
             } else |err| {
                 if (err == error.OutOfDate) {
                     swapchain.framebuffer_resized = true;
+                    // No image was acquired and the fence is still signaled.
+                    // Return a skipped frame, not a quarantined/reset slot.
                     return false;
                 } else if (err == error.ValidationFailed) {
                     log.log.err("beginFrame: validation failure while acquiring swapchain image", .{});
@@ -126,33 +140,34 @@ pub const FrameManager = struct {
         }
 
         // Reset fence before submitting the next frame.
-        _ = c.vkResetFences(device, 1, &self.in_flight_fences[self.current_frame]);
+        try Utils.checkVk(self.reset_fences_fn(device, 1, &self.in_flight_fences[self.current_frame]));
 
         // Reset the per-frame pool after its fence signals. This lets the driver
         // recycle all transient command-buffer storage for the frame at once.
         const cb = self.command_buffers[self.current_frame];
-        try Utils.checkVk(c.vkResetCommandPool(device, self.frame_command_pools[self.current_frame], 0));
+        try Utils.checkVk(self.reset_command_pool_fn(device, self.frame_command_pools[self.current_frame], 0));
 
         var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
         begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        try Utils.checkVk(c.vkBeginCommandBuffer(cb, &begin_info));
+        try Utils.checkVk(self.begin_command_buffer_fn(cb, &begin_info));
 
         self.frame_in_progress = true;
         return true;
     }
 
-    pub fn endFrame(self: *FrameManager, swapchain: *SwapchainPresenter, transfer_cb: ?c.VkCommandBuffer, transfer_semaphore: ?c.VkSemaphore) !void {
+    pub fn endFrame(self: *FrameManager, swapchain: anytype, transfer_cb: ?c.VkCommandBuffer, transfer_semaphore: ?c.VkSemaphore) !void {
+        if (self.terminal_failure) return error.GpuLost;
         if (!self.frame_in_progress) return error.InvalidState;
-        defer self.frame_in_progress = false;
+        errdefer self.failFrame();
 
         const cb = self.command_buffers[self.current_frame];
-        try Utils.checkVk(c.vkEndCommandBuffer(cb));
+        try Utils.checkVk(self.end_command_buffer_fn(cb));
 
         // Shared-queue uploads are submitted with graphics, so this CB is ended here.
         // Dedicated-queue uploads are ended in submitTransfer() before the separate submit.
         if (transfer_semaphore == null) {
             if (transfer_cb) |tcb| {
-                try Utils.checkVk(c.vkEndCommandBuffer(tcb));
+                try Utils.checkVk(self.end_command_buffer_fn(tcb));
             }
         }
 
@@ -219,20 +234,31 @@ pub const FrameManager = struct {
             };
         }
 
+        self.frame_in_progress = false;
+        self.image_acquired = false;
         self.current_frame = (self.current_frame + 1) % rhi.MAX_FRAMES_IN_FLIGHT;
     }
 
+    /// Failed starts can leave an unsignaled fence; failed submits/presents can
+    /// leave pending work. Quarantine the slot without touching its GPU state.
+    pub fn failFrame(self: *FrameManager) void {
+        self.terminal_failure = true;
+        self.frame_in_progress = false;
+    }
+
     pub fn abortFrame(self: *FrameManager) void {
-        if (!self.frame_in_progress) return;
+        if (self.terminal_failure or !self.frame_in_progress) return;
         const frame = self.current_frame;
         const device = self.vulkan_device.vk_device;
 
         // Discard every recorded reference before world/session teardown can
         // release its buffers. This command pool belongs exclusively to the
         // current frame slot, whose fence was waited before beginFrame.
-        const reset_result = c.vkResetCommandPool(device, self.frame_command_pools[frame], 0);
+        const reset_result = self.reset_command_pool_fn(device, self.frame_command_pools[frame], 0);
         if (reset_result != c.VK_SUCCESS) {
             log.log.err("Failed to reset aborted graphics command pool: {d}", .{reset_result});
+            self.failFrame();
+            return;
         }
 
         // beginFrame reset this fence, but an aborted frame has no graphics
@@ -242,6 +268,8 @@ pub const FrameManager = struct {
         submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
         self.vulkan_device.submitGuarded(submit_info, self.in_flight_fences[frame]) catch |err| {
             log.log.errWithTrace("Failed to retire aborted frame slot: {}", .{err});
+            self.failFrame();
+            return;
         };
         self.frame_in_progress = false;
     }

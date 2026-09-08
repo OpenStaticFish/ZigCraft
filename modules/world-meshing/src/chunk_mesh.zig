@@ -133,6 +133,8 @@ pub const ChunkMesh = struct {
 
     /// Build the full chunk mesh from chunk data and neighbors.
     /// Delegates greedy meshing to the meshing stage modules.
+    /// All inputs must remain immutable for this call. Runtime workers pass
+    /// snapshots, not pinned live chunks (pinning protects lifetime only).
     pub fn buildWithNeighbors(self: *ChunkMesh, chunk: *const Chunk, neighbors: NeighborChunks, atlas: *const TextureAtlas) !void {
         // Reusable scratch buffers owned for the whole chunk build. Previously
         // each subchunk allocated three fresh vertex ArrayLists plus the mesher
@@ -222,6 +224,12 @@ pub const ChunkMesh = struct {
     /// Commit chunk-wide meshing output to pending buffers consumed by upload().
     /// Called once after all subchunks have appended into the shared lists.
     fn commitPendingVertices(self: *ChunkMesh, solid: []const Vertex, cutout: []const Vertex, fluid: []const Vertex) !void {
+        const new_solid = if (solid.len > 0) try self.allocator.dupe(Vertex, solid) else null;
+        errdefer if (new_solid) |p| self.allocator.free(p);
+        const new_cutout = if (cutout.len > 0) try self.allocator.dupe(Vertex, cutout) else null;
+        errdefer if (new_cutout) |p| self.allocator.free(p);
+        const new_fluid = if (fluid.len > 0) try self.allocator.dupe(Vertex, fluid) else null;
+
         self.mutex.lock();
         defer self.mutex.unlock();
 
@@ -230,9 +238,9 @@ pub const ChunkMesh = struct {
         if (self.pending_cutout) |p| self.allocator.free(p);
         if (self.pending_fluid) |p| self.allocator.free(p);
 
-        self.pending_solid = if (solid.len > 0) try self.allocator.dupe(Vertex, solid) else null;
-        self.pending_cutout = if (cutout.len > 0) try self.allocator.dupe(Vertex, cutout) else null;
-        self.pending_fluid = if (fluid.len > 0) try self.allocator.dupe(Vertex, fluid) else null;
+        self.pending_solid = new_solid;
+        self.pending_cutout = new_cutout;
+        self.pending_fluid = new_fluid;
 
         var tile0: u32 = 0;
         var total: u32 = 0;
@@ -247,6 +255,20 @@ pub const ChunkMesh = struct {
         }
         self.diag_tile0_count = tile0;
         self.diag_total_verts = total;
+    }
+
+    /// Move validated worker-private output without copying vertices or touching
+    /// GPU allocations. Caller owns source exclusively and uses the same allocator.
+    pub fn takePendingFrom(self: *ChunkMesh, source: *ChunkMesh) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        inline for (.{ "pending_solid", "pending_cutout", "pending_fluid" }) |name| {
+            if (@field(self, name)) |vertices| self.allocator.free(vertices);
+            @field(self, name) = @field(source, name);
+            @field(source, name) = null;
+        }
+        self.diag_tile0_count = source.diag_tile0_count;
+        self.diag_total_verts = source.diag_total_verts;
     }
 
     pub fn upload(self: *ChunkMesh, allocator: *GlobalVertexAllocator) void {
@@ -409,3 +431,33 @@ pub const ChunkMesh = struct {
         }
     }
 };
+
+test "ChunkMesh pending publication survives OOM and transfers ownership without copying" {
+    const testing = std.testing;
+    const vertices = [_]Vertex{std.mem.zeroes(Vertex)};
+    for (0..3) |fail_offset| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{});
+        var mesh = ChunkMesh.init(failing.allocator());
+        defer mesh.deinitWithoutRHI();
+        try mesh.commitPendingVertices(&vertices, &vertices, &vertices);
+        const old_solid = mesh.pending_solid.?.ptr;
+        const old_cutout = mesh.pending_cutout.?.ptr;
+        const old_fluid = mesh.pending_fluid.?.ptr;
+        failing.fail_index = failing.alloc_index + fail_offset;
+        try testing.expectError(error.OutOfMemory, mesh.commitPendingVertices(&vertices, &vertices, &vertices));
+        try testing.expect(mesh.pending_solid.?.ptr == old_solid);
+        try testing.expect(mesh.pending_cutout.?.ptr == old_cutout);
+        try testing.expect(mesh.pending_fluid.?.ptr == old_fluid);
+        try testing.expectEqual(@as(u32, 3), mesh.diag_total_verts);
+
+        var destination = ChunkMesh.init(failing.allocator());
+        defer destination.deinitWithoutRHI();
+        destination.takePendingFrom(&mesh);
+        try testing.expect(destination.pending_solid.?.ptr == old_solid);
+        try testing.expect(destination.pending_cutout.?.ptr == old_cutout);
+        try testing.expect(destination.pending_fluid.?.ptr == old_fluid);
+        try testing.expect(mesh.pending_solid == null and mesh.pending_cutout == null and mesh.pending_fluid == null);
+        try testing.expectEqual(@as(u32, 3), destination.diag_total_verts);
+        try testing.expect(!destination.ready);
+    }
+}

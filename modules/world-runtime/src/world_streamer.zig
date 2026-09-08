@@ -67,6 +67,7 @@ const GpuMesher = @import("gpu_mesher.zig").GpuMesher;
 const WorldMutationCoordinator = @import("world_mutation.zig").WorldMutationCoordinator;
 const GpuAccelerationCoordinator = @import("gpu_acceleration_coordinator.zig").GpuAccelerationCoordinator;
 const ChunkQueueCoordinator = @import("chunk_queue_coordinator.zig").ChunkQueueCoordinator;
+const MeshInputSnapshot = @import("chunk_queue_coordinator.zig").MeshInputSnapshot;
 const build_options = @import("world_runtime_options");
 
 /// Buffer distance beyond render_distance for chunk unloading.
@@ -159,7 +160,7 @@ pub const WorldStreamer = struct {
     const STARTUP_RADIUS_INITIAL = 3;
     const STARTUP_RADIUS_STEP = 2;
     const STARTUP_PREFETCH_RINGS = 2;
-    pub fn init(allocator: std.mem.Allocator, storage: *ChunkStorage, generator: Generator, atlas: *const TextureAtlas, render_distance: i32, vertex_allocator: *GlobalVertexAllocator, max_uploads_per_frame: usize, gpu_block_buffer: ?*GpuBlockBuffer, gpu_mesher: ?*GpuMesher) !*WorldStreamer {
+    pub fn init(allocator: std.mem.Allocator, storage: *ChunkStorage, generator: Generator, atlas: *const TextureAtlas, render_distance: i32, vertex_allocator: *GlobalVertexAllocator, max_uploads_per_frame: usize, gpu_block_buffer: ?*GpuBlockBuffer, gpu_mesher: ?*GpuMesher, save_manager: ?*SaveManager) !*WorldStreamer {
         const streamer = try allocator.create(WorldStreamer);
         errdefer allocator.destroy(streamer);
 
@@ -211,16 +212,18 @@ pub const WorldStreamer = struct {
 
         streamer.queue_coordinator = try ChunkQueueCoordinator.init(allocator, storage, generator, atlas, gen_queue, mesh_queue, vertex_allocator, max_uploads_per_frame, &streamer.gpu_acceleration);
         errdefer streamer.queue_coordinator.deinit();
+        streamer.setSaveManager(save_manager);
+        try streamer.warmupInitialChunks();
 
         log.log.info("WorldStreamer workers: gen={} mesh={} (cpu={})", .{ gen_worker_count, mesh_worker_count, cpu_count });
 
         streamer.gen_pool = try WorkerPool.init(allocator, gen_worker_count, gen_queue, &streamer.queue_coordinator, ChunkQueueCoordinator.processGenJob);
-        errdefer streamer.gen_pool.deinit();
+        errdefer {
+            gen_queue.stop();
+            streamer.gen_pool.deinit();
+        }
 
         streamer.mesh_pool = try WorkerPool.init(allocator, mesh_worker_count, mesh_queue, &streamer.queue_coordinator, ChunkQueueCoordinator.processMeshJob);
-        errdefer streamer.mesh_pool.deinit();
-
-        try streamer.warmupInitialChunks();
         if (gpu_mesher) |mesher| mesher.setRemeshCallback(&streamer.queue_coordinator, enqueueGpuRemesh);
 
         return streamer;
@@ -318,16 +321,28 @@ pub const WorldStreamer = struct {
                 if (data.chunk.generated) continue;
 
                 data.chunk.state = .generating;
-                self.generator.generate(&data.chunk, null) catch |err| {
-                    log.log.warn("STARTUP_WARMUP_GEN_FAILED: ({},{}) {}", .{ cx, cz, err });
-                    data.chunk.state = .missing;
-                    continue;
-                };
+                const loaded = if (self.save_manager) |sm| sm.loadChunk(cx, cz, &data.chunk) else .not_found;
+                switch (loaded) {
+                    .not_found => {
+                        try self.generator.generate(&data.chunk, null);
+                        data.chunk.lighting_valid = true;
+                    },
+                    .success, .success_relight_required => {},
+                    .read_error, .corrupt_data => return error.SaveLoadFailed,
+                }
                 if (!data.chunk.generated) {
                     data.chunk.state = .missing;
                     continue;
                 }
                 data.chunk.state = .generated;
+                _ = data.chunk.rebuildMapSurface();
+                self.storage.markMapSurfaceChanged();
+                // Warmup runs before worker pools start. Reconciliation still
+                // requires the completed chunk to be published as generated.
+                if (loaded == .success_relight_required) {
+                    var lighting = @import("lighting_engine.zig").WorldLightingEngine.init(self.storage, self.allocator);
+                    if (!try lighting.reconcileLegacyArea(cx, cz)) return error.InitialLightingUnavailable;
+                }
             }
         }
 
@@ -404,6 +419,9 @@ pub const WorldStreamer = struct {
     }
 
     pub fn updateFrame(self: *WorldStreamer, player_pos: Vec3, dt: f32) !void {
+        if (self.save_manager) |sm| {
+            if (sm.load_failed.load(.acquire)) return error.SaveLoadFailed;
+        }
         if (self.paused) return;
 
         self.frame_counter += 1;
@@ -550,73 +568,70 @@ pub const WorldStreamer = struct {
     }
 
     fn finalizeChunkMesh(self: *WorldStreamer, cx: i32, cz: i32) void {
-        self.storage.chunks_mutex.lock();
-        const chunk_data = self.storage.chunks.get(.{ .x = cx, .z = cz }) orelse {
-            self.storage.chunks_mutex.unlock();
-            return;
-        };
-
-        // Claim mesh ownership through the same state machine used by workers.
-        // Pins prevent eviction, but do not prevent a queued worker from
-        // mutating the mesh concurrently.
-        const previous_state = chunk_data.chunk.state;
-        if (previous_state != .generated and previous_state != .renderable) {
-            self.storage.chunks_mutex.unlock();
-            return;
-        }
-        chunk_data.chunk.state = .meshing;
-
-        chunk_data.chunk.pin();
-        const neighbors = NeighborChunks{
-            .north = if (self.storage.chunks.get(.{ .x = cx, .z = cz - 1 })) |d| d: {
-                d.chunk.pin();
-                break :d &d.chunk;
-            } else null,
-            .south = if (self.storage.chunks.get(.{ .x = cx, .z = cz + 1 })) |d| d: {
-                d.chunk.pin();
-                break :d &d.chunk;
-            } else null,
-            .east = if (self.storage.chunks.get(.{ .x = cx + 1, .z = cz })) |d| d: {
-                d.chunk.pin();
-                break :d &d.chunk;
-            } else null,
-            .west = if (self.storage.chunks.get(.{ .x = cx - 1, .z = cz })) |d| d: {
-                d.chunk.pin();
-                break :d &d.chunk;
-            } else null,
-        };
-        self.storage.chunks_mutex.unlock();
-
-        defer {
-            chunk_data.chunk.unpin();
-            if (neighbors.north) |n| @constCast(n).unpin();
-            if (neighbors.south) |s| @constCast(s).unpin();
-            if (neighbors.east) |e| @constCast(e).unpin();
-            if (neighbors.west) |w| @constCast(w).unpin();
-        }
-
-        chunk_data.render.mesh.buildWithNeighbors(&chunk_data.chunk, neighbors, self.atlas) catch |err| {
-            log.log.warn("STARTUP_FINALIZE_MESH_FAILED: ({},{}) {}", .{ cx, cz, err });
+        const claimed = claim: {
+            self.storage.lighting_mutex.lock();
+            defer self.storage.lighting_mutex.unlock();
             self.storage.chunks_mutex.lock();
-            if (self.storage.chunks.get(.{ .x = cx, .z = cz })) |data| {
-                if (data.chunk.state == .meshing) data.chunk.state = previous_state;
-            }
-            self.storage.chunks_mutex.unlock();
-            return;
-        };
-        chunk_data.render.mesh.upload(self.vertex_allocator);
+            defer self.storage.chunks_mutex.unlock();
 
-        self.storage.chunks_mutex.lock();
-        if (self.storage.chunks.get(.{ .x = cx, .z = cz })) |data| {
-            if (data.chunk.state == .meshing) {
-                data.chunk.state = if (data.render.mesh.ready) .renderable else previous_state;
-                if (data.render.mesh.ready) {
-                    data.chunk.dirty = false;
-                    data.chunk.mesh_attempts = 0;
-                }
+            const data = self.storage.chunks.get(.{ .x = cx, .z = cz }) orelse return;
+            if (!data.chunk.generated or (data.chunk.state != .generated and data.chunk.state != .renderable)) return;
+            const neighbors = MeshInputSnapshot.residentNeighbors(self.storage, cx, cz);
+            const snapshot = MeshInputSnapshot.capture(self.allocator, &data.chunk, neighbors) catch |err| {
+                log.log.warn("STARTUP_FINALIZE_SNAPSHOT_FAILED: ({},{}) {}", .{ cx, cz, err });
+                return;
+            };
+            data.chunk.state = .meshing;
+            data.chunk.pin();
+            inline for (.{ "north", "south", "east", "west" }) |name| {
+                if (@field(neighbors, name)) |neighbor| @constCast(neighbor).pin();
+            }
+            break :claim .{ .data = data, .snapshot = snapshot, .neighbors = neighbors, .job_token = data.chunk.job_token };
+        };
+        defer {
+            claimed.snapshot.deinit(self.allocator);
+            claimed.data.chunk.unpin();
+            inline for (.{ "north", "south", "east", "west" }) |name| {
+                if (@field(claimed.neighbors, name)) |neighbor| @constCast(neighbor).unpin();
             }
         }
-        self.storage.chunks_mutex.unlock();
+
+        var built_mesh = world_meshing.ChunkMesh.init(self.allocator);
+        defer built_mesh.deinitWithoutRHI();
+        var build_succeeded = true;
+        built_mesh.buildWithNeighbors(&claimed.snapshot.chunks[0], claimed.snapshot.neighbors, self.atlas) catch |err| {
+            log.log.warn("STARTUP_FINALIZE_MESH_FAILED: ({},{}) {}", .{ cx, cz, err });
+            build_succeeded = false;
+        };
+
+        self.storage.lighting_mutex.lock();
+        defer self.storage.lighting_mutex.unlock();
+        self.storage.chunks_mutex.lock();
+        defer self.storage.chunks_mutex.unlock();
+        const data = self.storage.chunks.get(.{ .x = cx, .z = cz }) orelse return;
+        // A reset or new job owns its state and pending output. Never overwrite
+        // it, or publish vertices built before an edit or neighbor arrival.
+        if (data != claimed.data or data.chunk.state != .meshing or data.chunk.job_token != claimed.job_token) return;
+        const neighbors = MeshInputSnapshot.residentNeighbors(self.storage, cx, cz);
+        if (!build_succeeded or !claimed.snapshot.matches(&data.chunk, neighbors)) {
+            data.chunk.state = .generated;
+            data.chunk.dirty = true;
+            self.queue_coordinator.enqueuePendingMesh(cx, cz, claimed.job_token);
+            return;
+        }
+        data.render.mesh.takePendingFrom(&built_mesh);
+        data.render.mesh.upload(self.vertex_allocator);
+        // ready may describe old GPU allocations after a failed upload. Pending
+        // vertices must be consumed before this revision can be called clean.
+        const upload_complete = data.render.mesh.ready and data.render.mesh.pending_solid == null and
+            data.render.mesh.pending_cutout == null and data.render.mesh.pending_fluid == null;
+        data.chunk.state = if (upload_complete) .renderable else .generated;
+        data.chunk.dirty = !upload_complete;
+        if (upload_complete) {
+            data.chunk.mesh_attempts = 0;
+        } else {
+            self.queue_coordinator.enqueuePendingMesh(cx, cz, claimed.job_token);
+        }
     }
 
     fn processUnloads(self: *WorldStreamer, player_pos: Vec3) !void {
@@ -650,6 +665,8 @@ pub const WorldStreamer = struct {
         }
 
         for (to_remove.items) |key| {
+            self.storage.lighting_mutex.lock();
+            defer self.storage.lighting_mutex.unlock();
             const unload_candidate = blk: {
                 self.storage.chunks_mutex.lock();
                 defer self.storage.chunks_mutex.unlock();
@@ -660,22 +677,26 @@ pub const WorldStreamer = struct {
                 {
                     continue;
                 }
-                const previous_state = data.chunk.state;
                 data.chunk.pin();
+                errdefer data.chunk.unpin();
+                if (data.chunk.modified and data.chunk.generated) {
+                    if (self.save_manager) |sm| {
+                        // Keep the dirty resident chunk if snapshot acceptance
+                        // fails. No GPU/storage release may precede acceptance.
+                        try sm.enqueueSave(&data.chunk);
+                        data.chunk.modified = false;
+                    }
+                }
                 data.chunk.state = .unloading;
-                break :blk .{ .chunk = &data.chunk, .previous_state = previous_state };
+                break :blk .{ .chunk = &data.chunk };
             };
             const chunk = unload_candidate.chunk;
-
-            const save_enqueued = chunk.modified and chunk.generated and self.save_manager != null;
-            if (save_enqueued) self.save_manager.?.enqueueSave(chunk);
 
             self.gpu_acceleration.freeChunk(key.x, key.z);
 
             self.storage.chunks_mutex.lock();
             if (self.storage.chunks.get(key)) |data| {
                 if (&data.chunk == chunk and data.chunk.state == .unloading) {
-                    if (save_enqueued) data.chunk.modified = false;
                     data.chunk.unpin();
                     _ = self.storage.removeUnlocked(key.x, key.z, self.vertex_allocator);
                 } else {
@@ -808,4 +829,46 @@ fn cleanupMutationLighting(raw_context: *anyopaque) void {
     const context: *MutationLightingJob = @ptrCast(@alignCast(raw_context));
     const allocator = context.allocator;
     allocator.destroy(context);
+}
+
+test "startup mesh finalization allocation failures preserve output and release pins" {
+    const testing = std.testing;
+    // Snapshot, mask, and the three scratch vertex buffers. Every injected
+    // failure returns before atlas or GPU access, through the real finalizer.
+    for (0..5) |fail_index| {
+        var storage = ChunkStorage.init(testing.allocator);
+        defer storage.deinitWithoutRHI();
+        const target = try storage.getOrCreate(0, 0);
+        const east = try storage.getOrCreate(1, 0);
+        target.chunk.generated = true;
+        target.chunk.state = .renderable;
+        target.chunk.dirty = false;
+        east.chunk.generated = true;
+        east.chunk.state = .generated;
+        const old_pending = try testing.allocator.alloc(@import("engine-rhi").Vertex, 1);
+        target.render.mesh.pending_solid = old_pending;
+
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        var gpu = GpuAccelerationCoordinator.init(null, null);
+        // Only storage, allocator and pending-mesh bookkeeping are used on these
+        // failure paths. No worker pools or graphics objects are initialized.
+        var streamer: WorldStreamer = undefined;
+        streamer.allocator = failing.allocator();
+        streamer.storage = &storage;
+        streamer.atlas = undefined;
+        streamer.queue_coordinator = try ChunkQueueCoordinator.init(testing.allocator, &storage, undefined, undefined, undefined, undefined, undefined, 0, &gpu);
+        defer streamer.queue_coordinator.deinit();
+
+        streamer.finalizeChunkMesh(0, 0);
+        try testing.expectEqual(if (fail_index == 0) Chunk.State.renderable else Chunk.State.generated, target.chunk.state);
+        try testing.expectEqual(fail_index != 0, target.chunk.dirty);
+        try testing.expectEqual(old_pending.ptr, target.render.mesh.pending_solid.?.ptr);
+        try testing.expect(!target.chunk.isPinned());
+        try testing.expect(!east.chunk.isPinned());
+        try testing.expectEqual(@as(usize, if (fail_index == 0) 0 else 1), streamer.queue_coordinator.pending_mesh_incoming.items.len);
+        try testing.expect(storage.lighting_mutex.tryLock());
+        storage.lighting_mutex.unlock();
+        try testing.expect(storage.chunks_mutex.tryLock());
+        storage.chunks_mutex.unlock();
+    }
 }

@@ -103,8 +103,12 @@ test "BiomeDefinition fails continentalness out of range" {
 }
 
 test "BiomeDefinition fails ridge_mask too low" {
-    const def = getBiomeDefinition(.mountains);
+    // Ordinary mountains allow ridge-free relief; jagged peaks require a ridge.
+    const def = getBiomeDefinition(.jagged_peaks);
     try testing.expect(!def.meetsStructuralConstraints(120, 5, 0.85, 0.05));
+    try testing.expect(!def.meetsStructuralConstraints(120, 5, 0.85, def.min_ridge_mask - 0.0001));
+    try testing.expect(def.meetsStructuralConstraints(120, 5, 0.85, def.min_ridge_mask));
+    try testing.expect(getBiomeDefinition(.mountains).meetsStructuralConstraints(120, 5, 0.85, 0.0));
 }
 
 test "BiomeDefinition fails ridge_mask too high" {

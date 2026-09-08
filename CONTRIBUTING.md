@@ -54,8 +54,6 @@ devenv shell zig build run
 # Release build (optimized)
 devenv shell zig build -Doptimize=ReleaseFast
 
-# Clean build artifacts
-rm -rf zig-out/ .zig-cache/
 ```
 
 ### Testing
@@ -66,17 +64,20 @@ devenv shell zig build test
 # Run a specific test
 devenv shell zig build test -- --test-filter "Vec3 addition"
 
-# Integration test (window init smoke test)
-devenv shell zig build test-integration
+# Integration test (requires a display/compositor and Vulkan driver)
+timeout --kill-after=30s 10m devenv shell zig build test-integration
 ```
 
 ### Linting & Formatting
 ```bash
 # Format code
-devenv shell zig fmt src/
+devenv shell zig fmt src/ modules/ build.zig
 
-# Fast type-check (no full compilation)
-devenv shell zig build check
+# Check formatting without edits
+devenv shell zig fmt --check src/ modules/ build.zig
+
+# Compile the application; there is no `zig build check` step
+devenv shell zig build
 ```
 
 ### Asset Processing
@@ -144,7 +145,7 @@ Follow the coding conventions in [Code Style](#code-style) below. The [AGENTS.md
 
 ```bash
 # Format your code before committing
-devenv shell zig fmt src/
+devenv shell zig fmt src/ modules/ build.zig
 
 # Run tests
 devenv shell zig build test
@@ -208,6 +209,8 @@ git push origin promote/dev-to-main-$(date +%Y%m%d)
 - Verify all CI checks pass
 - Merge after final review
 
+Promotion PRs to `main`, pushes to `dev`/`main`, and `v*` tags run build and coverage workflows. Workflow success is not release authorization: complete the [release checklist](docs/release-checklist.md), including unresolved placeholder-asset redistribution rights, before publishing binaries or asset bundles.
+
 ---
 
 ## PR Templates
@@ -268,7 +271,7 @@ For full coding guidelines, see [AGENTS.md](AGENTS.md) (internal AI agent refere
 ### Before Committing
 ```bash
 # Format code
-devenv shell zig fmt src/
+devenv shell zig fmt src/ modules/ build.zig
 
 # Run all tests
 devenv shell zig build test
@@ -300,14 +303,18 @@ Keep the block catalog under the current `u8` capacity policy documented in [`do
 
 ### Modifying Shaders
 1. GLSL sources in `assets/shaders/` (Vulkan shaders in `vulkan/` subdirectory)
-2. Vulkan SPIR-V validated during `zig build test` via `glslangValidator`
-3. Uniform names must match exactly between shader source and RHI backends
+2. Run `devenv shell zig build shaders` to explicitly regenerate tracked SPIR-V after intentional edits
+3. Ordinary builds and `devenv shell zig build test-shaders` validate freshness, sizes, and shadow ABI without modifying tracked artifacts
+4. Update intentional size changes with `./scripts/update_spirv_baseline.sh` and review the generated diff
+5. GPU layouts, descriptors, and bindings must agree between shader sources and RHI backends
 
 ### Adding Unit Tests
-Add tests to `src/tests.zig` using `std.testing` assertions:
+Add tests beside their owning module's code and include them from its file-relative `test_root.zig`; application wiring tests belong in `src/tests.zig`. Inspect `devenv shell zig build test-discovery` to verify the compiler discovers named tests. Use `std.testing` assertions:
 - `expectEqual` - exact value comparison
 - `expectApproxEqAbs` - floating point comparison
 - `expect` - boolean/boolean expressions
+
+Fuzz-named corpus tests in the normal suite are deterministic regressions, not coverage-guided campaigns. Nightly `-Dsanitize=c` uses C UBSan, not ASan or universal Zig memory-error instrumentation. See [CI test guardrails](docs/ci-test-guardrails.md).
 
 ---
 
@@ -317,16 +324,19 @@ Add tests to `src/tests.zig` using `std.testing` assertions:
 modules/
   engine-*          # Engine packages for core, graphics, RHI, math, input, UI, ECS, audio
   world-core/       # Blocks, chunks, coordinates, and light packing
-  world-worldgen/   # Terrain generation, biomes, caves, decorations, generator registry
+  world-worldgen/   # Generator facade and registry
+  worldgen-*/       # Shared generation code and individual generator implementations
   world-meshing/    # Chunk storage, chunk mesh generation, GPU block buffers
   world-runtime/    # World facade, streamer, renderer, mutation, GPU meshing runtime
   world-persistence/# Level data, region files, chunk serialization, save manager
+  game-core/        # Session, player, inventory, settings, benchmarks
+  game-ui/          # Screens, menus, settings UI
 src/
-  game/             # Application logic, state, menus
+  game/             # Application wiring and lifecycle orchestration
   c.zig             # Central C interop (@cImport)
   main.zig          # Entry point
-  tests.zig         # Unit test suite
-libs/               # Local dependencies (zig-math, zig-noise)
+  tests.zig         # Application test root; module tests have their own direct roots
+libs/               # Vendored dependencies and the project-owned RmlUi bridge
 assets/shaders/     # GLSL shaders (vulkan/ contains SPIR-V)
 ```
 

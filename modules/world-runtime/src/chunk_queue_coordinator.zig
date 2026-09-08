@@ -32,18 +32,21 @@ const PendingMeshRef = struct {
 };
 
 const ChunkRevisions = struct {
+    job_token: u32,
     content: u64,
     light: u64,
 
+    /// Caller holds chunks_mutex, including the non-atomic incarnation token.
     fn capture(chunk: *const Chunk) ChunkRevisions {
         return .{
+            .job_token = chunk.job_token,
             .content = chunk.content_revision.load(.acquire),
             .light = chunk.light_revision.load(.acquire),
         };
     }
 
     fn matches(self: ChunkRevisions, chunk: *const Chunk) bool {
-        return self.content == chunk.content_revision.load(.acquire) and self.light == chunk.light_revision.load(.acquire);
+        return self.job_token == chunk.job_token and self.content == chunk.content_revision.load(.acquire) and self.light == chunk.light_revision.load(.acquire);
     }
 };
 
@@ -78,6 +81,70 @@ const MeshInputRevisions = struct {
     }
 };
 
+/// Owns only meshing inputs, never a live ChunkData/render payload or its
+/// synchronization state. The existing meshers consume Chunk views, so keep
+/// their arrays in private Chunks rather than copying any vertex buffers.
+pub const MeshInputSnapshot = struct {
+    chunks: []Chunk,
+    neighbors: NeighborChunks,
+    revisions: MeshInputRevisions,
+
+    /// Caller holds lighting_mutex -> chunks_mutex for the entire capture.
+    /// Live references retained for later validation must be pinned separately.
+    pub fn capture(allocator: std.mem.Allocator, target: *const Chunk, neighbors: NeighborChunks) !MeshInputSnapshot {
+        var count: usize = 1;
+        inline for (.{ "north", "south", "east", "west" }) |name| {
+            if (@field(neighbors, name) != null) count += 1;
+        }
+        const copies = try allocator.alloc(Chunk, count);
+        copyInputs(&copies[0], target);
+        var result = MeshInputSnapshot{ .chunks = copies, .neighbors = .empty, .revisions = MeshInputRevisions.capture(target, neighbors) };
+        var next: usize = 1;
+        inline for (.{ "north", "south", "east", "west" }) |name| {
+            if (@field(neighbors, name)) |neighbor| {
+                copyInputs(&copies[next], neighbor);
+                @field(result.neighbors, name) = &copies[next];
+                next += 1;
+            }
+        }
+        return result;
+    }
+
+    fn copyInputs(copy: *Chunk, source: *const Chunk) void {
+        copy.* = Chunk.init(source.chunk_x, source.chunk_z);
+        copy.blocks = source.blocks;
+        copy.light = source.light;
+        copy.biomes = source.biomes;
+    }
+
+    pub fn deinit(self: MeshInputSnapshot, allocator: std.mem.Allocator) void {
+        allocator.free(self.chunks);
+    }
+
+    /// Caller holds lighting_mutex -> chunks_mutex and supplies current resident
+    /// neighbors, not the old list (a previously absent neighbor may have arrived).
+    pub fn matches(self: MeshInputSnapshot, target: *const Chunk, neighbors: NeighborChunks) bool {
+        return self.revisions.matches(target, neighbors);
+    }
+
+    /// Caller holds chunks_mutex. Unpublished generation is never a mesh input.
+    pub fn residentNeighbors(storage: *ChunkStorage, cx: i32, cz: i32) NeighborChunks {
+        var neighbors = NeighborChunks.empty;
+        inline for (.{ "north", "south", "east", "west" }, .{ .{ 0, -1 }, .{ 0, 1 }, .{ 1, 0 }, .{ -1, 0 } }) |name, offset| {
+            neighbor: {
+                const nx = std.math.add(i32, cx, offset[0]) catch break :neighbor;
+                const nz = std.math.add(i32, cz, offset[1]) catch break :neighbor;
+                if (storage.chunks.get(.{ .x = nx, .z = nz })) |data| {
+                    if (data.chunk.generated and data.chunk.state != .generating and data.chunk.state != .unloading) {
+                        @field(neighbors, name) = &data.chunk;
+                    }
+                }
+            }
+        }
+        return neighbors;
+    }
+};
+
 /// How often (in frames) the slow recovery scan runs. The dominant transitions
 /// (.generated -> queued_for_mesh and .mesh_ready -> uploading) are handled
 /// every frame by the pending queues; the scan only catches stuck chunks and
@@ -106,6 +173,7 @@ pub const ChunkQueueCoordinator = struct {
     last_pc_x: std.atomic.Value(i32) = .init(0),
     last_pc_z: std.atomic.Value(i32) = .init(0),
     effective_render_dist: std.atomic.Value(i32) = .init(0),
+    gpu_mesh_enabled: std.atomic.Value(bool) = .init(false),
     missing_scan_initialized: bool = false,
     missing_scan_player_x: i32 = 0,
     missing_scan_player_z: i32 = 0,
@@ -136,6 +204,7 @@ pub const ChunkQueueCoordinator = struct {
             .vertex_allocator = vertex_allocator,
             .gpu = gpu,
             .max_uploads_per_frame = max_uploads_per_frame,
+            .gpu_mesh_enabled = .init(gpu.shouldUseGpuMeshReadyPath()),
         };
     }
 
@@ -146,6 +215,8 @@ pub const ChunkQueueCoordinator = struct {
     }
 
     pub fn setSaveManager(self: *ChunkQueueCoordinator, sm: ?*SaveManager) void {
+        self.storage.chunks_mutex.lock();
+        defer self.storage.chunks_mutex.unlock();
         self.save_manager = sm;
     }
 
@@ -153,6 +224,8 @@ pub const ChunkQueueCoordinator = struct {
         self.last_pc_x.store(pc_x, .release);
         self.last_pc_z.store(pc_z, .release);
         self.effective_render_dist.store(render_dist, .release);
+        // GPU configuration is main-thread-owned; workers read this mirror.
+        self.gpu_mesh_enabled.store(self.gpu.shouldUseGpuMeshReadyPath(), .release);
     }
 
     pub fn takeMissingRescanRequest(self: *ChunkQueueCoordinator) bool {
@@ -232,8 +305,10 @@ pub const ChunkQueueCoordinator = struct {
         while (iter.next()) |entry| {
             const chunk = &entry.value_ptr.*.chunk;
             if (chunk.state == .queued_for_generation or chunk.state == .generating) {
+                chunk.job_token +%= 1;
                 chunk.state = .missing;
             } else if (chunk.state == .queued_for_mesh or chunk.state == .meshing or chunk.state == .uploading) {
+                chunk.job_token +%= 1;
                 chunk.state = .generated;
             }
         }
@@ -292,6 +367,7 @@ pub const ChunkQueueCoordinator = struct {
             const key = ChunkKey{ .x = chunk_x, .z = chunk_z };
             const data = self.storage.chunks.get(key) orelse data: {
                 const created = try self.storage.createChunkDataUnlocked(chunk_x, chunk_z);
+                errdefer self.storage.allocator.destroy(created);
                 try self.storage.chunks.put(key, created);
                 break :data created;
             };
@@ -405,9 +481,8 @@ pub const ChunkQueueCoordinator = struct {
         }
         self.storage.chunks_mutex.unlock();
 
-        // Enqueue recovery flips outside the storage lock to avoid a
-        // lock-order inversion with the pending mutexes (the drain path
-        // acquires pending_mutex first, then chunks_mutex).
+        // Keep notification allocation outside the storage lock. Drains release
+        // the pending mutex before taking chunks_mutex, never nesting the two.
         for (recovery_enqueue[0..recovery_count]) |ref| {
             self.enqueuePendingMesh(ref.x, ref.z, ref.job_token);
         }
@@ -532,11 +607,16 @@ pub const ChunkQueueCoordinator = struct {
         var uploads: usize = 0;
         while (!self.upload_queue.isEmpty() and uploads < self.max_uploads_per_frame) {
             const key = self.upload_queue.pop() orelse break;
-            if (self.storage.get(key.x, key.z)) |data| {
+            self.storage.lighting_mutex.lock();
+            defer self.storage.lighting_mutex.unlock();
+            self.storage.chunks_mutex.lock();
+            defer self.storage.chunks_mutex.unlock();
+            if (self.storage.chunks.get(key)) |data| {
                 if (data.chunk.state != .uploading) continue;
 
-                // Main-thread invariant: only this upload path mutates `.uploading`
-                // chunks until GPU meshing finalization runs from the render graph.
+                // GPU block uploads read resident blocks; state/dirty flags may
+                // also be changed by workers. Neither is protected by main-thread
+                // ownership alone. Lock order continues chunks -> mesh here.
                 switch (self.gpu.queueGpuMesh(data)) {
                     .queued => {},
                     .deferred => {
@@ -594,142 +674,112 @@ pub const ChunkQueueCoordinator = struct {
         const cx = job.data.chunk.x;
         const cz = job.data.chunk.z;
 
-        self.storage.chunks_mutex.lockShared();
-        const chunk_data = self.storage.chunks.get(ChunkKey{ .x = cx, .z = cz }) orelse {
-            self.storage.chunks_mutex.unlockShared();
-            return;
-        };
-
-        const pc_x = self.last_pc_x.load(.acquire);
-        const pc_z = self.last_pc_z.load(.acquire);
-        const render_dist = self.effective_render_dist.load(.acquire);
-        const dx = @as(i64, cx) - @as(i64, pc_x);
-        const dz = @as(i64, cz) - @as(i64, pc_z);
-        const max_dist = @as(i64, render_dist) + CHUNK_UNLOAD_BUFFER;
-        if (!isWithinDistance(dx, dz, max_dist)) {
-            self.storage.chunks_mutex.unlockShared();
-
+        var save_manager: ?*SaveManager = null;
+        const chunk_data = claim: {
             self.storage.chunks_mutex.lock();
-            if (self.storage.chunks.get(ChunkKey{ .x = cx, .z = cz })) |data| {
-                if ((data.chunk.state == .queued_for_generation or data.chunk.state == .generating) and data.chunk.job_token == job.data.chunk.job_token) {
-                    data.chunk.state = .missing;
-                }
+            defer self.storage.chunks_mutex.unlock();
+            const data = self.storage.chunks.get(.{ .x = cx, .z = cz }) orelse return;
+            if (data.chunk.job_token != job.data.chunk.job_token) return;
+            const dx = @as(i64, cx) - self.last_pc_x.load(.acquire);
+            const dz = @as(i64, cz) - self.last_pc_z.load(.acquire);
+            const max_dist = @as(i64, self.effective_render_dist.load(.acquire)) + CHUNK_UNLOAD_BUFFER;
+            if (!isWithinDistance(dx, dz, max_dist)) {
+                if (data.chunk.state == .queued_for_generation or (data.chunk.state == .generating and !data.chunk.isPinned())) data.chunk.state = .missing;
+                return;
             }
-            self.storage.chunks_mutex.unlock();
-            return;
-        }
-
-        chunk_data.chunk.pin();
-        self.storage.chunks_mutex.unlockShared();
-
+            // A duplicate job must not claim an already-running generation.
+            if (data.chunk.state != .queued_for_generation) return;
+            data.chunk.state = .generating;
+            data.chunk.pin();
+            save_manager = self.save_manager;
+            break :claim data;
+        };
         defer chunk_data.chunk.unpin();
 
-        self.storage.chunks_mutex.lock();
-        if (self.storage.chunks.get(ChunkKey{ .x = cx, .z = cz })) |data| {
-            if (data.chunk.state == .queued_for_generation and data.chunk.job_token == job.data.chunk.job_token) {
-                data.chunk.state = .generating;
-            } else if (data.chunk.state != .generating or data.chunk.job_token != job.data.chunk.job_token) {
-                self.storage.chunks_mutex.unlock();
-                return;
+        var published = false;
+        defer if (!published) {
+            self.storage.chunks_mutex.lock();
+            defer self.storage.chunks_mutex.unlock();
+            if (chunk_data.chunk.state == .generating and chunk_data.chunk.job_token == job.data.chunk.job_token) {
+                chunk_data.chunk.state = .missing;
+                self.missing_rescan_requested.store(true, .release);
             }
-        } else {
-            self.storage.chunks_mutex.unlock();
+        };
+        if (self.gen_queue.shouldAbort()) return;
+        if (save_manager) |sm| {
+            if (sm.load_failed.load(.acquire)) return;
+        }
+
+        // Loading/generation may set generated=true before their final writes.
+        // Keep all of that work private, including map-surface rebuilding.
+        const generated = self.allocator.create(Chunk) catch return;
+        defer self.allocator.destroy(generated);
+        generated.* = Chunk.init(cx, cz);
+        const load_result = if (save_manager) |sm| sm.loadChunk(cx, cz, generated) else LoadResult.not_found;
+        switch (load_result) {
+            .not_found => {
+                // Generator's legacy *const bool cancellation API cannot safely
+                // observe the shared queue flag. Cancel between chunks instead.
+                self.generator.generate(generated, null) catch |err| {
+                    log.log.warn("CHUNK_GEN_ERROR: ({},{}) generator failed: {}", .{ cx, cz, err });
+                    return;
+                };
+                generated.lighting_valid = true;
+            },
+            .success, .success_relight_required => {},
+            .read_error, .corrupt_data => {
+                // SaveManager latched the failure for WorldStreamer to surface.
+                // Never publish partial load output or regenerate persistent data.
+                log.log.err("Save load failed for chunk ({}, {}): {}, generation stopped", .{ cx, cz, load_result });
+                return;
+            },
+        }
+        if (self.gen_queue.shouldAbort()) return;
+        if (!generated.generated) {
+            log.log.warn("CHUNK_GEN_FAILED: ({},{}) generator returned without setting generated=true", .{ cx, cz });
             return;
         }
-        self.storage.chunks_mutex.unlock();
-
-        if (chunk_data.chunk.state == .generating and chunk_data.chunk.job_token == job.data.chunk.job_token) {
-            const load_result = blk: {
-                const sm = self.save_manager orelse break :blk LoadResult.not_found;
-                break :blk sm.loadChunk(cx, cz, &chunk_data.chunk);
-            };
-
-            const generated_new = load_result != .success and load_result != .success_relight_required;
-            if (generated_new) {
-                if (load_result == .read_error or load_result == .corrupt_data) {
-                    log.log.warn("Save load failed for chunk ({}, {}): {}, regenerating", .{ cx, cz, load_result });
-                }
-                self.generator.generate(&chunk_data.chunk, &self.gen_queue.abort_worker) catch |err| {
-                    log.log.warn("CHUNK_GEN_ERROR: ({},{}) generator failed: {}", .{ cx, cz, err });
-                    self.storage.chunks_mutex.lock();
-                    chunk_data.chunk.state = .missing;
-                    chunk_data.chunk.generated = false;
-                    self.missing_rescan_requested.store(true, .release);
-                    self.storage.chunks_mutex.unlock();
-                    return;
-                };
-                if (self.gen_queue.abort_worker) {
-                    self.storage.chunks_mutex.lock();
-                    chunk_data.chunk.state = .missing;
-                    self.missing_rescan_requested.store(true, .release);
-                    self.storage.chunks_mutex.unlock();
-                    return;
-                }
-                // World generators already compute chunk-local lighting. Mark it
-                // current instead of rebuilding a loaded chunk neighborhood.
-                chunk_data.chunk.lighting_valid = true;
-            }
-
-            if (load_result == .success_relight_required) {
-                // Legacy saved chunks have no trustworthy lighting, so rebuild
-                // the local loaded area once.
-                var lighting = WorldLightingEngine.init(self.storage, self.allocator);
-                _ = lighting.reconcileLegacyArea(cx, cz) catch |err| blk: {
-                    log.log.warn("CHUNK_LIGHTING_ERROR: ({},{}) legacy relight failed: {}", .{ cx, cz, err });
-                    break :blk false;
-                };
-            } else if (load_result == .success) {
-                // Loaded chunks need only interface reconciliation with their
-                // resident neighbors; fresh generation already lit itself.
-                var lighting = WorldLightingEngine.init(self.storage, self.allocator);
-                _ = lighting.reconcileChunkArrival(cx, cz) catch |err| blk: {
-                    log.log.warn("CHUNK_LIGHTING_ERROR: ({},{}) boundary reconciliation failed: {}", .{ cx, cz, err });
-                    break :blk false;
-                };
-            } else {
-                // Generation has completed its own lighting pass, so persist it
-                // as current instead of forcing a full resident-world relight on
-                // every newly generated chunk.
-                chunk_data.chunk.lighting_valid = true;
-            }
-
-            // Validate worker-owned block data before taking the global storage
-            // writer lock. Scanning all 65,536 blocks under that lock serialized
-            // otherwise independent generation completions and render access.
-            const non_air_count = if (chunk_data.chunk.generated)
-                chunk_data.chunk.rebuildMapSurface()
-            else
-                0;
-
-            self.storage.chunks_mutex.lock();
-            const publishable = if (self.storage.chunks.get(ChunkKey{ .x = cx, .z = cz })) |data|
-                data == chunk_data and data.chunk.state == .generating and data.chunk.job_token == job.data.chunk.job_token
-            else
-                false;
-            if (!publishable) {
-                self.storage.chunks_mutex.unlock();
-                return;
-            }
-            if (!chunk_data.chunk.generated) {
-                log.log.warn("CHUNK_GEN_FAILED: ({},{}) generator returned without setting generated=true, resetting to missing", .{ cx, cz });
-                chunk_data.chunk.state = .missing;
-            } else {
-                if (non_air_count == 0) {
-                    log.log.warn("CHUNK_GEN_EMPTY: ({},{}) generated chunk has ZERO non-air blocks, resetting to missing", .{ cx, cz });
-                    chunk_data.chunk.generated = false;
-                    chunk_data.chunk.state = .missing;
-                } else {
-                    chunk_data.chunk.state = .generated;
-                    self.storage.markMapSurfaceChanged();
-                    _ = self.chunks_generated_total.fetchAdd(1, .monotonic);
-                }
-            }
-            self.storage.chunks_mutex.unlock();
-            if (chunk_data.chunk.state == .generated and chunk_data.chunk.job_token == job.data.chunk.job_token) {
-                self.markNeighborsForRemesh(cx, cz);
-                self.enqueueReadyNeighborhood(cx, cz);
-            }
+        if (generated.rebuildMapSurface() == 0) {
+            log.log.warn("CHUNK_GEN_EMPTY: ({},{}) generated chunk has ZERO non-air blocks", .{ cx, cz });
+            return;
         }
+
+        {
+            self.storage.lighting_mutex.lock();
+            defer self.storage.lighting_mutex.unlock();
+            self.storage.chunks_mutex.lock();
+            defer self.storage.chunks_mutex.unlock();
+            if (chunk_data.chunk.state != .generating or chunk_data.chunk.job_token != job.data.chunk.job_token) return;
+            // Do not copy job tokens, pins, or atomic revisions from private data.
+            inline for (.{ "blocks", "light", "biomes", "heightmap", "map_surface_blocks", "map_surface_heights", "dirty", "modified", "lighting_valid" }) |name| {
+                @field(chunk_data.chunk, name) = @field(generated, name);
+            }
+            chunk_data.chunk.markContentChanged();
+            chunk_data.chunk.markLightChanged();
+            chunk_data.chunk.map_surface_revision = chunk_data.chunk.content_revision.load(.acquire);
+            chunk_data.chunk.generated = true;
+            chunk_data.chunk.state = .generated;
+            self.storage.markMapSurfaceChanged();
+            _ = self.chunks_generated_total.fetchAdd(1, .monotonic);
+            published = true;
+        }
+
+        // Reconciliation now sees only fully published data and participates in
+        // the same input/revision lock protocol as edits and mesh snapshots.
+        var lighting = WorldLightingEngine.init(self.storage, self.allocator);
+        if (load_result == .success_relight_required) {
+            _ = lighting.reconcileLegacyArea(cx, cz) catch |err| blk: {
+                log.log.warn("CHUNK_LIGHTING_ERROR: ({},{}) legacy relight failed: {}", .{ cx, cz, err });
+                break :blk false;
+            };
+        } else if (load_result == .success) {
+            _ = lighting.reconcileChunkArrival(cx, cz) catch |err| blk: {
+                log.log.warn("CHUNK_LIGHTING_ERROR: ({},{}) boundary reconciliation failed: {}", .{ cx, cz, err });
+                break :blk false;
+            };
+        }
+        self.markNeighborsForRemesh(cx, cz);
+        self.enqueueReadyNeighborhood(cx, cz);
     }
 
     pub fn processMeshJob(ctx: *anyopaque, job: Job) void {
@@ -739,124 +789,91 @@ pub const ChunkQueueCoordinator = struct {
         const cx = job.data.chunk.x;
         const cz = job.data.chunk.z;
 
-        self.storage.chunks_mutex.lockShared();
-        const chunk_data = self.storage.chunks.get(ChunkKey{ .x = cx, .z = cz }) orelse {
-            self.storage.chunks_mutex.unlockShared();
-            return;
-        };
-
-        const pc_x = self.last_pc_x.load(.acquire);
-        const pc_z = self.last_pc_z.load(.acquire);
-        const render_dist = self.effective_render_dist.load(.acquire);
-        const dx = @as(i64, cx) - @as(i64, pc_x);
-        const dz = @as(i64, cz) - @as(i64, pc_z);
-        const max_dist = @as(i64, render_dist) + CHUNK_UNLOAD_BUFFER;
-        if (!isWithinDistance(dx, dz, max_dist)) {
-            self.storage.chunks_mutex.unlockShared();
-
+        var snapshot: ?MeshInputSnapshot = null;
+        defer if (snapshot) |inputs| inputs.deinit(self.allocator);
+        var neighbors = NeighborChunks.empty;
+        var mesh_revisions: MeshInputRevisions = undefined;
+        const chunk_data = claim: {
+            self.storage.lighting_mutex.lock();
+            defer self.storage.lighting_mutex.unlock();
             self.storage.chunks_mutex.lock();
-            if (self.storage.chunks.get(ChunkKey{ .x = cx, .z = cz })) |data| {
-                if ((data.chunk.state == .queued_for_mesh or data.chunk.state == .meshing) and data.chunk.job_token == job.data.chunk.job_token) {
-                    data.chunk.state = .generated;
-                }
+            defer self.storage.chunks_mutex.unlock();
+
+            const data = self.storage.chunks.get(.{ .x = cx, .z = cz }) orelse return;
+            if (data.chunk.job_token != job.data.chunk.job_token) return;
+            const dx = @as(i64, cx) - self.last_pc_x.load(.acquire);
+            const dz = @as(i64, cz) - self.last_pc_z.load(.acquire);
+            const max_dist = @as(i64, self.effective_render_dist.load(.acquire)) + CHUNK_UNLOAD_BUFFER;
+            if (!isWithinDistance(dx, dz, max_dist)) {
+                if (data.chunk.state == .queued_for_mesh or (data.chunk.state == .meshing and !data.chunk.isPinned())) data.chunk.state = .generated;
+                return;
             }
-            self.storage.chunks_mutex.unlock();
-            return;
-        }
-
-        chunk_data.chunk.pin();
-        const neighbors = NeighborChunks{
-            .north = if (self.storage.chunks.get(ChunkKey{ .x = cx, .z = cz - 1 })) |d| d: {
-                d.chunk.pin();
-                break :d &d.chunk;
-            } else null,
-            .south = if (self.storage.chunks.get(ChunkKey{ .x = cx, .z = cz + 1 })) |d| d: {
-                d.chunk.pin();
-                break :d &d.chunk;
-            } else null,
-            .east = if (self.storage.chunks.get(ChunkKey{ .x = cx + 1, .z = cz })) |d| d: {
-                d.chunk.pin();
-                break :d &d.chunk;
-            } else null,
-            .west = if (self.storage.chunks.get(ChunkKey{ .x = cx - 1, .z = cz })) |d| d: {
-                d.chunk.pin();
-                break :d &d.chunk;
-            } else null,
+            if (data.chunk.state != .queued_for_mesh or !data.chunk.generated) return;
+            neighbors = MeshInputSnapshot.residentNeighbors(self.storage, cx, cz);
+            mesh_revisions = MeshInputRevisions.capture(&data.chunk, neighbors);
+            if (!self.gpu_mesh_enabled.load(.acquire) or data.chunk.force_cpu_mesh) {
+                snapshot = MeshInputSnapshot.capture(self.allocator, &data.chunk, neighbors) catch {
+                    data.chunk.state = .generated;
+                    self.enqueuePendingMesh(cx, cz, job.data.chunk.job_token);
+                    return;
+                };
+            }
+            // Claim exactly once, after all fallible snapshot allocation. Pins
+            // remain until publication, including neighbor revision validation.
+            data.chunk.state = .meshing;
+            data.chunk.pin();
+            inline for (.{ "north", "south", "east", "west" }) |name| {
+                if (@field(neighbors, name)) |neighbor| @constCast(neighbor).pin();
+            }
+            break :claim data;
         };
-        self.storage.chunks_mutex.unlockShared();
-
         defer {
             chunk_data.chunk.unpin();
-            if (neighbors.north) |n| @as(*Chunk, @constCast(n)).unpin();
-            if (neighbors.south) |s| @as(*Chunk, @constCast(s)).unpin();
-            if (neighbors.east) |e| @as(*Chunk, @constCast(e)).unpin();
-            if (neighbors.west) |w| @as(*Chunk, @constCast(w)).unpin();
+            inline for (.{ "north", "south", "east", "west" }) |name| {
+                if (@field(neighbors, name)) |neighbor| @constCast(neighbor).unpin();
+            }
         }
 
-        const mesh_revisions = MeshInputRevisions.capture(&chunk_data.chunk, neighbors);
-
-        self.storage.chunks_mutex.lock();
-        if (self.storage.chunks.get(ChunkKey{ .x = cx, .z = cz })) |data| {
-            if (data.chunk.state == .queued_for_mesh and data.chunk.job_token == job.data.chunk.job_token) {
-                data.chunk.state = .meshing;
-            } else if (data.chunk.state != .meshing or data.chunk.job_token != job.data.chunk.job_token) {
-                self.storage.chunks_mutex.unlock();
-                return;
+        // Both inputs and output are worker-private during expensive meshing.
+        // Stale/failed work must not replace another job's pending vertices.
+        var built_mesh = world_meshing.ChunkMesh.init(self.allocator);
+        defer built_mesh.deinitWithoutRHI();
+        var build_succeeded = true;
+        if (snapshot) |inputs| {
+            built_mesh.buildWithNeighbors(&inputs.chunks[0], inputs.neighbors, self.atlas) catch |err| {
+                log.log.errWithTrace("Mesh build failed for chunk ({}, {}): {}", .{ cx, cz, err });
+                build_succeeded = false;
+            };
+        }
+        const aborted = self.mesh_queue.shouldAbort();
+        const publishable = publish: {
+            // Exclude lighting batches until their revision has been advanced.
+            self.storage.lighting_mutex.lock();
+            defer self.storage.lighting_mutex.unlock();
+            self.storage.chunks_mutex.lock();
+            defer self.storage.chunks_mutex.unlock();
+            // A reset/new job owns its own state. Never clobber it on failure.
+            if (chunk_data.chunk.state != .meshing or chunk_data.chunk.job_token != job.data.chunk.job_token) return;
+            const current_neighbors = MeshInputSnapshot.residentNeighbors(self.storage, cx, cz);
+            const inputs_match = if (snapshot) |inputs|
+                inputs.matches(&chunk_data.chunk, current_neighbors)
+            else
+                mesh_revisions.matches(&chunk_data.chunk, current_neighbors);
+            if (!build_succeeded or aborted or !inputs_match) {
+                chunk_data.chunk.state = .generated;
+                break :publish false;
             }
-        } else {
-            self.storage.chunks_mutex.unlock();
+            if (snapshot != null) chunk_data.render.mesh.takePendingFrom(&built_mesh);
+            chunk_data.chunk.state = .mesh_ready;
+            chunk_data.chunk.dirty = false;
+            break :publish true;
+        };
+        if (!publishable) {
+            self.enqueuePendingMesh(cx, cz, job.data.chunk.job_token);
             return;
         }
-        self.storage.chunks_mutex.unlock();
-
-        if (chunk_data.chunk.state == .meshing and chunk_data.chunk.job_token == job.data.chunk.job_token) {
-            if (self.gpu.shouldUseGpuMeshReadyPath() and !chunk_data.chunk.force_cpu_mesh) {
-                self.storage.chunks_mutex.lock();
-                const publishable = if (self.storage.chunks.get(ChunkKey{ .x = cx, .z = cz })) |data|
-                    data.chunk.state == .meshing and data.chunk.job_token == job.data.chunk.job_token and mesh_revisions.matches(&data.chunk, neighbors)
-                else
-                    false;
-                chunk_data.chunk.state = if (publishable) .mesh_ready else .generated;
-                if (publishable) chunk_data.chunk.dirty = false;
-                self.storage.chunks_mutex.unlock();
-                if (!publishable) {
-                    self.enqueuePendingMesh(cx, cz, chunk_data.chunk.job_token);
-                    return;
-                }
-                self.enqueuePendingUpload(cx, cz);
-                _ = self.chunks_meshed_total.fetchAdd(1, .monotonic);
-                return;
-            }
-            chunk_data.render.mesh.buildWithNeighbors(&chunk_data.chunk, neighbors, self.atlas) catch |err| {
-                log.log.errWithTrace("Mesh build failed for chunk ({}, {}): {}", .{ cx, cz, err });
-                self.storage.chunks_mutex.lock();
-                chunk_data.chunk.state = .generated;
-                self.storage.chunks_mutex.unlock();
-                self.enqueuePendingMesh(cx, cz, chunk_data.chunk.job_token);
-                return;
-            };
-            if (self.mesh_queue.abort_worker) {
-                self.storage.chunks_mutex.lock();
-                chunk_data.chunk.state = .generated;
-                self.storage.chunks_mutex.unlock();
-                self.enqueuePendingMesh(cx, cz, chunk_data.chunk.job_token);
-                return;
-            }
-            self.storage.chunks_mutex.lock();
-            const publishable = if (self.storage.chunks.get(ChunkKey{ .x = cx, .z = cz })) |data|
-                data.chunk.state == .meshing and data.chunk.job_token == job.data.chunk.job_token and mesh_revisions.matches(&data.chunk, neighbors)
-            else
-                false;
-            chunk_data.chunk.state = if (publishable) .mesh_ready else .generated;
-            if (publishable) chunk_data.chunk.dirty = false;
-            self.storage.chunks_mutex.unlock();
-            if (!publishable) {
-                self.enqueuePendingMesh(cx, cz, chunk_data.chunk.job_token);
-                return;
-            }
-            self.enqueuePendingUpload(cx, cz);
-            _ = self.chunks_meshed_total.fetchAdd(1, .monotonic);
-        }
+        self.enqueuePendingUpload(cx, cz);
+        _ = self.chunks_meshed_total.fetchAdd(1, .monotonic);
     }
 
     fn markNeighborsForRemesh(self: *ChunkQueueCoordinator, cx: i32, cz: i32) void {
@@ -922,8 +939,7 @@ pub const ChunkQueueCoordinator = struct {
         }
         self.storage.chunks_mutex.unlockShared();
 
-        // Enqueue outside chunks_mutex to keep lock ordering consistent with
-        // drainPendingMesh (pending mutex first, then chunks_mutex).
+        // Avoid extending the state-lock batch with notification allocation.
         for (enqueue_refs[0..enqueue_count]) |ref| {
             self.enqueuePendingMesh(ref.x, ref.z, ref.job_token);
         }
@@ -1053,4 +1069,367 @@ test "missing chunk scan cursor covers concentric square rings without duplicate
 
     try std.testing.expectEqual(coordinates.len, count);
     try std.testing.expect(MAX_MISSING_SCAN_STEPS < @as(usize, 4096) * 4096);
+}
+
+test "mesh input snapshots retain target and neighbor data across runtime edits" {
+    const testing = std.testing;
+    const boundary = world_meshing.meshing.boundary;
+    const WorldMutationCoordinator = @import("world_mutation.zig").WorldMutationCoordinator;
+    var storage = ChunkStorage.init(testing.allocator);
+    defer storage.deinitWithoutRHI();
+    const target = try storage.getOrCreate(0, 0);
+    target.chunk.generated = true;
+    target.chunk.setBlock(1, 2, 3, .stone);
+    target.chunk.setLight(1, 2, 3, world_core.PackedLight.init(7, 4));
+    target.chunk.setBiome(1, 3, .forest);
+    const offsets = [_][2]i32{ .{ 0, -1 }, .{ 0, 1 }, .{ 1, 0 }, .{ -1, 0 } };
+    for (offsets) |offset| {
+        const neighbor = try storage.getOrCreate(offset[0], offset[1]);
+        neighbor.chunk.generated = true;
+        neighbor.chunk.fill(.stone);
+        @memset(&neighbor.chunk.light, world_core.PackedLight.init(9, 6));
+        @memset(&neighbor.chunk.biomes, .forest);
+    }
+    const snapshot = capture: {
+        storage.lighting_mutex.lock();
+        defer storage.lighting_mutex.unlock();
+        storage.chunks_mutex.lockShared();
+        defer storage.chunks_mutex.unlockShared();
+        const neighbors = MeshInputSnapshot.residentNeighbors(&storage, 0, 0);
+        break :capture try MeshInputSnapshot.capture(testing.allocator, &target.chunk, neighbors);
+    };
+    defer snapshot.deinit(testing.allocator);
+
+    var mutation = WorldMutationCoordinator.init(&storage, testing.allocator, null, false);
+    const samples = [_][2]i32{ .{ 3, -1 }, .{ 3, 16 }, .{ 16, 3 }, .{ -1, 3 } };
+    for (samples) |sample| _ = try mutation.applyBlockMutation(sample[0], 2, sample[1], .dirt);
+    {
+        storage.lighting_mutex.lock();
+        defer storage.lighting_mutex.unlock();
+        storage.chunks_mutex.lockShared();
+        defer storage.chunks_mutex.unlockShared();
+        // Target is unchanged: neighbor edits alone must reject publication.
+        try testing.expect(!snapshot.matches(&target.chunk, MeshInputSnapshot.residentNeighbors(&storage, 0, 0)));
+    }
+    _ = try mutation.applyBlockMutation(1, 2, 3, .dirt);
+    {
+        storage.lighting_mutex.lock();
+        defer storage.lighting_mutex.unlock();
+        storage.chunks_mutex.lock();
+        defer storage.chunks_mutex.unlock();
+        var iter = storage.iteratorUnsafe();
+        while (iter.next()) |entry| {
+            @memset(&entry.value_ptr.*.chunk.light, world_core.PackedLight.init(0, 0));
+            @memset(&entry.value_ptr.*.chunk.biomes, .desert);
+            entry.value_ptr.*.chunk.markLightChanged();
+            entry.value_ptr.*.chunk.markContentChanged();
+        }
+        try testing.expect(!snapshot.matches(&target.chunk, MeshInputSnapshot.residentNeighbors(&storage, 0, 0)));
+    }
+    const copy = &snapshot.chunks[0];
+    try testing.expectEqual(world_core.BlockType.stone, copy.getBlock(1, 2, 3));
+    try testing.expectEqual(@as(u4, 7), copy.getSkyLight(1, 2, 3));
+    try testing.expectEqual(world_core.BiomeId.forest, copy.getBiome(1, 3));
+    for (samples) |sample| {
+        try testing.expectEqual(world_core.BlockType.stone, boundary.getBlockCross(copy, snapshot.neighbors, sample[0], 2, sample[1]));
+        try testing.expectEqual(@as(u4, 9), boundary.getLightCross(copy, snapshot.neighbors, sample[0], 2, sample[1]).getSkyLight());
+        try testing.expectEqual(world_core.BiomeId.forest, boundary.getBiomeAt(copy, snapshot.neighbors, sample[0], sample[1]));
+    }
+}
+
+test "mesh job snapshot and build allocation failures release every pin" {
+    const testing = std.testing;
+    // Snapshot, mask, then each of the three initial vertex buffers.
+    for (0..5) |fail_index| {
+        var storage = ChunkStorage.init(testing.allocator);
+        defer storage.deinitWithoutRHI();
+        const target = try storage.getOrCreate(0, 0);
+        const east = try storage.getOrCreate(1, 0);
+        target.chunk.generated = true;
+        target.chunk.state = .queued_for_mesh;
+        east.chunk.generated = true;
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        var queue = JobQueue.init(testing.allocator);
+        defer queue.deinit();
+        var gpu = GpuAccelerationCoordinator.init(null, null);
+        var coordinator = ChunkQueueCoordinator{
+            .allocator = failing.allocator(),
+            .storage = &storage,
+            .generator = undefined,
+            .atlas = undefined,
+            .gen_queue = &queue,
+            .mesh_queue = &queue,
+            .upload_queue = try RingBuffer(ChunkKey).init(testing.allocator, 16),
+            .vertex_allocator = undefined,
+            .gpu = &gpu,
+            .max_uploads_per_frame = 8,
+        };
+        defer coordinator.deinit();
+        ChunkQueueCoordinator.processMeshJob(&coordinator, .{
+            .type = .chunk_meshing,
+            .data = .{ .chunk = .{ .x = 0, .z = 0, .job_token = target.chunk.job_token } },
+        });
+        try testing.expectEqual(Chunk.State.generated, target.chunk.state);
+        try testing.expect(!target.chunk.isPinned());
+        try testing.expect(!east.chunk.isPinned());
+        try testing.expectEqual(@as(u32, 0), coordinator.mesh_jobs_in_flight.load(.acquire));
+        try testing.expectEqual(@as(u64, 0), coordinator.chunks_meshed_total.load(.acquire));
+        try testing.expect(target.render.mesh.pending_solid == null);
+        try testing.expect(storage.lighting_mutex.tryLock());
+        storage.lighting_mutex.unlock();
+        try testing.expect(storage.chunks_mutex.tryLock());
+        storage.chunks_mutex.unlock();
+    }
+}
+
+test "generation publishes private data without copying pins and rejects reset work" {
+    const testing = std.testing;
+    const Probe = struct {
+        coordinator: *ChunkQueueCoordinator,
+        job: Job,
+        reset: bool,
+        saw_private: bool = false,
+        saw_pin: bool = false,
+        locks_released: bool = false,
+        calls: usize = 0,
+
+        fn generate(ctx: *anyopaque, chunk: *Chunk, _: ?*const bool) @import("world-worldgen").worldgen_api.WorldgenError!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            if (self.calls > 1) return;
+            chunk.setBlock(1, 2, 3, .stone);
+            chunk.generated = true;
+            const storage = self.coordinator.storage;
+            if (storage.lighting_mutex.tryLock()) {
+                defer storage.lighting_mutex.unlock();
+                if (storage.chunks_mutex.tryLock()) {
+                    defer storage.chunks_mutex.unlock();
+                    self.locks_released = true;
+                    const resident = storage.chunks.get(.{ .x = 0, .z = 0 }).?;
+                    self.saw_private = chunk != &resident.chunk and !resident.chunk.generated and resident.chunk.getBlock(1, 2, 3) == .air;
+                    self.saw_pin = resident.chunk.isPinned();
+                }
+            }
+            // Duplicate dispatch cannot claim the running job a second time.
+            ChunkQueueCoordinator.processGenJob(self.coordinator, self.job);
+            if (self.reset) self.coordinator.resetPausedChunks();
+        }
+    };
+    for ([_]bool{ false, true }) |reset| {
+        var storage = ChunkStorage.init(testing.allocator);
+        defer storage.deinitWithoutRHI();
+        const target = try storage.getOrCreate(0, 0);
+        target.chunk.state = .queued_for_generation;
+        var queue = JobQueue.init(testing.allocator);
+        defer queue.deinit();
+        var gpu = GpuAccelerationCoordinator.init(null, null);
+        var coordinator = ChunkQueueCoordinator{
+            .allocator = testing.allocator,
+            .storage = &storage,
+            .generator = undefined,
+            .atlas = undefined,
+            .gen_queue = &queue,
+            .mesh_queue = &queue,
+            .upload_queue = try RingBuffer(ChunkKey).init(testing.allocator, 16),
+            .vertex_allocator = undefined,
+            .gpu = &gpu,
+            .max_uploads_per_frame = 8,
+        };
+        defer coordinator.deinit();
+        var probe = Probe{
+            .coordinator = &coordinator,
+            .job = .{ .type = .chunk_generation, .data = .{ .chunk = .{ .x = 0, .z = 0, .job_token = target.chunk.job_token } } },
+            .reset = reset,
+        };
+        coordinator.generator = .{
+            .ptr = &probe,
+            .info = .{ .name = "probe", .description = "private generation probe", .version = 1 },
+            .vtable = &.{ .generate = Probe.generate, .getSeed = undefined, .getRegionInfo = undefined, .getColumnInfo = undefined, .deinit = undefined },
+        };
+        ChunkQueueCoordinator.processGenJob(&coordinator, probe.job);
+        try testing.expect(probe.saw_private and probe.saw_pin and probe.locks_released);
+        try testing.expectEqual(@as(usize, 1), probe.calls);
+        try testing.expect(!target.chunk.isPinned());
+        try testing.expectEqual(@as(u32, 0), coordinator.generation_jobs_in_flight.load(.acquire));
+        try testing.expectEqual(!reset, target.chunk.generated);
+        try testing.expectEqual(if (reset) Chunk.State.missing else Chunk.State.generated, target.chunk.state);
+        try testing.expectEqual(if (reset) world_core.BlockType.air else world_core.BlockType.stone, target.chunk.getBlock(1, 2, 3));
+        if (reset) {
+            try testing.expect(target.chunk.job_token != probe.job.data.chunk.job_token);
+        } else {
+            try testing.expectEqual(probe.job.data.chunk.job_token, target.chunk.job_token);
+            try testing.expect(target.chunk.mapSurfaceIsCurrent());
+        }
+    }
+}
+
+test "mesh jobs cannot reclaim active or reset lifecycle state" {
+    const testing = std.testing;
+    var storage = ChunkStorage.init(testing.allocator);
+    defer storage.deinitWithoutRHI();
+    const target = try storage.getOrCreate(0, 0);
+    target.chunk.generated = true;
+    target.chunk.state = .meshing;
+    target.chunk.pin();
+    defer target.chunk.unpin();
+    const unpublished = try storage.getOrCreate(1, 0);
+    unpublished.chunk.generated = true;
+    unpublished.chunk.state = .generating;
+    var gpu = GpuAccelerationCoordinator.init(null, null);
+    var coordinator = ChunkQueueCoordinator{
+        .allocator = testing.allocator,
+        .storage = &storage,
+        .generator = undefined,
+        .atlas = undefined,
+        .gen_queue = undefined,
+        .mesh_queue = undefined,
+        .upload_queue = try RingBuffer(ChunkKey).init(testing.allocator, 16),
+        .vertex_allocator = undefined,
+        .gpu = &gpu,
+        .max_uploads_per_frame = 8,
+    };
+    defer coordinator.deinit();
+    const job = Job{ .type = .chunk_meshing, .data = .{ .chunk = .{ .x = 0, .z = 0, .job_token = target.chunk.job_token } } };
+    ChunkQueueCoordinator.processMeshJob(&coordinator, job);
+    try testing.expectEqual(Chunk.State.meshing, target.chunk.state);
+    try testing.expectEqual(@as(u32, 1), target.chunk.pin_count.load(.monotonic));
+    {
+        storage.lighting_mutex.lock();
+        defer storage.lighting_mutex.unlock();
+        storage.chunks_mutex.lock();
+        defer storage.chunks_mutex.unlock();
+        const neighbors = MeshInputSnapshot.residentNeighbors(&storage, 0, 0);
+        try testing.expect(neighbors.east == null);
+        const revisions = MeshInputRevisions.capture(&target.chunk, neighbors);
+        unpublished.chunk.state = .generated;
+        try testing.expect(!revisions.matches(&target.chunk, MeshInputSnapshot.residentNeighbors(&storage, 0, 0)));
+    }
+    coordinator.resetPausedChunks();
+    const reset_token = target.chunk.job_token;
+    try testing.expect(reset_token != job.data.chunk.job_token);
+    ChunkQueueCoordinator.processMeshJob(&coordinator, job);
+    try testing.expectEqual(reset_token, target.chunk.job_token);
+    try testing.expectEqual(Chunk.State.generated, target.chunk.state);
+    try testing.expectEqual(@as(usize, 0), coordinator.pending_upload_incoming.items.len);
+}
+
+test "generation load failures preserve resident and persistent data and stop queued generation" {
+    const testing = std.testing;
+    const fs = @import("fs");
+    const RegionFile = @import("world-persistence").RegionFile;
+    const Probe = struct {
+        calls: usize = 0,
+
+        fn generate(ctx: *anyopaque, chunk: *Chunk, _: ?*const bool) @import("world-worldgen").worldgen_api.WorldgenError!void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.calls += 1;
+            chunk.setBlock(1, 2, 3, .stone);
+            chunk.generated = true;
+        }
+    };
+
+    for ([_]LoadResult{ .read_error, .corrupt_data }) |failure| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const dir = fs.Dir{ .inner = tmp.dir };
+        var path_buf: [fs.max_path_bytes]u8 = undefined;
+        const path = try dir.realpath(".", &path_buf);
+        const sm = try SaveManager.init(testing.allocator, path, "load_failure", 1, "flat");
+        defer sm.deinit();
+        sm.running.store(false, .release);
+        sm.thread.?.join();
+        sm.thread = null;
+
+        const region_name = "regions/r.0.0.mca";
+        if (failure == .read_error) {
+            const file = try dir.createFile(region_name, .{});
+            defer file.close();
+            try file.writeAll("valuable but damaged region");
+        } else {
+            var region_path_buf: [fs.max_path_bytes]u8 = undefined;
+            const region_path = try std.fmt.bufPrint(&region_path_buf, "{s}/{s}", .{ path, region_name });
+            var region = try RegionFile.create(testing.allocator, region_path);
+            defer region.close();
+            // Valid region/compression, invalid serialized chunk payload.
+            try region.writeChunk(0, 0, "valuable but damaged chunk");
+        }
+        const disk_before = try dir.readFileAlloc(region_name, testing.allocator, 1024 * 1024);
+        defer testing.allocator.free(disk_before);
+
+        var storage = ChunkStorage.init(testing.allocator);
+        defer storage.deinitWithoutRHI();
+        const target = try storage.getOrCreate(0, 0);
+        target.chunk.setBlock(1, 2, 3, .gold_ore);
+        target.chunk.setLight(1, 2, 3, world_core.PackedLight.init(9, 6));
+        target.chunk.setBiome(1, 3, .forest);
+        target.chunk.setSurfaceHeight(1, 3, 2);
+        _ = target.chunk.rebuildMapSurface();
+        target.chunk.generated = true;
+        target.chunk.lighting_valid = true;
+        target.chunk.state = .queued_for_generation;
+        const original = try testing.allocator.create(Chunk);
+        defer testing.allocator.destroy(original);
+        original.* = target.chunk;
+
+        var queue = JobQueue.init(testing.allocator);
+        defer queue.deinit();
+        var gpu = GpuAccelerationCoordinator.init(null, null);
+        var probe = Probe{};
+        var coordinator = ChunkQueueCoordinator{
+            .allocator = testing.allocator,
+            .storage = &storage,
+            .generator = .{
+                .ptr = &probe,
+                .info = .{ .name = "probe", .description = "generation must not replace failed loads", .version = 1 },
+                .vtable = &.{ .generate = Probe.generate, .getSeed = undefined, .getRegionInfo = undefined, .getColumnInfo = undefined, .deinit = undefined },
+            },
+            .atlas = undefined,
+            .gen_queue = &queue,
+            .mesh_queue = &queue,
+            .upload_queue = try RingBuffer(ChunkKey).init(testing.allocator, 16),
+            .vertex_allocator = undefined,
+            .gpu = &gpu,
+            .max_uploads_per_frame = 8,
+            .save_manager = sm,
+        };
+        defer coordinator.deinit();
+        ChunkQueueCoordinator.processGenJob(&coordinator, .{
+            .type = .chunk_generation,
+            .data = .{ .chunk = .{ .x = 0, .z = 0, .job_token = target.chunk.job_token } },
+        });
+
+        try testing.expect(sm.load_failed.load(.acquire));
+        try testing.expectEqual(@as(usize, 0), probe.calls);
+        try testing.expectEqual(Chunk.State.missing, target.chunk.state);
+        try testing.expect(!target.chunk.isPinned());
+        try testing.expect(target.chunk.dirty and target.chunk.modified);
+        try testing.expect(target.chunk.generated and target.chunk.lighting_valid);
+        try testing.expectEqual(original.job_token, target.chunk.job_token);
+        try testing.expectEqual(original.content_revision.load(.acquire), target.chunk.content_revision.load(.acquire));
+        try testing.expectEqual(original.light_revision.load(.acquire), target.chunk.light_revision.load(.acquire));
+        inline for (.{ "blocks", "light", "biomes", "heightmap", "map_surface_blocks", "map_surface_heights" }) |name| {
+            try testing.expectEqualSlices(@TypeOf(@field(original, name)[0]), &@field(original, name), &@field(target.chunk, name));
+        }
+        try testing.expect(target.chunk.mapSurfaceIsCurrent());
+        try testing.expectEqual(@as(u64, 0), coordinator.chunks_generated_total.load(.acquire));
+        try testing.expectEqual(@as(u32, 0), coordinator.generation_jobs_in_flight.load(.acquire));
+        try testing.expectEqual(@as(usize, 0), coordinator.pending_mesh_incoming.items.len);
+
+        const scratch = try testing.allocator.create(Chunk);
+        defer testing.allocator.destroy(scratch);
+        scratch.* = Chunk.init(0, 0);
+        try testing.expectEqual(failure, sm.loadChunk(0, 0, scratch));
+        try testing.expectEqual(LoadResult.not_found, sm.loadChunk(-1, 0, scratch));
+        const missing = try storage.getOrCreate(-1, 0);
+        missing.chunk.state = .queued_for_generation;
+        ChunkQueueCoordinator.processGenJob(&coordinator, .{
+            .type = .chunk_generation,
+            .data = .{ .chunk = .{ .x = -1, .z = 0, .job_token = missing.chunk.job_token } },
+        });
+        try testing.expectEqual(@as(usize, 0), probe.calls);
+        try testing.expect(!missing.chunk.generated and !missing.chunk.isPinned());
+        const disk_after = try dir.readFileAlloc(region_name, testing.allocator, 1024 * 1024);
+        defer testing.allocator.free(disk_after);
+        try testing.expectEqualSlices(u8, disk_before, disk_after);
+    }
 }

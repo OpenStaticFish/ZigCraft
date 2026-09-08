@@ -8,6 +8,10 @@
 
 const builtin = @import("builtin");
 
+test {
+    _ = @import("test_root.zig");
+}
+
 pub const rhi = @import("rhi.zig");
 pub const interfaces = @import("interfaces.zig");
 pub const wrappers = @import("wrappers.zig");

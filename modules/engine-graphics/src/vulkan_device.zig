@@ -7,9 +7,8 @@
 //! - Device fault reporting via VK_EXT_device_fault
 //!
 //! ## Robustness Layer
-//! The engine enables `VK_EXT_robustness2` to prevent GPU hangs from out-of-bounds
-//! buffer or image accesses. Shader accesses are clamped or return zero instead
-//! of triggering a TDR or system freeze.
+//! Supported robustness features constrain shader memory accesses. They do not
+//! make invalid Vulkan commands legal or guarantee protection from GPU hangs.
 //!
 //! ## Thread Safety
 //! `VulkanDevice` uses an internal mutex for `submitGuarded` to ensure queue
@@ -54,11 +53,13 @@ pub const VulkanDevice = struct {
     transfer_family: u32 = 0,
     has_dedicated_transfer_queue: bool = false,
     supports_device_fault: bool = false,
+    robust_buffer_access2_enabled: bool = false,
     mutex: sync.Mutex = .{},
 
     debug_messenger: c.VkDebugUtilsMessengerEXT = null,
     validation_error_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     debug_utils_enabled: bool = false,
+    validation_layers_enabled: bool = false,
 
     // Extension function pointers
     vkGetDeviceFaultInfoEXT: ?*const fn (
@@ -66,6 +67,9 @@ pub const VulkanDevice = struct {
         pFaultCounts: *c.VkDeviceFaultCountsEXT,
         pFaultInfo: ?*c.VkDeviceFaultInfoEXT,
     ) callconv(.c) c.VkResult = null,
+
+    // Injectable dispatch boundary; tests exercise the same guarded path as the renderer.
+    queue_submit_fn: *const fn (c.VkQueue, u32, [*c]const c.VkSubmitInfo, c.VkFence) callconv(.c) c.VkResult = c.vkQueueSubmit,
 
     fault_count: u32 = 0,
     recovery_count: u32 = 0,
@@ -85,6 +89,7 @@ pub const VulkanDevice = struct {
 
     pub fn init(allocator: std.mem.Allocator, window: *c.SDL_Window) !VulkanDevice {
         var self = VulkanDevice{ .allocator = allocator };
+        errdefer self.deinit();
 
         // 1. Create Instance
         var count: u32 = 0;
@@ -100,14 +105,14 @@ pub const VulkanDevice = struct {
         const debug_utils_name_slice = std.mem.span(debug_utils_name);
 
         var instance_ext_count: u32 = 0;
-        _ = c.vkEnumerateInstanceExtensionProperties(null, &instance_ext_count, null);
+        try checkVk(c.vkEnumerateInstanceExtensionProperties(null, &instance_ext_count, null));
         const instance_ext_props = try allocator.alloc(c.VkExtensionProperties, instance_ext_count);
         defer allocator.free(instance_ext_props);
-        _ = c.vkEnumerateInstanceExtensionProperties(null, &instance_ext_count, instance_ext_props.ptr);
+        try checkVk(c.vkEnumerateInstanceExtensionProperties(null, &instance_ext_count, instance_ext_props.ptr));
 
         var props2_supported = false;
         var debug_utils_supported = false;
-        for (instance_ext_props) |prop| {
+        for (instance_ext_props[0..instance_ext_count]) |prop| {
             const name: [*:0]const u8 = @ptrCast(&prop.extensionName);
             if (std.mem.eql(u8, std.mem.span(name), props2_name_slice)) {
                 props2_supported = true;
@@ -171,14 +176,14 @@ pub const VulkanDevice = struct {
 
         if (enable_validation) {
             var layer_count: u32 = 0;
-            _ = c.vkEnumerateInstanceLayerProperties(&layer_count, null);
+            try checkVk(c.vkEnumerateInstanceLayerProperties(&layer_count, null));
             if (layer_count > 0) {
                 const layer_props = allocator.alloc(c.VkLayerProperties, layer_count) catch null;
                 if (layer_props) |props| {
                     defer allocator.free(props);
-                    _ = c.vkEnumerateInstanceLayerProperties(&layer_count, props.ptr);
+                    try checkVk(c.vkEnumerateInstanceLayerProperties(&layer_count, props.ptr));
                     var found = false;
-                    for (props) |layer| {
+                    for (props[0..layer_count]) |layer| {
                         const layer_name: [*:0]const u8 = @ptrCast(&layer.layerName);
                         if (std.mem.eql(u8, std.mem.span(layer_name), "VK_LAYER_KHRONOS_validation")) {
                             found = true;
@@ -188,23 +193,31 @@ pub const VulkanDevice = struct {
                     if (found) {
                         create_info.enabledLayerCount = 1;
                         create_info.ppEnabledLayerNames = &validation_layers;
+                        self.validation_layers_enabled = true;
                         log.log.info("Vulkan validation layers enabled", .{});
                     }
                 }
             }
         }
-        try checkVk(c.vkCreateInstance(&create_info, null, &self.instance));
+        // Failed Vulkan creation calls may leave undefined output handles.
+        // Publish only successful handles so rollback never destroys garbage.
+        var instance: c.VkInstance = null;
+        try checkVk(c.vkCreateInstance(&create_info, null, &instance));
+        self.instance = instance;
 
         // 2. Create Surface
-        if (!c.SDL_Vulkan_CreateSurface(window, self.instance, null, &self.surface)) return error.VulkanSurfaceFailed;
+        var surface: c.VkSurfaceKHR = null;
+        if (!c.SDL_Vulkan_CreateSurface(window, self.instance, null, &surface)) return error.VulkanSurfaceFailed;
+        self.surface = surface;
 
         // 3. Pick Physical Device
         var device_count: u32 = 0;
-        _ = c.vkEnumeratePhysicalDevices(self.instance, &device_count, null);
+        try checkVk(c.vkEnumeratePhysicalDevices(self.instance, &device_count, null));
         if (device_count == 0) return error.NoVulkanDevice;
         const devices = try allocator.alloc(c.VkPhysicalDevice, device_count);
         defer allocator.free(devices);
-        _ = c.vkEnumeratePhysicalDevices(self.instance, &device_count, devices.ptr);
+        try checkVk(c.vkEnumeratePhysicalDevices(self.instance, &device_count, devices.ptr));
+        if (device_count == 0) return error.NoVulkanDevice;
         self.physical_device = devices[0];
 
         // 4. Create Logical Device
@@ -246,7 +259,8 @@ pub const VulkanDevice = struct {
 
         var graphics_family: ?u32 = null;
         var dedicated_transfer_family: ?u32 = null;
-        for (queue_families, 0..) |qf, i| {
+        for (queue_families[0..queue_family_count], 0..) |qf, i| {
+            if (qf.queueCount == 0) continue;
             const idx: u32 = @intCast(i);
             if (graphics_family == null and (qf.queueFlags & c.VK_QUEUE_GRAPHICS_BIT) != 0) {
                 graphics_family = idx;
@@ -290,10 +304,10 @@ pub const VulkanDevice = struct {
         }
 
         var ext_count: u32 = 0;
-        _ = c.vkEnumerateDeviceExtensionProperties(self.physical_device, null, &ext_count, null);
+        try checkVk(c.vkEnumerateDeviceExtensionProperties(self.physical_device, null, &ext_count, null));
         const ext_props = try allocator.alloc(c.VkExtensionProperties, ext_count);
         defer allocator.free(ext_props);
-        _ = c.vkEnumerateDeviceExtensionProperties(self.physical_device, null, &ext_count, ext_props.ptr);
+        try checkVk(c.vkEnumerateDeviceExtensionProperties(self.physical_device, null, &ext_count, ext_props.ptr));
 
         const robustness2_name: [*:0]const u8 = @ptrCast(c.VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
         const device_fault_name: [*:0]const u8 = @ptrCast(c.VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
@@ -305,7 +319,7 @@ pub const VulkanDevice = struct {
         var supports_robustness2 = false;
         var supports_device_fault = false;
         var supports_indirect_count = false;
-        for (ext_props) |prop| {
+        for (ext_props[0..ext_count]) |prop| {
             const name: [*:0]const u8 = @ptrCast(&prop.extensionName);
             const name_slice = std.mem.span(name);
             if (std.mem.eql(u8, name_slice, robustness2_name_slice)) supports_robustness2 = true;
@@ -315,27 +329,38 @@ pub const VulkanDevice = struct {
 
         if (supports_robustness2) log.log.info("VK_EXT_robustness2 supported", .{});
         if (supports_device_fault) log.log.info("VK_EXT_device_fault supported", .{});
-        self.supports_device_fault = supports_device_fault;
-
-        const allow_robustness2 = supports_robustness2 and props2_enabled;
-        const allow_device_fault = supports_device_fault and props2_enabled;
+        var allow_robustness2 = supports_robustness2 and props2_enabled;
+        var allow_device_fault = supports_device_fault and props2_enabled;
         if (!props2_enabled and (supports_robustness2 or supports_device_fault)) {
             log.log.warn("VK_KHR_get_physical_device_properties2 not enabled; skipping robustness/device fault", .{});
         }
 
         var robustness2_features = std.mem.zeroes(c.VkPhysicalDeviceRobustness2FeaturesEXT);
         robustness2_features.sType = c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT;
-        if (allow_robustness2) {
-            robustness2_features.robustBufferAccess2 = c.VK_TRUE;
-            robustness2_features.robustImageAccess2 = c.VK_TRUE;
-            robustness2_features.nullDescriptor = c.VK_TRUE;
-        }
-
         var fault_features = std.mem.zeroes(c.VkPhysicalDeviceFaultFeaturesEXT);
         fault_features.sType = c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
-        if (allow_device_fault) {
-            fault_features.deviceFault = c.VK_TRUE;
-            fault_features.deviceFaultVendorBinary = c.VK_FALSE;
+
+        if (allow_robustness2 or allow_device_fault) {
+            const proc = c.vkGetInstanceProcAddr(self.instance, "vkGetPhysicalDeviceFeatures2KHR");
+            if (proc) |function| {
+                const get_features: *const fn (c.VkPhysicalDevice, *c.VkPhysicalDeviceFeatures2KHR) callconv(.c) void = @ptrCast(function);
+                var features2 = std.mem.zeroes(c.VkPhysicalDeviceFeatures2KHR);
+                features2.sType = c.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2_KHR;
+                if (allow_robustness2) {
+                    robustness2_features.pNext = if (allow_device_fault) @ptrCast(&fault_features) else null;
+                    features2.pNext = @ptrCast(&robustness2_features);
+                } else {
+                    features2.pNext = @ptrCast(&fault_features);
+                }
+                get_features(self.physical_device, &features2);
+                if (device_features.robustBufferAccess != c.VK_TRUE) robustness2_features.robustBufferAccess2 = c.VK_FALSE;
+                allow_device_fault = allow_device_fault and fault_features.deviceFault == c.VK_TRUE;
+                fault_features.deviceFaultVendorBinary = c.VK_FALSE;
+            } else {
+                log.log.warn("Feature query unavailable; skipping robustness/device fault features", .{});
+                allow_robustness2 = false;
+                allow_device_fault = false;
+            }
         }
 
         if (allow_robustness2) {
@@ -372,12 +397,15 @@ pub const VulkanDevice = struct {
         device_create_info.enabledExtensionCount = enabled_extension_count;
         device_create_info.ppEnabledExtensionNames = &enabled_extensions;
 
-        var create_result = c.vkCreateDevice(self.physical_device, &device_create_info, null, &self.vk_device);
+        var vk_device: c.VkDevice = null;
+        var create_result = c.vkCreateDevice(self.physical_device, &device_create_info, null, &vk_device);
         if ((allow_robustness2 or allow_device_fault) and
             (create_result == c.VK_ERROR_FEATURE_NOT_PRESENT or create_result == c.VK_ERROR_EXTENSION_NOT_PRESENT))
         {
             log.log.warn("Robustness/device fault features not available, falling back to basic device", .{});
             device_create_info.pNext = null;
+            allow_robustness2 = false;
+            allow_device_fault = false;
             enabled_extensions[0] = c.VK_KHR_SWAPCHAIN_EXTENSION_NAME;
             enabled_extension_count = 1;
             supports_indirect_count = false;
@@ -385,10 +413,16 @@ pub const VulkanDevice = struct {
             device_create_info.ppEnabledExtensionNames = &enabled_extensions;
             queue_create_count = 1;
             device_create_info.queueCreateInfoCount = queue_create_count;
-            create_result = c.vkCreateDevice(self.physical_device, &device_create_info, null, &self.vk_device);
+            self.has_dedicated_transfer_queue = false;
+            self.transfer_family = self.graphics_family;
+            vk_device = null;
+            create_result = c.vkCreateDevice(self.physical_device, &device_create_info, null, &vk_device);
         }
 
         try checkVk(create_result);
+        self.vk_device = vk_device;
+        self.supports_device_fault = allow_device_fault;
+        self.robust_buffer_access2_enabled = if (allow_robustness2) robustness2_features.robustBufferAccess2 == c.VK_TRUE else false;
         c.vkGetDeviceQueue(self.vk_device, self.graphics_family, 0, &self.queue);
 
         if (self.supports_device_fault and self.vk_device != null) {
@@ -416,6 +450,7 @@ pub const VulkanDevice = struct {
     }
 
     pub fn initDebugMessenger(self: *VulkanDevice) void {
+        if (self.instance == null) return;
         if (!self.debug_utils_enabled) return;
         if (self.debug_messenger != null) return;
 
@@ -429,8 +464,11 @@ pub const VulkanDevice = struct {
                 debug_info.messageType = c.VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | c.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | c.VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
                 debug_info.pfnUserCallback = debugCallback;
                 debug_info.pUserData = self;
-                if (func(self.instance, &debug_info, null, &self.debug_messenger) != c.VK_SUCCESS) {
+                var messenger: c.VkDebugUtilsMessengerEXT = null;
+                if (func(self.instance, &debug_info, null, &messenger) != c.VK_SUCCESS) {
                     log.log.warn("Failed to create debug utils messenger", .{});
+                } else {
+                    self.debug_messenger = messenger;
                 }
             } else {
                 log.log.warn("vkCreateDebugUtilsMessengerEXT not available", .{});
@@ -441,7 +479,17 @@ pub const VulkanDevice = struct {
     }
 
     pub fn deinit(self: *VulkanDevice) void {
-        if (self.debug_messenger != null) {
+        // The caller must retire GPU work and destroy device children first.
+        // Keep the messenger alive while destroying the device and surface.
+        if (self.vk_device != null) {
+            c.vkDestroyDevice(self.vk_device, null);
+            self.vk_device = null;
+        }
+        if (self.instance != null and self.surface != null) {
+            c.vkDestroySurfaceKHR(self.instance, self.surface, null);
+        }
+        self.surface = null;
+        if (self.instance != null and self.debug_messenger != null) {
             const destroy_proc = c.vkGetInstanceProcAddr(self.instance, "vkDestroyDebugUtilsMessengerEXT");
             if (destroy_proc) |proc| {
                 const destroy_fn: c.PFN_vkDestroyDebugUtilsMessengerEXT = @ptrCast(proc);
@@ -449,11 +497,21 @@ pub const VulkanDevice = struct {
                     func(self.instance, self.debug_messenger, null);
                 }
             }
-            self.debug_messenger = null;
         }
-        c.vkDestroyDevice(self.vk_device, null);
-        c.vkDestroySurfaceKHR(self.instance, self.surface, null);
-        c.vkDestroyInstance(self.instance, null);
+        self.debug_messenger = null;
+        if (self.instance != null) c.vkDestroyInstance(self.instance, null);
+        self.instance = null;
+        self.physical_device = null;
+        self.queue = null;
+        self.vkGetDeviceFaultInfoEXT = null;
+        self.vkCmdDrawIndirectCountKHR = null;
+        self.vkCmdDrawIndexedIndirectCountKHR = null;
+        self.supports_device_fault = false;
+        self.robust_buffer_access2_enabled = false;
+        self.draw_indirect_count = false;
+        self.has_dedicated_transfer_queue = false;
+        self.debug_utils_enabled = false;
+        self.validation_layers_enabled = false;
     }
 
     pub fn getDeviceLocalVramBytes(self: VulkanDevice) u64 {
@@ -484,13 +542,14 @@ pub const VulkanDevice = struct {
         return error.NoMatchingMemoryType;
     }
 
-    /// Submits command buffers to the graphics queue with device loss protection.
+    /// Submits command buffers to the graphics queue and reports submission errors.
+    /// This does not prevent device loss or recover a lost device.
     /// Thread-safe via internal mutex.
     pub fn submitGuarded(self: *VulkanDevice, submit_info: c.VkSubmitInfo, fence: c.VkFence) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const result = c.vkQueueSubmit(self.queue, 1, &submit_info, fence);
+        const result = self.queue_submit_fn(self.queue, 1, &submit_info, fence);
 
         if (result == c.VK_ERROR_DEVICE_LOST) {
             self.fault_count += 1;
@@ -565,16 +624,22 @@ pub fn checkVk(result: c.VkResult) !void {
     }
 }
 
-test "VulkanDevice.submitGuarded initialization state" {
+test "VulkanDevice.deinit is safe and repeatable before initialization" {
     const testing = @import("std").testing;
 
-    const device = VulkanDevice{
+    var device = VulkanDevice{
         .allocator = testing.allocator,
         .vk_device = null,
         .queue = null,
     };
 
-    try testing.expectEqual(@as(u32, 0), device.fault_count);
+    device.deinit();
+    device.deinit();
+    try testing.expect(device.instance == null);
+    try testing.expect(device.surface == null);
+    try testing.expect(device.vk_device == null);
+    try testing.expect(device.queue == null);
+    try testing.expect(device.debug_messenger == null);
     try testing.expect(!device.supports_device_fault);
 }
 

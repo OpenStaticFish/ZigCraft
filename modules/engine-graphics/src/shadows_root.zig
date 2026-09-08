@@ -1,4 +1,8 @@
 pub const csm = @import("csm.zig");
+
+test {
+    _ = @import("shadows_test_root.zig");
+}
 pub const shadow_scene = @import("shadow_scene.zig");
 pub const shadow_system = @import("shadow_system.zig");
 pub const shadow_cascade_tests = @import("shadow_cascade_tests.zig");

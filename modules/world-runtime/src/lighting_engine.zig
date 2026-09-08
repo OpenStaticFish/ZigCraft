@@ -33,6 +33,9 @@ pub const WorldLightingEngine = struct {
         }
 
         if (!try self.pinLoadedArea(&component, cx, cz, -1, 1, -1, 1)) return false;
+        var completed = false;
+        var propagation_started = false;
+        defer if (propagation_started) self.markLightingChanged(&component, if (completed) null else false);
 
         var sky_queue = std.ArrayListUnmanaged(SkyNode).empty;
         defer sky_queue.deinit(self.allocator);
@@ -41,21 +44,24 @@ pub const WorldLightingEngine = struct {
 
         const center = component.get(.{ .x = cx, .z = cz }).?;
         if (component.get(.{ .x = cx - 1, .z = cz })) |west| {
-            try seedChunkInterface(center, west, .west, self.allocator, &sky_queue, &rgb_queue);
+            try seedChunkInterface(center, west, .west, false, self.allocator, &sky_queue, &rgb_queue);
         }
         if (component.get(.{ .x = cx + 1, .z = cz })) |east| {
-            try seedChunkInterface(center, east, .east, self.allocator, &sky_queue, &rgb_queue);
+            try seedChunkInterface(center, east, .east, false, self.allocator, &sky_queue, &rgb_queue);
         }
         if (component.get(.{ .x = cx, .z = cz - 1 })) |north| {
-            try seedChunkInterface(center, north, .north, self.allocator, &sky_queue, &rgb_queue);
+            try seedChunkInterface(center, north, .north, false, self.allocator, &sky_queue, &rgb_queue);
         }
         if (component.get(.{ .x = cx, .z = cz + 1 })) |south| {
-            try seedChunkInterface(center, south, .south, self.allocator, &sky_queue, &rgb_queue);
+            try seedChunkInterface(center, south, .south, false, self.allocator, &sky_queue, &rgb_queue);
         }
 
+        // Seeding only reads light. No interface differences means no writes,
+        // so avoid invalidating nine otherwise unchanged chunks on arrival.
+        propagation_started = sky_queue.items.len != 0 or rgb_queue.items.len != 0;
         try spreadSkylight(&component, self.allocator, &sky_queue);
         try spreadBlockLight(&component, self.allocator, &rgb_queue);
-        markLightingChanged(&component);
+        completed = true;
         return true;
     }
 
@@ -80,6 +86,20 @@ pub const WorldLightingEngine = struct {
         self.storage.lighting_mutex.lock();
         defer self.storage.lighting_mutex.unlock();
 
+        const needs_rebuild = blk: {
+            self.storage.chunks_mutex.lockShared();
+            defer self.storage.chunks_mutex.unlockShared();
+            const center = self.storage.chunks.get(.{ .x = center_cx, .z = center_cz }) orelse return;
+            break :blk !center.chunk.lighting_valid;
+        };
+        if (needs_rebuild) {
+            // Queued mutations invalidate the complete local window before
+            // releasing their locks. Earlier edits may have canceled jobs, so
+            // additive propagation alone cannot establish current lighting.
+            _ = try self.relightArea(center_cx, center_cz, -1, 1, -1, 1);
+            return;
+        }
+
         const min_dx: i32 = if (local_x == 0) -1 else 0;
         const max_dx: i32 = if (local_x == CHUNK_SIZE_X - 1) 1 else 0;
         const min_dz: i32 = if (local_z == 0) -1 else 0;
@@ -93,6 +113,8 @@ pub const WorldLightingEngine = struct {
         }
 
         if (!try self.pinLoadedArea(&component, center_cx, center_cz, min_dx, max_dx, min_dz, max_dz)) return;
+        var completed = false;
+        defer self.markLightingChanged(&component, if (completed) null else false);
 
         var sky_queue = std.ArrayListUnmanaged(SkyNode).empty;
         defer sky_queue.deinit(self.allocator);
@@ -103,7 +125,7 @@ pub const WorldLightingEngine = struct {
         try seedLightFromNeighbors(&component, self.allocator, &sky_queue, &rgb_queue, center_cx, center_cz, local_x, local_y, local_z);
         try spreadSkylight(&component, self.allocator, &sky_queue);
         try spreadBlockLight(&component, self.allocator, &rgb_queue);
-        markLightingChanged(&component);
+        completed = true;
     }
 
     fn relightArea(self: *WorldLightingEngine, center_cx: i32, center_cz: i32, min_dx: i32, max_dx: i32, min_dz: i32, max_dz: i32) !bool {
@@ -115,6 +137,15 @@ pub const WorldLightingEngine = struct {
         }
 
         if (!try self.pinLoadedArea(&component, center_cx, center_cz, min_dx, max_dx, min_dz, max_dz)) return false;
+        var boundary = ComponentChunks.init(self.allocator);
+        defer boundary.deinit();
+        defer {
+            var chunks = boundary.valueIterator();
+            while (chunks.next()) |chunk| chunk.*.unpin();
+        }
+        try self.pinRelightBoundary(&component, &boundary);
+        var completed = false;
+        defer self.markLightingChanged(&component, completed);
 
         var sky_queue = std.ArrayListUnmanaged(SkyNode).empty;
         defer sky_queue.deinit(self.allocator);
@@ -126,15 +157,74 @@ pub const WorldLightingEngine = struct {
             resetChunkLighting(chunk.*);
             try seedChunkSunlight(chunk.*, self.allocator, &sky_queue);
             try seedChunkBlockLight(chunk.*, self.allocator, &rgb_queue);
-            chunk.*.dirty = true;
-            chunk.*.modified = true;
-            chunk.*.lighting_valid = true;
-            chunk.*.markLightChanged();
         }
 
+        // Rebuild with fixed incoming boundary conditions. Only component
+        // chunks are writable/queued; exterior chunks must never be reset or
+        // accidentally visited by propagation starting from an exterior node.
+        chunks = component.valueIterator();
+        while (chunks.next()) |chunk| {
+            for (CHUNK_INTERFACES) |edge| {
+                const nx = std.math.add(i32, chunk.*.chunk_x, edge.dx) catch continue;
+                const nz = std.math.add(i32, chunk.*.chunk_z, edge.dz) catch continue;
+                if (boundary.get(.{ .x = nx, .z = nz })) |neighbor| {
+                    try seedChunkInterface(chunk.*, neighbor, edge.face, true, self.allocator, &sky_queue, &rgb_queue);
+                }
+            }
+        }
         try spreadSkylight(&component, self.allocator, &sky_queue);
         try spreadBlockLight(&component, self.allocator, &rgb_queue);
+        completed = true;
         return true;
+    }
+
+    /// Caller holds lighting_mutex. A boundary is trustworthy only when valid;
+    /// absorb connected invalid dependencies (including canceled edits) into
+    /// the rebuild until all loaded exterior neighbors are valid and read-only.
+    fn pinRelightBoundary(self: *WorldLightingEngine, component: *ComponentChunks, boundary: *ComponentChunks) !void {
+        var pending = std.ArrayListUnmanaged(*Chunk).empty;
+        defer pending.deinit(self.allocator);
+        var chunks = component.valueIterator();
+        while (chunks.next()) |chunk| try pending.append(self.allocator, chunk.*);
+
+        self.storage.chunks_mutex.lockShared();
+        defer self.storage.chunks_mutex.unlockShared();
+        var index: usize = 0;
+        while (index < pending.items.len) : (index += 1) {
+            const chunk = pending.items[index];
+            for (CHUNK_INTERFACES) |edge| {
+                const nx = std.math.add(i32, chunk.chunk_x, edge.dx) catch continue;
+                const nz = std.math.add(i32, chunk.chunk_z, edge.dz) catch continue;
+                const key = ChunkKey{ .x = nx, .z = nz };
+                if (component.contains(key) or boundary.contains(key)) continue;
+                const data = self.storage.chunks.get(key) orelse continue;
+                if (!data.chunk.generated or data.chunk.state == .generating or data.chunk.state == .unloading) continue;
+                if (data.chunk.lighting_valid) {
+                    try boundary.put(key, &data.chunk);
+                    data.chunk.pin();
+                } else {
+                    try component.put(key, &data.chunk);
+                    data.chunk.pin();
+                    try pending.append(self.allocator, &data.chunk);
+                }
+            }
+        }
+    }
+
+    /// Propagation holds lighting_mutex and pins, not chunks_mutex. Publish
+    /// flags/revisions in one short state-lock batch, including partial OOM
+    /// writes so a mesh captured before this batch can never be accepted.
+    fn markLightingChanged(self: *WorldLightingEngine, component: *ComponentChunks, lighting_valid: ?bool) void {
+        self.storage.chunks_mutex.lock();
+        defer self.storage.chunks_mutex.unlock();
+        var chunks = component.valueIterator();
+        while (chunks.next()) |chunk| {
+            chunk.*.dirty = true;
+            chunk.*.modified = true;
+            // Incremental propagation cannot repair a previously invalid batch.
+            if (lighting_valid) |valid| chunk.*.lighting_valid = valid;
+            chunk.*.markLightChanged();
+        }
     }
 
     fn pinLoadedArea(self: *WorldLightingEngine, component: *ComponentChunks, center_cx: i32, center_cz: i32, min_dx: i32, max_dx: i32, min_dz: i32, max_dz: i32) !bool {
@@ -142,7 +232,7 @@ pub const WorldLightingEngine = struct {
         defer self.storage.chunks_mutex.unlockShared();
 
         const center = self.storage.chunks.get(.{ .x = center_cx, .z = center_cz }) orelse return false;
-        if (!center.chunk.generated) return false;
+        if (!center.chunk.generated or center.chunk.state == .generating or center.chunk.state == .unloading) return false;
 
         var dz = min_dz;
         while (dz <= max_dz) : (dz += 1) {
@@ -150,7 +240,7 @@ pub const WorldLightingEngine = struct {
             while (dx <= max_dx) : (dx += 1) {
                 const key = ChunkKey{ .x = center_cx + dx, .z = center_cz + dz };
                 const data = self.storage.chunks.get(key) orelse continue;
-                if (!data.chunk.generated) continue;
+                if (!data.chunk.generated or data.chunk.state == .generating or data.chunk.state == .unloading) continue;
                 try component.put(key, &data.chunk);
                 data.chunk.pin();
             }
@@ -164,6 +254,12 @@ const SkyNode = struct { chunk: *Chunk, x: u8, y: u16, z: u8, light: u4 };
 const RgbNode = struct { chunk: *Chunk, x: u8, y: u16, z: u8, r: u4, g: u4, b: u4 };
 const LoadedStep = struct { cx: i32, cz: i32, x: u32, y: u32, z: u32, chunk: *Chunk };
 const ChunkInterface = enum { west, east, north, south };
+const CHUNK_INTERFACES = [_]struct { dx: i32, dz: i32, face: ChunkInterface }{
+    .{ .dx = -1, .dz = 0, .face = .west },
+    .{ .dx = 1, .dz = 0, .face = .east },
+    .{ .dx = 0, .dz = -1, .face = .north },
+    .{ .dx = 0, .dz = 1, .face = .south },
+};
 const VOXEL_NEIGHBOR_OFFSETS = [_][3]i32{ .{ 1, 0, 0 }, .{ -1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, -1, 0 }, .{ 0, 0, 1 }, .{ 0, 0, -1 } };
 
 fn resetChunkLighting(chunk: *Chunk) void {
@@ -199,7 +295,7 @@ fn seedChunkBlockLight(chunk: *Chunk, allocator: std.mem.Allocator, queue: *std.
     };
 }
 
-fn seedChunkInterface(center: *Chunk, neighbor: *Chunk, interface: ChunkInterface, allocator: std.mem.Allocator, sky_queue: *std.ArrayListUnmanaged(SkyNode), rgb_queue: *std.ArrayListUnmanaged(RgbNode)) !void {
+fn seedChunkInterface(center: *Chunk, neighbor: *Chunk, interface: ChunkInterface, incoming_only: bool, allocator: std.mem.Allocator, sky_queue: *std.ArrayListUnmanaged(SkyNode), rgb_queue: *std.ArrayListUnmanaged(RgbNode)) !void {
     for (0..CHUNK_SIZE_X) |horizontal| {
         const h: u32 = @intCast(horizontal);
         const positions = switch (interface) {
@@ -210,8 +306,31 @@ fn seedChunkInterface(center: *Chunk, neighbor: *Chunk, interface: ChunkInterfac
         };
         // Saved/player-placed emitters can sit above generated surface heights.
         for (0..CHUNK_SIZE_Y) |y| {
-            try seedInterfacePair(center, positions[0][0], @intCast(y), positions[0][1], neighbor, positions[1][0], positions[1][1], allocator, sky_queue, rgb_queue);
+            if (incoming_only) {
+                try seedIncomingLight(center, positions[0][0], @intCast(y), positions[0][1], neighbor.getLight(positions[1][0], @intCast(y), positions[1][1]), allocator, sky_queue, rgb_queue);
+            } else {
+                try seedInterfacePair(center, positions[0][0], @intCast(y), positions[0][1], neighbor, positions[1][0], positions[1][1], allocator, sky_queue, rgb_queue);
+            }
         }
+    }
+}
+
+fn seedIncomingLight(chunk: *Chunk, x: u32, y: u32, z: u32, incoming: PackedLight, allocator: std.mem.Allocator, sky_queue: *std.ArrayListUnmanaged(SkyNode), rgb_queue: *std.ArrayListUnmanaged(RgbNode)) !void {
+    const block = chunk.getBlock(x, y, z);
+    if (block_registry.getBlockDefinition(block).isOpaque()) return;
+    const attenuation = block_registry.lightAttenuation(block);
+    const sky: u4 = if (incoming.getSkyLight() > attenuation) incoming.getSkyLight() - attenuation else 0;
+    if (sky > chunk.getSkyLight(x, y, z)) {
+        chunk.setSkyLight(x, y, z, sky);
+        try sky_queue.append(allocator, skyNode(chunk, x, y, z, sky));
+    }
+    const current = chunk.getLight(x, y, z);
+    const r = @max(current.getBlockLightR(), if (incoming.getBlockLightR() > 1) incoming.getBlockLightR() - 1 else 0);
+    const g = @max(current.getBlockLightG(), if (incoming.getBlockLightG() > 1) incoming.getBlockLightG() - 1 else 0);
+    const b = @max(current.getBlockLightB(), if (incoming.getBlockLightB() > 1) incoming.getBlockLightB() - 1 else 0);
+    if (r > current.getBlockLightR() or g > current.getBlockLightG() or b > current.getBlockLightB()) {
+        chunk.setBlockLightRGB(x, y, z, r, g, b);
+        try rgb_queue.append(allocator, rgbNode(chunk, x, y, z, chunk.getLight(x, y, z)));
     }
 }
 
@@ -251,7 +370,6 @@ fn seedSunlightColumn(component: *const ComponentChunks, allocator: std.mem.Allo
         if (!sunlit) continue;
         if (chunk.getSkyLight(x, uy, z) < sky_light) {
             chunk.setSkyLight(x, uy, z, sky_light);
-            chunk.dirty = true;
             try queue.append(allocator, skyNode(chunk, x, uy, z, sky_light));
         }
         sky_light = block_registry.attenuateVerticalSkylight(sky_light, block);
@@ -278,22 +396,13 @@ fn seedLightFromNeighbors(component: *const ComponentChunks, allocator: std.mem.
 
     if (best_sky > chunk.getSkyLight(x, y, z)) {
         chunk.setSkyLight(x, y, z, best_sky);
-        chunk.dirty = true;
         try sky_queue.append(allocator, skyNode(chunk, x, y, z, best_sky));
     }
 
     const current = chunk.getLight(x, y, z);
     if (best_r > current.getBlockLightR() or best_g > current.getBlockLightG() or best_b > current.getBlockLightB()) {
         chunk.setBlockLightRGB(x, y, z, best_r, best_g, best_b);
-        chunk.dirty = true;
         try block_queue.append(allocator, rgbNode(chunk, x, y, z, chunk.getLight(x, y, z)));
-    }
-}
-
-fn markLightingChanged(component: *ComponentChunks) void {
-    var chunks = component.valueIterator();
-    while (chunks.next()) |chunk| {
-        if (chunk.*.dirty) chunk.*.markLightChanged();
     }
 }
 
@@ -310,7 +419,6 @@ fn spreadSkylight(component: *const ComponentChunks, allocator: std.mem.Allocato
             const next_light: u4 = if (node.light > attenuation) node.light - attenuation else 0;
             if (next_light <= pos.chunk.getSkyLight(pos.x, pos.y, pos.z)) continue;
             pos.chunk.setSkyLight(pos.x, pos.y, pos.z, next_light);
-            pos.chunk.dirty = true;
             try queue.append(allocator, skyNode(pos.chunk, pos.x, pos.y, pos.z, next_light));
         }
     }
@@ -332,7 +440,6 @@ fn spreadBlockLight(component: *const ComponentChunks, allocator: std.mem.Alloca
             const g = @max(next_g, current.getBlockLightG());
             const b = @max(next_b, current.getBlockLightB());
             pos.chunk.setBlockLightRGB(pos.x, pos.y, pos.z, r, g, b);
-            pos.chunk.dirty = true;
             try queue.append(allocator, rgbNode(pos.chunk, pos.x, pos.y, pos.z, pos.chunk.getLight(pos.x, pos.y, pos.z)));
         }
     }
@@ -431,4 +538,72 @@ test "WorldLightingEngine preserves neighbor light during interior recompute" {
     try lighting.recomputeArea(0, 0, 4, 4);
 
     try testing.expect(center.chunk.getLight(CHUNK_SIZE_X - 2, 4, 1).getBlockLightR() > 0);
+}
+
+test "WorldLightingEngine invalidates partial lighting on allocation failure and releases pins" {
+    const testing = std.testing;
+    var storage = ChunkStorage.init(testing.allocator);
+    defer storage.deinitWithoutRHI();
+    const center = try storage.getOrCreate(0, 0);
+    center.chunk.generated = true;
+    center.chunk.state = .renderable;
+    center.chunk.dirty = false;
+    center.chunk.modified = false;
+    center.chunk.lighting_valid = true;
+    center.chunk.setLight(1, 1, 1, PackedLight.init(0, 13));
+    const revision = center.chunk.light_revision.load(.acquire);
+
+    // The component map and boundary worklist succeed; the first propagation
+    // allocation fails after resetChunkLighting changed the resident array.
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 2 });
+    var lighting = WorldLightingEngine.init(&storage, failing.allocator());
+    try testing.expectError(error.OutOfMemory, lighting.recomputeArea(0, 0, 1, 1));
+    try testing.expectEqual(@as(u4, 0), center.chunk.getBlockLight(1, 1, 1));
+    try testing.expect(center.chunk.light_revision.load(.acquire) > revision);
+    try testing.expect(center.chunk.dirty and center.chunk.modified);
+    try testing.expect(!center.chunk.lighting_valid);
+    try testing.expect(!center.chunk.isPinned());
+    try testing.expectEqual(Chunk.State.renderable, center.chunk.state);
+    try testing.expect(storage.lighting_mutex.tryLock());
+    storage.lighting_mutex.unlock();
+    try testing.expect(storage.chunks_mutex.tryLock());
+    storage.chunks_mutex.unlock();
+}
+
+test "WorldLightingEngine boundary rebuild releases pins at every allocation failure" {
+    const testing = std.testing;
+    const Harness = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var storage = ChunkStorage.init(testing.allocator);
+            defer storage.deinitWithoutRHI();
+            // Enough invalid dependencies to grow both the map and worklist,
+            // followed by one valid, read-only incoming-light source.
+            for (0..14) |cx| {
+                const data = try storage.getOrCreate(@intCast(cx), 0);
+                data.chunk.generated = true;
+                data.chunk.fill(.stone);
+                data.chunk.lighting_valid = cx == 13;
+            }
+            const receiver = storage.get(12, 0).?;
+            receiver.chunk.setBlock(CHUNK_SIZE_X - 1, 4, 4, .air);
+            const source = storage.get(13, 0).?;
+            source.chunk.setBlock(0, 4, 4, .torch);
+            source.chunk.setBlockLightRGB(0, 4, 4, 15, 11, 6);
+            source.chunk.modified = false;
+
+            var lighting = WorldLightingEngine.init(&storage, allocator);
+            const result = lighting.recomputeArea(0, 0, 4, 4);
+            const completed = if (result) |_| true else |_| false;
+            var chunks = storage.iteratorUnsafe();
+            while (chunks.next()) |entry| {
+                const chunk = &entry.value_ptr.*.chunk;
+                try testing.expect(!chunk.isPinned());
+                try testing.expectEqual(completed or chunk.chunk_x == 13, chunk.lighting_valid);
+            }
+            try testing.expect(!source.chunk.modified);
+            try result;
+            try testing.expect(receiver.chunk.getBlockLight(CHUNK_SIZE_X - 1, 4, 4) > 0);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Harness.run, .{});
 }

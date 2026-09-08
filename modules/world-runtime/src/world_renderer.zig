@@ -29,8 +29,25 @@ const build_options = @import("world_runtime_options");
 const runtime_env = @import("engine-core").runtime_env;
 
 pub const MAX_MDI_CHUNKS: usize = 16384;
+const MAX_MDI_BATCHES: usize = 16;
 const MB: usize = 1024 * 1024;
 const GPU_BLOCK_SLOT_SIZE: usize = 16 * 16 * 256;
+
+// Every recorded batch needs its own destination, not just fresh staging data.
+const MdiBatchSlots = struct {
+    next: usize = 0,
+
+    fn reserve(self: *MdiBatchSlots) !usize {
+        if (self.next == MAX_MDI_BATCHES) return error.MdiBatchCapacityExceeded;
+        const slot = self.next;
+        self.next += 1;
+        return slot;
+    }
+
+    fn reset(self: *MdiBatchSlots) void {
+        self.next = 0;
+    }
+};
 
 fn getenv(name: [:0]const u8) ?[]const u8 {
     return runtime_env.getenv(name);
@@ -106,11 +123,415 @@ test "WorldRenderer parses boolean feature env" {
     try std.testing.expect(!parseEnabledEnv(null, false));
 }
 
+test "WorldRenderer MDI slots exhaust without reuse and reset only the retired frame" {
+    var frames = [_]MdiBatchSlots{.{}} ** rhi_mod.MAX_FRAMES_IN_FLIGHT;
+    _ = try frames[1].reserve();
+    for (0..MAX_MDI_BATCHES) |i| try std.testing.expectEqual(i, try frames[0].reserve());
+    try std.testing.expectError(error.MdiBatchCapacityExceeded, frames[0].reserve());
+    try std.testing.expectError(error.MdiBatchCapacityExceeded, frames[0].reserve());
+    frames[0].reset();
+    try std.testing.expectEqual(@as(usize, 0), try frames[0].reserve());
+    try std.testing.expectEqual(@as(usize, 1), try frames[1].reserve());
+}
+
+test "WorldRenderer MDI uploads retain every batch destination and model until frame reuse" {
+    const Capture = struct {
+        next_handle: rhi_mod.BufferHandle = 1,
+        bytes: [MAX_MDI_BATCHES * 2][@sizeOf(rhi_mod.InstanceData)]u8 = undefined,
+        lengths: [MAX_MDI_BATCHES * 2]usize = .{0} ** (MAX_MDI_BATCHES * 2),
+        instance: rhi_mod.BufferHandle = 0,
+        draws: [MAX_MDI_BATCHES]struct { instance: rhi_mod.BufferHandle, indirect: rhi_mod.BufferHandle } = undefined,
+        draw_count: usize = 0,
+
+        fn create(ptr: *anyopaque, _: usize, _: rhi_mod.BufferUsage) rhi_mod.RhiError!rhi_mod.BufferHandle {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            const handle = self.next_handle;
+            self.next_handle += 1;
+            return handle;
+        }
+
+        fn update(ptr: *anyopaque, handle: rhi_mod.BufferHandle, offset: usize, data: []const u8) rhi_mod.RhiError!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (offset != 0 or data.len > self.bytes[0].len) return error.InvalidState;
+            @memcpy(self.bytes[handle - 1][0..data.len], data);
+            self.lengths[handle - 1] = data.len;
+        }
+
+        fn bindInstance(ptr: *anyopaque, handle: rhi_mod.BufferHandle) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.instance = handle;
+        }
+
+        fn drawIndirect(ptr: *anyopaque, _: rhi_mod.BufferHandle, indirect: rhi_mod.BufferHandle, _: usize, _: u32, _: u32) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.draws[self.draw_count] = .{ .instance = self.instance, .indirect = indirect };
+            self.draw_count += 1;
+        }
+
+        fn frameIndex(_: *anyopaque) usize {
+            return 0;
+        }
+    };
+    var capture = Capture{};
+    var factory: rhi_mod.IResourceFactory.VTable = undefined;
+    factory.createBuffer = Capture.create;
+    factory.updateBuffer = Capture.update;
+    var state: rhi_mod.IRenderStateContext.VTable = undefined;
+    state.setInstanceBuffer = Capture.bindInstance;
+    var encoder: rhi_mod.IGraphicsCommandEncoder.VTable = undefined;
+    encoder.drawIndirect = Capture.drawIndirect;
+    var query: IDeviceQuery.VTable = undefined;
+    query.getFrameIndex = Capture.frameIndex;
+    var vertices: GlobalVertexAllocator = undefined;
+    vertices.buffer = 99;
+    var renderer: WorldRenderer = undefined;
+    renderer.rm = .{ .factory = .{ .ptr = &capture, .vtable = &factory } };
+    renderer.render_ctx = .{
+        .render = undefined,
+        .passes = undefined,
+        .post_process = undefined,
+        .effects = undefined,
+        .vulkan = undefined,
+        .state = .{ .ptr = &capture, .vtable = &state },
+        .encoder = .{ .ptr = &capture, .vtable = &encoder },
+    };
+    renderer.query = .{ .ptr = &capture, .vtable = &query };
+    renderer.vertex_allocator = &vertices;
+    renderer.instance_buffers = .{.{0} ** MAX_MDI_BATCHES} ** rhi_mod.MAX_FRAMES_IN_FLIGHT;
+    renderer.indirect_buffers = .{.{0} ** MAX_MDI_BATCHES} ** rhi_mod.MAX_FRAMES_IN_FLIGHT;
+    renderer.mdi_batch_slots = [_]MdiBatchSlots{.{}} ** rhi_mod.MAX_FRAMES_IN_FLIGHT;
+
+    // Four cascades plus geometry, reflection, terrain and water all upload
+    // before execution. Inspect destinations only after the final upload.
+    const batch_count = rhi_mod.SHADOW_CASCADE_COUNT + 4;
+    var instances: [batch_count]rhi_mod.InstanceData = undefined;
+    var commands: [batch_count]rhi_mod.DrawIndirectCommand = undefined;
+    for (0..batch_count) |i| {
+        instances[i] = .{ .model = Mat4.translate(Vec3.init(@floatFromInt(i), 2, 3)) };
+        commands[i] = .{ .vertexCount = @intCast((i + 1) * 3), .instanceCount = 1, .firstVertex = @intCast(i * 6), .firstInstance = 0 };
+        renderer.instance_data = .{ .items = instances[i .. i + 1], .capacity = 1 };
+        renderer.draw_commands = .{ .items = commands[i .. i + 1], .capacity = 1 };
+        try renderer.uploadMdiBatch();
+    }
+    try std.testing.expectEqual(batch_count, capture.draw_count);
+    for (capture.draws[0..batch_count], 0..) |draw_call, i| {
+        try std.testing.expectEqualSlices(u8, std.mem.asBytes(&instances[i]), capture.bytes[draw_call.instance - 1][0..capture.lengths[draw_call.instance - 1]]);
+        try std.testing.expectEqualSlices(u8, std.mem.asBytes(&commands[i]), capture.bytes[draw_call.indirect - 1][0..capture.lengths[draw_call.indirect - 1]]);
+    }
+    renderer.mdi_batch_slots[0].reset();
+    try renderer.uploadMdiBatch();
+    try std.testing.expectEqual(capture.draws[0].instance, capture.draws[batch_count].instance);
+    try std.testing.expectEqual(capture.draws[0].indirect, capture.draws[batch_count].indirect);
+    try std.testing.expectEqual(@as(rhi_mod.BufferHandle, batch_count * 2 + 1), capture.next_handle);
+}
+
 pub const RenderLayer = enum {
     all,
     terrain,
     fluid,
 };
+
+test "WorldRenderer shadow MDI allocation failures retain solid and cutout geometry" {
+    const Capture = struct {
+        model: Mat4 = Mat4.identity,
+        draws: usize = 0,
+        vertices: u32 = 0,
+        offsets: [2]usize = undefined,
+
+        fn supports(_: *anyopaque) bool {
+            return true;
+        }
+
+        fn setModel(ptr: *anyopaque, model: Mat4, _: Vec3) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.model = model;
+        }
+
+        fn draw(ptr: *anyopaque, _: rhi_mod.BufferHandle, count: u32, _: rhi_mod.DrawMode, offset: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.offsets[self.draws] = offset;
+            self.draws += 1;
+            self.vertices += count;
+        }
+    };
+    var storage = ChunkStorage.init(std.testing.allocator);
+    defer storage.deinitWithoutRHI();
+    const chunk = try storage.getOrCreate(-3, -5);
+    chunk.render.mesh.solid_allocation = .{ .offset = 0, .count = 6, .handle = 1 };
+    chunk.render.mesh.cutout_allocation = .{ .offset = 6 * @sizeOf(rhi_mod.Vertex), .count = 3, .handle = 2 };
+    chunk.render.mesh.fluid_allocation = .{ .offset = 9 * @sizeOf(rhi_mod.Vertex), .count = 12, .handle = 3 };
+    for (0..2) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        var capture = Capture{};
+        var state: rhi_mod.IRenderStateContext.VTable = undefined;
+        state.setModelMatrix = Capture.setModel;
+        var encoder: rhi_mod.IGraphicsCommandEncoder.VTable = undefined;
+        encoder.drawOffset = Capture.draw;
+        var query: IDeviceQuery.VTable = undefined;
+        query.supportsIndirectFirstInstance = Capture.supports;
+        var vertices: GlobalVertexAllocator = undefined;
+        vertices.buffer = 99;
+        var renderer: WorldRenderer = undefined;
+        renderer.allocator = failing.allocator();
+        renderer.storage = &storage;
+        renderer.vertex_allocator = &vertices;
+        renderer.render_ctx = .{
+            .render = undefined,
+            .passes = undefined,
+            .post_process = undefined,
+            .effects = undefined,
+            .vulkan = undefined,
+            .state = .{ .ptr = &capture, .vtable = &state },
+            .encoder = .{ .ptr = &capture, .vtable = &encoder },
+        };
+        renderer.query = .{ .ptr = &capture, .vtable = &query };
+        renderer.instance_data = .empty;
+        defer renderer.instance_data.deinit(renderer.allocator);
+        renderer.draw_commands = .empty;
+        defer renderer.draw_commands.deinit(renderer.allocator);
+        renderer.last_shadow_stats = .{};
+        const camera = Vec3.init(-49, 10, -81);
+        renderer.renderShadowPass(Mat4.identity, camera, Vec3.init(-48, 0, -80), Vec3.init(-48, 256, -80));
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(@as(usize, 2), capture.draws);
+        try std.testing.expectEqual(@as(u32, 9), capture.vertices);
+        try std.testing.expectEqualSlices(usize, &.{ 0, 6 * @sizeOf(rhi_mod.Vertex) }, &capture.offsets);
+        try std.testing.expect(WorldRenderer.mat4ExactEqual(Mat4.translate(Vec3.init(1, -10, 1)), capture.model));
+        try std.testing.expectEqual(@as(usize, 0), renderer.instance_data.items.len);
+        try std.testing.expectEqual(@as(usize, 0), renderer.draw_commands.items.len);
+        try std.testing.expectEqual(@as(u32, 1), renderer.last_shadow_stats.chunks_rendered);
+    }
+}
+
+test "WorldRenderer terrain submissions are nearest first while cached fluid order and models survive" {
+    const Capture = struct {
+        model: Mat4 = Mat4.identity,
+        models: [9]Mat4 = undefined,
+        offsets: [9]usize = undefined,
+        counts: [9]u32 = undefined,
+        draws: usize = 0,
+
+        fn supports(_: *anyopaque) bool {
+            return false;
+        }
+
+        fn setModel(ptr: *anyopaque, model: Mat4, _: Vec3) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.model = model;
+        }
+
+        fn draw(ptr: *anyopaque, _: rhi_mod.BufferHandle, count: u32, _: rhi_mod.DrawMode, offset: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.models[self.draws] = self.model;
+            self.offsets[self.draws] = offset;
+            self.counts[self.draws] = count;
+            self.draws += 1;
+        }
+    };
+    var storage = ChunkStorage.init(std.testing.allocator);
+    defer storage.deinitWithoutRHI();
+    var chunks: [3]*ChunkData = undefined;
+    for ([_][2]i32{ .{ -3, -5 }, .{ -4, -6 }, .{ -5, -6 } }, 0..) |coord, i| {
+        const chunk = try storage.getOrCreate(coord[0], coord[1]);
+        chunks[i] = chunk;
+        chunk.render.mesh.solid_allocation = .{ .offset = i * 1000, .count = 6, .handle = 1 };
+        chunk.render.mesh.cutout_allocation = .{ .offset = i * 1000 + 100, .count = 3, .handle = 2 };
+        chunk.render.mesh.fluid_allocation = .{ .offset = i * 1000 + 200, .count = 12, .handle = 3 };
+    }
+    var capture = Capture{};
+    var state: rhi_mod.IRenderStateContext.VTable = undefined;
+    state.setModelMatrix = Capture.setModel;
+    var encoder: rhi_mod.IGraphicsCommandEncoder.VTable = undefined;
+    encoder.drawOffset = Capture.draw;
+    var query: IDeviceQuery.VTable = undefined;
+    query.supportsIndirectFirstInstance = Capture.supports;
+    var vertices: GlobalVertexAllocator = undefined;
+    vertices.buffer = 99;
+    var renderer: WorldRenderer = undefined;
+    renderer.allocator = std.testing.allocator;
+    renderer.storage = &storage;
+    renderer.vertex_allocator = &vertices;
+    renderer.render_ctx = .{
+        .render = undefined,
+        .passes = undefined,
+        .post_process = undefined,
+        .effects = undefined,
+        .vulkan = undefined,
+        .state = .{ .ptr = &capture, .vtable = &state },
+        .encoder = .{ .ptr = &capture, .vtable = &encoder },
+    };
+    renderer.query = .{ .ptr = &capture, .vtable = &query };
+    renderer.visible_chunks = .empty;
+    defer renderer.visible_chunks.deinit(renderer.allocator);
+    renderer.cpu_cull_cache = .empty;
+    defer renderer.cpu_cull_cache.deinit(renderer.allocator);
+    renderer.cpu_cull_cache_valid = false;
+    renderer.frame_serial = 1;
+    renderer.render_frame_count = 0;
+    renderer.instance_data = .empty;
+    renderer.draw_commands = .empty;
+    renderer.use_gpu_culling = false;
+    renderer.force_mdi_fallback = true;
+    renderer.last_render_stats = .{};
+    const camera = Vec3.init(-49, 10, -81);
+    renderer.render(Mat4.identity, camera, 6, .fluid);
+    try std.testing.expectEqual(@as(usize, 3), capture.draws);
+    const fluid_offsets = capture.offsets[0..3].*;
+    const fluid_models = capture.models[0..3].*;
+    for (0..2) |_| {
+        capture.draws = 0;
+        renderer.render(Mat4.identity, camera, 6, .terrain);
+        try std.testing.expectEqual(@as(usize, 6), capture.draws);
+        try std.testing.expectEqual(@as(u32, 3), renderer.last_render_stats.chunks_rendered);
+        try std.testing.expectEqual(@as(u64, 27), renderer.last_render_stats.vertices_rendered);
+        for ([_]usize{ 1, 0, 2 }, 0..) |index, rank| {
+            const chunk = chunks[index];
+            const model = Mat4.translate(Vec3.init(@as(f32, @floatFromInt(chunk.chunk.chunk_x * CHUNK_SIZE_X)) - camera.x, -camera.y, @as(f32, @floatFromInt(chunk.chunk.chunk_z * CHUNK_SIZE_Z)) - camera.z));
+            try std.testing.expectEqual(index * 1000, capture.offsets[rank * 2]);
+            try std.testing.expectEqual(index * 1000 + 100, capture.offsets[rank * 2 + 1]);
+            try std.testing.expectEqual(@as(u32, 6), capture.counts[rank * 2]);
+            try std.testing.expectEqual(@as(u32, 3), capture.counts[rank * 2 + 1]);
+            try std.testing.expect(WorldRenderer.mat4ExactEqual(model, capture.models[rank * 2]));
+            try std.testing.expect(WorldRenderer.mat4ExactEqual(model, capture.models[rank * 2 + 1]));
+        }
+    }
+    capture.draws = 0;
+    renderer.render(Mat4.identity, camera, 6, .fluid);
+    try std.testing.expectEqual(@as(usize, 3), capture.draws);
+    try std.testing.expectEqualSlices(usize, &fluid_offsets, capture.offsets[0..3]);
+    for (fluid_models, capture.models[0..3]) |expected, actual| try std.testing.expect(WorldRenderer.mat4ExactEqual(expected, actual));
+    try std.testing.expectEqual(@as(u64, 1), renderer.render_frame_count);
+}
+
+test "WorldRenderer chunk centre ordering stays precise at negative coordinate limits" {
+    var storage = ChunkStorage.init(std.testing.allocator);
+    defer storage.deinitWithoutRHI();
+    const origin = std.math.minInt(i32);
+    const near = try storage.getOrCreate(origin, origin);
+    const east = try storage.getOrCreate(origin + 1, origin);
+    const south = try storage.getOrCreate(origin, origin + 1);
+    var visible = [_]*ChunkData{ south, east, near };
+    const context = WorldRenderer.ChunkDistance{ .pc_x = origin, .pc_z = origin, .local_x = 8, .local_z = 8 };
+    std.mem.sort(*ChunkData, &visible, context, WorldRenderer.ChunkDistance.lessThan);
+    try std.testing.expectEqualSlices(*ChunkData, &.{ near, east, south }, &visible);
+    try std.testing.expectEqual(@as(f64, 0), context.squared(near));
+    try std.testing.expectEqual(@as(f64, 256), context.squared(east));
+    // Near the east edge, sorting origins would incorrectly prefer the east
+    // chunk; sorting centres still prefers the camera's own chunk.
+    const edge = WorldRenderer.ChunkDistance{ .pc_x = origin, .pc_z = origin, .local_x = 15, .local_z = 8 };
+    std.mem.sort(*ChunkData, &visible, edge, WorldRenderer.ChunkDistance.lessThan);
+    try std.testing.expectEqualSlices(*ChunkData, &.{ near, east, south }, &visible);
+}
+
+test "WorldRenderer fluid demand follows real upload draw and resident eviction" {
+    const Capture = struct {
+        uploads: usize = 0,
+        draws: usize = 0,
+        vertices: u32 = 0,
+        fn create(_: *anyopaque, _: usize, _: rhi_mod.BufferUsage) rhi_mod.RhiError!rhi_mod.BufferHandle {
+            return 99;
+        }
+        fn destroy(_: *anyopaque, _: rhi_mod.BufferHandle) void {}
+        fn supports(_: *anyopaque) bool {
+            return false;
+        }
+        fn update(ptr: *anyopaque, _: rhi_mod.BufferHandle, _: usize, _: []const u8) rhi_mod.RhiError!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.uploads += 1;
+        }
+        fn frame(_: *anyopaque) usize {
+            return 0;
+        }
+        fn model(_: *anyopaque, _: Mat4, _: Vec3) void {}
+        fn draw(ptr: *anyopaque, _: rhi_mod.BufferHandle, count: u32, _: rhi_mod.DrawMode, _: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.draws += 1;
+            self.vertices += count;
+        }
+    };
+    var capture = Capture{};
+    var factory: rhi_mod.IResourceFactory.VTable = undefined;
+    factory.createBuffer = Capture.create;
+    factory.destroyBuffer = Capture.destroy;
+    factory.updateBuffer = Capture.update;
+    var query: IDeviceQuery.VTable = undefined;
+    query.getFrameIndex = Capture.frame;
+    query.supportsIndirectFirstInstance = Capture.supports;
+    var vertices = try GlobalVertexAllocator.init(std.testing.allocator, .{ .factory = .{ .ptr = &capture, .vtable = &factory } }, .{ .ptr = &capture, .vtable = &query }, 1);
+    defer vertices.deinit();
+    var storage = ChunkStorage.init(std.testing.allocator);
+    defer storage.deinitWithoutRHI();
+    var renderer: WorldRenderer = undefined;
+    renderer.storage = &storage;
+    renderer.gpu_mesher = null;
+    renderer.gpu_block_buffer = null;
+    renderer.vertex_allocator = &vertices;
+    renderer.last_render_stats = .{};
+    renderer.allocator = std.testing.allocator;
+    renderer.query = .{ .ptr = &capture, .vtable = &query };
+    renderer.visible_chunks = .empty;
+    defer renderer.visible_chunks.deinit(renderer.allocator);
+    renderer.cpu_cull_cache = .empty;
+    defer renderer.cpu_cull_cache.deinit(renderer.allocator);
+    renderer.cpu_cull_cache_valid = false;
+    renderer.frame_serial = 1;
+    renderer.render_frame_count = 0;
+    renderer.instance_data = .empty;
+    renderer.draw_commands = .empty;
+    renderer.use_gpu_culling = false;
+    renderer.force_mdi_fallback = true;
+    var state: rhi_mod.IRenderStateContext.VTable = undefined;
+    state.setModelMatrix = Capture.model;
+    var encoder: rhi_mod.IGraphicsCommandEncoder.VTable = undefined;
+    encoder.drawOffset = Capture.draw;
+    renderer.render_ctx = .{ .render = undefined, .passes = undefined, .post_process = undefined, .effects = undefined, .vulkan = undefined, .state = .{ .ptr = &capture, .vtable = &state }, .encoder = .{ .ptr = &capture, .vtable = &encoder } };
+    try std.testing.expect(!renderer.hasDrawableFluid());
+    const chunk = try storage.getOrCreate(-3, -5);
+    chunk.render.mesh.pending_cutout = try std.testing.allocator.alloc(rhi_mod.Vertex, 3);
+    @memset(chunk.render.mesh.pending_cutout.?, std.mem.zeroes(rhi_mod.Vertex));
+    chunk.render.mesh.upload(&vertices);
+    try std.testing.expect(!renderer.hasDrawableFluid());
+    const camera = Vec3.init(-49, 10, -81);
+    renderer.render(Mat4.identity, camera, 6, .fluid);
+    try std.testing.expectEqual(@as(usize, 0), capture.draws);
+    chunk.render.mesh.pending_fluid = try std.testing.allocator.alloc(rhi_mod.Vertex, 6);
+    @memset(chunk.render.mesh.pending_fluid.?, std.mem.zeroes(rhi_mod.Vertex));
+    try std.testing.expect(!renderer.hasDrawableFluid());
+    chunk.render.mesh.upload(&vertices);
+    try std.testing.expectEqual(@as(usize, 2), capture.uploads);
+    try std.testing.expect(renderer.hasDrawableFluid());
+    renderer.render(Mat4.identity, camera, 6, .fluid);
+    try std.testing.expectEqual(@as(usize, 1), renderer.visible_chunks.items.len);
+    try std.testing.expectEqual(@as(u64, 6), renderer.last_render_stats.vertices_rendered);
+    try std.testing.expectEqual(@as(usize, 1), capture.draws);
+    try std.testing.expectEqual(@as(u32, 6), capture.vertices);
+    // Mesh/state flags cannot hide a retained drawable allocation.
+    chunk.render.mesh.ready = false;
+    try std.testing.expect(renderer.hasDrawableFluid());
+    try std.testing.expect(chunk.render.mesh.mutex.tryLock());
+    chunk.render.mesh.mutex.unlock();
+    try std.testing.expect(storage.remove(-3, -5, &vertices));
+    try std.testing.expect(!renderer.hasDrawableFluid());
+    try std.testing.expect(storage.chunks_mutex.tryLock());
+    storage.chunks_mutex.unlock();
+}
+
+test "WorldRenderer fluid demand is conservative for unknown compute streams" {
+    var storage = ChunkStorage.init(std.testing.allocator);
+    defer storage.deinitWithoutRHI();
+    var renderer: WorldRenderer = undefined;
+    renderer.storage = &storage;
+    var mesher: GpuMesher = undefined;
+    var blocks: GpuBlockBuffer = undefined;
+    renderer.gpu_mesher = &mesher;
+    renderer.gpu_block_buffer = null;
+    try std.testing.expect(renderer.hasDrawableFluid());
+    renderer.gpu_mesher = null;
+    renderer.gpu_block_buffer = &blocks;
+    try std.testing.expect(renderer.hasDrawableFluid());
+    renderer.gpu_block_buffer = null;
+    try std.testing.expect(!renderer.hasDrawableFluid());
+}
 
 pub const WorldRenderer = struct {
     allocator: std.mem.Allocator,
@@ -129,8 +550,9 @@ pub const WorldRenderer = struct {
     // MDI Resources
     instance_data: std.ArrayListUnmanaged(rhi_mod.InstanceData),
     draw_commands: std.ArrayListUnmanaged(rhi_mod.DrawIndirectCommand),
-    instance_buffers: [rhi_mod.MAX_FRAMES_IN_FLIGHT]rhi_mod.BufferHandle,
-    indirect_buffers: [rhi_mod.MAX_FRAMES_IN_FLIGHT]rhi_mod.BufferHandle,
+    instance_buffers: [rhi_mod.MAX_FRAMES_IN_FLIGHT][MAX_MDI_BATCHES]rhi_mod.BufferHandle = .{.{0} ** MAX_MDI_BATCHES} ** rhi_mod.MAX_FRAMES_IN_FLIGHT,
+    indirect_buffers: [rhi_mod.MAX_FRAMES_IN_FLIGHT][MAX_MDI_BATCHES]rhi_mod.BufferHandle = .{.{0} ** MAX_MDI_BATCHES} ** rhi_mod.MAX_FRAMES_IN_FLIGHT,
+    mdi_batch_slots: [rhi_mod.MAX_FRAMES_IN_FLIGHT]MdiBatchSlots = [_]MdiBatchSlots{.{}} ** rhi_mod.MAX_FRAMES_IN_FLIGHT,
     force_mdi_fallback: bool,
 
     // GPU Culling
@@ -187,14 +609,6 @@ pub const WorldRenderer = struct {
         // The compute mesher does not yet match the production vertex/light contract.
         const gpu_meshing_enabled = false;
 
-        const max_chunks = MAX_MDI_CHUNKS;
-        var instance_buffers: [rhi_mod.MAX_FRAMES_IN_FLIGHT]rhi_mod.BufferHandle = undefined;
-        var indirect_buffers: [rhi_mod.MAX_FRAMES_IN_FLIGHT]rhi_mod.BufferHandle = undefined;
-        for (0..rhi_mod.MAX_FRAMES_IN_FLIGHT) |i| {
-            instance_buffers[i] = try rm.createBuffer(max_chunks * @sizeOf(rhi_mod.InstanceData), .storage);
-            indirect_buffers[i] = try rm.createBuffer(max_chunks * @sizeOf(rhi_mod.DrawIndirectCommand) * 3, .indirect);
-        }
-
         const owned_culling_system = culling_system.*;
         const use_gpu = !safe_mode_enabled and owned_culling_system != null and parseEnabledEnv(getenv("ZIGCRAFT_ENABLE_GPU_CULLING"), false);
         if (use_gpu) {
@@ -246,8 +660,6 @@ pub const WorldRenderer = struct {
             .last_shadow_stats = .{},
             .instance_data = .empty,
             .draw_commands = .empty,
-            .instance_buffers = instance_buffers,
-            .indirect_buffers = indirect_buffers,
             .force_mdi_fallback = force_mdi_fallback,
             .culling_system = owned_culling_system,
             .aabb_data = .empty,
@@ -278,6 +690,8 @@ pub const WorldRenderer = struct {
         self.resetShadowStats();
         self.frame_serial += 1;
         self.cpu_cull_cache_valid = false;
+        // The RHI begins the frame (and waits its fence) before world rendering.
+        self.mdi_batch_slots[self.query.getFrameIndex()].reset();
         self.vertex_allocator.tick(self.query.getFrameIndex());
     }
 
@@ -314,8 +728,8 @@ pub const WorldRenderer = struct {
         self.gpu_visible_indices.deinit(self.allocator);
 
         for (0..rhi_mod.MAX_FRAMES_IN_FLIGHT) |i| {
-            if (self.instance_buffers[i] != 0) self.rm.destroyBuffer(self.instance_buffers[i]);
-            if (self.indirect_buffers[i] != 0) self.rm.destroyBuffer(self.indirect_buffers[i]);
+            for (self.instance_buffers[i]) |buffer| if (buffer != 0) self.rm.destroyBuffer(buffer);
+            for (self.indirect_buffers[i]) |buffer| if (buffer != 0) self.rm.destroyBuffer(buffer);
         }
         self.instance_data.deinit(self.allocator);
         self.draw_commands.deinit(self.allocator);
@@ -329,6 +743,23 @@ pub const WorldRenderer = struct {
         self.vertex_allocator.deinit();
         self.allocator.destroy(self.vertex_allocator);
         self.allocator.destroy(self);
+    }
+
+    pub fn hasDrawableFluid(self: *WorldRenderer) bool {
+        // Experimental compute streams need not use the CPU fluid allocation.
+        if (self.gpu_mesher != null or self.gpu_block_buffer != null) return true;
+
+        self.storage.chunks_mutex.lockShared();
+        defer self.storage.chunks_mutex.unlockShared();
+        var chunks = self.storage.chunks.valueIterator();
+        while (chunks.next()) |data| {
+            // Retained allocations remain drawable during remeshing. Do not
+            // infer demand from block contents, chunk state, or visibility.
+            data.*.render.mesh.mutex.lock();
+            defer data.*.render.mesh.mutex.unlock();
+            if (data.*.render.mesh.fluid_allocation != null) return true;
+        }
+        return false;
     }
 
     pub fn render(self: *WorldRenderer, view_proj: Mat4, camera_pos: Vec3, render_distance: i32, layer: RenderLayer) void {
@@ -360,6 +791,17 @@ pub const WorldRenderer = struct {
         }
 
         self.last_render_stats.chunks_total = @intCast(self.storage.chunks.count());
+
+        // Keep the shared visibility cache in its original order for fluid/all.
+        // Only opaque/cutout submissions benefit from front-to-back depth rejection.
+        if (layer == .terrain) {
+            std.mem.sort(*ChunkData, self.visible_chunks.items, ChunkDistance{
+                .pc_x = pc_x,
+                .pc_z = pc_z,
+                .local_x = @as(f64, camera_pos.x) - @as(f64, @floatFromInt(pc_x * CHUNK_SIZE_X)),
+                .local_z = @as(f64, camera_pos.z) - @as(f64, @floatFromInt(pc_z * CHUNK_SIZE_Z)),
+            }, ChunkDistance.lessThan);
+        }
 
         const vertex_size = @sizeOf(rhi_mod.Vertex);
         const supports_indirect_first_instance = self.query.supportsIndirectFirstInstance();
@@ -440,39 +882,58 @@ pub const WorldRenderer = struct {
             }
         }
 
-        if (self.instance_data.items.len > 0 and self.draw_commands.items.len > 0) {
-            const fi = self.query.getFrameIndex();
-
-            const max_instances: usize = MAX_MDI_CHUNKS;
-            const max_commands: usize = MAX_MDI_CHUNKS * 3;
-
-            std.debug.assert(self.instance_data.items.len <= max_instances);
-            std.debug.assert(self.draw_commands.items.len <= max_commands);
-
-            const instance_bytes = std.mem.sliceAsBytes(self.instance_data.items);
-            self.rm.updateBuffer(self.instance_buffers[fi], 0, instance_bytes) catch |err| {
-                log.log.err("MDI: failed to update instance buffer: {}", .{err});
-                return;
-            };
-
-            const cmd_bytes = std.mem.sliceAsBytes(self.draw_commands.items);
-            self.rm.updateBuffer(self.indirect_buffers[fi], 0, cmd_bytes) catch |err| {
-                log.log.err("MDI: failed to update indirect buffer: {}", .{err});
-                return;
-            };
-
-            self.render_ctx.setInstanceBuffer(self.instance_buffers[fi]);
-
-            self.render_ctx.drawIndirect(
-                self.vertex_allocator.buffer,
-                self.indirect_buffers[fi],
-                0,
-                @intCast(self.draw_commands.items.len),
-                @sizeOf(rhi_mod.DrawIndirectCommand),
-            );
-        }
+        self.submitMdiBatch();
 
         self.drawGuaranteedNearChunks(@intCast(pc_x), @intCast(pc_z), r_dist, camera_pos, layer);
+    }
+
+    const ChunkDistance = struct {
+        pc_x: i64,
+        pc_z: i64,
+        local_x: f64,
+        local_z: f64,
+
+        fn squared(self: @This(), data: *ChunkData) f64 {
+            // Subtract chunk coordinates before conversion; visible deltas are
+            // bounded by render distance, even at large negative world positions.
+            const x = @as(f64, @floatFromInt(@as(i64, data.chunk.chunk_x) - self.pc_x)) * CHUNK_SIZE_X + CHUNK_SIZE_X / 2 - self.local_x;
+            const z = @as(f64, @floatFromInt(@as(i64, data.chunk.chunk_z) - self.pc_z)) * CHUNK_SIZE_Z + CHUNK_SIZE_Z / 2 - self.local_z;
+            return x * x + z * z;
+        }
+
+        fn lessThan(self: @This(), a: *ChunkData, b: *ChunkData) bool {
+            const ad = self.squared(a);
+            const bd = self.squared(b);
+            if (ad != bd) return ad < bd;
+            return a.chunk.chunk_z < b.chunk.chunk_z or (a.chunk.chunk_z == b.chunk.chunk_z and a.chunk.chunk_x < b.chunk.chunk_x);
+        }
+    };
+
+    fn submitMdiBatch(self: *WorldRenderer) void {
+        if (self.instance_data.items.len == 0 or self.draw_commands.items.len == 0) return;
+        self.uploadMdiBatch() catch |err| {
+            log.log.warn("MDI: batch unavailable ({}), drawing this batch directly", .{err});
+            for (self.draw_commands.items) |command| {
+                self.render_ctx.setModelMatrix(self.instance_data.items[command.firstInstance].model, Vec3.one);
+                self.render_ctx.drawOffset(self.vertex_allocator.buffer, command.vertexCount, .triangles, @as(usize, command.firstVertex) * @sizeOf(rhi_mod.Vertex));
+            }
+        };
+    }
+
+    fn uploadMdiBatch(self: *WorldRenderer) !void {
+        const fi = self.query.getFrameIndex();
+        // Do not release the slot on failure: one of its uploads may be queued.
+        const slot = try self.mdi_batch_slots[fi].reserve();
+        if (self.instance_buffers[fi][slot] == 0) {
+            self.instance_buffers[fi][slot] = try self.rm.createBuffer(MAX_MDI_CHUNKS * @sizeOf(rhi_mod.InstanceData), .storage);
+        }
+        if (self.indirect_buffers[fi][slot] == 0) {
+            self.indirect_buffers[fi][slot] = try self.rm.createBuffer(MAX_MDI_CHUNKS * 3 * @sizeOf(rhi_mod.DrawIndirectCommand), .indirect);
+        }
+        try self.rm.updateBuffer(self.instance_buffers[fi][slot], 0, std.mem.sliceAsBytes(self.instance_data.items));
+        try self.rm.updateBuffer(self.indirect_buffers[fi][slot], 0, std.mem.sliceAsBytes(self.draw_commands.items));
+        self.render_ctx.setInstanceBuffer(self.instance_buffers[fi][slot]);
+        self.render_ctx.drawIndirect(self.vertex_allocator.buffer, self.indirect_buffers[fi][slot], 0, @intCast(self.draw_commands.items.len), @sizeOf(rhi_mod.DrawIndirectCommand));
     }
 
     fn drawChunkDirect(self: *WorldRenderer, data: *ChunkData, model: Mat4, layer: RenderLayer, count_vertices: bool) u64 {
@@ -742,26 +1203,36 @@ pub const WorldRenderer = struct {
                                 continue;
                             }
 
+                            // Reserve the whole chunk before appending so allocation failure
+                            // cannot silently drop either solid or cutout shadow geometry.
+                            self.instance_data.ensureUnusedCapacity(self.allocator, 1) catch {
+                                _ = self.drawChunkDirect(data, model, .terrain, false);
+                                continue;
+                            };
+                            self.draw_commands.ensureUnusedCapacity(self.allocator, command_count) catch {
+                                _ = self.drawChunkDirect(data, model, .terrain, false);
+                                continue;
+                            };
                             const instance_idx: u32 = @intCast(self.instance_data.items.len);
-                            self.instance_data.append(self.allocator, .{
+                            self.instance_data.appendAssumeCapacity(.{
                                 .model = model,
-                            }) catch continue;
+                            });
 
                             if (data.render.mesh.solid_allocation) |alloc| {
-                                self.draw_commands.append(self.allocator, .{
+                                self.draw_commands.appendAssumeCapacity(.{
                                     .vertexCount = alloc.count,
                                     .instanceCount = 1,
                                     .firstVertex = @intCast(alloc.offset / vertex_size),
                                     .firstInstance = instance_idx,
-                                }) catch {};
+                                });
                             }
                             if (data.render.mesh.cutout_allocation) |alloc| {
-                                self.draw_commands.append(self.allocator, .{
+                                self.draw_commands.appendAssumeCapacity(.{
                                     .vertexCount = alloc.count,
                                     .instanceCount = 1,
                                     .firstVertex = @intCast(alloc.offset / vertex_size),
                                     .firstInstance = instance_idx,
-                                }) catch {};
+                                });
                             }
                             continue;
                         }
@@ -779,20 +1250,6 @@ pub const WorldRenderer = struct {
             }
         }
 
-        if (supports_shadow_mdi and self.instance_data.items.len > 0 and self.draw_commands.items.len > 0) {
-            const fi = self.query.getFrameIndex();
-            std.debug.assert(self.instance_data.items.len <= MAX_MDI_CHUNKS);
-            std.debug.assert(self.draw_commands.items.len <= MAX_MDI_CHUNKS * 3);
-            self.rm.updateBuffer(self.instance_buffers[fi], 0, std.mem.sliceAsBytes(self.instance_data.items)) catch |err| {
-                log.log.err("Shadow MDI: failed to update instance buffer: {}", .{err});
-                return;
-            };
-            self.rm.updateBuffer(self.indirect_buffers[fi], 0, std.mem.sliceAsBytes(self.draw_commands.items)) catch |err| {
-                log.log.err("Shadow MDI: failed to update indirect buffer: {}", .{err});
-                return;
-            };
-            self.render_ctx.setInstanceBuffer(self.instance_buffers[fi]);
-            self.render_ctx.drawIndirect(self.vertex_allocator.buffer, self.indirect_buffers[fi], 0, @intCast(self.draw_commands.items.len), @sizeOf(rhi_mod.DrawIndirectCommand));
-        }
+        self.submitMdiBatch();
     }
 };

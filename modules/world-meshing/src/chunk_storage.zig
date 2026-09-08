@@ -69,7 +69,12 @@ pub const ChunkStorage = struct {
 
     chunks: std.HashMap(ChunkKey, *ChunkData, ChunkKeyContext, 80),
     free_list: std.ArrayListUnmanaged(*ChunkData),
+    /// Guards membership, lifecycle/state flags, and published chunk metadata.
+    /// Pins protect lifetime only, not the contents of a resident chunk.
     chunks_mutex: sync.RwLock,
+    /// Guards resident block/light/biome data. When both locks are needed,
+    /// acquire lighting_mutex before chunks_mutex. Generate and mesh private
+    /// data outside these locks; copy inputs/publish results under the locks.
     lighting_mutex: sync.Mutex,
     allocator: std.mem.Allocator,
     next_job_token: u32,
@@ -172,6 +177,8 @@ pub const ChunkStorage = struct {
         return total;
     }
 
+    /// The returned pointer is not pinned. Background users must look up and
+    /// pin under chunks_mutex; content readers additionally need lighting_mutex.
     pub fn get(self: *ChunkStorage, cx: i32, cz: i32) ?*ChunkData {
         self.chunks_mutex.lockShared();
         defer self.chunks_mutex.unlockShared();
@@ -194,6 +201,7 @@ pub const ChunkStorage = struct {
         if (self.chunks.get(key)) |data| return data;
 
         const data = try self.createChunkDataUnlocked(cx, cz);
+        errdefer self.allocator.destroy(data);
         try self.chunks.put(key, data);
         return data;
     }
@@ -229,6 +237,8 @@ pub const ChunkStorage = struct {
     /// SAFETY: Caller must hold chunks_mutex (exclusive lock)!
     pub fn removeUnlocked(self: *ChunkStorage, cx: i32, cz: i32, vertex_allocator: anytype) bool {
         const key = ChunkKey{ .x = cx, .z = cz };
+        const data = self.chunks.get(key) orelse return false;
+        if (data.chunk.isPinned()) return false;
         if (self.chunks.fetchRemove(key)) |entry| {
             entry.value.*.render.mesh.deinit(vertex_allocator);
             // Retain the large ChunkData allocation for future chunks. The mesh
@@ -276,3 +286,22 @@ pub const ChunkStorage = struct {
         return null; // not in storage
     }
 };
+
+test "ChunkStorage removal refuses pinned chunks before pooling or destruction" {
+    const testing = std.testing;
+    var storage = ChunkStorage.init(testing.allocator);
+    defer storage.deinitWithoutRHI();
+    const data = try storage.getOrCreate(0, 0);
+    const token = data.chunk.job_token;
+    data.chunk.pin();
+    defer data.chunk.unpin();
+
+    // No GPU resources exist, and the pin must reject removal before deinit.
+    var vertex_allocator: @import("chunk_allocator.zig").GlobalVertexAllocator = undefined;
+    try testing.expect(!storage.remove(0, 0, &vertex_allocator));
+    try testing.expectEqual(@as(usize, 1), storage.count());
+    try testing.expectEqual(@as(usize, 0), storage.free_list.items.len);
+    try testing.expect(storage.get(0, 0).? == data);
+    try testing.expectEqual(token, data.chunk.job_token);
+    try testing.expectEqual(@as(u64, 0), storage.getMapSurfaceRevision());
+}

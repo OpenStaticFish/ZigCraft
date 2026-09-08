@@ -1,4 +1,8 @@
 pub const chunk_inspector_overlay = @import("chunk_inspector_overlay.zig");
+
+test {
+    _ = @import("test_root.zig");
+}
 pub const debug_frustum = @import("debug_frustum.zig");
 pub const debug_lpv_overlay = @import("debug_lpv_overlay.zig");
 pub const debug_menu = @import("debug_menu.zig");

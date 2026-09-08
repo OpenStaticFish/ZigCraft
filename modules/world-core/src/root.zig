@@ -1,4 +1,8 @@
 pub const block = @import("block.zig");
+
+test {
+    _ = @import("test_root.zig");
+}
 pub const block_registry = @import("block_registry.zig");
 pub const chunk = @import("chunk.zig");
 pub const chunk_constants = @import("chunk_constants.zig");

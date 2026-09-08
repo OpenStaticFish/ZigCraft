@@ -74,7 +74,7 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
 
-    if (ctx.runtime.gpu_fault_detected) return;
+    if (ctx.runtime.gpu_fault_detected or ctx.frames.terminal_failure) return;
     if (ctx.frames.frame_in_progress) return;
 
     frame_orchestration.recreatePendingShadowResources(ctx);
@@ -97,50 +97,45 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
     }
 
     // Begin frame (acquire image, reset fences/CBs)
-    const frame_started = ctx.frames.beginFrame(&ctx.swapchain) catch |err| {
-        if (err == error.GpuLost) {
-            ctx.runtime.gpu_fault_detected = true;
-        } else {
-            log.log.errWithTrace("beginFrame failed: {}", .{err});
-        }
+    const frame_started = frame_orchestration.startFrame(ctx) catch |err| {
+        log.log.errWithTrace("beginFrame failed: {}; frame slot quarantined, restart required", .{err});
         return;
     };
+    if (!frame_started) return;
 
-    if (frame_started) {
-        processTimingResults(ctx);
+    processTimingResults(ctx);
 
-        if (ctx.dynamic_resolution.enabled) {
-            ctx.dynamic_resolution.update(ctx.timing.timing_results.total_gpu_ms);
-        }
-
-        const current_frame = ctx.frames.current_frame;
-        const command_buffer = ctx.frames.command_buffers[current_frame];
-        if (ctx.timing.query_pool != null) {
-            rhi_timing.resetFrameTiming(ctx, current_frame);
-            c.vkCmdResetQueryPool(command_buffer, ctx.timing.query_pool, @intCast(current_frame * QUERY_COUNT_PER_FRAME), QUERY_COUNT_PER_FRAME);
-        }
+    if (ctx.dynamic_resolution.enabled) {
+        ctx.dynamic_resolution.update(ctx.timing.timing_results.total_gpu_ms);
     }
 
-    ctx.resources.setCurrentFrame(ctx.frames.current_frame);
-
-    if (!frame_started) {
-        return;
+    const current_frame = ctx.frames.current_frame;
+    const command_buffer = ctx.frames.command_buffers[current_frame];
+    if (ctx.timing.query_pool != null) {
+        rhi_timing.resetFrameTiming(ctx, current_frame);
+        c.vkCmdResetQueryPool(command_buffer, ctx.timing.query_pool, @intCast(current_frame * QUERY_COUNT_PER_FRAME), QUERY_COUNT_PER_FRAME);
     }
 
     ctx.runtime.transfer_barrier_needed = flushed_inter_frame_transfer;
-    render_state.applyPendingDescriptorUpdates(ctx, ctx.frames.current_frame);
     frame_orchestration.prepareFrameState(ctx);
 }
 
 fn abortFrame(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
-    if (!ctx.frames.frame_in_progress) return;
+    if (ctx.frames.terminal_failure or !ctx.frames.frame_in_progress) return;
 
     // Reset both recording command buffers before any screen/world teardown.
     // vkDeviceWaitIdle only covers submitted work and cannot make references in
     // an unsubmitted recording command buffer safe to destroy.
+    const faults_before = ctx.vulkan_device.fault_count;
     ctx.resources.abortCurrentFrame();
     ctx.frames.abortFrame();
+    frame_orchestration.invalidateAbortedTemporalState(ctx);
+    if (ctx.frames.terminal_failure) {
+        ctx.runtime.gpu_fault_detected = true;
+        if (ctx.vulkan_device.fault_count == faults_before) ctx.vulkan_device.fault_count +|= 1;
+        return;
+    }
     if (ctx.screenshot_capture.staging != null) screenshot.discardCapture(ctx);
 
     // Recreate semaphores
@@ -482,6 +477,8 @@ fn setModelMatrix(ctx_ptr: *anyopaque, model: Mat4, color: Vec3) void {
 
 fn setInstanceBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
     render_state.setInstanceBuffer(ctx, handle);
 }
 
@@ -600,6 +597,8 @@ fn supportsIndirectCount(ctx_ptr: *anyopaque) bool {
 
 fn recover(ctx_ptr: *anyopaque) anyerror!void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    const was_recording = ctx.frames.frame_in_progress;
+    defer if (was_recording and !ctx.frames.frame_in_progress) frame_orchestration.invalidateAbortedTemporalState(ctx);
     try state_control.recover(ctx);
 }
 
@@ -690,6 +689,7 @@ fn drawIndexed(ctx_ptr: *anyopaque, vbo_handle: rhi.BufferHandle, ebo_handle: rh
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
+    if (!render_state.prepareDrawDescriptors(ctx)) return;
     draw_submission.drawIndexed(ctx, vbo_handle, ebo_handle, count);
 }
 
@@ -697,11 +697,15 @@ fn drawIndirect(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, command_buffer: r
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
+    if (!render_state.prepareDrawDescriptors(ctx)) return;
     draw_submission.drawIndirect(ctx, handle, command_buffer, offset, draw_count, stride);
 }
 
 fn drawIndirectCount(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, command_buffer: rhi.BufferHandle, offset: usize, count_buffer: rhi.BufferHandle, count_offset: usize, max_draw_count: u32, stride: u32) bool {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
+    if (!render_state.prepareDrawDescriptors(ctx)) return false;
     return draw_submission.drawIndirectCount(ctx, handle, command_buffer, offset, count_buffer, count_offset, max_draw_count, stride);
 }
 
@@ -709,6 +713,7 @@ fn drawInstance(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, insta
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
+    if (!render_state.prepareDrawDescriptors(ctx)) return;
     draw_submission.drawInstance(ctx, handle, count, instance_index);
 }
 
@@ -720,6 +725,7 @@ fn drawOffset(ctx_ptr: *anyopaque, handle: rhi.BufferHandle, count: u32, mode: r
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
+    if (!ctx.post_process.pass_active and !render_state.prepareDrawDescriptors(ctx)) return;
     draw_submission.drawOffset(ctx, handle, count, mode, offset);
 }
 
@@ -930,6 +936,8 @@ fn computeSsao(ctx_ptr: *anyopaque, proj: Mat4, inv_proj: Mat4) void {
 
 fn drawSkyEffect(ctx_ptr: *anyopaque, params: rhi.SkyParams) rhi.RhiError!void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
     const pipeline = ctx.pipeline_manager.sky_pipeline;
     const layout = ctx.pipeline_manager.sky_pipeline_layout;
     const cmd = ctx.frames.command_buffers[ctx.frames.current_frame];
@@ -953,6 +961,7 @@ fn drawSkyEffect(ctx_ptr: *anyopaque, params: rhi.SkyParams) rhi.RhiError!void {
         .time = .{ params.time, params.cam_pos.x, params.cam_pos.y, params.cam_pos.z },
     };
 
+    if (!render_state.prepareDrawDescriptors(ctx)) return error.ResourceNotReady;
     c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     const descriptor_set = ctx.descriptors.descriptor_sets[ctx.frames.current_frame];
     if (descriptor_set != null) {
@@ -964,12 +973,17 @@ fn drawSkyEffect(ctx_ptr: *anyopaque, params: rhi.SkyParams) rhi.RhiError!void {
 
 fn beginWaterDrawEffect(ctx_ptr: *anyopaque, reflection: rhi.TextureHandle, scene_depth: rhi.TextureHandle) bool {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
     const pipeline = ctx.water_system.water_pipeline;
     const layout = ctx.water_system.water_pipeline_layout;
     const cmd = ctx.frames.command_buffers[ctx.frames.current_frame];
 
     if (pipeline == null or layout == null or cmd == null or reflection == 0 or scene_depth == 0) return false;
 
+    ctx.draw.current_water_reflection_texture = reflection;
+    ctx.draw.current_scene_depth_texture = scene_depth;
+    if (!render_state.prepareDrawDescriptors(ctx)) return false;
     c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     const descriptor_set = ctx.descriptors.descriptor_sets[ctx.frames.current_frame];
     if (descriptor_set != null) {

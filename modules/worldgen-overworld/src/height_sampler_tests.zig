@@ -86,8 +86,13 @@ test "HeightSampler continental zone inland_low" {
 
 test "HeightSampler continental zone inland_high" {
     const sampler = HeightSampler.init();
+    const lower = sampler.params.continental_inland_low_max;
+    const upper = sampler.params.continental_inland_high_max;
+    try testing.expectEqual(ContinentalZone.inland_low, sampler.getContinentalZone(lower - 0.0001));
+    try testing.expectEqual(ContinentalZone.inland_high, sampler.getContinentalZone(lower));
     try testing.expectEqual(ContinentalZone.inland_high, sampler.getContinentalZone(0.68));
-    try testing.expectEqual(ContinentalZone.inland_high, sampler.getContinentalZone(0.72));
+    try testing.expectEqual(ContinentalZone.inland_high, sampler.getContinentalZone(upper - 0.0001));
+    try testing.expectEqual(ContinentalZone.mountain_core, sampler.getContinentalZone(upper));
 }
 
 test "HeightSampler continental zone mountain_core" {

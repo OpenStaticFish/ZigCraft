@@ -3,6 +3,12 @@ const App = @import("game/app.zig").App;
 const engine_core = @import("engine-core");
 const log = engine_core.log;
 
+comptime {
+    if (@import("build_options").benchmark and !@import("engine-graphics").skips_presentation) {
+        @compileError("The benchmark graphics backend must be compiled without presentation");
+    }
+}
+
 pub const panic = std.debug.FullPanic(crashPanic);
 
 fn crashPanic(msg: []const u8, first_trace_addr: ?usize) noreturn {

@@ -6,6 +6,13 @@ const rhi = @import("engine-rhi").rhi;
 const Utils = @import("utils.zig");
 const shader_registry = @import("shader_registry.zig");
 
+pub fn terrainRasterizer(base: c.VkPipelineRasterizationStateCreateInfo, variant: enum { solid, wireframe, selection, line }) c.VkPipelineRasterizationStateCreateInfo {
+    var result = base;
+    result.polygonMode = if (variant == .wireframe) c.VK_POLYGON_MODE_LINE else c.VK_POLYGON_MODE_FILL;
+    if (variant != .solid) result.cullMode = c.VK_CULL_MODE_NONE;
+    return result;
+}
+
 fn loadShaderModule(
     allocator: std.mem.Allocator,
     vk_device: c.VkDevice,
@@ -42,6 +49,7 @@ pub fn createTerrainPipeline(
     color_blending: *const c.VkPipelineColorBlendStateCreateInfo,
     _sample_count: c.VkSampleCountFlagBits,
     g_render_pass: c.VkRenderPass,
+    water_reflection: bool,
 ) !void {
     _ = _sample_count;
     const vert_module = try loadShaderModule(allocator, vk_device, shader_registry.TERRAIN_VERT);
@@ -49,9 +57,12 @@ pub fn createTerrainPipeline(
     const frag_module = try loadShaderModule(allocator, vk_device, shader_registry.TERRAIN_FRAG);
     defer c.vkDestroyShaderModule(vk_device, frag_module, null);
 
+    const reflection: c.VkBool32 = if (water_reflection) c.VK_TRUE else c.VK_FALSE;
+    const entry = c.VkSpecializationMapEntry{ .constantID = 0, .offset = 0, .size = @sizeOf(c.VkBool32) };
+    const specialization = c.VkSpecializationInfo{ .mapEntryCount = 1, .pMapEntries = &entry, .dataSize = @sizeOf(c.VkBool32), .pData = &reflection };
     var shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
-        .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main" },
-        .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_module, .pName = "main" },
+        .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main", .pSpecializationInfo = &specialization },
+        .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_module, .pName = "main", .pSpecializationInfo = &specialization },
     };
 
     const binding_description = c.VkVertexInputBindingDescription{ .binding = 0, .stride = @sizeOf(rhi.Vertex), .inputRate = c.VK_VERTEX_INPUT_RATE_VERTEX };
@@ -87,25 +98,30 @@ pub fn createTerrainPipeline(
     pipeline_info.renderPass = hdr_render_pass;
     pipeline_info.subpass = 0;
 
+    errdefer {
+        inline for (.{ "terrain_pipeline", "wireframe_pipeline", "selection_pipeline", "line_pipeline", "g_pipeline" }) |name| {
+            if (@field(self, name) != null) c.vkDestroyPipeline(vk_device, @field(self, name), null);
+            @field(self, name) = null;
+        }
+    }
     try Utils.checkVk(c.vkCreateGraphicsPipelines(vk_device, null, 1, &pipeline_info, null, &self.terrain_pipeline));
 
-    var wireframe_rasterizer = rasterizer.*;
-    wireframe_rasterizer.cullMode = c.VK_CULL_MODE_NONE;
-    wireframe_rasterizer.polygonMode = c.VK_POLYGON_MODE_LINE;
-    pipeline_info.pRasterizationState = &wireframe_rasterizer;
-    try Utils.checkVk(c.vkCreateGraphicsPipelines(vk_device, null, 1, &pipeline_info, null, &self.wireframe_pipeline));
+    const wireframe_rasterizer = terrainRasterizer(rasterizer.*, .wireframe);
+    var wireframe_pipeline_info = pipeline_info;
+    wireframe_pipeline_info.pRasterizationState = &wireframe_rasterizer;
+    try Utils.checkVk(c.vkCreateGraphicsPipelines(vk_device, null, 1, &wireframe_pipeline_info, null, &self.wireframe_pipeline));
 
-    var selection_rasterizer = rasterizer.*;
-    selection_rasterizer.cullMode = c.VK_CULL_MODE_NONE;
-    selection_rasterizer.polygonMode = c.VK_POLYGON_MODE_FILL;
+    const selection_rasterizer = terrainRasterizer(rasterizer.*, .selection);
     var selection_pipeline_info = pipeline_info;
     selection_pipeline_info.pRasterizationState = &selection_rasterizer;
     try Utils.checkVk(c.vkCreateGraphicsPipelines(vk_device, null, 1, &selection_pipeline_info, null, &self.selection_pipeline));
 
     var line_input_assembly = input_assembly.*;
     line_input_assembly.topology = c.VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    const line_rasterizer = terrainRasterizer(rasterizer.*, .line);
     var line_pipeline_info = pipeline_info;
     line_pipeline_info.pInputAssemblyState = &line_input_assembly;
+    line_pipeline_info.pRasterizationState = &line_rasterizer;
     try Utils.checkVk(c.vkCreateGraphicsPipelines(vk_device, null, 1, &line_pipeline_info, null, &self.line_pipeline));
 
     if (g_render_pass != null) {
@@ -130,8 +146,11 @@ pub fn createTerrainPipeline(
 
         var g_multisampling = multisampling.*;
         g_multisampling.rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT;
+        g_multisampling.alphaToCoverageEnable = c.VK_FALSE;
 
+        const g_rasterizer = terrainRasterizer(rasterizer.*, .solid);
         var g_pipeline_info = pipeline_info;
+        g_pipeline_info.pRasterizationState = &g_rasterizer;
         g_pipeline_info.stageCount = 2;
         g_pipeline_info.pStages = &g_shader_stages[0];
         g_pipeline_info.pMultisampleState = &g_multisampling;

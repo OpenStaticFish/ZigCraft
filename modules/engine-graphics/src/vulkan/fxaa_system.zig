@@ -73,7 +73,7 @@ pub const FXAASystem = struct {
         // not load stale menu pixels from a prior composition.
         color_attachment.loadOp = c.VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         color_attachment.storeOp = c.VK_ATTACHMENT_STORE_OP_STORE;
-        color_attachment.initialLayout = final_layout;
+        color_attachment.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
         color_attachment.finalLayout = final_layout;
 
         var color_ref = c.VkAttachmentReference{ .attachment = 0, .layout = c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };

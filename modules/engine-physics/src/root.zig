@@ -1,4 +1,8 @@
 pub const collision = @import("collision.zig");
+
+test {
+    _ = @import("test_root.zig");
+}
 pub const VoxelCollisionWorld = collision.VoxelCollisionWorld;
 pub const CollisionResult = collision.CollisionResult;
 pub const CollisionConfig = collision.CollisionConfig;

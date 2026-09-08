@@ -91,7 +91,7 @@ After cloning or creating a new worktree, run the setup script to enable git hoo
 ```
 
 This configures a pre-push hook that runs:
-- `zig fmt --check src/` - formatting check
+- `zig fmt --check src/ modules/ build.zig` - formatting check
 - `zig build test` - full test suite
 
 To bypass in emergencies: `git push --no-verify`
@@ -144,19 +144,25 @@ The shadow/cave lighting capture launches a deterministic low-block test scene, 
 - **All Tests**: `devenv shell zig build test`
 - **Single Test**: `devenv shell zig build test -- --test-filter "Test Name"`
 - **Single Test Alternative**: `devenv shell zig build test -Dtest-filter="Test Name"`
+- **Test inventory**: `devenv shell zig build test-discovery` (runs direct roots and prints named tests)
+- **Shader checks only**: `devenv shell zig build test-shaders` (does not rewrite tracked SPIR-V)
+
+The fuzz-named corpus tests in the ordinary suite are deterministic regression tests, not an ongoing fuzz campaign. The nightly `-Dsanitize=c` mode enables C undefined-behavior sanitization, **not AddressSanitizer**. See [CI test guardrails](docs/ci-test-guardrails.md) for scope and limitations.
 
 ## 📂 Project Structure
 
 - `modules/engine-*`: Core engine packages (RHI, graphics, math, UI, input, jobs, ECS, audio).
 - `modules/world-core`: Blocks, chunks, coordinates, lighting, and shared world types.
-- `modules/world-worldgen`: Procedural terrain, noise, biomes, caves, decorations, and generator registry.
+- `modules/world-worldgen`: Generator facade and registry; `modules/worldgen-*` own shared generation code and individual terrain generators.
 - `modules/world-meshing`: Chunk storage, mesh generation, GPU block buffers, and meshing helpers.
 - `modules/world-runtime`: World facade, streaming, mutation, rendering, and GPU meshing runtime.
 - `modules/world-persistence`: Level data, chunk serialization, region files, and save manager.
-- `src/game/`: Application/gameplay state, screens, player, inventory, and session logic.
+- `modules/game-core`: Session, player, inventory, settings, and benchmark logic.
+- `modules/game-ui`: Screens, menus, and settings UI.
+- `src/game/`: Application wiring and lifecycle orchestration; `src/main.zig` is the executable entry point.
 - `assets/`: GLSL shaders and textures.
-- `scripts/`: Helper scripts for asset processing.
-- `libs/`: Local dependencies (zig-math, zig-noise, stb).
+- `scripts/`: CI verification, benchmarks, asset processing, and reporting tools.
+- `libs/`: Vendored dependencies (zig-math, zig-noise, stb) and the project-owned RmlUi C ABI bridge.
 
 
 ## 🛠️ Texture Pipeline
@@ -165,7 +171,7 @@ The shadow/cave lighting capture launches a deterministic low-block test scene, 
 
 Some textures in `assets/textures/default/` are temporary development placeholders imported from external Minecraft-compatible resource packs, including Classic Faithful 64x Jappa, while the engine art pipeline is being built out. They are included only to make local development and visual iteration easier, and should be replaced with original or clearly licensed project assets before any public release or redistribution.
 
-ZigCraft does not claim ownership of third-party placeholder textures. Keep attribution and licensing requirements with any external resource pack assets you use.
+ZigCraft does not claim ownership of third-party placeholder textures. Keep attribution and licensing requirements with any external resource pack assets you use. The repository's code license does not establish redistribution rights for these placeholders; the [release checklist](docs/release-checklist.md) requires a separate asset/license review. This remains unresolved until supported by evidence.
 
 The engine supports HD texture packs with full PBR maps. To standardize high-resolution source imagery (4k JPEGs, EXRs) into engine-ready 512px PNGs, use the provided helper script:
 
@@ -208,13 +214,7 @@ All PRs target the `dev` branch. Use our PR templates (`feature.md`, `bug.md`, `
 ## 🔧 Troubleshooting
 
 ### devenv Build Failures
-```bash
-# Clean build artifacts
-rm -rf zig-out/ .zig-cache/
-
-# Refresh devenv inputs (updates the pinned nixpkgs)
-devenv update
-```
+Preserve the failing log and pinned `devenv.lock` first. Check tool versions and the selected profile before changing dependencies. `devenv update` is an intentional dependency upgrade, not a routine repair command. Cache deletion is not required for diagnosis; use `./scripts/codebase_report.sh` to report tracked source metrics separately from local cache/build footprint without cleaning anything.
 
 ### Vulkan Driver Issues
 - **Linux**: Ensure `vulkan-loader` and GPU drivers are installed
@@ -222,11 +222,13 @@ devenv update
 - **Verify**: Run `vulkaninfo` to check Vulkan support
 
 ### Shader Validation Errors
-Shaders are validated during `zig build test`. If glslang fails:
+Ordinary builds and `zig build test` validate tracked SPIR-V without rewriting it. After intentionally changing GLSL, regenerate the runtime artifacts explicitly and then validate:
 ```bash
-# Install glslang via devenv
-devenv shell  # glslang is included in the dev shell
+devenv shell zig build shaders
+devenv shell zig build test-shaders
 ```
+
+If shader sizes intentionally change, update `docs/shaders/spirv-sizes.json` with `./scripts/update_spirv_baseline.sh` and review the baseline diff. Do not regenerate first when investigating stale-artifact failures: preserve the failing evidence.
 
 ### Performance Issues
 - Try `zig build run -Doptimize=ReleaseFast` for optimized builds

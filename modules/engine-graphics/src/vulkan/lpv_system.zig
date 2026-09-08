@@ -40,6 +40,7 @@ pub const LPVSystem = struct {
     center_retention: f32,
     enabled: bool,
     resources_initialized: bool = false,
+    abort_generation: u64 = 0,
     update_interval_frames: u32 = 6,
 
     origin: Vec3 = Vec3.zero,
@@ -122,9 +123,11 @@ pub const LPVSystem = struct {
             c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         );
         errdefer self.destroyLightBuffer();
+        if (self.light_buffer.mapped_ptr == null or self.light_buffer.size < light_buffer_size) return error.InvalidBuffer;
 
         // Occlusion grid buffer: one u32 per cell (1 = opaque, 0 = transparent)
-        const occlusion_buffer_size = @as(usize, self.grid_size) * @as(usize, self.grid_size) * @as(usize, self.grid_size) * @sizeOf(u32);
+        const cells = try occlusionCellCount(self.grid_size);
+        const occlusion_buffer_size = cells * @sizeOf(u32);
         self.occlusion_buffer = try Utils.createVulkanBuffer(
             &self.vk_ctx.vulkan_device,
             occlusion_buffer_size,
@@ -132,6 +135,8 @@ pub const LPVSystem = struct {
             c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
         );
         errdefer self.destroyOcclusionBuffer();
+        self.occlusion_grid = try self.allocator.alloc(u32, cells);
+        try validateOcclusionCapacity(self.grid_size, self.occlusion_grid.len, self.occlusion_buffer);
 
         try lpv_utils.ensureShaderFileExists(INJECT_SHADER_PATH);
         try lpv_utils.ensureShaderFileExists(PROPAGATE_SHADER_PATH);
@@ -139,6 +144,7 @@ pub const LPVSystem = struct {
         errdefer self.deinitComputeResources();
         try self.initComputeResources();
 
+        self.abort_generation = self.vk_ctx.runtime.lpv_abort_generation;
         self.resources_initialized = true;
     }
 
@@ -153,11 +159,38 @@ pub const LPVSystem = struct {
     }
 
     pub fn deinit(self: *LPVSystem) void {
+        if (self.resources_initialized) self.waitForGpu() catch |err| {
+            log.log.err("LPV teardown GPU wait failed: {}", .{err});
+        };
         self.deinitResources();
         self.allocator.destroy(self);
     }
 
     pub fn setSettings(self: *LPVSystem, enabled: bool, intensity: f32, cell_size: f32, propagation_iterations: u32, grid_size: u32, update_interval_frames: u32) !void {
+        const clamped_grid = std.math.clamp(grid_size, 16, 64);
+        // An aborted dispatch advanced CPU layouts/output selection without
+        // executing them. Rebuild rather than guessing the images' real layouts.
+        const replacing = enabled and (!self.isEnabled() or clamped_grid != self.grid_size);
+        if (self.resources_initialized and (replacing or !enabled)) {
+            // Waiting cannot retire resources referenced by an unsubmitted command buffer.
+            if (self.vk_ctx.frames.frame_in_progress and
+                (self.vk_ctx.runtime.lpv_recorded_this_frame or self.vk_ctx.runtime.draw_call_count != 0)) return error.InvalidState;
+            try self.waitForGpu();
+        }
+
+        if (replacing) {
+            // Build a complete generation, including mapped SSBOs and immutable compute sets.
+            // No live state changes until every allocation and descriptor write succeeds.
+            const replacement = try LPVSystem.init(self.allocator, self.rhi, clamped_grid, cell_size, intensity, propagation_iterations, true);
+            replacement.propagation_factor = self.propagation_factor;
+            replacement.center_retention = self.center_retention;
+            replacement.current_frame = self.current_frame;
+            replacement.was_enabled_last_frame = false;
+            std.mem.swap(LPVSystem, self, replacement);
+            replacement.deinitResources();
+            self.allocator.destroy(replacement);
+        }
+
         self.intensity = std.math.clamp(intensity, 0.0, 4.0);
         self.cell_size = @max(cell_size, 0.5);
         self.propagation_iterations = std.math.clamp(propagation_iterations, 1, 8);
@@ -165,86 +198,50 @@ pub const LPVSystem = struct {
         self.stats.propagation_iterations = self.propagation_iterations;
         self.stats.update_interval_frames = self.update_interval_frames;
 
-        const clamped_grid = std.math.clamp(grid_size, 16, 64);
+        self.enabled = enabled;
         if (!enabled) {
-            self.enabled = false;
             self.deinitResources();
-            self.stats.light_count = 0;
-            self.stats.cpu_update_ms = 0.0;
-            return;
-        }
-
-        if (!self.resources_initialized) {
             self.grid_size = clamped_grid;
             self.stats.grid_size = clamped_grid;
-            try self.initResources();
+            self.stats.light_count = 0;
+            self.stats.cpu_update_ms = 0.0;
         }
-        self.enabled = true;
+    }
 
-        if (clamped_grid == self.grid_size) return;
-
-        const old_resources = GridResources{
-            .grid_textures_a = self.grid_textures_a,
-            .grid_textures_b = self.grid_textures_b,
-            .active_grid_textures = self.active_grid_textures,
-            .debug_overlay_texture = self.debug_overlay_texture,
-            .debug_overlay_pixels = self.debug_overlay_pixels,
-            .image_layout_a = self.image_layout_a,
-            .image_layout_b = self.image_layout_b,
-        };
-        const old_grid_size = self.grid_size;
-        const old_stats_grid_size = self.stats.grid_size;
-        const old_origin = self.origin;
-
-        const new_resources = try self.createGridResources(clamped_grid);
-        self.applyGridResources(new_resources);
-        self.grid_size = clamped_grid;
-        self.stats.grid_size = clamped_grid;
-        self.origin = Vec3.zero;
-
-        errdefer {
-            var failed_new = GridResources{
-                .grid_textures_a = self.grid_textures_a,
-                .grid_textures_b = self.grid_textures_b,
-                .active_grid_textures = self.active_grid_textures,
-                .debug_overlay_texture = self.debug_overlay_texture,
-                .debug_overlay_pixels = self.debug_overlay_pixels,
-                .image_layout_a = self.image_layout_a,
-                .image_layout_b = self.image_layout_b,
-            };
-            self.destroyGridResources(&failed_new);
-            self.applyGridResources(old_resources);
-            self.grid_size = old_grid_size;
-            self.stats.grid_size = old_stats_grid_size;
-            self.origin = old_origin;
-        }
-
-        self.buildDebugOverlay(&.{}, 0);
-        try self.uploadDebugOverlay();
-        try self.updateDescriptorSets();
-
-        var old_to_destroy = old_resources;
-        self.destroyGridResources(&old_to_destroy);
+    fn waitForGpu(self: *LPVSystem) !void {
+        self.vk_ctx.vulkan_device.mutex.lock();
+        defer self.vk_ctx.vulkan_device.mutex.unlock();
+        try Utils.checkVk(c.vkDeviceWaitIdle(self.vk_ctx.vulkan_device.vk_device));
     }
 
     pub fn getTextureHandle(self: *const LPVSystem) rhi_pkg.TextureHandle {
+        if (!self.isEnabled()) return 0;
         return self.active_grid_textures[0]; // R channel (binding 11)
     }
 
     pub fn getTextureHandleG(self: *const LPVSystem) rhi_pkg.TextureHandle {
+        if (!self.isEnabled()) return 0;
         return self.active_grid_textures[1]; // G channel (binding 12)
     }
 
     pub fn getTextureHandleB(self: *const LPVSystem) rhi_pkg.TextureHandle {
+        if (!self.isEnabled()) return 0;
         return self.active_grid_textures[2]; // B channel (binding 13)
     }
 
     pub fn getDebugOverlayTextureHandle(self: *const LPVSystem) rhi_pkg.TextureHandle {
+        if (!self.isEnabled()) return 0;
         return self.debug_overlay_texture;
     }
 
     pub fn getStats(self: *const LPVSystem) Stats {
-        return self.stats;
+        var stats = self.stats;
+        if (!self.isEnabled()) {
+            stats.updated_this_frame = false;
+            stats.light_count = 0;
+            stats.cpu_update_ms = 0;
+        }
+        return stats;
     }
 
     pub fn getOrigin(self: *const LPVSystem) Vec3 {
@@ -260,10 +257,13 @@ pub const LPVSystem = struct {
     }
 
     pub fn isEnabled(self: *const LPVSystem) bool {
-        return self.enabled and self.resources_initialized;
+        return self.enabled and self.resources_initialized and self.abort_generation == self.vk_ctx.runtime.lpv_abort_generation;
     }
 
     pub fn update(self: *LPVSystem, world: ILPVWorld, camera_pos: Vec3, debug_overlay_enabled: bool) !void {
+        if (self.enabled and !self.isEnabled()) {
+            try self.setSettings(true, self.intensity, self.cell_size, self.propagation_iterations, self.grid_size, self.update_interval_frames);
+        }
         self.current_frame +%= 1;
         const timer_start = std.Io.Clock.awake.now(std.Options.debug_io);
         self.stats.updated_this_frame = false;
@@ -299,14 +299,21 @@ pub const LPVSystem = struct {
             return;
         }
 
+        // These mapped inputs are shared across frames, not frame-buffered.
+        if (self.vk_ctx.runtime.lpv_recorded_this_frame and self.vk_ctx.frames.frame_in_progress) return error.InvalidState;
+        try self.waitForGpu();
         self.origin = next_origin;
         self.was_enabled_last_frame = true;
 
         var lights: [MAX_LIGHTS_PER_UPDATE]GpuLight = undefined;
         const light_count = self.collectLights(world, lights[0..]);
+        if (light_count > lights.len) return error.InvalidLightCount;
         if (self.light_buffer.mapped_ptr) |ptr| {
             const bytes = std.mem.sliceAsBytes(lights[0..light_count]);
+            if (bytes.len > self.light_buffer.size) return error.InvalidBufferSize;
             @memcpy(@as([*]u8, @ptrCast(ptr))[0..bytes.len], bytes);
+        } else {
+            return error.InvalidBuffer;
         }
 
         // Build occlusion grid for opaque block awareness during propagation
@@ -340,18 +347,10 @@ pub const LPVSystem = struct {
     /// Build a per-cell occlusion grid (1 = opaque, 0 = transparent) for the current LPV volume.
     /// Stored as packed u32 array where each u32 holds the opacity for one cell.
     fn buildOcclusionGrid(self: *LPVSystem, world: ILPVWorld) bool {
-        const gs = @as(usize, self.grid_size);
-        const total_cells = gs * gs * gs;
-
-        // Ensure CPU buffer is allocated
-        if (self.occlusion_grid.len != total_cells) {
-            const new_grid = self.allocator.alloc(u32, total_cells) catch |err| {
-                log.log.err("LPV occlusion grid allocation failed ({} cells): {}", .{ total_cells, err });
-                return false;
-            };
-            if (self.occlusion_grid.len > 0) self.allocator.free(self.occlusion_grid);
-            self.occlusion_grid = new_grid;
-        }
+        validateOcclusionCapacity(self.grid_size, self.occlusion_grid.len, self.occlusion_buffer) catch |err| {
+            log.log.err("LPV occlusion upload rejected: {}", .{err});
+            return false;
+        };
 
         @memset(self.occlusion_grid, 0);
         world.buildOcclusionGrid(self.origin, self.grid_size, self.cell_size, self.occlusion_grid);
@@ -371,7 +370,7 @@ pub const LPVSystem = struct {
         var resources = GridResources{};
         errdefer self.destroyGridResources(&resources);
 
-        const empty = try self.allocator.alloc(f32, @as(usize, grid_size) * @as(usize, grid_size) * @as(usize, grid_size) * 4);
+        const empty = try self.allocator.alloc(f32, (try occlusionCellCount(grid_size)) * 4);
         defer self.allocator.free(empty);
         @memset(empty, 0.0);
         const bytes = std.mem.sliceAsBytes(empty);
@@ -467,7 +466,8 @@ pub const LPVSystem = struct {
 
     fn dispatchCompute(self: *LPVSystem, light_count: usize) !void {
         const cmd = self.vk_ctx.frames.command_buffers[self.vk_ctx.frames.current_frame];
-        if (cmd == null) return;
+        if (cmd == null or !self.vk_ctx.frames.frame_in_progress) return error.InvalidState;
+        self.vk_ctx.runtime.lpv_recorded_this_frame = true;
 
         // Transition all 6 SH channel textures (3 per grid) to GENERAL for compute access
         for (0..3) |ch| {
@@ -774,6 +774,7 @@ pub const LPVSystem = struct {
     }
 
     fn updateDescriptorSets(self: *LPVSystem) !void {
+        try validateOcclusionCapacity(self.grid_size, self.occlusion_grid.len, self.occlusion_buffer);
         // Resolve all 6 texture resources (3 channels x 2 grids)
         var imgs_a: [3]c.VkDescriptorImageInfo = undefined;
         var imgs_b: [3]c.VkDescriptorImageInfo = undefined;
@@ -784,7 +785,7 @@ pub const LPVSystem = struct {
             imgs_b[ch] = c.VkDescriptorImageInfo{ .sampler = null, .imageView = tex_b.view, .imageLayout = c.VK_IMAGE_LAYOUT_GENERAL };
         }
         var light_info = c.VkDescriptorBufferInfo{ .buffer = self.light_buffer.buffer, .offset = 0, .range = @sizeOf(GpuLight) * MAX_LIGHTS_PER_UPDATE };
-        const occlusion_size = @as(usize, self.grid_size) * @as(usize, self.grid_size) * @as(usize, self.grid_size) * @sizeOf(u32);
+        const occlusion_size = (try occlusionCellCount(self.grid_size)) * @sizeOf(u32);
         var occlusion_info = c.VkDescriptorBufferInfo{ .buffer = self.occlusion_buffer.buffer, .offset = 0, .range = @intCast(occlusion_size) };
 
         // Inject: bindings 0,1,2 = output R,G,B images (grid A), binding 3 = light buffer
@@ -958,3 +959,15 @@ pub const LPVSystem = struct {
         self.propagate_ba_descriptor_set = null;
     }
 };
+
+pub fn occlusionCellCount(grid_size: u32) !usize {
+    if (grid_size < 16 or grid_size > 64) return error.InvalidGridSize;
+    const size: usize = grid_size;
+    return size * size * size;
+}
+
+pub fn validateOcclusionCapacity(grid_size: u32, cpu_cells: usize, buffer: Utils.VulkanBuffer) !void {
+    const cells = try occlusionCellCount(grid_size);
+    if (cpu_cells != cells or buffer.size < cells * @sizeOf(u32)) return error.InvalidBufferSize;
+    if (buffer.mapped_ptr == null) return error.InvalidBuffer;
+}

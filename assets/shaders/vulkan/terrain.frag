@@ -1,5 +1,7 @@
 #version 450
 
+layout(constant_id = 0) const bool WATER_REFLECTION = false;
+
 layout(location = 0) in vec3 vColor;
 layout(location = 1) flat in vec3 vNormal;
 layout(location = 2) in vec2 vTexCoord;
@@ -414,11 +416,20 @@ float debugOutdoorFactor(float skyLight) {
 vec3 computeTerrainLighting(vec3 albedo, vec3 N, vec3 V, vec3 L, float roughness, float totalShadow, float skyLight, float skyVisibility, vec3 blockLight, float ao, float ssao, out float directKeyOut, out float skyFillOut, out float blockLightOut, out float outdoorOut) {
     float outdoor = baselineOutdoorFactor(skyVisibility);
     float nDotL = max(dot(N, L), 0.0);
+    // Guard only the BRDF to retain the contribution's multiply/add chain.
+    vec3 brdf = vec3(0.0);
+    if (nDotL != 0.0 && outdoor != 0.0 && global.params.w != 0.0 && totalShadow != 1.0) {
+        brdf = computeBRDF(albedo, N, V, L, roughness);
+    }
     vec3 sunRadiance = global.sun_color.rgb * global.params.w * SUN_RADIANCE_TO_IRRADIANCE / PI;
-    vec3 direct = computeBRDF(albedo, N, V, L, roughness) * sunRadiance * nDotL * (1.0 - totalShadow) * outdoor;
+    vec3 direct = brdf * sunRadiance * nDotL * (1.0 - totalShadow) * outdoor;
     float indirectSky = sqrt(clamp(skyLight, 0.0, 1.0)) * clamp(skyVisibility, 0.0, 1.0);
-    vec3 outdoorIrradiance = min(computeIBLAmbient(N, roughness), IBL_CLAMP);
     vec3 tunnelIrradiance = vec3(0.42);
+    vec3 outdoorIrradiance = vec3(0.0);
+    // IBL uses explicit LOD, so per-fragment zero weights need no derivatives.
+    if (outdoor != 0.0 && indirectSky != 0.0) {
+        outdoorIrradiance = min(computeIBLAmbient(N, roughness), IBL_CLAMP);
+    }
     vec3 skyIrradiance = mix(tunnelIrradiance, outdoorIrradiance, outdoor) * indirectSky;
     vec3 groundBounce = vec3(0.018) * indirectSky * max(-N.y, 0.0) * outdoor;
     vec3 propagated = sampleLPVAtlas(absoluteWorldPos(vFragPosWorld), N);
@@ -495,7 +506,11 @@ void main() {
     const float AO_FADE_DISTANCE = 128.0;
     const float TEXTURE_FADE_START = 32.0;
     const float TEXTURE_FADE_END = 128.0;
-    float viewDistance = length(vFragPosWorld);
+    // Keep world positions/normals in the main-origin coordinate system for
+    // shadows and LPV, but evaluate view-dependent terms from the reflected eye.
+    vec3 eye = vec3(0.0);
+    if (WATER_REFLECTION) eye.y = 2.0 * (64.0 - global.cam_pos.y);
+    float viewDistance = length(vFragPosWorld - eye);
     float textureDetail = 1.0 - smoothstep(TEXTURE_FADE_START, TEXTURE_FADE_END, viewDistance);
 
     vec2 tileBase = vec2(mod(float(vTileID), 16.0), floor(float(vTileID) / 16.0)) * (1.0 / 16.0);
@@ -519,15 +534,27 @@ void main() {
     float skyVisibility = clamp(vSkyLight, 0.0, 1.0);
     float atmosphericVisibility = skyVisibilityFactor(skyVisibility);
     float cascadeDistance = max(vViewDepth, 0.0);
-    int layer = selectShadowCascade(vFragPosWorld, cascadeDistance);
+    float debugChannel = global.viewport_size.w;
+    bool debugNeedsLayer = global.viewport_size.z > 0.5 &&
+        debugChannel >= DEBUG_SHADOW_FACTOR + 0.5 && debugChannel < DEBUG_SEAM_DIAG + 0.5;
+    bool needsShadow = !isCloud && global.shadow_params.z > 0.0;
+    int layer = 0;
+    if (needsShadow || debugNeedsLayer) {
+        layer = selectShadowCascade(vFragPosWorld, cascadeDistance);
+    }
     float shadowFactor = 0.0;
-    shadowFactor = computeShadowCascades(vFragPosWorld, N, L, cascadeDistance, layer);
-    shadowFactor *= 1.0 - smoothstep(shadows.fade_params.x, shadows.fade_params.y, cascadeDistance);
-    if (isCloud) shadowFactor = 0.0;
+    // Shadow maps have one mip, identical min/mag filters and no anisotropy.
+    if (needsShadow) {
+        shadowFactor = computeShadowCascades(vFragPosWorld, N, L, cascadeDistance, layer);
+        shadowFactor *= 1.0 - smoothstep(shadows.fade_params.x, shadows.fade_params.y, cascadeDistance);
+    }
     
     float totalShadow = shadowFactor * clamp(global.shadow_params.z, 0.0, 1.0);
 
-    float ssao = mix(1.0, texture(uSSAOMap, gl_FragCoord.xy / global.viewport_size.xy).r, global.pbr_params.w);
+    float ssao = 1.0;
+    if (global.pbr_params.w != 0.0) {
+        ssao = mix(1.0, texture(uSSAOMap, gl_FragCoord.xy / global.viewport_size.xy).r, global.pbr_params.w);
+    }
     float ao = mix(1.0, vAO, mix(0.4, 0.05, clamp(viewDistance / AO_FADE_DISTANCE, 0.0, 1.0)));
 
     vec3 albedo = vColor;
@@ -542,13 +569,13 @@ void main() {
             roughness = texture(uRoughnessMap, uv).r;
         }
     }
-    vec3 V = normalize(-vFragPosWorld);
+    vec3 V = normalize(eye - vFragPosWorld);
     color = computeTerrainLighting(albedo, N, V, L, clamp(roughness, 0.05, 1.0), totalShadow, vSkyLight * global.lighting.x, skyVisibility, vBlockLight, ao, ssao, debugDirectKey, debugSkyFill, debugBlockLight, debugOutdoor);
 
     if (global.volumetric_params.x > 0.5) {
         float shaftDither = interleavedGradientNoise(gl_FragCoord.xy + vec2(global.params.x));
         if (atmosphericVisibility > 0.01) {
-            vec4 volumetric = computeVolumetric(vec3(0.0), vFragPosWorld, shaftDither);
+            vec4 volumetric = computeVolumetric(eye, vFragPosWorld, shaftDither);
             volumetric.rgb *= atmosphericVisibility;
             color = color * volumetric.a + volumetric.rgb;
         }
@@ -560,7 +587,6 @@ void main() {
         color = mix(color, global.fog_color.rgb, fogFactor);
     }
 
-    float debugChannel = global.viewport_size.w;
     if (global.viewport_size.z > 0.5 && debugChannel > 0.5) {
         if (debugChannel < DEBUG_SHADOW_FACTOR + 0.5) {
             color = vec3(clamp(shadowFactor, 0.0, 1.0));

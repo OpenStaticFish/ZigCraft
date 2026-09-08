@@ -108,7 +108,7 @@ pub const BloomSystem = struct {
             image_info.arrayLayers = 1;
             image_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
             image_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
-            image_info.usage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT;
+            image_info.usage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT | c.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
             image_info.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
 
             try Utils.checkVk(c.vkCreateImage(vk, &image_info, null, &self.mip_images[i]));

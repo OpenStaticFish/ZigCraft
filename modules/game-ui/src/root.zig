@@ -1,4 +1,8 @@
 pub const screen = @import("screen.zig");
+
+test {
+    _ = @import("test_root.zig");
+}
 pub const menu_theme = @import("menu_theme.zig");
 pub const menu_theme_tests = @import("menu_theme_tests.zig");
 pub const rml_markup = @import("rml_markup.zig");

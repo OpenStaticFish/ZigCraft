@@ -86,7 +86,8 @@ test "ShadowConfig default field values" {
 
     try testing.expectEqual(@as(f32, 250.0), cfg.distance);
     try testing.expectEqual(@as(u32, 4096), cfg.resolution);
-    try testing.expectEqual(@as(u8, 12), cfg.pcf_samples);
+    // The cascaded-shadow rewrite uses the supported nine-tap default.
+    try testing.expectEqual(@as(u8, 9), cfg.pcf_samples);
     try testing.expect(cfg.cascade_blend);
     try testing.expectEqual(@as(f32, 0.35), cfg.strength);
     try testing.expectEqual(@as(f32, 250.0), cfg.caster_distance);

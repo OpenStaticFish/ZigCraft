@@ -23,8 +23,10 @@ pub const IRenderSettings = struct {
         setFilmGrainIntensity: *const fn (ptr: *anyopaque, intensity: f32) void,
         setVolumetricDensity: *const fn (ptr: *anyopaque, density: f32) void,
         setDebugShadowView: *const fn (ptr: *anyopaque, enabled: bool) void,
+        setShadowDebugChannel: *const fn (ptr: *anyopaque, channel: u32) void,
         setShadowResolution: *const fn (ptr: *anyopaque, resolution: u32) void,
         setMSAA: *const fn (ptr: *anyopaque, samples: u8) void,
+        setDynamicResolution: *const fn (ptr: *anyopaque, enabled: bool, min_scale: f32, max_scale: f32, target_fps: u32) void,
     };
 
     /// Enables or disables wireframe rendering in the active render settings backend.
@@ -115,6 +117,16 @@ pub const IRenderSettings = struct {
     /// Intended for diagnostics; normal gameplay rendering should leave this disabled.
     pub fn setDebugShadowView(self: IRenderSettings, enabled: bool) void {
         self.vtable.setDebugShadowView(self.ptr, enabled);
+    }
+
+    /// Selects the terrain/shadow diagnostic channel; zero disables the channel.
+    pub fn setShadowDebugChannel(self: IRenderSettings, channel: u32) void {
+        self.vtable.setShadowDebugChannel(self.ptr, channel);
+    }
+
+    /// Updates the dynamic-resolution enablement, scale range, and frame budget together.
+    pub fn setDynamicResolution(self: IRenderSettings, enabled: bool, min_scale: f32, max_scale: f32, target_fps: u32) void {
+        self.vtable.setDynamicResolution(self.ptr, enabled, min_scale, max_scale, target_fps);
     }
 
     /// Sets the requested MSAA sample count.

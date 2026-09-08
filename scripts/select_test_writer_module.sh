@@ -66,7 +66,7 @@ case "$selected" in
         scan_paths="modules/engine-graphics/src/vulkan/pipeline_manager.zig modules/engine-graphics/src/vulkan/pipeline_specialized.zig modules/engine-graphics/src/vulkan/shader_registry.zig modules/engine-graphics/src/vulkan/descriptor_manager.zig modules/engine-graphics/src/vulkan/descriptor_bindings.zig"
         ;;
     graphics/vulkan-swapchain)
-        scan_paths="modules/engine-graphics/src/vulkan/swapchain.zig modules/engine-graphics/src/vulkan/swapchain_presenter.zig modules/engine-graphics/src/vulkan_swapchain.zig"
+        scan_paths="modules/engine-graphics/src/vulkan/swapchain_presenter.zig modules/engine-graphics/src/vulkan_swapchain.zig"
         ;;
     graphics/vulkan-frame)
         scan_paths="modules/engine-graphics/src/vulkan/frame_manager.zig modules/engine-graphics/src/vulkan/rhi_frame_orchestration.zig modules/engine-graphics/src/vulkan/render_pass_manager.zig modules/engine-graphics/src/vulkan/rhi_pass_orchestration.zig"
@@ -75,7 +75,7 @@ case "$selected" in
         scan_paths="modules/engine-rhi/src/rhi.zig modules/engine-rhi/src/rhi_types.zig modules/engine-graphics/src/rhi_vulkan.zig modules/engine-graphics/src/rhi_tests.zig"
         ;;
     graphics/shadows)
-        scan_paths="modules/engine-graphics/src/shadow_system.zig modules/engine-graphics/src/csm.zig modules/engine-graphics/src/vulkan/shadow_system.zig modules/engine-graphics/src/vulkan/rhi_shadow_bridge.zig modules/engine-graphics/src/shadow_scene.zig"
+        scan_paths="modules/engine-graphics/src/shadow_system.zig modules/engine-graphics/src/csm.zig modules/engine-graphics/src/vulkan/rhi_shadow_bridge.zig modules/engine-graphics/src/shadow_scene.zig"
         ;;
     graphics/post-process)
         scan_paths="modules/engine-graphics/src/vulkan/bloom_system.zig modules/engine-graphics/src/vulkan/fxaa_system.zig modules/engine-graphics/src/vulkan/taa_system.zig modules/engine-graphics/src/vulkan/ssao_system.zig modules/engine-graphics/src/vulkan/post_process_system.zig"

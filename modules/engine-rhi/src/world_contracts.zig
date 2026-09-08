@@ -28,6 +28,9 @@ pub const IWorldRenderView = struct {
         render: *const fn (ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3) void,
         renderOpaque: *const fn (ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3) void,
         renderFluid: *const fn (ptr: *anyopaque, view_proj: Mat4, camera_pos: Vec3) void,
+        /// False proves no resident renderer-owned fluid can be drawn. Unknown
+        /// geometry providers must return true, independent of camera visibility.
+        hasDrawableFluid: *const fn (ptr: *anyopaque) bool,
     };
 
     pub fn render(self: IWorldRenderView, view_proj: Mat4, camera_pos: Vec3) void {
@@ -40,6 +43,10 @@ pub const IWorldRenderView = struct {
 
     pub fn renderFluid(self: IWorldRenderView, view_proj: Mat4, camera_pos: Vec3) void {
         self.vtable.renderFluid(self.ptr, view_proj, camera_pos);
+    }
+
+    pub fn hasDrawableFluid(self: IWorldRenderView) bool {
+        return self.vtable.hasDrawableFluid(self.ptr);
     }
 };
 

@@ -219,10 +219,9 @@ pub const RmlCreateWorldScreen = struct {
         const world_name = wizard.displayWorldName(name_input);
         const generator = registry.getGeneratorInfo(self.selected_generator_index);
         log.log.info("World seed: {} | Type: {s} | Name: {s}", .{ seed, generator.name, world_name });
-        world_save.saveNewWorld(self.context.allocator, seed, self.selected_generator_index, world_name) catch |err| {
-            log.log.warn("Failed to save level.dat for new world: {}", .{err});
-        };
-        const world_screen = try WorldScreen.init(self.context.allocator, self.context, seed, self.selected_generator_index);
+        const save_path = try world_save.saveNewWorld(self.context.allocator, seed, self.selected_generator_index, world_name);
+        defer self.context.allocator.free(save_path);
+        const world_screen = try WorldScreen.initPersistent(self.context.allocator, self.context, seed, self.selected_generator_index, save_path);
         errdefer world_screen.deinit(world_screen);
         self.context.screen_manager.setScreen(world_screen.screen());
     }

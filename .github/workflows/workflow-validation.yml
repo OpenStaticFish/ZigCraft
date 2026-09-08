@@ -7,6 +7,7 @@ on:
       - ".github/workflows/**"
       - ".github/actions/**"
       - "scripts/*.sh"
+      - "scripts/*.py"
       - ".shellcheckrc"
       - "devenv.nix"
       - "devenv.yaml"
@@ -17,6 +18,7 @@ on:
       - ".github/workflows/**"
       - ".github/actions/**"
       - "scripts/*.sh"
+      - "scripts/*.py"
       - ".shellcheckrc"
       - "devenv.nix"
       - "devenv.yaml"
@@ -58,10 +60,16 @@ jobs:
           ruby -e 'require "yaml"; Dir[".github/actions/**/action.{yml,yaml}"].sort.each { |f| YAML.load_file(f); puts "OK #{f}" }'
 
       - name: Check shell script syntax
-        run: devenv shell --profile unit -- bash -n scripts/*.sh
+        run: |
+          for script in scripts/*.sh; do
+            bash -n "$script"
+          done
 
       - name: Run ShellCheck
         run: devenv shell --profile unit -- shellcheck scripts/*.sh
+
+      - name: Verify offline CI acceptance regressions
+        run: devenv shell --profile unit -- python3 -B scripts/test_ci_verification.py
 
       - name: Validate devenv configuration
         run: devenv info >/dev/null

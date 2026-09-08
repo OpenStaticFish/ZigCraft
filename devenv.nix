@@ -399,7 +399,13 @@ in
   # pick the lean CPU shell (--profile unit) or the graphics shell
   # (--profile graphics). Local devs get the full shell via the
   # `default` profile, which .envrc activates automatically.
-  packages = [ pkgs.pkg-config pkgs.glslang pkgs.patchelf ] ++ commonBuildInputs;
+  packages = [
+    pkgs.pkg-config
+    pkgs.glslang
+    pkgs.patchelf
+    # Coverage parsing and offline CI tests share the locked nixpkgs Python environment.
+    (pkgs.python3.withPackages (ps: [ ps.defusedxml ]))
+  ] ++ commonBuildInputs;
 
   env = {
     ZIGCRAFT_DYNAMIC_LINKER = nix_dynamic_linker;

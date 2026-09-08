@@ -7,7 +7,7 @@ echo "To bypass these checks in an emergency, use: git push --no-verify"
 echo ""
 
 echo "[1/2] Checking formatting..."
-devenv shell --profile unit -- zig fmt --check src/
+devenv shell --profile unit -- zig fmt --check src/ modules/ build.zig
 
 echo "[2/2] Running full test suite..."
 devenv shell --profile unit -- zig build test

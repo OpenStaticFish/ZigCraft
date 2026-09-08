@@ -16,8 +16,8 @@ pub const AudioSystemManager = struct {
     }
 
     pub fn deinit(self: *AudioSystemManager) void {
-        self.audio_system.deinit();
         const allocator = self.audio_system.allocator;
+        self.audio_system.deinit();
         allocator.destroy(self);
     }
 
@@ -25,3 +25,18 @@ pub const AudioSystemManager = struct {
         self.audio_system.update();
     }
 };
+
+test "AudioSystemManager teardown preserves allocator ownership" {
+    const allocator = std.testing.allocator;
+    const audio = try allocator.create(AudioSystem);
+    errdefer allocator.destroy(audio);
+    audio.* = .{
+        .allocator = allocator,
+        .backend = undefined,
+        .manager = @import("engine-audio").manager.SoundManager.init(allocator),
+        .enabled = false,
+    };
+    const manager = try allocator.create(AudioSystemManager);
+    manager.* = .{ .audio_system = audio };
+    manager.deinit();
+}

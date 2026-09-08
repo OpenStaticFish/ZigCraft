@@ -25,6 +25,13 @@ pub fn createSwapchainUIResources(ctx: anytype) !void {
 
 pub fn createShadowResources(ctx: anytype) !void {
     const vk = ctx.vulkan_device.vk_device;
+    errdefer {
+        for (&ctx.shadow_runtime.shadow_map_handles) |*handle| {
+            if (handle.* != 0) ctx.resources.destroyTexture(handle.*);
+            handle.* = 0;
+        }
+        ctx.shadow_system.deinit(vk);
+    }
     const shadow_res = ctx.shadow_runtime.shadow_resolution;
     var shadow_depth_desc = std.mem.zeroes(c.VkAttachmentDescription);
     shadow_depth_desc.format = DEPTH_FORMAT;
@@ -63,7 +70,7 @@ pub fn createShadowResources(ctx: anytype) !void {
     shadow_img_info.arrayLayers = rhi.SHADOW_CASCADE_COUNT;
     shadow_img_info.format = DEPTH_FORMAT;
     shadow_img_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
-    shadow_img_info.usage = c.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT;
+    shadow_img_info.usage = c.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT | c.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     shadow_img_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
     try Utils.checkVk(c.vkCreateImage(ctx.vulkan_device.vk_device, &shadow_img_info, null, &ctx.shadow_system.shadow_image));
 
@@ -221,6 +228,7 @@ pub fn createShadowResources(ctx: anytype) !void {
 
 pub fn createGPassResources(ctx: anytype) !void {
     lifecycle.destroyGPassResources(ctx);
+    errdefer lifecycle.destroyGPassResources(ctx);
     const normal_format = c.VK_FORMAT_R8G8B8A8_UNORM;
     const velocity_format = c.VK_FORMAT_R16G16_SFLOAT;
 
@@ -338,6 +346,7 @@ pub fn createGPassResources(ctx: anytype) !void {
     depth_sampler_info.compareEnable = c.VK_FALSE;
     var depth_sampler: c.VkSampler = null;
     try Utils.checkVk(c.vkCreateSampler(vk, &depth_sampler_info, null, &depth_sampler));
+    ctx.gpass.g_depth_sampler = depth_sampler;
 
     ctx.gpass.g_depth_handle = try ctx.resources.registerExternalTexture(
         extent.width,
@@ -346,7 +355,6 @@ pub fn createGPassResources(ctx: anytype) !void {
         ctx.gpass.g_depth_view,
         depth_sampler,
     );
-    ctx.gpass.g_depth_sampler = depth_sampler;
 
     ctx.gpass.g_pass_extent = extent;
 
@@ -421,8 +429,14 @@ pub fn createTAAResources(ctx: anytype) !void {
 
 pub fn createWaterResources(ctx: anytype) !void {
     const extent = ctx.swapchain.getExtent();
+    if (extent.width < 2 or extent.height < 2) return error.InvalidExtent;
 
+    if (ctx.water_system.reflection_texture_handle != 0) {
+        ctx.resources.destroyTexture(ctx.water_system.reflection_texture_handle);
+        ctx.water_system.reflection_texture_handle = 0;
+    }
     ctx.water_system.destroyResources(ctx.vulkan_device.vk_device);
+    errdefer ctx.water_system.destroyResources(ctx.vulkan_device.vk_device);
     try ctx.water_system.ensureResources(
         ctx.vulkan_device.vk_device,
         ctx.vulkan_device.physical_device,

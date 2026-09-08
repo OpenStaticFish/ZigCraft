@@ -1,4 +1,8 @@
 pub const chunk_queue_coordinator = @import("chunk_queue_coordinator.zig");
+
+test {
+    _ = @import("test_root.zig");
+}
 pub const gpu_acceleration_coordinator = @import("gpu_acceleration_coordinator.zig");
 pub const gpu_mesher = @import("gpu_mesher.zig");
 pub const lighting_engine = @import("lighting_engine.zig");

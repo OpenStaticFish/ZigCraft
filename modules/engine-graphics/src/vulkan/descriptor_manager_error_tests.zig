@@ -86,7 +86,7 @@ test "updateShadowUniforms returns error.UnmappedBuffer for invalid frame" {
     try testing.expect(manager.shadow_ubos_mapped[0] == null);
     try testing.expect(manager.shadow_ubos_mapped[1] == null);
 
-    var data: [64]u8 = undefined;
+    const data = std.mem.zeroes(descriptor_manager.ShadowUniforms);
     const result = manager.updateShadowUniforms(0, &data);
     try testing.expectError(error.UnmappedBuffer, result);
 }

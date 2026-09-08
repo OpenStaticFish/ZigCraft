@@ -1,4 +1,9 @@
 pub const atmosphere = @import("engine-atmosphere").atmosphere;
+pub const skips_presentation = @import("engine_graphics_options").skip_present;
+
+test {
+    _ = @import("test_root.zig");
+}
 pub const atmosphere_celestial = @import("engine-atmosphere").atmosphere_celestial;
 pub const atmosphere_config = @import("engine-atmosphere").atmosphere_config;
 pub const atmosphere_sky_palette = @import("engine-atmosphere").atmosphere_sky_palette;
