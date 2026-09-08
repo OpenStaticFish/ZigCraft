@@ -1237,7 +1237,13 @@ pub const World = struct {
         .render = irender,
         .renderOpaque = irenderOpaque,
         .renderFluid = irenderFluid,
+        .hasDrawableFluid = ihasDrawableFluid,
     };
+
+    fn ihasDrawableFluid(ptr: *anyopaque) bool {
+        const self: *World = @ptrCast(@alignCast(ptr));
+        return self.renderer.hasDrawableFluid();
+    }
 
     fn iupdate(ptr: *anyopaque, player_pos: Vec3, dt: f32) anyerror!void {
         const self: *World = @ptrCast(@alignCast(ptr));

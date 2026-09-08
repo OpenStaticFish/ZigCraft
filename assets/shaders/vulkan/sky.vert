@@ -30,7 +30,8 @@ void main() {
     vec2 render_pos = pos;
     render_pos.y = -render_pos.y;
 
-    gl_Position = vec4(render_pos, 0.9999, 1.0);
+    // Reverse-Z far plane: only shade samples not covered by opaque geometry.
+    gl_Position = vec4(render_pos, 0.0, 1.0);
 
     vec3 rayDir = pc.cam_forward.xyz
                 + pc.cam_right.xyz * ndc.x * pc.params.x * pc.params.y

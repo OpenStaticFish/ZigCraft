@@ -1,5 +1,7 @@
 #version 450
 
+layout(constant_id = 0) const bool WATER_REFLECTION = false;
+
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in uint aColor;
 layout(location = 2) in uint aNormal;
@@ -91,7 +93,19 @@ void main() {
     }
 
     vec4 worldPos = model * vec4(aPos, 1.0);
-    vec4 clipPos = global.view_proj * worldPos;
+    vec4 projectedPos = worldPos;
+    if (WATER_REFLECTION) {
+        // Models remain relative to the main eye; mirror only projection about y=64.
+        projectedPos.y = 2.0 * (64.0 - global.cam_pos.y) - worldPos.y;
+    }
+    vec4 clipPos = global.view_proj * projectedPos;
+    if (WATER_REFLECTION) {
+        // CPU reflection culling uses unjittered P. For the origin-centered rigid
+        // view, projection row w is unit length and orthogonal to unjittered x/y.
+        mat4 rows = transpose(global.view_proj);
+        clipPos.xy -= vec2(dot(rows[0].xyz, rows[3].xyz),
+                           dot(rows[1].xyz, rows[3].xyz)) * clipPos.w;
+    }
     vec4 clipPosPrev = global.view_proj_prev * worldPos;
 
     gl_Position = clipPos;
@@ -118,7 +132,7 @@ void main() {
     vNormal = decodedNormal;
     vTexCoord = aTexCoord;
     vTileID = int(tile_id_u16);
-    vDistance = length(worldPos.xyz);
+    vDistance = length(projectedPos.xyz);
     vSkyLight = skylight;
     vBlockLight = blocklight;
     vCloud = cloud;

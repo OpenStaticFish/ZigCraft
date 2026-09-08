@@ -609,6 +609,8 @@ pub const WaterReflectionPass = struct {
     fn execute(ptr: *anyopaque, ctx: SceneContext) anyerror!void {
         const self: *WaterReflectionPass = @ptrCast(@alignCast(ptr));
         if (!self.enabled) return;
+        // Query at execution time, after MeshBuildPass accepts new GPU data.
+        if (!ctx.world.hasDrawableFluid()) return;
 
         ctx.water_ctx.beginReflectionPass();
         defer ctx.water_ctx.endReflectionPass();
@@ -643,6 +645,7 @@ pub const WaterPass = struct {
     fn execute(ptr: *anyopaque, ctx: SceneContext) anyerror!void {
         const self: *WaterPass = @ptrCast(@alignCast(ptr));
         if (!self.enabled) return;
+        if (!ctx.world.hasDrawableFluid()) return;
 
         const reflection_handle = ctx.water_ctx.getReflectionTextureHandle();
         const scene_depth_handle = ctx.water_ctx.getSceneDepthTextureHandle();
@@ -676,3 +679,110 @@ pub const MeshBuildPass = struct {
         }
     }
 };
+
+test "water demand gates both passes and observes same frame mesh dispatch" {
+    const Mat4 = @import("engine-math").Mat4;
+    const Mock = struct {
+        drawable: bool = false,
+        events: std.ArrayListUnmanaged(u8) = .empty,
+        fn event(ptr: *anyopaque, value: u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.events.append(std.testing.allocator, value) catch @panic("OOM");
+        }
+        fn demand(ptr: *anyopaque) bool {
+            event(ptr, 'q');
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.drawable;
+        }
+        fn dispatch(ptr: *anyopaque) void {
+            event(ptr, 'm');
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.drawable = true;
+        }
+        fn drawOpaque(ptr: *anyopaque, _: Mat4, _: Vec3) void {
+            event(ptr, 'o');
+        }
+        fn fluid(ptr: *anyopaque, _: Mat4, _: Vec3) void {
+            event(ptr, 'f');
+        }
+        fn beginReflection(ptr: *anyopaque) void {
+            event(ptr, 'r');
+        }
+        fn endReflection(ptr: *anyopaque) void {
+            event(ptr, 'R');
+        }
+        fn reflected(ptr: *anyopaque, _: Mat4, _: Mat4, _: Vec3) Mat4 {
+            event(ptr, 'v');
+            return Mat4.identity;
+        }
+        fn reflection(ptr: *anyopaque) rhi_pkg.TextureHandle {
+            event(ptr, 'h');
+            return 14;
+        }
+        fn depth(ptr: *anyopaque) rhi_pkg.TextureHandle {
+            event(ptr, 'd');
+            return 15;
+        }
+        fn beginWater(ptr: *anyopaque, reflection_handle: rhi_pkg.TextureHandle, depth_handle: rhi_pkg.TextureHandle) bool {
+            std.debug.assert(reflection_handle == 14 and depth_handle == 15);
+            event(ptr, 'w');
+            return true;
+        }
+        fn endWater(ptr: *anyopaque) void {
+            event(ptr, 'W');
+        }
+        fn bind(ptr: *anyopaque, _: rhi_pkg.TextureHandle, _: u32) void {
+            event(ptr, 't');
+        }
+    };
+    var mock = Mock{};
+    defer mock.events.deinit(std.testing.allocator);
+    var atlas: TextureAtlas = undefined;
+    atlas.texture.handle = 1;
+    atlas.normal_texture = null;
+    atlas.roughness_texture = null;
+    atlas.displacement_texture = null;
+    var material = MaterialSystem{ .allocator = std.testing.allocator, .atlas = &atlas };
+    var reflection_pass = WaterReflectionPass.init(&material);
+    var water_pass = WaterPass{};
+    var mesh_pass = MeshBuildPass{};
+    var camera = Camera.init(.{});
+    var ctx: SceneContext = undefined;
+    ctx.world = .{ .ptr = &mock, .vtable = &.{ .render = Mock.drawOpaque, .renderOpaque = Mock.drawOpaque, .renderFluid = Mock.fluid, .hasDrawableFluid = Mock.demand } };
+    ctx.water_ctx = .{ .ctx = .{ .ptr = &mock, .vtable = &.{ .beginReflectionPass = Mock.beginReflection, .endReflectionPass = Mock.endReflection, .getReflectionTextureHandle = Mock.reflection, .getSceneDepthTextureHandle = Mock.depth, .computeReflectedViewProj = Mock.reflected } } };
+    var encoder: rhi_pkg.IGraphicsCommandEncoder.VTable = undefined;
+    encoder.bindTexture = Mock.bind;
+    var effects: rhi_pkg.IRenderEffectsContext.VTable = undefined;
+    effects.beginWaterDraw = Mock.beginWater;
+    effects.endWaterDraw = Mock.endWater;
+    ctx.render_ctx = .{ .render = undefined, .passes = undefined, .post_process = undefined, .vulkan = undefined, .state = undefined, .encoder = .{ .ptr = &mock, .vtable = &encoder }, .effects = .{ .ptr = &mock, .vtable = &effects } };
+    ctx.camera = &camera;
+    ctx.aspect = 16.0 / 9.0;
+    ctx.viewport_width = 1920;
+    ctx.viewport_height = 1080;
+    ctx.taa_enabled = false;
+    ctx.env_map_handle = 0;
+    ctx.lpv_textures = .{};
+    ctx.gpu_mesh_dispatch_fn = Mock.dispatch;
+    ctx.gpu_mesh_dispatch_ctx = &mock;
+    try reflection_pass.pass().execute(ctx);
+    try water_pass.pass().execute(ctx);
+    try std.testing.expectEqualStrings("qq", mock.events.items);
+
+    mock.events.clearRetainingCapacity();
+    try mesh_pass.pass().execute(ctx);
+    try reflection_pass.pass().execute(ctx);
+    try water_pass.pass().execute(ctx);
+    try std.testing.expectEqualStrings("mqrvttttoRqhdwttfW", mock.events.items);
+
+    // Required-water frames retain all bindings and both complete draw scopes.
+    mock.events.clearRetainingCapacity();
+    try reflection_pass.pass().execute(ctx);
+    try water_pass.pass().execute(ctx);
+    try std.testing.expectEqualStrings("qrvttttoRqhdwttfW", mock.events.items);
+    mock.drawable = false;
+    mock.events.clearRetainingCapacity();
+    try reflection_pass.pass().execute(ctx);
+    try water_pass.pass().execute(ctx);
+    try std.testing.expectEqualStrings("qq", mock.events.items);
+}

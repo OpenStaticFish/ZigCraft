@@ -380,7 +380,7 @@ pub const PipelineManager = struct {
         _sample_count: c.VkSampleCountFlagBits,
         g_render_pass: c.VkRenderPass,
     ) !void {
-        try pipeline_specialized.createTerrainPipeline(self, allocator, vk_device, hdr_render_pass, viewport_state, dynamic_state, input_assembly, rasterizer, multisampling, depth_stencil, color_blending, _sample_count, g_render_pass);
+        try pipeline_specialized.createTerrainPipeline(self, allocator, vk_device, hdr_render_pass, viewport_state, dynamic_state, input_assembly, rasterizer, multisampling, depth_stencil, color_blending, _sample_count, g_render_pass, false);
     }
 
     /// Create sky pipeline

@@ -53,12 +53,40 @@ pub fn recreatePendingShadowResources(ctx: anytype) void {
 }
 
 pub fn recreateSwapchainInternal(ctx: anytype) void {
-    _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
+    if (ctx.frames.terminal_failure) return;
+    if (c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device) != c.VK_SUCCESS) {
+        ctx.frames.failFrame();
+        ctx.runtime.gpu_fault_detected = true;
+        return;
+    }
 
     var w: c_int = 0;
     var h: c_int = 0;
     _ = c.SDL_GetWindowSizeInPixels(ctx.window, &w, &h);
     if (w == 0 or h == 0) return;
+
+    if (ctx.frames.image_acquired) {
+        // An aborted frame never consumed its acquisition. Retire the binary
+        // semaphore before destroying that swapchain or acquiring from the new
+        // one. No recorded image transitions are submitted here.
+        const wait_stage: c.VkPipelineStageFlags = c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        var submit = std.mem.zeroes(c.VkSubmitInfo);
+        submit.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.waitSemaphoreCount = 1;
+        submit.pWaitSemaphores = &ctx.frames.image_available_semaphores[ctx.frames.current_frame];
+        submit.pWaitDstStageMask = &wait_stage;
+        ctx.vulkan_device.submitGuarded(submit, null) catch {
+            ctx.frames.failFrame();
+            ctx.runtime.gpu_fault_detected = true;
+            return;
+        };
+        if (c.vkQueueWaitIdle(ctx.vulkan_device.queue) != c.VK_SUCCESS) {
+            ctx.frames.failFrame();
+            ctx.runtime.gpu_fault_detected = true;
+            return;
+        }
+        ctx.frames.image_acquired = false;
+    }
 
     setup.destroyMainRenderPassAndPipelines(ctx);
     lifecycle.destroyHDRResources(ctx);
@@ -78,16 +106,6 @@ pub fn recreateSwapchainInternal(ctx: anytype) void {
         _ = markSwapchainRecreateFailed(ctx, "swapchain", err);
         return;
     };
-
-    if (!ctx.swapchain.skip_present) {
-        lifecycle.transitionImagesToPresent(ctx, ctx.swapchain.swapchain.images.items) catch |err| {
-            log.log.warn("Failed to transition swapchain images to PRESENT: {}", .{err});
-        };
-    } else {
-        lifecycle.transitionImagesToColorAttachment(ctx, ctx.swapchain.swapchain.images.items) catch |err| {
-            log.log.warn("Failed to transition headless image to COLOR_ATTACHMENT: {}", .{err});
-        };
-    }
 
     lifecycle.createHDRResources(ctx) catch |err| {
         _ = markSwapchainRecreateFailed(ctx, "HDR resources", err);
@@ -185,13 +203,6 @@ pub fn recreateSwapchainInternal(ctx: anytype) void {
 
         if (count > 0) {
             lifecycle.transitionImagesToShaderRead(ctx, list[0..count], false, 1) catch |err| log.log.warn("Failed to transition images: {}", .{err});
-        }
-
-        if (ctx.shadow_system.shadow_image != null) {
-            lifecycle.transitionImagesToShaderRead(ctx, &[_]c.VkImage{ctx.shadow_system.shadow_image}, true, rhi.SHADOW_CASCADE_COUNT) catch |err| log.log.warn("Failed to transition Shadow image: {}", .{err});
-            for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
-                ctx.shadow_system.shadow_image_layouts[i] = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-            }
         }
     }
 

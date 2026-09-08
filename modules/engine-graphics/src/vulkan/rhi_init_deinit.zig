@@ -64,12 +64,6 @@ pub fn initContext(ctx: anytype, allocator: std.mem.Allocator, render_device: ?*
     ctx.descriptors = try DescriptorManager.init(allocator, &ctx.vulkan_device, &ctx.resources);
     ctx.init_ownership.descriptors = true;
 
-    if (!ctx.swapchain.skip_present) {
-        try lifecycle.transitionImagesToPresent(ctx, ctx.swapchain.swapchain.images.items);
-    } else {
-        try lifecycle.transitionImagesToColorAttachment(ctx, ctx.swapchain.swapchain.images.items);
-    }
-
     ctx.init_ownership.render_resources = true;
     ctx.pipeline_manager = try PipelineManager.init(&ctx.vulkan_device, &ctx.descriptors, null);
     ctx.render_pass_manager = RenderPassManager.init(ctx.allocator);
@@ -184,14 +178,14 @@ pub fn initContext(ctx: anytype, allocator: std.mem.Allocator, render_device: ?*
     try ctx.resources.flushTransfer();
     ctx.resources.setCurrentFrame(0);
 
-    if (!ctx.options.safe_mode) {
-        if (ctx.shadow_system.shadow_image != null) {
-            try lifecycle.transitionImagesToShaderRead(ctx, &[_]c.VkImage{ctx.shadow_system.shadow_image}, true, rhi.SHADOW_CASCADE_COUNT);
-            for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
-                ctx.shadow_system.shadow_image_layouts[i] = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-            }
+    if (ctx.shadow_system.shadow_image != null) {
+        try lifecycle.transitionImagesToShaderRead(ctx, &[_]c.VkImage{ctx.shadow_system.shadow_image}, true, rhi.SHADOW_CASCADE_COUNT);
+        for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
+            ctx.shadow_system.shadow_image_layouts[i] = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
         }
+    }
 
+    if (!ctx.options.safe_mode) {
         var list: [32]c.VkImage = undefined;
         var count: usize = 0;
         const candidates = [_]c.VkImage{ ctx.gpass.g_normal_image, ctx.ssao_system.image, ctx.ssao_system.blur_image, ctx.ssao_system.noise_image, ctx.velocity.velocity_image };

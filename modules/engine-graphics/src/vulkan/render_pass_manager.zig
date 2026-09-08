@@ -32,6 +32,7 @@ pub const RenderPassManager = struct {
 
     // UI render pass (for swapchain overlay)
     ui_swapchain_render_pass: c.VkRenderPass = null,
+    ui_swapchain_clear_render_pass: c.VkRenderPass = null,
 
     // Framebuffers
     main_framebuffer: c.VkFramebuffer = null,
@@ -84,6 +85,10 @@ pub const RenderPassManager = struct {
 
     /// Destroy all render passes
     fn destroyRenderPasses(self: *RenderPassManager, vk_device: c.VkDevice) void {
+        if (self.ui_swapchain_clear_render_pass) |rp| {
+            c.vkDestroyRenderPass(vk_device, rp, null);
+            self.ui_swapchain_clear_render_pass = null;
+        }
         if (self.hdr_render_pass) |rp| {
             c.vkDestroyRenderPass(vk_device, rp, null);
             self.hdr_render_pass = null;
@@ -405,6 +410,10 @@ pub const RenderPassManager = struct {
 
     /// Create UI swapchain render pass
     pub fn createUISwapchainRenderPass(self: *RenderPassManager, vk_device: c.VkDevice, swapchain_format: c.VkFormat, final_layout: c.VkImageLayout) !void {
+        if (self.ui_swapchain_clear_render_pass) |rp| {
+            c.vkDestroyRenderPass(vk_device, rp, null);
+            self.ui_swapchain_clear_render_pass = null;
+        }
         if (self.ui_swapchain_render_pass) |rp| {
             c.vkDestroyRenderPass(vk_device, rp, null);
             self.ui_swapchain_render_pass = null;
@@ -432,7 +441,7 @@ pub const RenderPassManager = struct {
         dependency.srcSubpass = c.VK_SUBPASS_EXTERNAL;
         dependency.dstSubpass = 0;
         dependency.srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dependency.srcAccessMask = 0;
+        dependency.srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
         dependency.dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         dependency.dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
         dependency.dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT;
@@ -447,6 +456,12 @@ pub const RenderPassManager = struct {
         rp_info.pDependencies = &dependency;
 
         try Utils.checkVk(c.vkCreateRenderPass(vk_device, &rp_info, null, &self.ui_swapchain_render_pass));
+        // Identical subpasses/dependencies keep pipelines and framebuffers
+        // compatible; only first-use contents/layout differ from the overlay.
+        const clear_contract = final_composition.attachmentContract(.clear, final_layout);
+        color_attachment.loadOp = clear_contract.load_op;
+        color_attachment.initialLayout = clear_contract.initial_layout;
+        try Utils.checkVk(c.vkCreateRenderPass(vk_device, &rp_info, null, &self.ui_swapchain_clear_render_pass));
     }
 
     /// Create main framebuffer

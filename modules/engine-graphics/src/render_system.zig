@@ -277,9 +277,18 @@ pub const RenderSystem = struct {
             if (self.water_reflection_pass.enabled) {
                 try self.render_graph.addPass(self.water_reflection_pass.pass());
             }
-            try self.render_graph.addPass(self.sky_pass.pass());
+            // Clouds share the non-blended terrain pipeline. Preserve their
+            // order relative to opaque (including equal-depth ties), then fill
+            // only uncovered samples with sky in the same main render pass.
             try self.render_graph.addPass(self.cloud_pass.pass());
             try self.render_graph.addPass(self.opaque_pass.pass());
+            var late_sky_pass = self.sky_pass.pass();
+            late_sky_pass.vtable = &.{
+                .name = "SkyPass",
+                .needs_main_pass = true,
+                .execute = executeLateSky,
+            };
+            try self.render_graph.addPass(late_sky_pass);
             if (self.water_pass.enabled) {
                 try self.render_graph.addPass(self.water_pass.pass());
             } else {
@@ -296,6 +305,14 @@ pub const RenderSystem = struct {
 
         log.log.info("RenderSystem initialized successfully", .{});
         return self;
+    }
+
+    fn executeLateSky(ptr: *anyopaque, ctx: render_graph_pkg.SceneContext) anyerror!void {
+        const sky: *render_graph_pkg.SkyPass = @ptrCast(@alignCast(ptr));
+        // Sky binds a different pipeline after opaque; later overlays must not
+        // reuse the cached terrain binding, even when water/clouds are disabled.
+        defer ctx.render_ctx.setTerrainPipelineBound(false);
+        try sky.pass().execute(ctx);
     }
 
     pub fn deinit(self: *RenderSystem) void {
@@ -440,3 +457,42 @@ pub const RenderSystem = struct {
         self.ssao_pass.enabled = !value;
     }
 };
+
+test "late sky invalidates terrain binding after draw and skipped pipeline" {
+    const Mock = struct {
+        bound: bool = true,
+        drew: bool = false,
+        invalidated_after_draw: bool = false,
+        skip: bool,
+
+        fn drawSky(ptr: *anyopaque, _: rhi_pkg.SkyParams) rhi_pkg.RhiError!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.drew = true;
+            if (self.skip) return error.SkyPipelineNotReady;
+        }
+
+        fn setBound(ptr: *anyopaque, bound: bool) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.bound = bound;
+            self.invalidated_after_draw = self.drew and !bound;
+        }
+    };
+    var effects: rhi_pkg.IRenderEffectsContext.VTable = undefined;
+    effects.drawSky = Mock.drawSky;
+    var state: rhi_pkg.IRenderStateContext.VTable = undefined;
+    state.setTerrainPipelineBound = Mock.setBound;
+    var atmosphere = render_graph_pkg.AtmosphereSystem{ .allocator = std.testing.allocator };
+    var sky = render_graph_pkg.SkyPass{};
+    for ([_]bool{ false, true }) |skip| {
+        var mock = Mock{ .skip = skip };
+        var ctx: render_graph_pkg.SceneContext = undefined;
+        ctx.render_ctx.effects = .{ .ptr = &mock, .vtable = &effects };
+        ctx.render_ctx.state = .{ .ptr = &mock, .vtable = &state };
+        ctx.atmosphere_system = &atmosphere;
+        ctx.sky_params = std.mem.zeroes(rhi_pkg.SkyParams);
+        try RenderSystem.executeLateSky(&sky, ctx);
+        try std.testing.expect(mock.drew);
+        try std.testing.expect(!mock.bound);
+        try std.testing.expect(mock.invalidated_after_draw);
+    }
+}

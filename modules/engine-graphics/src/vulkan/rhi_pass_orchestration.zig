@@ -190,27 +190,15 @@ pub fn beginUISwapchainPassInternal(ctx: anytype, clear_output: bool) void {
     const extent = ctx.swapchain.getExtent();
     var rp_begin = std.mem.zeroes(c.VkRenderPassBeginInfo);
     rp_begin.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    rp_begin.renderPass = ctx.render_pass_manager.ui_swapchain_render_pass.?;
+    const first_composition = clear_output or !ctx.runtime.final_composed.isCurrentImage(image_index);
+    rp_begin.renderPass = if (first_composition) ctx.render_pass_manager.ui_swapchain_clear_render_pass.? else ctx.render_pass_manager.ui_swapchain_render_pass.?;
     rp_begin.framebuffer = ctx.render_pass_manager.ui_swapchain_framebuffers.items[image_index];
     rp_begin.renderArea = .{ .offset = .{ .x = 0, .y = 0 }, .extent = extent };
-    rp_begin.clearValueCount = 0;
+    const clear_value = c.VkClearValue{ .color = .{ .float32 = .{ 0, 0, 0, 1 } } };
+    rp_begin.clearValueCount = if (first_composition) 1 else 0;
+    rp_begin.pClearValues = if (first_composition) &clear_value else null;
 
     c.vkCmdBeginRenderPass(command_buffer, &rp_begin, c.VK_SUBPASS_CONTENTS_INLINE);
-
-    if (clear_output) {
-        var clear_attachment = std.mem.zeroes(c.VkClearAttachment);
-        clear_attachment.aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT;
-        clear_attachment.colorAttachment = 0;
-        clear_attachment.clearValue.color.float32 = .{ 0.0, 0.0, 0.0, 1.0 };
-
-        var clear_rect = std.mem.zeroes(c.VkClearRect);
-        clear_rect.rect.offset = .{ .x = 0, .y = 0 };
-        clear_rect.rect.extent = extent;
-        clear_rect.baseArrayLayer = 0;
-        clear_rect.layerCount = 1;
-
-        c.vkCmdClearAttachments(command_buffer, 1, &clear_attachment, 1, &clear_rect);
-    }
 
     const viewport = c.VkViewport{
         .x = 0,
@@ -226,7 +214,7 @@ pub fn beginUISwapchainPassInternal(ctx: anytype, clear_output: bool) void {
     c.vkCmdSetScissor(command_buffer, 0, 1, &scissor);
 
     ctx.ui.ui_swapchain_pass_active = true;
-    ctx.ui.ui_swapchain_clears_output = clear_output;
+    ctx.ui.ui_swapchain_clears_output = first_composition;
 }
 
 pub fn endFXAAPassInternal(ctx: anytype) void {
@@ -469,6 +457,13 @@ pub fn endFrame(ctx: anytype) void {
         beginFXAAPassInternal(ctx);
     }
     if (ctx.fxaa.pass_active) endFXAAPassInternal(ctx);
+
+    // Even a frame with no draws must initialize the acquired image before
+    // presentation. Use the same clear-only path as a scene-less UI frame.
+    if (!ctx.runtime.final_composed.isCurrentImage(ctx.frames.current_image_index)) {
+        beginUISwapchainPassInternal(ctx, true);
+        endUISwapchainPassInternal(ctx);
+    }
 
     // The UI path can trigger post-processing at endFrame, so append the
     // readback only after every final-color pass has completed.

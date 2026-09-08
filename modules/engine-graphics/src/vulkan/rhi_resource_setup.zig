@@ -70,7 +70,7 @@ pub fn createShadowResources(ctx: anytype) !void {
     shadow_img_info.arrayLayers = rhi.SHADOW_CASCADE_COUNT;
     shadow_img_info.format = DEPTH_FORMAT;
     shadow_img_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
-    shadow_img_info.usage = c.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT;
+    shadow_img_info.usage = c.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT | c.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     shadow_img_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
     try Utils.checkVk(c.vkCreateImage(ctx.vulkan_device.vk_device, &shadow_img_info, null, &ctx.shadow_system.shadow_image));
 

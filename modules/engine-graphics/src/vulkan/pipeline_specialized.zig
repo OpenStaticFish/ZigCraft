@@ -49,6 +49,7 @@ pub fn createTerrainPipeline(
     color_blending: *const c.VkPipelineColorBlendStateCreateInfo,
     _sample_count: c.VkSampleCountFlagBits,
     g_render_pass: c.VkRenderPass,
+    water_reflection: bool,
 ) !void {
     _ = _sample_count;
     const vert_module = try loadShaderModule(allocator, vk_device, shader_registry.TERRAIN_VERT);
@@ -56,9 +57,12 @@ pub fn createTerrainPipeline(
     const frag_module = try loadShaderModule(allocator, vk_device, shader_registry.TERRAIN_FRAG);
     defer c.vkDestroyShaderModule(vk_device, frag_module, null);
 
+    const reflection: c.VkBool32 = if (water_reflection) c.VK_TRUE else c.VK_FALSE;
+    const entry = c.VkSpecializationMapEntry{ .constantID = 0, .offset = 0, .size = @sizeOf(c.VkBool32) };
+    const specialization = c.VkSpecializationInfo{ .mapEntryCount = 1, .pMapEntries = &entry, .dataSize = @sizeOf(c.VkBool32), .pData = &reflection };
     var shader_stages = [_]c.VkPipelineShaderStageCreateInfo{
-        .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main" },
-        .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_module, .pName = "main" },
+        .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_VERTEX_BIT, .module = vert_module, .pName = "main", .pSpecializationInfo = &specialization },
+        .{ .sType = c.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = c.VK_SHADER_STAGE_FRAGMENT_BIT, .module = frag_module, .pName = "main", .pSpecializationInfo = &specialization },
     };
 
     const binding_description = c.VkVertexInputBindingDescription{ .binding = 0, .stride = @sizeOf(rhi.Vertex), .inputRate = c.VK_VERTEX_INPUT_RATE_VERTEX };

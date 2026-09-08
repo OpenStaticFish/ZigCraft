@@ -524,20 +524,35 @@ fn defineBuildSteps(
     benchmark_options.addOption([]const u8, "benchmark_world", benchmark_world);
     benchmark_options.addOption([]const u8, "benchmark_build_mode", @tagName(optimize));
 
+    // The backend reads its own module options, not the executable's options.
+    // Reusing the normal graph here silently presents the hidden benchmark window.
+    const benchmark_graphics_options = b.addOptions();
+    benchmark_graphics_options.addOption(bool, "debug_shadows", enable_debug_shadows);
+    benchmark_graphics_options.addOption(bool, "chunk_debug_mode", false);
+    benchmark_graphics_options.addOption([]const u8, "chunk_debug_enable", "");
+    benchmark_graphics_options.addOption(bool, "skip_present", true);
+    benchmark_graphics_options.addOption(bool, "imgui", enable_imgui);
+    benchmark_graphics_options.addOption(bool, "rmlui", enable_rmlui);
+    var benchmark_opts = opts;
+    benchmark_opts.options = benchmark_options;
+    benchmark_opts.engine_graphics_options = benchmark_graphics_options;
+    benchmark_opts.skip_present = true;
+    const benchmark_modules = defineModules(b, target, optimize, benchmark_opts);
+
     const benchmark_root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .sanitize_c = sanitize_c,
     });
-    benchmark_root_module.addImport("zig-math", zig_math);
-    benchmark_root_module.addImport("zig-noise", zig_noise);
-    benchmark_root_module.addImport("fs", fs_module);
-    benchmark_root_module.addImport("sync", sync_module);
-    benchmark_root_module.addImport("c", c_module);
-    addProjectModuleImports(benchmark_root_module, modules);
-    benchmark_root_module.addImport("game-core", game_core);
-    benchmark_root_module.addImport("game-ui", game_ui);
+    benchmark_root_module.addImport("zig-math", benchmark_modules.zig_math);
+    benchmark_root_module.addImport("zig-noise", benchmark_modules.zig_noise);
+    benchmark_root_module.addImport("fs", benchmark_modules.fs_module);
+    benchmark_root_module.addImport("sync", benchmark_modules.sync_module);
+    benchmark_root_module.addImport("c", benchmark_modules.c_module);
+    addProjectModuleImports(benchmark_root_module, benchmark_modules);
+    benchmark_root_module.addImport("game-core", benchmark_modules.game_core);
+    benchmark_root_module.addImport("game-ui", benchmark_modules.game_ui);
     benchmark_root_module.addOptions("build_options", benchmark_options);
     benchmark_root_module.addIncludePath(b.path("libs/stb"));
 

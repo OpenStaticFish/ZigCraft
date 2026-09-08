@@ -486,6 +486,31 @@ test "Frame start failures stop before later driver calls and quarantine unsigna
     }
 }
 
+test "Aborted presented recording retains acquisition until a successful re-recorded frame" {
+    var fixture: SubmissionMock.Context = undefined;
+    var ctx = FrameStartMock.init(&fixture);
+    try testing.expect(try ctx.frames.beginFrame(&ctx.swapchain));
+    try testing.expect(ctx.frames.image_acquired);
+    const image_index = ctx.frames.current_image_index;
+    const frame = ctx.frames.current_frame;
+
+    FrameStartMock.event_count = 0;
+    ctx.frames.abortFrame();
+    try testing.expect(!ctx.frames.frame_in_progress);
+    try testing.expect(ctx.frames.image_acquired);
+    try testing.expectEqual(frame, ctx.frames.current_frame);
+    try testing.expectEqual(@as(usize, 1), SubmissionMock.queue_calls);
+
+    FrameStartMock.event_count = 0;
+    try testing.expect(try ctx.frames.beginFrame(&ctx.swapchain));
+    const expected = [_]FrameStartMock.Event{ .wait, .reset_fence, .reset_pool, .begin_command };
+    try testing.expectEqualSlices(FrameStartMock.Event, &expected, FrameStartMock.events[0..FrameStartMock.event_count]);
+    try testing.expectEqual(image_index, ctx.frames.current_image_index);
+    try ctx.frames.endFrame(&fixture.swapchain, null, null);
+    try testing.expect(!ctx.frames.image_acquired);
+    try testing.expectEqual(@as(usize, 1), fixture.swapchain.present_calls);
+}
+
 test "Frame acquisition OutOfDate leaves the fence signaled and permits a later start" {
     const orchestration = @import("rhi_frame_orchestration.zig");
     var fixture: SubmissionMock.Context = undefined;

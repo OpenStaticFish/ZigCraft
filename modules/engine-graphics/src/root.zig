@@ -1,4 +1,5 @@
 pub const atmosphere = @import("engine-atmosphere").atmosphere;
+pub const skips_presentation = @import("engine_graphics_options").skip_present;
 
 test {
     _ = @import("test_root.zig");

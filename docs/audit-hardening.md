@@ -84,6 +84,42 @@ The measured line-coverage result is **21,485 / 27,431 instrumented project line
 the test executables. It is not coverage of every maintained source file, and
 kcov's placeholder branch fields are not a branch-coverage measurement.
 
+## Low-Cost CI Follow-Up
+
+PR #981 retains the existing two-vCPU runners, presets, resolution, and benchmark
+thresholds. Hosted CI exposed and motivated additional fixes:
+
+- Coverage uses private LLVM ELF copies with the configured Nix interpreter,
+  avoiding the Ubuntu loader/Nix libc mismatch. XML parsing rejects entities and
+  external reads with defusedxml from the pinned development environment.
+- Presented images are transitioned only after acquisition. UI-first and empty
+  frames initialize acquired images; aborted recordings retain acquisition for
+  re-recording. HDR, bloom, and shadow fallback images have defined contents.
+- The benchmark has its own consistently offscreen module graph. A compile-time
+  guard rejects an executable/backend presentation-mode mismatch.
+- Sky shading happens after opaque depth is available. FXAA skips only an exact
+  zero-direction case; terrain shading skips only zero-contribution work.
+- Opaque cloud cells and terrain chunks submit front-to-back. Reflections are
+  omitted only when the world has no drawable fluid; visible water remains intact.
+- Reflected terrain rasterization and view-dependent lighting now use the same
+  reflected camera as culling, through shader specialization rather than mutable
+  per-pass writes to an already referenced uniform buffer.
+- Failed SLO runs retain complete finite JSON measurements while still returning
+  failure. Incomplete and non-finite results remain rejected.
+
+The local follow-up Debug and ReleaseSafe suites pass 1,931 tests each. Shader
+checks, ReleaseFast, 25 offline CI tests, three shader-optimization tests, and
+normal offscreen integration pass. GPU reference/readback experiments were also
+used to reject a non-equivalent FXAA candidate and verify the retained changes.
+
+The benchmark is not declared green: controlled two-CPU low/stationary runs still
+miss the unchanged 12-FPS p1 floor. The existing GPU total is a partial pass sum;
+individual stage timestamps can include overlapping work. End-to-end frame time,
+not that sum or an intermediate shader speedup, is the performance acceptance
+criterion. Presented local testing also needed Mesa's `nowlts` diagnostic
+workaround for a Wayland presentation-clock mismatch; that workaround was not
+silently added to the benchmark or its CI environment.
+
 ## Remaining Scope
 
 - Choosing one live menu implementation, removing alternate world generators,

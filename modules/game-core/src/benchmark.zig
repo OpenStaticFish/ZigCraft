@@ -147,6 +147,7 @@ const FrameSample = struct {
     vertices: u64,
     chunks_rendered: u32,
     gpu_memory_mb: f32,
+    gpu_timings: GpuTimingResults = std.mem.zeroes(GpuTimingResults),
 };
 
 pub const SloThresholds = struct {
@@ -235,6 +236,7 @@ pub const BenchmarkRunner = struct {
             .vertices = if (world_stats) |stats| stats.vertices_rendered else 0,
             .chunks_rendered = if (world_stats) |stats| stats.chunks_rendered else 0,
             .gpu_memory_mb = gpu_memory_mb,
+            .gpu_timings = gpu,
         });
         self.sampled_s += dt;
         self.scenario_elapsed_s += dt;
@@ -246,13 +248,28 @@ pub const BenchmarkRunner = struct {
 
     pub fn writeResults(self: *const BenchmarkRunner) !void {
         const results = try self.makeResults();
-        try validateResults(results);
+        // Retain valid measurements for diagnosis without turning an SLO breach into success.
+        const validation = validateResults(results);
+        validation catch |err| switch (err) {
+            error.BenchmarkSloBreach => {},
+            else => return err,
+        };
         const json = try results_json(results, self.allocator);
         defer self.allocator.free(json);
         if (fs.path.dirname(self.output_path)) |dir| try fs.cwd().makePath(dir);
         var file = try fs.cwd().createFile(self.output_path, .{ .truncate = true });
         defer file.close();
         try file.writeAll(json);
+        validation catch |err| {
+            if (!@import("builtin").is_test) {
+                inline for (.{ "g_pass_ms", "ssao_pass_ms", "lpv_pass_ms", "sky_pass_ms", "bloom_pass_ms", "fxaa_pass_ms", "post_process_pass_ms" }) |field| {
+                    var sum: f64 = 0;
+                    for (self.samples.items) |sample| sum += @field(sample.gpu_timings, field);
+                    std.log.info("benchmark GPU {s} average: {d:.6}ms ({d} samples)", .{ field, sum / @as(f64, @floatFromInt(self.samples.items.len)), self.samples.items.len });
+                }
+            }
+            return err;
+        };
     }
 
     pub fn makeResults(self: *const BenchmarkRunner) !BenchmarkResults {
@@ -345,7 +362,7 @@ pub fn validateResults(results: BenchmarkResults) !void {
         results.vertices_avg > thresholds.vertices_max or
         results.gpu_memory_mb_max > thresholds.gpu_memory_mb_max;
     if (breached) {
-        std.log.err("benchmark SLO breach for {s}: p1 FPS {d:.2}/{d:.2}, max frame {d:.2}/{d:.2}ms, draw calls {d:.2}/{d:.2}, vertices {d:.2}/{d:.2}, GPU memory {d:.2}/{d:.2}MiB", .{
+        if (!@import("builtin").is_test) std.log.err("benchmark SLO breach for {s}: p1 FPS {d:.2}/{d:.2}, max frame {d:.2}/{d:.2}ms, draw calls {d:.2}/{d:.2}, vertices {d:.2}/{d:.2}, GPU memory {d:.2}/{d:.2}MiB", .{
             results.preset,
             results.fps.p1,
             thresholds.fps_p1_min,
@@ -510,4 +527,46 @@ test "benchmark scenarios loop with smooth traversal and discontinuous teleports
 test "benchmark percentiles interpolate between adjacent samples" {
     const samples = [_]f32{ 10, 20 };
     try std.testing.expectApproxEqAbs(@as(f64, 15), percentile(&samples, 0.5), 0.001);
+}
+
+test "benchmark writeResults retains SLO failure JSON but rejects invalid results" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output_path = try fs.path.join(std.testing.allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path, "failed.json" });
+    defer std.testing.allocator.free(output_path);
+    var runner = try BenchmarkRunner.init(std.testing.allocator, "low", "stationary", 6, 5, BENCHMARK_WORLD_SEED, "ReleaseFast", "overworld", output_path);
+    defer runner.deinit();
+    runner.evidence_mode = false;
+    runner.warmup_ready = true;
+    runner.sampled_s = 5;
+    try runner.samples.append(std.testing.allocator, .{
+        .cpu_ms = 5000,
+        .fps = 0.2,
+        .gpu_shadow_ms = 10,
+        .gpu_opaque_ms = 20,
+        .gpu_total_ms = 30,
+        .draw_calls = 100,
+        .vertices = 3000,
+        .chunks_rendered = 10,
+        .gpu_memory_mb = 100,
+    });
+    try std.testing.expectError(error.BenchmarkSloBreach, runner.writeResults());
+    const json = try fs.cwd().readFileAlloc(output_path, std.testing.allocator, 64 * 1024);
+    defer std.testing.allocator.free(json);
+    const parsed = try std.json.parseFromSlice(BenchmarkResults, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(u32, 1), parsed.value.frames);
+    try std.testing.expectEqual(@as(f64, 5000), parsed.value.max_frame_ms);
+    try std.testing.expectEqual(@as(f64, 30), parsed.value.gpu_ms.total_avg);
+    try std.testing.expect(parsed.value.completion.scenario_completed);
+    try std.testing.expectError(error.BenchmarkSloBreach, validateResults(parsed.value));
+
+    runner.sampled_s = 0;
+    try std.testing.expectError(error.IncompleteBenchmarkScenario, runner.writeResults());
+    runner.sampled_s = 5;
+    runner.samples.items[0].gpu_total_ms = std.math.nan(f32);
+    try std.testing.expectError(error.NonFiniteBenchmarkResult, runner.writeResults());
+    const retained = try fs.cwd().readFileAlloc(output_path, std.testing.allocator, 64 * 1024);
+    defer std.testing.allocator.free(retained);
+    try std.testing.expectEqualStrings(json, retained);
 }

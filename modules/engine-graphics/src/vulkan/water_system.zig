@@ -473,6 +473,7 @@ pub const WaterSystem = struct {
             &color_blending,
             c.VK_SAMPLE_COUNT_1_BIT,
             null,
+            true,
         );
 
         self.reflection_terrain_pipeline = owner.terrain_pipeline;
@@ -533,9 +534,48 @@ pub const WaterSystem = struct {
     }
 
     pub fn computeReflectedViewProj(_: *WaterSystem, view: Mat4, proj: Mat4, camera_pos: Vec3) Mat4 {
+        // terrain.vert specializes the same P * V * T * S transform without
+        // replacing the main camera's already-recorded global uniforms.
         const reflected_offset_y = 2.0 * (WATER_LEVEL - camera_pos.y);
         const reflect_matrix = Mat4.translate(Vec3.init(0.0, reflected_offset_y, 0.0)).multiply(Mat4.scale(Vec3.init(1.0, -1.0, 1.0)));
         const reflected_view = view.multiply(reflect_matrix);
         return proj.multiply(reflected_view);
     }
 };
+
+test "reflection projection matches mirrored world points and removes main TAA jitter" {
+    var water: WaterSystem = .{};
+    const proj = Mat4.perspectiveReverseZ(1.2, 16.0 / 9.0, 0.1, 1024.0);
+    const view = Mat4.lookAt(Vec3.zero, Vec3.init(0.3, -0.2, -1.0), Vec3.up);
+    for ([_]Vec3{ Vec3.init(-128.5, 80, -256.25), Vec3.init(32, 48, -16), Vec3.init(-4, 64, 7), Vec3.init(-20, -8, -30) }) |camera| {
+        const reflected = water.computeReflectedViewProj(view, proj, camera);
+        for ([_]Vec3{ Vec3.init(-140, 70, -300), Vec3.init(40, 60, -80), Vec3.init(-7, -16, -120) }) |point| {
+            const relative = point.sub(camera);
+            const mirrored = Vec3.init(relative.x, 2.0 * (WATER_LEVEL - camera.y) - relative.y, relative.z);
+            const expected = reflected.transformPoint(relative);
+            // Independent absolute-world construction: mirror geometry about sea
+            // level, then subtract the original eye and use the ordinary camera.
+            const absolute_mirror = Vec3.init(point.x, 2.0 * WATER_LEVEL - point.y, point.z);
+            const actual = proj.multiply(view).transformPoint(absolute_mirror.sub(camera));
+            try std.testing.expectApproxEqAbs(expected.x, actual.x, 0.0001);
+            try std.testing.expectApproxEqAbs(expected.y, actual.y, 0.0001);
+            try std.testing.expectApproxEqAbs(expected.z, actual.z, 0.0001);
+            for ([_]Vec3{ Vec3.zero, Vec3.init(0.5 / 1920.0, -0.75 / 1080.0, 0) }) |jitter| {
+                const vp = Mat4.translate(jitter).multiply(proj).multiply(view);
+                var ndc = vp.transformPoint(mirrored);
+                var recovered: [2]f32 = .{ 0, 0 };
+                for (0..2) |axis| for (0..3) |k| {
+                    recovered[axis] += vp.data[k][axis] * vp.data[k][3];
+                };
+                ndc.x -= recovered[0];
+                ndc.y -= recovered[1];
+                try std.testing.expectApproxEqAbs(expected.x, ndc.x, 0.0001);
+                try std.testing.expectApproxEqAbs(expected.y, ndc.y, 0.0001);
+                try std.testing.expectApproxEqAbs(expected.z, ndc.z, 0.0001);
+            }
+            const reflected_eye = Vec3.init(camera.x, 2.0 * WATER_LEVEL - camera.y, camera.z);
+            const eye_relative = Vec3.init(0, 2.0 * (WATER_LEVEL - camera.y), 0);
+            try std.testing.expectApproxEqAbs(reflected_eye.sub(point).length(), eye_relative.sub(relative).length(), 0.0001);
+        }
+    }
+}

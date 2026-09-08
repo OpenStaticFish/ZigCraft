@@ -22,6 +22,9 @@ pub const FrameManager = struct {
     current_frame: usize = 0,
     current_image_index: u32 = 0,
     frame_in_progress: bool = false,
+    // An aborted recording retains both the image and its unconsumed acquire
+    // semaphore. Re-record that image rather than acquiring/signaling twice.
+    image_acquired: bool = false,
     terminal_failure: bool = false,
     dry_run: bool = false,
     wait_for_fences_fn: *const fn (c.VkDevice, u32, [*c]const c.VkFence, c.VkBool32, u64) callconv(.c) c.VkResult = c.vkWaitForFences,
@@ -117,10 +120,11 @@ pub const FrameManager = struct {
             // In dry-run/headless mode, we skip image acquisition to avoid WSI/driver crashes.
             // We just use image 0 as our target.
             self.current_image_index = 0;
-        } else {
+        } else if (!self.image_acquired) {
             const result = swapchain.acquireNextImage(self.image_available_semaphores[self.current_frame]);
             if (result) |index| {
                 self.current_image_index = index;
+                self.image_acquired = true;
             } else |err| {
                 if (err == error.OutOfDate) {
                     swapchain.framebuffer_resized = true;
@@ -231,6 +235,7 @@ pub const FrameManager = struct {
         }
 
         self.frame_in_progress = false;
+        self.image_acquired = false;
         self.current_frame = (self.current_frame + 1) % rhi.MAX_FRAMES_IN_FLIGHT;
     }
 
