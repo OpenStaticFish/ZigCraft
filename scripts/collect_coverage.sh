@@ -47,10 +47,24 @@ for binary in "${binaries[@]}"; do
     stage="test executable $index/${#binaries[@]} ($binary)"
     target="$work/bin/test-$index"
     cp "$binary" "$target"
-    # kcov must trace the test ELF itself. Rewriting Zig's native ELF layout
-    # with patchelf can abort, so use the library search path without editing it.
-    # Equivalent glibc loaders can live at different Nix store paths. Let the
-    # actual instrumented execution detect incompatibility, not path equality.
+    # kcov execs the ELF, bypassing the build runner's explicit Nix loader.
+    # Patch only this private LLVM-built copy, never the cached original.
+    stage="ELF inspection $index/${#binaries[@]} ($binary)"
+    readelf --wide --program-headers --dynamic "$target" > "$work/bin/test-$index.original.elf.txt"
+    interpreter=$(LC_ALL=C readelf --wide --program-headers "$target" |
+        sed -n 's/.*Requesting program interpreter: \(.*\)]/\1/p')
+    printf 'Original test ELF interpreter: %s\n' "${interpreter:-<static>}"
+    if [[ -n "${ZIGCRAFT_DYNAMIC_LINKER:-}" && -n "$interpreter" &&
+          "$interpreter" != "$ZIGCRAFT_DYNAMIC_LINKER" ]]; then
+        stage="ELF interpreter patch $index/${#binaries[@]} ($binary)"
+        patchelf --set-interpreter "$ZIGCRAFT_DYNAMIC_LINKER" "$target"
+        if [[ "$(patchelf --print-interpreter "$target")" != "$ZIGCRAFT_DYNAMIC_LINKER" ]]; then
+            printf 'Coverage ELF interpreter patch did not apply\n' >&2
+            exit 1
+        fi
+    fi
+    readelf --wide --program-headers --dynamic "$target" > "$work/bin/test-$index.elf.txt"
+    stage="test executable $index/${#binaries[@]} ($binary)"
     printf 'Collecting test executable %d/%d: %s\n' "$index" "${#binaries[@]}" "$binary"
     LD_LIBRARY_PATH="${ZIGCRAFT_RUNTIME_LIBRARY_PATH:-${LD_LIBRARY_PATH:-}}" \
         ZIGCRAFT_LOG_LEVEL=fatal timeout --kill-after=10s 5m kcov \

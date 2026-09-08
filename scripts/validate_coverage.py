@@ -3,11 +3,12 @@
 
 from pathlib import Path
 import sys
-import xml.etree.ElementTree as ET
+from defusedxml import DefusedXmlException, ElementTree as ET
 
 
 def validate(report, root, required_scopes=()):
-    tree = ET.parse(report).getroot()
+    # kcov emits a Cobertura DOCTYPE; allow it, but never entities or external reads.
+    tree = ET.parse(report, forbid_dtd=False, forbid_entities=True, forbid_external=True).getroot()
     sources = [Path(node.text) for node in tree.findall('./sources/source') if node.text]
     lines = {}
     for entry in tree.findall('.//class'):
@@ -46,6 +47,9 @@ def validate(report, root, required_scopes=()):
 if __name__ == '__main__':
     try:
         validate(Path(sys.argv[1]), Path.cwd().resolve(), required_scopes=('src', 'modules'))
+    except DefusedXmlException:
+        print('Coverage unavailable: unsafe XML rejected', file=sys.stderr)
+        sys.exit(1)
     except (OSError, ET.ParseError, ValueError, KeyError) as error:
         print(f'Coverage unavailable: {error}', file=sys.stderr)
         sys.exit(1)

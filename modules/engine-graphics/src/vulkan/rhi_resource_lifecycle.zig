@@ -238,7 +238,15 @@ pub fn transitionImagesToShaderRead(ctx: anytype, images: []const c.VkImage, is_
 }
 
 pub fn transitionImagesToPresent(ctx: anytype, images: []const c.VkImage) !void {
-    return transitionImagesFromUndefined(ctx, images, c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0);
+    return transitionImagesFromUndefined(ctx, images, c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, false);
+}
+
+/// Post-processing can run before the scene pass, and disabled bloom stays bound.
+/// Initialize on both startup and resize, including safe mode, rather than sample
+/// undefined contents or rely on a producer pass that may never run.
+pub fn initializePostProcessInputs(ctx: anytype) !void {
+    const images = [_]c.VkImage{ctx.hdr.hdr_image} ++ ctx.bloom.mip_images;
+    try transitionImagesFromUndefined(ctx, &images, c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, c.VK_ACCESS_SHADER_READ_BIT, true);
 }
 
 /// Headless final-composition passes load and retain this layout between
@@ -250,10 +258,11 @@ pub fn transitionImagesToColorAttachment(ctx: anytype, images: []const c.VkImage
         c.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
         c.VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        false,
     );
 }
 
-fn transitionImagesFromUndefined(ctx: anytype, images: []const c.VkImage, layout: c.VkImageLayout, dst_stage: c.VkPipelineStageFlags, dst_access: c.VkAccessFlags) !void {
+fn transitionImagesFromUndefined(ctx: anytype, images: []const c.VkImage, layout: c.VkImageLayout, dst_stage: c.VkPipelineStageFlags, dst_access: c.VkAccessFlags, clear: bool) !void {
     if (ctx.runtime.recovering) return;
 
     var alloc_info = std.mem.zeroes(c.VkCommandBufferAllocateInfo);
@@ -276,16 +285,27 @@ fn transitionImagesFromUndefined(ctx: anytype, images: []const c.VkImage, layout
         barriers[i] = std.mem.zeroes(c.VkImageMemoryBarrier);
         barriers[i].sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         barriers[i].oldLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
-        barriers[i].newLayout = layout;
+        barriers[i].newLayout = if (clear) c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL else layout;
         barriers[i].srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
         barriers[i].dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
         barriers[i].image = images[i];
         barriers[i].subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
         barriers[i].srcAccessMask = 0;
-        barriers[i].dstAccessMask = dst_access;
+        barriers[i].dstAccessMask = if (clear) c.VK_ACCESS_TRANSFER_WRITE_BIT else dst_access;
     }
 
-    c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, dst_stage, 0, 0, null, 0, null, @intCast(count), &barriers[0]);
+    c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, if (clear) c.VK_PIPELINE_STAGE_TRANSFER_BIT else dst_stage, 0, 0, null, 0, null, @intCast(count), &barriers[0]);
+    if (clear) {
+        const black = c.VkClearColorValue{ .float32 = .{ 0, 0, 0, 0 } };
+        for (barriers[0..count]) |*barrier| {
+            c.vkCmdClearColorImage(cmd, barrier.image, c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &barrier.subresourceRange);
+            barrier.oldLayout = c.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.newLayout = layout;
+            barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = dst_access;
+        }
+        c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TRANSFER_BIT, dst_stage, 0, 0, null, 0, null, @intCast(count), &barriers[0]);
+    }
 
     try Utils.checkVk(c.vkEndCommandBuffer(cmd));
 
@@ -320,7 +340,7 @@ pub fn createHDRResources(ctx: anytype) !void {
     image_info.format = format;
     image_info.tiling = c.VK_IMAGE_TILING_OPTIMAL;
     image_info.initialLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
-    image_info.usage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT;
+    image_info.usage = c.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | c.VK_IMAGE_USAGE_SAMPLED_BIT | c.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     image_info.samples = c.VK_SAMPLE_COUNT_1_BIT;
     image_info.sharingMode = c.VK_SHARING_MODE_EXCLUSIVE;
 

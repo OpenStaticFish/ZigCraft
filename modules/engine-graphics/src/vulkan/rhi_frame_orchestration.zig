@@ -160,6 +160,10 @@ pub fn recreateSwapchainInternal(ctx: anytype) void {
         return;
     };
     setup.updatePostProcessDescriptorsWithBloom(ctx);
+    lifecycle.initializePostProcessInputs(ctx) catch |err| {
+        _ = markSwapchainRecreateFailed(ctx, "post-process inputs", err);
+        return;
+    };
 
     setup.createUpscaleResources(ctx) catch |err| {
         _ = markSwapchainRecreateFailed(ctx, "upscale resources", err);
@@ -171,14 +175,8 @@ pub fn recreateSwapchainInternal(ctx: anytype) void {
     if (!ctx.options.safe_mode) {
         var list: [32]c.VkImage = undefined;
         var count: usize = 0;
-        const candidates = [_]c.VkImage{ ctx.hdr.hdr_image, ctx.gpass.g_normal_image, ctx.ssao_system.image, ctx.ssao_system.blur_image, ctx.ssao_system.noise_image, ctx.velocity.velocity_image };
+        const candidates = [_]c.VkImage{ ctx.gpass.g_normal_image, ctx.ssao_system.image, ctx.ssao_system.blur_image, ctx.ssao_system.noise_image, ctx.velocity.velocity_image };
         for (candidates) |img| {
-            if (img != null) {
-                list[count] = img;
-                count += 1;
-            }
-        }
-        for (ctx.bloom.mip_images) |img| {
             if (img != null) {
                 list[count] = img;
                 count += 1;

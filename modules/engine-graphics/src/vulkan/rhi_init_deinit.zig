@@ -140,6 +140,7 @@ pub fn initContext(ctx: anytype, allocator: std.mem.Allocator, render_device: ?*
     try ctx.bloom.init(&ctx.vulkan_device, ctx.allocator, ctx.descriptors.descriptor_pool, ctx.hdr.hdr_view, ctx.swapchain.getExtent().width, ctx.swapchain.getExtent().height, c.VK_FORMAT_R16G16B16A16_SFLOAT);
 
     setup.updatePostProcessDescriptorsWithBloom(ctx);
+    try lifecycle.initializePostProcessInputs(ctx);
 
     ctx.draw.dummy_texture = ctx.descriptors.dummy_texture;
     ctx.draw.dummy_texture_3d = ctx.descriptors.dummy_texture_3d;
@@ -193,14 +194,8 @@ pub fn initContext(ctx: anytype, allocator: std.mem.Allocator, render_device: ?*
 
         var list: [32]c.VkImage = undefined;
         var count: usize = 0;
-        const candidates = [_]c.VkImage{ ctx.hdr.hdr_image, ctx.gpass.g_normal_image, ctx.ssao_system.image, ctx.ssao_system.blur_image, ctx.ssao_system.noise_image, ctx.velocity.velocity_image };
+        const candidates = [_]c.VkImage{ ctx.gpass.g_normal_image, ctx.ssao_system.image, ctx.ssao_system.blur_image, ctx.ssao_system.noise_image, ctx.velocity.velocity_image };
         for (candidates) |img| {
-            if (img != null) {
-                list[count] = img;
-                count += 1;
-            }
-        }
-        for (ctx.bloom.mip_images) |img| {
             if (img != null) {
                 list[count] = img;
                 count += 1;

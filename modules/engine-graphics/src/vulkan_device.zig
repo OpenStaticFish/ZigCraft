@@ -422,7 +422,7 @@ pub const VulkanDevice = struct {
         try checkVk(create_result);
         self.vk_device = vk_device;
         self.supports_device_fault = allow_device_fault;
-        self.robust_buffer_access2_enabled = allow_robustness2 and robustness2_features.robustBufferAccess2 == c.VK_TRUE;
+        self.robust_buffer_access2_enabled = if (allow_robustness2) robustness2_features.robustBufferAccess2 == c.VK_TRUE else false;
         c.vkGetDeviceQueue(self.vk_device, self.graphics_family, 0, &self.queue);
 
         if (self.supports_device_fault and self.vk_device != null) {

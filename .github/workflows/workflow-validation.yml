@@ -69,7 +69,7 @@ jobs:
         run: devenv shell --profile unit -- shellcheck scripts/*.sh
 
       - name: Verify offline CI acceptance regressions
-        run: python3 -B scripts/test_ci_verification.py
+        run: devenv shell --profile unit -- python3 -B scripts/test_ci_verification.py
 
       - name: Validate devenv configuration
         run: devenv info >/dev/null

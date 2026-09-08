@@ -127,23 +127,26 @@ pub const VulkanSwapchain = struct {
     }
 
     fn createSwapchain(self: *VulkanSwapchain) !void {
+        var w: c_int = 0;
+        var h: c_int = 0;
+        if (!c.SDL_GetWindowSizeInPixels(self.window, &w, &h)) return error.BackendError;
+        var lw: c_int = 0;
+        var lh: c_int = 0;
+        if (!c.SDL_GetWindowSize(self.window, &lw, &lh)) return error.BackendError;
+        try self.setDrawableSize(w, h, lw, lh);
+
         if (self.headless_mode) {
             try self.images.ensureUnusedCapacity(self.allocator, 1);
             try self.image_views.ensureUnusedCapacity(self.allocator, 1);
             log.log.info("VulkanSwapchain: Initializing in HEADLESS mode (offscreen)", .{});
             self.image_format = c.VK_FORMAT_B8G8R8A8_UNORM;
             self.screenshot_capture_supported = true;
-            self.extent = .{ .width = 1920, .height = 1080 };
-            self.pixel_width = 1920;
-            self.pixel_height = 1080;
-            self.logical_width = 1920;
-            self.logical_height = 1080;
-            self.scale = 1.0;
+            log.log.info("VulkanSwapchain: offscreen drawable {}x{} (logical {}x{}, scale {d})", .{ self.extent.width, self.extent.height, self.logical_width, self.logical_height, self.scale });
 
             var image_info = std.mem.zeroes(c.VkImageCreateInfo);
             image_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
             image_info.imageType = c.VK_IMAGE_TYPE_2D;
-            image_info.extent = .{ .width = 1920, .height = 1080, .depth = 1 };
+            image_info.extent = .{ .width = self.extent.width, .height = self.extent.height, .depth = 1 };
             image_info.mipLevels = 1;
             image_info.arrayLayers = 1;
             image_info.format = self.image_format;
@@ -203,25 +206,6 @@ pub const VulkanSwapchain = struct {
             }
         }
         self.image_format = surface_format.format;
-
-        var w: c_int = 0;
-        var h: c_int = 0;
-        _ = c.SDL_GetWindowSizeInPixels(self.window, &w, &h);
-
-        var lw: c_int = 0;
-        var lh: c_int = 0;
-        _ = c.SDL_GetWindowSize(self.window, &lw, &lh);
-
-        self.scale = if (lw > 0) @as(f32, @floatFromInt(w)) / @as(f32, @floatFromInt(lw)) else 1.0;
-        self.pixel_width = @intCast(w);
-        self.pixel_height = @intCast(h);
-        self.logical_width = @intCast(lw);
-        self.logical_height = @intCast(lh);
-
-        // Protect against zero-size extents (can happen during fullscreen transitions on Wayland)
-        if (w <= 0 or h <= 0) {
-            return error.BackendError;
-        }
 
         if (cap.currentExtent.width != 0xFFFFFFFF) {
             self.extent = cap.currentExtent;
@@ -292,6 +276,18 @@ pub const VulkanSwapchain = struct {
 
     fn clearImageTrackingForRecreate(self: *VulkanSwapchain) void {
         self.images.clearRetainingCapacity();
+    }
+
+    fn setDrawableSize(self: *VulkanSwapchain, w: c_int, h: c_int, lw: c_int, lh: c_int) !void {
+        // Wayland transitions can temporarily report an unusable drawable.
+        // Validate before signed-to-unsigned casts or allocating either target.
+        if (w <= 0 or h <= 0 or lw <= 0 or lh <= 0) return error.BackendError;
+        self.pixel_width = @intCast(w);
+        self.pixel_height = @intCast(h);
+        self.logical_width = @intCast(lw);
+        self.logical_height = @intCast(lh);
+        self.scale = @as(f32, @floatFromInt(w)) / @as(f32, @floatFromInt(lw));
+        self.extent = .{ .width = self.pixel_width, .height = self.pixel_height };
     }
 
     fn createDepthBuffer(self: *VulkanSwapchain, msaa_samples: u8) !void {
@@ -556,6 +552,40 @@ fn presentModeName(mode: c.VkPresentModeKHR) []const u8 {
         c.VK_PRESENT_MODE_FIFO_RELAXED_KHR => "FIFO_RELAXED",
         else => "UNKNOWN",
     };
+}
+
+test "VulkanSwapchain drawable sizing honors offscreen size and HiDPI resize" {
+    var swapchain: VulkanSwapchain = undefined;
+    try swapchain.setDrawableSize(640, 360, 640, 360);
+    try std.testing.expectEqual(@as(u32, 640), swapchain.extent.width);
+    try std.testing.expectEqual(@as(u32, 360), swapchain.extent.height);
+    try std.testing.expectEqual(@as(f32, 1), swapchain.scale);
+
+    try swapchain.setDrawableSize(2560, 1440, 1280, 720);
+    try std.testing.expectEqual(@as(u32, 2560), swapchain.extent.width);
+    try std.testing.expectEqual(@as(u32, 1440), swapchain.extent.height);
+    try std.testing.expectEqual(swapchain.extent.width, swapchain.pixel_width);
+    try std.testing.expectEqual(swapchain.extent.height, swapchain.pixel_height);
+    try std.testing.expectEqual(@as(u32, 1280), swapchain.logical_width);
+    try std.testing.expectEqual(@as(u32, 720), swapchain.logical_height);
+    try std.testing.expectEqual(@as(f32, 2), swapchain.scale);
+}
+
+test "VulkanSwapchain rejects invalid drawable sizes before casting" {
+    var swapchain: VulkanSwapchain = undefined;
+    const invalid = [_][4]c_int{
+        .{ 0, 360, 640, 360 },
+        .{ 640, 0, 640, 360 },
+        .{ -1, 360, 640, 360 },
+        .{ 640, -1, 640, 360 },
+        .{ 640, 360, 0, 360 },
+        .{ 640, 360, 640, 0 },
+        .{ 640, 360, -1, 360 },
+        .{ 640, 360, 640, -1 },
+    };
+    for (invalid) |size| {
+        try std.testing.expectError(error.BackendError, swapchain.setDrawableSize(size[0], size[1], size[2], size[3]));
+    }
 }
 
 test "VulkanSwapchain recreation discards prior image handles" {

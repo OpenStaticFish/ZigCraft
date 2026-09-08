@@ -41,7 +41,8 @@ jobs:
       - name: Checkout trusted review tooling only
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          # Both allowed events identify trusted base/default-branch code here.
+          ref: ${{ github.sha }}
           persist-credentials: false
           sparse-checkout: scripts/static_pr_review.py
           sparse-checkout-cone-mode: false

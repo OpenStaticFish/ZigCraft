@@ -10,6 +10,8 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
+from defusedxml import EntitiesForbidden
+
 import static_pr_review
 import validate_coverage
 import codebase_report
@@ -23,6 +25,48 @@ class CoverageValidationTests(unittest.TestCase):
     def test_project_lines(self):
         with patch('builtins.print'):
             self.assertEqual(validate_coverage.validate(self.report(), Path.cwd()), (1, 1))
+
+    def test_cobertura_doctype_without_external_reads(self):
+        report = ('<?xml version="1.0"?>'
+                  '<!DOCTYPE coverage SYSTEM "http://cobertura.sourceforge.net/xml/coverage-04.dtd">'
+                  + self.report().getvalue())
+        with patch('builtins.open', side_effect=AssertionError('Unexpected external file read')), \
+             patch('socket.socket', side_effect=AssertionError('Unexpected network access')), \
+             patch('builtins.print'):
+            self.assertEqual(validate_coverage.validate(io.StringIO(report), Path.cwd()), (1, 1))
+
+    def test_entities_rejected_without_disclosing_payload(self):
+        declarations = {
+            'internal': '<!ENTITY private_entity "private-value">',
+            'external_file': '<!ENTITY private_entity SYSTEM "file:///private-file">',
+            'external_http': '<!ENTITY private_entity SYSTEM "https://example.invalid/private-token">',
+            'parameter': '<!ENTITY % private_entity SYSTEM "file:///private-file">%private_entity;',
+            'billion_laughs': '<!ENTITY e0 "ha">' + ''.join(
+                f'<!ENTITY e{i} "' + f'&e{i - 1};' * 10 + '">'
+                for i in range(1, 10)) + '<!ENTITY private_entity "&e9;">',
+        }
+        for name, declaration in declarations.items():
+            with self.subTest(name=name):
+                report = (f'<!DOCTYPE coverage [{declaration}]>'
+                          + self.report().getvalue().replace('<coverage>', '<coverage>&private_entity;'))
+                with self.assertRaises(EntitiesForbidden), \
+                     patch('builtins.open', side_effect=AssertionError('Unexpected external file read')), \
+                     patch('socket.socket', side_effect=AssertionError('Unexpected network access')):
+                    validate_coverage.validate(io.StringIO(report), Path.cwd())
+                result = subprocess.run(
+                    [sys.executable, '-B', 'scripts/validate_coverage.py', '/dev/stdin'],
+                    input=report, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, '')
+                self.assertEqual(result.stderr, 'Coverage unavailable: unsafe XML rejected\n')
+
+    def test_malformed_xml_fails_cleanly(self):
+        result = subprocess.run(
+            [sys.executable, '-B', 'scripts/validate_coverage.py', '/dev/stdin'],
+            input='<coverage>', capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Coverage unavailable:', result.stderr)
+        self.assertNotIn('Traceback', result.stderr)
 
     def test_no_lines(self):
         with self.assertRaises(ValueError):
