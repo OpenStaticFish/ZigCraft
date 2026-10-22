@@ -131,7 +131,7 @@ jobs:
 
       - name: Install Bencher CLI
         if: steps.gate.outputs.run == 'true' && env.BENCHER_API_TOKEN != '' && env.BENCHER_PROJECT != ''
-        uses: bencherdev/bencher@30a740a2e4246560b1a5fd424057d84aa2b188d6
+        uses: bencherdev/bencher@80353ea765c65b8fdd69dc9f6329afb9936f7da2
 
       - name: Publish Bencher trends
         if: steps.gate.outputs.run == 'true' && env.BENCHER_API_TOKEN != '' && env.BENCHER_PROJECT != ''
