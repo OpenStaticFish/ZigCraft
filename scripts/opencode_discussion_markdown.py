@@ -56,7 +56,14 @@ def reply_body(markdown, rendered):
     # One HTML block prevents Markdown from being parsed again after a blank
     # line. Entities preserve line breaks, including blank lines inside code.
     fragment = "".join(parser.parts).replace("\n", "&#10;")
-    return f"<div>{fragment}</div>\n"
+    body = f"<div>{fragment}</div>\n"
+    if len(body.encode("utf-8")) <= 64_000:
+        return body
+
+    # Leave room for the publisher marker. A fence longer than any run in
+    # the 16 KB source keeps the entire fallback literal, including mentions.
+    fence = "~" * max(3, 1 + max(map(len, re.findall(r"~+", markdown)), default=0))
+    return f"Formatted reply exceeded GitHub's comment limit; showing the original text.\n\n{fence}\n{markdown}\n{fence}\n"
 
 
 if __name__ == "__main__":
