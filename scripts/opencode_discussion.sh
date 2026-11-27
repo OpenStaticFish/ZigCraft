@@ -30,12 +30,13 @@ infer() {
     jq -Rse 'test("[^[:space:]]") and (test("[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f]") | not)' "$tmp/response" >/dev/null
     [[ $(cat "$tmp/response") != SKIP ]] || exit 0
 }
-post_reply() {
-    already_commented && return 0
+prepare_reply() {
     {
         printf '%s\n\n' "$marker"
         python3 scripts/opencode_discussion_markdown.py "$GITHUB_REPOSITORY" "$tmp/response"
     } > "$tmp/reply"
     [[ $(wc -c < "$tmp/reply") -le 65536 ]]
+}
+post_reply() {
     gh api "$repo/issues/$number/comments" -F "body=@$tmp/reply" --silent
 }

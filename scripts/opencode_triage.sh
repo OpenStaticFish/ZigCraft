@@ -26,6 +26,8 @@ already_commented && exit 0
     fi
 } > "$tmp/request"
 infer
+prepare_reply
+already_commented && exit 0
 current_dev
 [[ $(issue_snapshot) == "$issue" ]]
 post_reply

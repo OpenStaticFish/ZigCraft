@@ -12,7 +12,7 @@ from opencode_discussion_markdown import reply_body
 class ReplyBodyTests(unittest.TestCase):
     def test_mentions_do_not_change_alerts_zig_code_or_links(self):
         source = (
-            "@octocat &#64;octocat @org/team and `@octocat`.\n\n"
+            "@octocat &#64;octocat @org/team and `@octocat`. Literal &#64;\n\n"
             "> [!NOTE]\n> This is an alert.\n\n"
             "<https://example.com/@project>\n\n"
             '```zig\nconst std = @import("std");\n```\n'
@@ -27,14 +27,16 @@ class ReplyBodyTests(unittest.TestCase):
         def render(text):
             if text == source:
                 return ('<p><a class="user-mention" href="https://github.com/octocat">@octocat</a> '
-                        '&#64;octocat @org/team and <code>@octocat</code>.</p>' + alert_and_code)
+                        '&#64;octocat @org/team and <code>@octocat</code>. Literal @</p>' + alert_and_code)
             if text == candidate:
-                return '<p>@\u200boctocat @\u200boctocat @\u200borg/team and <code>@octocat</code>.</p>' + alert_and_code
+                return ('<p>@\u200boctocat @\u200boctocat @\u200borg/team and <code>@octocat</code>. Literal @</p>'
+                        + alert_and_code)
 
             tags = re.findall(r"Zc[0-9a-f]+Q[0-9]+Z", text)
-            self.assertEqual(len(tags), 6)
-            prose, entity, team, inline, link, fenced = tags
+            self.assertEqual(len(tags), 7)
+            prose, entity, team, inline, literal, link, fenced = tags
             return (f'<p>@{prose}octocat @{entity}octocat @{team}org/team and <code>@{inline}octocat</code>.</p>'
+                    f'<p>Literal @{literal}</p>'
                     f'<a href="https://example.com/@{link}project">https://example.com/@{link}project</a>'
                     f'<pre>@{fenced}import("std");</pre>')
 
@@ -50,6 +52,10 @@ class ReplyBodyTests(unittest.TestCase):
         source = f"<{url}>\n"
         preview = f'<p><a href="{url}">{url}</a></p>'
         self.assertEqual(reply_body(source, lambda _: preview), source)
+
+    def test_trailing_at_sign_without_a_handle_preserves_source(self):
+        source = "Literal &#64;\n"
+        self.assertEqual(reply_body(source, lambda _: "<p>Literal @</p>"), source)
 
     def test_large_preview_does_not_expand_published_markdown(self):
         code = "@as(u8, 1);\n" * 1300
@@ -96,6 +102,7 @@ class DiscussionPublisherTests(unittest.TestCase):
                         esac
                     }
                     cp "$FIXTURE/response" "$tmp/response"
+                    prepare_reply
                     post_reply
                 """],
                 env={
@@ -117,6 +124,60 @@ class DiscussionPublisherTests(unittest.TestCase):
         self.assertIn("GitHub's Markdown preview was unavailable", body)
         self.assertNotIn("partial preview", body)
         self.assertTrue(body.endswith(f"\n~~~\n{source}\n~~~\n"))
+
+    def test_slash_reply_is_not_posted_if_access_is_revoked_during_preview(self):
+        with tempfile.TemporaryDirectory() as directory:
+            files = Path(directory)
+            issue_url = "https://api.github.com/repos/OpenStaticFish/ZigCraft/issues/1005"
+            user = {"id": 7, "login": "maintainer", "type": "User"}
+            issue = {"id": 10, "number": 1005, "url": issue_url, "state": "open",
+                     "title": "Issue", "body": "", "labels": [], "user": user}
+            comment = {"id": 11, "issue_url": issue_url, "body": "/oc explain this", "user": user}
+            (files / "event").write_text(json.dumps({"action": "created", "issue": issue, "comment": comment}))
+            (files / "issue").write_text(json.dumps(issue))
+            (files / "comment").write_text(json.dumps(comment))
+            gh = files / "gh"
+            gh.write_text(
+                '#!/bin/sh\ncat >/dev/null\ntouch "$FIXTURE/revoked"\nprintf "<p>Plain reply</p>\\n"\n'
+            )
+            gh.chmod(0o700)
+            subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", """
+                    gh() {
+                        case "$2" in
+                            --paginate) echo '[]' ;;
+                            */git/ref/heads/dev) echo "$GITHUB_SHA" ;;
+                            */issues/comments/11) cat "$FIXTURE/comment" ;;
+                            */collaborators/maintainer/permission)
+                                if [[ -f "$FIXTURE/revoked" ]]; then
+                                    touch "$FIXTURE/rechecked"
+                                    echo read
+                                else
+                                    echo write
+                                fi ;;
+                            */issues/1005) cat "$FIXTURE/issue" ;;
+                            */issues/1005/comments) touch "$FIXTURE/posted" ;;
+                            *) return 1 ;;
+                        esac
+                    }
+                    opencode-ci() { cat >/dev/null; echo 'Plain reply'; }
+                    source scripts/opencode_slash.sh
+                """],
+                env={
+                    **os.environ,
+                    "GITHUB_REPOSITORY": "OpenStaticFish/ZigCraft",
+                    "GITHUB_EVENT_PATH": str(files / "event"),
+                    "GITHUB_EVENT_NAME": "issue_comment",
+                    "GITHUB_RUN_ATTEMPT": "1",
+                    "GITHUB_SHA": "a" * 40,
+                    "TMPDIR": directory,
+                    "FIXTURE": directory,
+                    "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
+                },
+                check=True,
+            )
+            self.assertTrue((files / "rechecked").exists())
+            self.assertFalse((files / "posted").exists())
 
     def test_discussion_replies_are_not_review_history(self):
         verdict = '```json\n{"reviewed_sha":"example"}\n```'

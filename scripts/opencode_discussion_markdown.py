@@ -53,7 +53,7 @@ class ReplyHTML(HTMLParser):
             self.prose.append(data)
             # GitHub has already decoded entities. Break handles even when
             # the reply names a team or user the preview cannot resolve.
-            neutral = re.sub(r"(?<![A-Za-z0-9_])@(?=[A-Za-z0-9]|$)", "@\u200b", data)
+            neutral = re.sub(r"(?<![A-Za-z0-9_])@(?=[A-Za-z0-9])", "@\u200b", data)
             self.changed |= neutral != data
             data = neutral
         self.parts.append(escape(data, quote=False))
@@ -85,7 +85,7 @@ def reply_body(markdown, render):
         return literal_reply(markdown, "GitHub's Markdown preview was unavailable")
 
     annotated_preview = ReplyHTML(rendered)
-    tag = re.compile(rf"{token}([0-9]+)Z")
+    tag = re.compile(rf"(?<![A-Za-z0-9_])@{token}([0-9]+)Z(?=[A-Za-z0-9])")
     prose_indices = {int(index) for text in annotated_preview.prose for index in tag.findall(text)}
     indices = count()
     candidate = AT_SIGN.sub(
