@@ -51,6 +51,7 @@ pub const VulkanSwapchain = struct {
             .headless_mode = headless,
             .present_mode = present_mode,
         };
+        errdefer self.deinit();
         try self.create(msaa_samples);
         return self;
     }
@@ -261,9 +262,15 @@ pub const VulkanSwapchain = struct {
         try checkVk(c.vkCreateSwapchainKHR(self.device.vk_device, &swapchain_info, null, &self.handle));
 
         var image_count: u32 = 0;
-        _ = c.vkGetSwapchainImagesKHR(self.device.vk_device, self.handle, &image_count, null);
+        try checkVk(c.vkGetSwapchainImagesKHR(self.device.vk_device, self.handle, &image_count, null));
+        if (image_count == 0 or image_count > rhi.MAX_SWAPCHAIN_IMAGES) {
+            log.log.err("Unsupported Vulkan swapchain image count: {} (maximum {})", .{ image_count, rhi.MAX_SWAPCHAIN_IMAGES });
+            return error.UnsupportedSwapchainImageCount;
+        }
         try self.images.resize(self.allocator, image_count);
-        _ = c.vkGetSwapchainImagesKHR(self.device.vk_device, self.handle, &image_count, self.images.items.ptr);
+        try checkVk(c.vkGetSwapchainImagesKHR(self.device.vk_device, self.handle, &image_count, self.images.items.ptr));
+        if (image_count == 0) return error.UnsupportedSwapchainImageCount;
+        self.images.shrinkRetainingCapacity(image_count);
 
         for (self.images.items) |image| {
             var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);

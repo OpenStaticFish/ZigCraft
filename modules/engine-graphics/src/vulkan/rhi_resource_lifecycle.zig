@@ -242,8 +242,6 @@ pub fn initializeSampledFrameImages(ctx: anytype) !void {
     // shaders. Layout initialization is required in safe mode as well.
     const candidates = [_]c.VkImage{
         ctx.hdr.hdr_image,
-        ctx.gpass.g_normal_image,
-        ctx.velocity.velocity_image,
     } ++ ctx.bloom.mip_images;
     var images: [candidates.len]c.VkImage = undefined;
     var count: usize = 0;
