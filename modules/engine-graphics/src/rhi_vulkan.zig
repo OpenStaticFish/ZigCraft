@@ -76,7 +76,7 @@ fn beginFrame(ctx_ptr: *anyopaque) anyerror!bool {
 
     if (ctx.runtime.gpu_fault_detected or ctx.frames.frame_in_progress) return false;
 
-    frame_orchestration.recreatePendingShadowResources(ctx);
+    try frame_orchestration.recreatePendingShadowResources(ctx);
 
     if ((ctx.runtime.framebuffer_resized or ctx.swapchain.framebuffer_resized) and !ctx.runtime.swapchain_recreate_failed) {
         log.log.info("beginFrame: triggering recreateSwapchainInternal (resize)", .{});
@@ -91,7 +91,15 @@ fn beginFrame(ctx_ptr: *anyopaque) anyerror!bool {
 
     // A failed rebuild may already have destroyed resources needed to draw.
     // A fresh resize or quality request can retry, but only success resumes rendering.
-    if (ctx.runtime.pipeline_rebuild_needed) return false;
+    if (ctx.runtime.pipeline_rebuild_needed) {
+        if (ctx.resources.staging_ring.allocated() > 0) {
+            // Retire the entire FIFO only after every outstanding copy is
+            // complete. Leave graphics deletion queues and frame slots alone.
+            try Utils.checkVk(c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device));
+            ctx.resources.staging_ring.reclaimAll();
+        }
+        return false;
+    }
 
     // Begin frame (acquire image, reset fences/CBs)
     const frame_started = try ctx.frames.beginFrame(&ctx.swapchain);

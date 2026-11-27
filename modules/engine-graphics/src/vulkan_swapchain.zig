@@ -108,7 +108,7 @@ pub const VulkanSwapchain = struct {
     }
 
     pub fn recreate(self: *VulkanSwapchain, msaa_samples: u8) !void {
-        _ = c.vkDeviceWaitIdle(self.device.vk_device);
+        try checkVk(c.vkDeviceWaitIdle(self.device.vk_device));
         self.cleanup();
         try self.create(msaa_samples);
     }
@@ -172,13 +172,10 @@ pub const VulkanSwapchain = struct {
         }
 
         var cap: c.VkSurfaceCapabilitiesKHR = undefined;
-        _ = c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(self.device.physical_device, self.device.surface, &cap);
+        try checkVk(c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(self.device.physical_device, self.device.surface, &cap));
 
-        var format_count: u32 = 0;
-        _ = c.vkGetPhysicalDeviceSurfaceFormatsKHR(self.device.physical_device, self.device.surface, &format_count, null);
-        const formats = try self.allocator.alloc(c.VkSurfaceFormatKHR, format_count);
+        const formats = try self.querySurfaceFormats();
         defer self.allocator.free(formats);
-        _ = c.vkGetPhysicalDeviceSurfaceFormatsKHR(self.device.physical_device, self.device.surface, &format_count, formats.ptr);
 
         var surface_format = formats[0];
         for (formats) |f| {
@@ -278,6 +275,25 @@ pub const VulkanSwapchain = struct {
             var view: c.VkImageView = null;
             try checkVk(c.vkCreateImageView(self.device.vk_device, &view_info, null, &view));
             try self.image_views.append(self.allocator, view);
+        }
+    }
+
+    fn querySurfaceFormats(self: *VulkanSwapchain) ![]c.VkSurfaceFormatKHR {
+        while (true) {
+            var count: u32 = 0;
+            try checkVk(c.vkGetPhysicalDeviceSurfaceFormatsKHR(self.device.physical_device, self.device.surface, &count, null));
+            if (count == 0) return error.FormatNotSupported;
+
+            const formats = try self.allocator.alloc(c.VkSurfaceFormatKHR, count);
+            errdefer self.allocator.free(formats);
+            const result = c.vkGetPhysicalDeviceSurfaceFormatsKHR(self.device.physical_device, self.device.surface, &count, formats.ptr);
+            if (result == c.VK_INCOMPLETE) {
+                self.allocator.free(formats);
+                continue;
+            }
+            try checkVk(result);
+            if (count == 0) return error.FormatNotSupported;
+            return self.allocator.realloc(formats, count);
         }
     }
 

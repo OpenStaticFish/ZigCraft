@@ -158,6 +158,10 @@ fn skipGraphicsFrame(_: *anyopaque) anyerror!bool {
     return false;
 }
 
+fn timeOutImageAcquire(_: c.VkDevice, _: c.VkSwapchainKHR, _: u64, _: c.VkSemaphore, _: c.VkFence, _: [*c]u32) callconv(.c) c.VkResult {
+    return c.VK_TIMEOUT;
+}
+
 fn loseGraphicsDevice(_: *anyopaque) anyerror!bool {
     return error.GpuLost;
 }
@@ -297,6 +301,24 @@ test "smoke test: launch, generate, render, exit" {
 
     // Simulate a skipped acquire after successful frames. The screen still
     // updates, but its draw and the frame-completion callbacks must not run.
+    const vulkan: *@import("engine-graphics").VulkanContext = @ptrCast(@alignCast(app.render_system.rhi.ptr));
+    if (!build_options.skip_present) {
+        const acquired_frame_slot = vulkan.frames.current_frame;
+        const tick = active_upload_screen.tick;
+        const acquire = vulkan.swapchain.acquire_image;
+        {
+            vulkan.swapchain.acquire_image = &timeOutImageAcquire;
+            defer vulkan.swapchain.acquire_image = acquire;
+            try app.runSingleFrame();
+        }
+        try testing.expectEqual(acquired_frame_slot, vulkan.frames.current_frame);
+        try testing.expectEqual(tick +% 1, active_upload_screen.tick);
+        try testing.expect(!app.input.interface().shouldQuit());
+        active_upload_screen.quit_on_draw = false;
+        try app.runSingleFrame();
+        try testing.expect(acquired_frame_slot != vulkan.frames.current_frame);
+        active_upload_screen.quit_on_draw = true;
+    }
     const skipped_tick = active_upload_screen.tick;
     {
         app.render_system.waitIdle();
@@ -331,12 +353,23 @@ test "smoke test: launch, generate, render, exit" {
 
     // Exercise the real Vulkan frame-start guard with the state left by a
     // failed rebuild. A new recreation request should let the next frame draw.
-    const vulkan: *@import("engine-graphics").VulkanContext = @ptrCast(@alignCast(app.render_system.rhi.ptr));
     vulkan.runtime.swapchain_recreate_failed = true;
     vulkan.runtime.pipeline_rebuild_needed = true;
     try app.runSingleFrame();
     try testing.expect(!vulkan.frames.frame_in_progress);
     try testing.expect(!app.input.interface().shouldQuit());
+    {
+        const ring = &vulkan.resources.staging_ring;
+        const capacity = ring.capacity;
+        ring.capacity = 256;
+        defer ring.capacity = capacity;
+        // Alignment leaves space for only one upload at a time. Repeated
+        // skipped frames must not fill the ring with finished copies.
+        for (0..4) |_| {
+            try app.runSingleFrame();
+            try testing.expectEqual(@as(u64, 1), ring.allocated());
+        }
+    }
     app.render_system.rhi.context().requestSwapchainRecreate();
 
     const fault_count_before_late_quit = app.render_system.getRHI().query().getFaultCount();

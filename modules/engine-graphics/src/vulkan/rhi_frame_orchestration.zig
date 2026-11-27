@@ -7,13 +7,14 @@ const bindings = @import("descriptor_bindings.zig");
 const lifecycle = @import("rhi_resource_lifecycle.zig");
 const final_composition = @import("final_composition.zig");
 const setup = @import("rhi_resource_setup.zig");
+const Utils = @import("utils.zig");
 
-pub fn recreatePendingShadowResources(ctx: anytype) void {
+pub fn recreatePendingShadowResources(ctx: anytype) !void {
     const requested = ctx.shadow_runtime.pending_shadow_resolution orelse return;
     ctx.shadow_runtime.pending_shadow_resolution = null;
     if (requested == ctx.shadow_runtime.shadow_resolution) return;
 
-    _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
+    try Utils.checkVk(c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device));
     const previous = ctx.shadow_runtime.shadow_resolution;
     var previous_system = ctx.shadow_system;
     const previous_handles = ctx.shadow_runtime.shadow_map_handles;
@@ -28,6 +29,7 @@ pub fn recreatePendingShadowResources(ctx: anytype) void {
         ctx.shadow_system = previous_system;
         ctx.shadow_runtime.shadow_resolution = previous;
         ctx.shadow_runtime.shadow_map_handles = previous_handles;
+        if (err == error.GpuLost) return error.GpuLost;
         return;
     };
 
@@ -39,6 +41,7 @@ pub fn recreatePendingShadowResources(ctx: anytype) void {
             ctx.shadow_system = previous_system;
             ctx.shadow_runtime.shadow_resolution = previous;
             ctx.shadow_runtime.shadow_map_handles = previous_handles;
+            if (err == error.GpuLost) return error.GpuLost;
             return;
         };
         for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
@@ -53,7 +56,7 @@ pub fn recreatePendingShadowResources(ctx: anytype) void {
 }
 
 pub fn recreateSwapchainInternal(ctx: anytype) !void {
-    @import("utils.zig").checkVk(c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device)) catch |err|
+    Utils.checkVk(c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device)) catch |err|
         return handleSwapchainRecreateError(ctx, "device idle wait", err);
 
     var w: c_int = 0;

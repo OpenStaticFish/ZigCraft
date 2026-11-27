@@ -82,6 +82,14 @@ pub const StagingRing = struct {
         self.frame_used[frame_index] = 0;
     }
 
+    /// All submitted transfers have completed and no copies remain queued.
+    pub fn reclaimAll(self: *StagingRing) void {
+        self.head = 0;
+        self.tail = 0;
+        self.used_total = 0;
+        @memset(&self.frame_used, 0);
+    }
+
     pub fn allocated(self: *StagingRing) u64 {
         return self.used_total;
     }

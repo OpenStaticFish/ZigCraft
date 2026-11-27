@@ -27,6 +27,7 @@ pub const SwapchainPresenter = struct {
 
     // Dynamic function pointers for extensions
     fp_vkQueuePresentKHR: c.PFN_vkQueuePresentKHR = null,
+    acquire_image: @TypeOf(&c.vkAcquireNextImageKHR) = &c.vkAcquireNextImageKHR,
     skip_present: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, vulkan_device: *VulkanDevice, window: *c.SDL_Window, msaa_samples: u8, present_mode: c.VkPresentModeKHR, skip_present: bool) !SwapchainPresenter {
@@ -90,7 +91,7 @@ pub const SwapchainPresenter = struct {
     pub fn acquireNextImage(self: *SwapchainPresenter, semaphore: c.VkSemaphore) !u32 {
         var image_index: u32 = 0;
         // Timeout: 2 seconds
-        const result = c.vkAcquireNextImageKHR(self.vulkan_device.vk_device, self.swapchain.handle, 2_000_000_000, semaphore, null, &image_index);
+        const result = self.acquire_image(self.vulkan_device.vk_device, self.swapchain.handle, 2_000_000_000, semaphore, null, &image_index);
 
         if (result == c.VK_ERROR_OUT_OF_DATE_KHR) {
             return error.OutOfDate;
