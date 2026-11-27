@@ -17,6 +17,7 @@ from test_opencode_prose import render_gfm
 
 class MergeGate(unittest.TestCase):
     number, base, head = "3", "a" * 40, "b" * 40
+    diff = "diff --git a/source.zig b/source.zig\n--- a/source.zig\n+++ b/source.zig\n@@ -1 +1 @@\n-before\n+after\n"
 
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -63,7 +64,7 @@ class MergeGate(unittest.TestCase):
         if path == "collaborators/dev/permission":
             return {"permission": self.permission}
         if path == f"compare/{self.base}...{self.head}" and diff:
-            return "diff --git a/source.zig b/source.zig\n"
+            return self.diff
         if path == f"statuses/{self.head}" and body:
             self.states.append((body["context"], body["state"]))
             return {}
@@ -129,6 +130,8 @@ class MergeGate(unittest.TestCase):
             with self.assertRaises(gate.pr.PilotError):
                 gate.prepare(*self.target)
         with patch.dict(self.pr, changed_files=2), self.assertRaises(gate.pr.PilotError):
+            gate.prepare(*self.target)
+        with patch.object(self, "diff", self.diff.removesuffix("+after\n")), self.assertRaises(gate.pr.PilotError):
             gate.prepare(*self.target)
         gate.fail(*self.target)
         self.assertFalse((self.root / "pr-input").exists())
@@ -233,14 +236,35 @@ class MergeGate(unittest.TestCase):
         text = (self.root / "pr-input/request.txt").read_text()
         for path in ("issues/55", "issues/3/comments?", "pulls/3/reviews?"):
             self.assertIn(path, text.split('{"unavailable":')[1].splitlines()[0])
-        self.assertTrue(text.endswith("diff --git a/source.zig b/source.zig\n"))
+        self.assertTrue(text.endswith(self.diff))
+
+    def test_optional_requests_share_one_wall_clock_budget(self):
+        self.pr.update(body="Fixes #1, fixes #2, fixes #3, fixes #4", comments=25)
+        elapsed = 0
+        def delayed(path, **kwargs):
+            nonlocal elapsed
+            if path.startswith("issues/"):
+                elapsed += 8
+                raise TimeoutError()
+            return self.github(path, **kwargs)
+        with patch.object(gate.time, "monotonic", side_effect=lambda: elapsed), \
+                patch.object(gate.signal, "setitimer") as timer, patch.object(gate.pr, "api", side_effect=delayed):
+            gate.prepare(*self.target)
+        self.assertEqual([call.args[1] for call in timer.call_args_list if call.args[1]], [20, 12, 4])
+        self.assertTrue((self.root / "pr-input/request.txt").read_text().endswith(self.diff))
+
+    def test_long_formal_review_keeps_blocker_substance(self):
+        finding = "**[HIGH]** `" + "path/" * 100 + "foo.zig:4` - Dangling pointer\n**Confidence:** High\n**Description:** Freed twice."
+        excerpt = gate.review_excerpt("Summary. " * 1000 + "\n" + finding, 240)
+        for part in ("HIGH:", "foo.zig:4", "Dangling pointer", "Freed twice."):
+            self.assertIn(part, excerpt)
 
     def test_optional_context_cannot_displace_pinned_diff(self):
         self.pr.update(body="界" * 6000, comments=1)
         self.comments.append({"user": {"login": "github-actions[bot]"},
                               "body": gate.review_header(self.number, self.base, self.head) + "summary" * 900
                               + "\n**High (1)**\n<pre>• source.zig:10: stale handle used after free</pre>"})
-        diff = "diff --git a/t b/t\n" + ("d" * (gate.pr.INPUT_LIMIT - len(gate.PROMPT.read_bytes()) - 1000))
+        diff = self.diff.rstrip("\n") + ("d" * (gate.pr.INPUT_LIMIT - len(gate.PROMPT.read_bytes()) - 1100)) + "\n"
         with patch.object(gate.pr, "api", side_effect=lambda path, **kw: diff if kw.get("diff") else self.github(path, **kw)):
             gate.prepare(*self.target)
         text = (self.root / "pr-input/request.txt").read_text()
@@ -269,6 +293,9 @@ class MergeGate(unittest.TestCase):
                     self.assertTrue(request.read_text().endswith(diff))
                     self.assertLessEqual(request.stat().st_size, gate.pr.INPUT_LIMIT)
                     self.assertEqual(request.read_text().startswith(gate.COMPACT_PROMPT), size > 89 * 1024)
+                    if size > 89 * 1024:
+                        self.assertIn("max 12 verified fix notes each", request.read_text())
+                        self.assertIn("locations <=384 UTF-8 bytes after HTML escaping", request.read_text())
                 else:
                     with self.assertRaisesRegex(gate.pr.PilotError, "complete diff exceed"):
                         gate.prepare(*self.target)
@@ -352,7 +379,7 @@ class MergeGate(unittest.TestCase):
         text = (self.root / "pr-input/request.txt").read_text()
         for evidence in (marker, "Previous formal review", "Linked issue", '"automated-test"'):
             self.assertIn(evidence, text)
-        self.assertTrue(text.endswith("diff --git a/source.zig b/source.zig\n"))
+        self.assertTrue(text.endswith(self.diff))
 
     def test_large_report_preserves_all_findings_and_verdict(self):
         item = {**self.finding, "impact": "`" * 1000, "description": "&" * 1000}
