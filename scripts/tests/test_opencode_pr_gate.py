@@ -29,10 +29,17 @@ class MergeGate(unittest.TestCase):
             "base": {"sha": self.base, "ref": "dev", "repo": {"full_name": gate.pr.REPO}},
             "changed_files": 1,
         }
+        self.finding = {"location": "src/example.zig:10", "title": "Example", "confidence": "High",
+                        "description": "<pre>@name", "impact": "Wrong result", "suggested_fix": "Use the checked value"}
         self.decision = {
             "reviewed_sha": self.head, "reviewed_base": self.base,
             "overall_confidence_score": 80, "recommendation": "MERGE",
-            "critical": [], "high": [], "medium": [], "low": ["<pre>@name"],
+            "critical": [], "high": [], "medium": [], "low": [self.finding],
+            "summary": "Review summary", "verdict_reason": "Ready based on the supplied changes.",
+            "solid": {k: {"score": 8, "notes": "Clear responsibility"} for k in gate.PRINCIPLES},
+            "confidence_breakdown": dict(code_quality=85, completeness=80, risk_level=80, test_coverage=70),
+            "fixed": {k: [] for k in gate.SEVERITIES}, "no_security_concerns": True,
+            "tests_present_and_passing": False,
         }
         self.response = self.root / "pr-output/response.txt"
         self.response.parent.mkdir()
@@ -45,6 +52,10 @@ class MergeGate(unittest.TestCase):
     def github(self, path, *, diff=False, body=None, method=None):
         if path == "pulls/3":
             return self.pr
+        if path == "pulls/3/reviews?per_page=100":
+            return [{"user": {"login": "opencode-agent[bot]"}, "body": "Previous formal review"}]
+        if path == "issues/55":
+            return {"title": "Linked issue", "body": "Requested behavior"}
         if path == "collaborators/dev/permission":
             return {"permission": self.permission}
         if path == f"compare/{self.base}...{self.head}" and diff:
@@ -88,6 +99,20 @@ class MergeGate(unittest.TestCase):
         self.assertFalse(self.states)
         self.assertFalse(self.comments)
 
+    def test_review_prompt_receives_previous_findings_and_linked_issue(self):
+        self.pr.update(body="Fixes #55", comments=1, labels=[{"name": "automated-test"}])
+        self.comments.append({"user": {"login": "github-actions[bot]"},
+                              "body": f"<!-- zigcraft-pr-gate:3:{self.base}:{self.head} -->\nPrevious finding"})
+        gate.prepare(*self.target)
+        prompt = (self.root / "pr-input/request.txt").read_text()
+        for text in ("Previous finding", "Previous formal review", "Requested behavior", "automated-test",
+                     "**PR to review:** #3", "📊 SOLID Principles Score"):
+            self.assertIn(text, prompt)
+        self.decision["fixed"]["high"] = ["Released the previous allocation"]
+        passed, report = gate.verdict(json.dumps(self.decision), self.base, self.head, self.number)
+        self.assertTrue(passed)
+        self.assertIn("[FIXED]", report)
+
     def test_stale_base_and_incomplete_diff_cannot_prepare_a_request(self):
         with patch.dict(self.pr["base"], sha="c" * 40):
             gate.start(*self.target)
@@ -101,7 +126,7 @@ class MergeGate(unittest.TestCase):
 
     def test_every_blocking_severity_threshold_and_verdict_is_independent(self):
         for field, value in [
-            ("critical", ["bug"]), ("high", ["bug"]), ("medium", ["bug"]),
+            ("critical", [self.finding]), ("high", [self.finding]), ("medium", [self.finding]),
             ("overall_confidence_score", 79), ("recommendation", "MERGE WITH FIXES"),
             ("recommendation", "DO NOT MERGE"),
         ]:
@@ -119,8 +144,15 @@ class MergeGate(unittest.TestCase):
         self.assertEqual(self.states[-1], ("ai-merge-gate", "success"))
         self.assertEqual(len(self.comments), 2)
         self.assertNotIn("<pre>", self.comments[-1]["body"])
-        self.assertIn("<ul><li>&lt;pre&gt;@", self.comments[-1]["body"])
-        self.response.write_text(json.dumps({**self.decision, "high": ["bug"]}))
+        body = self.comments[-1]["body"]
+        self.assertIn("&lt;pre&gt;@", body)
+        for section in ["📋 Summary", "📌 Review Metadata", *gate.HEADINGS, "📊 SOLID Principles Score",
+                        "🎯 Final Assessment", "Confidence Breakdown", "Merge Readiness", "Machine Readable Verdict"]:
+            self.assertIn(section, body)
+        self.assertIn("- [ ] Tests present and passing", body)
+        machine = json.loads(body.split("```json\n")[1].split("\n```")[0])
+        self.assertEqual(machine["recommendation"], "MERGE")
+        self.response.write_text(json.dumps({**self.decision, "high": [{**self.finding, "title": "bug"}]}))
         gate.publish(*self.target)
         self.assertEqual(self.states[-1], ("ai-merge-gate", "failure"))
         self.assertEqual(len(self.comments), 2)

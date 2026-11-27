@@ -282,6 +282,9 @@ def request_text(target):
                       'Files are selected excerpts at a revision, NOT a diff. Only revision_commit '
                       'identifies what that commit changed. A cross-reference is not proof of completion. '
                       'For status questions distinguish verified work from unverified acceptance criteria. '
+                      'A run conclusion is not job or artifact evidence: jobs can be skipped, and a run head SHA '
+                      'does not prove what was checked out. Without specific job or artifact evidence, report '
+                      'only the observed run status, not verification of a test, checkout or acceptance criterion. '
                       'A missing item in these bounded samples means unknown, not failed or never run. '
                       'Cite relevant PR numbers and workflow run IDs. Return only JSON: '
                       '{"comment":"answer"}. No tools. Do not claim you ran tests or changed files.')
