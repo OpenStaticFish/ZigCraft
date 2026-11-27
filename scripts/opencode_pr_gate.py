@@ -5,15 +5,14 @@ import json
 import os
 from pathlib import Path
 import re
-import signal
 import subprocess
 import sys
-import time
 from http.client import HTTPException
 
 # -I excludes the working directory. Only import from the pinned checkout.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import opencode_v2_pr as pr
+from opencode_deadline import lookup_budget
 
 
 SEVERITIES = ("critical", "high", "medium", "low")
@@ -119,33 +118,22 @@ def bot_bodies(records, login, prefix=""):
 def review_context(current):
     number = current["number"]
     unavailable = []
-    deadline = time.monotonic() + 20  # Leave the required calls and artifact upload outside this budget.
-
-    def expired(*_):
-        raise TimeoutError("Optional GitHub context deadline")
+    fetch = lookup_budget(20)
 
     def optional(path, expected, **kwargs):
-        remaining = deadline - time.monotonic()
-        if remaining > 0:
-            # A socket inactivity timeout alone cannot bound a slowly streaming response.
-            handler = signal.signal(signal.SIGALRM, expired)
-            try:
-                signal.setitimer(signal.ITIMER_REAL, remaining)
-                result = pr.api(path, **kwargs)
-                if isinstance(result, expected):
-                    return result
-            except (OSError, ValueError, HTTPException):
-                pass
-            finally:
-                signal.setitimer(signal.ITIMER_REAL, 0)
-                signal.signal(signal.SIGALRM, handler)
+        try:
+            result = fetch(pr.api, path, **kwargs)
+            if isinstance(result, expected):
+                return result
+        except (OSError, ValueError, HTTPException):
+            pass
         unavailable.append(path)
         return expected()
 
     body = text_field(current, "body")[:6000]
     # Only resolve local closing references, never a user-supplied URL.
     visible = re.sub(r"<!--.*?(?:-->|\Z)|^ {0,3}((`|~)\2{2,})[^\n]*\n.*?(?:^ {0,3}\1\2*[ \t]*$|\Z)"
-                     r"|(`+)[^\n]*?\3|^(?: {4}|\t)[^\n]*", " ", body, flags=re.M | re.S)
+                     r"|(`+)[^\n]*?\3|^(?: {0,3}>| {4}|\t)[^\n]*", " ", body, flags=re.M | re.S)
     refs = re.findall(r"\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+#([1-9][0-9]{0,9})\b", visible, re.I)
     issues = []
     for ref in list(dict.fromkeys(refs))[:4]:
@@ -177,7 +165,8 @@ def review_context(current):
                     legacy.append({"head": text_field(review, "commit_id") or None, "body": text})
     labels = current.get("labels")
     names = [text_field(label, "name") for label in labels] if isinstance(labels, list) else []
-    coverage = {"comment_search_complete": comment_search_complete, "formal_search_complete": formal_search_complete,
+    coverage = {"comment_search_complete": comment_search_complete, "formal_body_search_complete": formal_search_complete,
+                "inline_review_comments_included": False,
                 "older_gate_reviews_omitted": len(previous) > 2, "older_formal_reviews_omitted": len(legacy) > 2}
     return previous[:2], {"history_coverage": coverage, "unavailable": unavailable,
             "title": text_field(current, "title"), "description_excerpt": body,
@@ -203,16 +192,26 @@ def pack_history(entries, key, remaining, complete):
     return fields, remaining, status
 
 
+def pinned_diff(base, head):
+    # Commit-to-commit diff: no PR checkout, hooks, external diff or text conversion.
+    args = ["git", "-c", "credential.helper=!gh auth git-credential", "diff", "--no-ext-diff", "--no-textconv",
+            "--no-color", "--submodule=short", f"{base}...{head}", "--"]
+    with subprocess.Popen(args, stdout=subprocess.PIPE) as proc:
+        data = proc.stdout.read(pr.INPUT_LIMIT + 1)
+        if len(data) > pr.INPUT_LIMIT:
+            proc.kill()
+            raise pr.PilotError("Complete diff exceeds input limit")
+        if proc.wait():
+            raise pr.PilotError("Cannot diff pinned Git trees")
+    return data.decode("utf-8")
+
+
 def prepare(number, base, head):
     current = pr.api(f"pulls/{number}")
     if not pr.matches_target(current, number, base, head):
         raise pr.PilotError("PR changed before preparation")
-    diff = pr.api(f"compare/{base}...{head}", diff=True)
-    # --numstat parses the complete patch (including old/new hunk counts)
-    # without applying it or requiring the PR's files in the trusted checkout.
-    parsed = subprocess.run(["git", "apply", "--numstat", "-z", "-"], input=diff.encode(), capture_output=True)
-    if (not diff.startswith("diff --git ") or "\0" in diff or parsed.returncode
-            or parsed.stdout.count(b"\0") != current["changed_files"]
+    diff = pinned_diff(base, head)
+    if (not diff.startswith("diff --git ") or "\0" in diff
             or 1 + diff.count("\ndiff --git ") != current["changed_files"]):
         raise pr.PilotError("Missing, incomplete or invalid PR diff")
     prompt = PROMPT.read_text(encoding="utf-8").replace("$PR_NUMBER", number).replace("$HEAD_SHA", head)
@@ -239,7 +238,7 @@ def prepare(number, base, head):
             coverage["comment_search_complete"] and not coverage["older_gate_reviews_omitted"])
         formal, remaining, formal_status = pack_history(
             metadata.pop("formal_review_excerpts"), "previous_formal_review", remaining,
-            coverage["formal_search_complete"] and not coverage["older_formal_reviews_omitted"])
+            coverage["formal_body_search_complete"] and not coverage["older_formal_reviews_omitted"])
         context.extend(formal)
         for key, value in metadata.items():
             field = json.dumps({key: value}, ensure_ascii=False) + "\n"

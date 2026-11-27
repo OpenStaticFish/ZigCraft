@@ -15,6 +15,7 @@ from urllib.parse import quote, urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from opencode_slash_patch import allowed_path, apply_patch, publish_pr
+from opencode_deadline import lookup_budget
 from opencode_prose import paragraphs
 
 
@@ -233,10 +234,11 @@ def linked_prs(timeline):
 def github_evidence(target, workflows):
     sha = target["head"]
     unavailable = []
+    fetch = lookup_budget(15)
 
     def lookup(field, path, parse):
         try:
-            payload = repo(path, optional=True)
+            payload = fetch(repo, path, optional=True)
         except (ValueError, OSError, HTTPException):
             payload = None
         if payload is not None:

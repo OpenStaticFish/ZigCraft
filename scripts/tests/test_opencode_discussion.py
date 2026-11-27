@@ -182,6 +182,12 @@ class DiscussionFixture(unittest.TestCase):
         self.assertEqual(evidence["unavailable"], ["workflow_runs_at_revision_sample"])
         self.assertEqual(evidence["revision_commit"]["subject"], "")
 
+    def test_expired_optional_budget_still_supplies_source(self):
+        with patch("opencode_deadline.time.monotonic", side_effect=[0, 1, 16, 17]):
+            self.prepare()
+        paths = [call.args[0] for call in discussion.repo.call_args_list if call.kwargs.get("optional")]
+        self.assertFalse(any(path.startswith(("actions/runs?", "issues/1/timeline?")) for path in paths))
+
     def test_markup_expansion_stays_within_comment_limit(self):
         self.prepare()
         self.response({"comment": "&" * 16000})

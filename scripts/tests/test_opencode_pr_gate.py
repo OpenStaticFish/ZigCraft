@@ -1,5 +1,6 @@
 import json
 import os
+from contextlib import chdir
 from pathlib import Path
 import subprocess
 import sys
@@ -13,6 +14,26 @@ sys.path.insert(0, str(ROOT / ".github/actions/opencode-v2"))
 import adapter
 import opencode_pr_gate as gate
 from test_opencode_prose import render_gfm
+
+
+class PinnedTrees(unittest.TestCase):
+    def test_worktree_missing_second_hunk_cannot_hide_committed_change(self):
+        with tempfile.TemporaryDirectory() as tmp, chdir(tmp):
+            def git(*args):
+                return subprocess.check_output(["git", "-c", "user.name=Fixture", "-c", "user.email=t@example.org", *args])
+
+            git("init", "-q")
+            source = Path("file")
+            middle = "unchanged\n" * 20
+            source.write_text("old\n" + middle + "old\n")
+            git("add", "file")
+            git("commit", "-qm", "base")
+            source.write_text("first\n" + middle + "second\n")
+            git("commit", "-qam", "head")
+            source.write_text("first\n" + middle + "old\n")
+            diff = gate.pinned_diff("HEAD^", "HEAD")
+            self.assertEqual(diff.count("\n@@ "), 2)
+            self.assertIn("+second\n", diff)
 
 
 class MergeGate(unittest.TestCase):
@@ -51,6 +72,7 @@ class MergeGate(unittest.TestCase):
         self.comments = []
         self.states = []
         self.permission = "write"
+        self.enterContext(patch.object(gate, "pinned_diff", return_value=self.diff))
         self.enterContext(patch.object(gate.pr, "api", side_effect=self.github))
 
     def github(self, path, *, diff=False, body=None, method=None, pagination=None):
@@ -58,13 +80,13 @@ class MergeGate(unittest.TestCase):
             return self.pr
         if path == "pulls/3/reviews?per_page=100":
             pagination["last"] = 1
-            return [{"id": 9, "user": {"login": "opencode-agent[bot]"}, "body": "Previous formal review"}]
+            return [None, {}, {"id": 9, "user": {"login": "opencode-agent[bot]"}, "body": "Previous formal review"}]
         if path == "issues/55":
             return {"title": "Linked issue", "body": "Requested behavior"}
+        if path == "issues/56":
+            return {"title": "Incomplete issue", "body": {}}
         if path == "collaborators/dev/permission":
             return {"permission": self.permission}
-        if path == f"compare/{self.base}...{self.head}" and diff:
-            return self.diff
         if path == f"statuses/{self.head}" and body:
             self.states.append((body["context"], body["state"]))
             return {}
@@ -105,15 +127,17 @@ class MergeGate(unittest.TestCase):
         self.assertFalse(self.comments)
 
     def test_review_prompt_receives_previous_findings_and_linked_issue(self):
-        self.pr.update(body="<!-- Fixes #1 -->\n```md\nCloses #2\nResolves #3\n```\n`Fixes #4`\nFixes #55",
-                       comments=1, labels=[{"name": "automated-test"}])
+        self.pr.update(body="<!-- Fixes #1 -->\n```md\nCloses #2\nResolves #3\n```\n`Fixes #4`\n> Fixes #5\nFixes #55, closes #56",
+                       comments=5, labels=[None, {}, {"name": "automated-test"}])
         self.comments.append({"id": 17, "user": {"login": "github-actions[bot]"},
                               "body": f"<!-- zigcraft-pr-gate:3:{self.base}:{self.head} -->\nPrevious finding"})
+        self.comments.extend([None, {}, {"user": []}, {"body": 5, "user": {"login": "github-actions[bot]"}}])
         gate.prepare(*self.target)
         prompt = (self.root / "pr-input/request.txt").read_text()
-        for text in ("Previous finding", "Previous formal review", "Requested behavior", "automated-test",
+        for text in ("Previous finding", "Previous formal review", "Requested behavior", "Incomplete issue", "automated-test",
                      "**PR to review:** #3", "Single Responsibility", "Return one JSON object"):
             self.assertIn(text, prompt)
+        self.assertTrue(prompt.endswith(self.diff))
         self.decision["fixed"]["high"] = ["source.zig:2 releases the previous allocation."]
         passed, report = gate.verdict(json.dumps(self.decision), self.base, self.head, self.number)
         self.assertTrue(passed)
@@ -130,8 +154,6 @@ class MergeGate(unittest.TestCase):
             with self.assertRaises(gate.pr.PilotError):
                 gate.prepare(*self.target)
         with patch.dict(self.pr, changed_files=2), self.assertRaises(gate.pr.PilotError):
-            gate.prepare(*self.target)
-        with patch.object(self, "diff", self.diff.removesuffix("+after\n")), self.assertRaises(gate.pr.PilotError):
             gate.prepare(*self.target)
         gate.fail(*self.target)
         self.assertFalse((self.root / "pr-input").exists())
@@ -182,7 +204,8 @@ class MergeGate(unittest.TestCase):
                 self.assertEqual(previous, [gate_entry["body"]])
                 self.assertEqual(context["formal_review_excerpts"][0]["body"], formal_entry["body"])
                 self.assertEqual(context["history_coverage"]["comment_search_complete"], complete)
-                self.assertEqual(context["history_coverage"]["formal_search_complete"], complete)
+                self.assertEqual(context["history_coverage"]["formal_body_search_complete"], complete)
+                self.assertFalse(context["history_coverage"]["inline_review_comments_included"])
 
     def test_history_keeps_blocker_after_long_summary_and_fixed_notes(self):
         self.decision["summary"] = "&" * 1000
@@ -247,8 +270,8 @@ class MergeGate(unittest.TestCase):
                 elapsed += 8
                 raise TimeoutError()
             return self.github(path, **kwargs)
-        with patch.object(gate.time, "monotonic", side_effect=lambda: elapsed), \
-                patch.object(gate.signal, "setitimer") as timer, patch.object(gate.pr, "api", side_effect=delayed):
+        with patch("opencode_deadline.time.monotonic", side_effect=lambda: elapsed), \
+                patch("opencode_deadline.signal.setitimer") as timer, patch.object(gate.pr, "api", side_effect=delayed):
             gate.prepare(*self.target)
         self.assertEqual([call.args[1] for call in timer.call_args_list if call.args[1]], [20, 12, 4])
         self.assertTrue((self.root / "pr-input/request.txt").read_text().endswith(self.diff))
@@ -265,7 +288,7 @@ class MergeGate(unittest.TestCase):
                               "body": gate.review_header(self.number, self.base, self.head) + "summary" * 900
                               + "\n**High (1)**\n<pre>• source.zig:10: stale handle used after free</pre>"})
         diff = self.diff.rstrip("\n") + ("d" * (gate.pr.INPUT_LIMIT - len(gate.PROMPT.read_bytes()) - 1100)) + "\n"
-        with patch.object(gate.pr, "api", side_effect=lambda path, **kw: diff if kw.get("diff") else self.github(path, **kw)):
+        with patch.object(gate, "pinned_diff", return_value=diff):
             gate.prepare(*self.target)
         text = (self.root / "pr-input/request.txt").read_text()
         self.assertTrue(text.endswith(diff))
@@ -286,7 +309,7 @@ class MergeGate(unittest.TestCase):
         for size in (89 * 1024, 94 * 1024, old_limit, gate.pr.INPUT_LIMIT):
             diff = header + "x" * (size - len(header) - 1) + "\n"
             with tempfile.TemporaryDirectory() as runner, patch.dict(os.environ, RUNNER_TEMP=runner), \
-                    patch.object(gate.pr, "api", side_effect=lambda path, **kw: diff if kw.get("diff") else self.github(path, **kw)):
+                    patch.object(gate, "pinned_diff", return_value=diff):
                 request = Path(runner) / "pr-input/request.txt"
                 if size <= old_limit:
                     gate.prepare(*self.target)
@@ -359,27 +382,6 @@ class MergeGate(unittest.TestCase):
         for retired in ("evaluate_ai_merge_gate.sh", "publish_ai_merge_gate.sh"):
             self.assertFalse((ROOT / "scripts" / retired).exists())
             self.assertNotIn(retired, listing)
-
-    def test_malformed_optional_records_keep_valid_evidence_and_diff(self):
-        self.pr.update(body="Fixes #55", comments=1, labels=[None, {}, {"name": "automated-test"}])
-        malformed = [None, {}, {"user": []}, {"body": 5, "user": {"login": "github-actions[bot]"}}]
-        marker = "<!-- zigcraft-pr-gate:3:previous -->"
-        self.comments.extend([{"id": 17, "body": marker, "user": {"login": "github-actions[bot]"}}, *malformed])
-
-        def mixed_records(path, **kwargs):
-            result = self.github(path, **kwargs)
-            if path == "issues/55":
-                return {"title": "Linked issue", "body": {}}
-            if path.startswith("pulls/3/reviews?"):
-                return malformed + result
-            return result
-
-        with patch.object(gate.pr, "api", side_effect=mixed_records):
-            gate.prepare(*self.target)
-        text = (self.root / "pr-input/request.txt").read_text()
-        for evidence in (marker, "Previous formal review", "Linked issue", '"automated-test"'):
-            self.assertIn(evidence, text)
-        self.assertTrue(text.endswith(self.diff))
 
     def test_large_report_preserves_all_findings_and_verdict(self):
         item = {**self.finding, "impact": "`" * 1000, "description": "&" * 1000}
