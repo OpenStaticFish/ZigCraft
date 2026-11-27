@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -9,46 +10,80 @@ from opencode_discussion_markdown import reply_body
 
 
 class ReplyBodyTests(unittest.TestCase):
-    def test_mentions_do_not_change_zig_code_or_links(self):
+    def test_mentions_do_not_change_alerts_zig_code_or_links(self):
         source = (
-            "@octocat &#64;octocat @org/team and `@as`.\n\n"
-            '```zig\nconst std = @import("std");\n\nconst n = @as(u8, 1);\n```\n'
+            "@octocat &#64;octocat @org/team and `@octocat`.\n\n"
+            "> [!NOTE]\n> This is an alert.\n\n"
+            "<https://example.com/@project>\n\n"
+            '```zig\nconst std = @import("std");\n```\n'
         )
-        preview = (
-            '<p><a class="user-mention notranslate" href="https://github.com/octocat">'
-            '@octocat</a> &#64;octocat @org/team and <code>@as</code>. '
-            '<a href="https://example.com/@project">https://example.com/@project</a></p>\n'
-            '<div><pre><span>@import</span>("std");\n\n'
-            'const n = <span>@as</span>(u8, 1);</pre></div>\n'
+        alert_and_code = (
+            '<div class="markdown-alert markdown-alert-note"><p>This is an alert.</p></div>'
+            '<p><a href="https://example.com/@project">https://example.com/@project</a></p>'
+            '<pre><span>@import</span>("std");</pre>'
         )
-        body = reply_body(source, preview)
-        self.assertIn("@\u200boctocat @\u200boctocat @\u200borg/team", body)
-        self.assertNotIn("user-mention", body)
-        self.assertIn("<code>@as</code>", body)
-        self.assertIn('<span>@import</span>("std");&#10;&#10;const n = <span>@as</span>(u8, 1);', body)
-        self.assertIn('<a href="https://example.com/@project">https://example.com/@project</a>', body)
-        self.assertEqual(len(body.splitlines()), 1)
+        candidate = source.replace("@octocat &#64;octocat @org/team", "@\u200boctocat &#64;\u200boctocat @\u200borg/team")
+
+        def render(text):
+            if text == source:
+                return ('<p><a class="user-mention" href="https://github.com/octocat">@octocat</a> '
+                        '&#64;octocat @org/team and <code>@octocat</code>.</p>' + alert_and_code)
+            if text == candidate:
+                return '<p>@\u200boctocat @\u200boctocat @\u200borg/team and <code>@octocat</code>.</p>' + alert_and_code
+
+            tags = re.findall(r"Zc[0-9a-f]+Q[0-9]+Z", text)
+            self.assertEqual(len(tags), 6)
+            prose, entity, team, inline, link, fenced = tags
+            return (f'<p>@{prose}octocat @{entity}octocat @{team}org/team and <code>@{inline}octocat</code>.</p>'
+                    f'<a href="https://example.com/@{link}project">https://example.com/@{link}project</a>'
+                    f'<pre>@{fenced}import("std");</pre>')
+
+        self.assertEqual(reply_body(source, render), candidate)
 
     def test_reply_without_prose_mentions_preserves_source(self):
         source = '**Bold.** `@import("std")` and `actions/checkout@v6`.\n'
         preview = '<p><strong>Bold.</strong> <code>@import("std")</code> and <code>actions/checkout@v6</code>.</p>'
-        self.assertEqual(reply_body(source, preview), source)
+        self.assertEqual(reply_body(source, lambda _: preview), source)
 
     def test_autolink_without_mentions_preserves_source(self):
         url = "https://example.com/@project"
         source = f"<{url}>\n"
         preview = f'<p><a href="{url}">{url}</a></p>'
-        self.assertEqual(reply_body(source, preview), source)
+        self.assertEqual(reply_body(source, lambda _: preview), source)
+
+    def test_large_preview_does_not_expand_published_markdown(self):
+        code = "@as(u8, 1);\n" * 1300
+        source = f"@octocat\n\n```zig\n{code}```"
+        candidate = f"@\u200boctocat\n\n```zig\n{code}```"
+        highlighted = '<pre>' + '<span class="pl-c1">@as</span>(u8, 1);\n' * 2100 + '</pre>'
+        self.assertGreater(len(highlighted.encode()), 65_536)
+
+        def render(text):
+            if text == source:
+                return '<p>@octocat</p>' + highlighted
+            if text == candidate:
+                return '<p>@\u200boctocat</p>' + highlighted
+            return '<p>' + text.splitlines()[0] + '</p><pre>code omitted</pre>'
+
+        self.assertEqual(reply_body(source, render), candidate)
+
+    def test_unverified_edit_falls_back_to_literal_text(self):
+        source = "@octocat\n\n~~~zig\n@as(u8, 1);\n~~~"
+        body = reply_body(source, lambda _: "<p>@octocat</p>")
+        self.assertIn("Could not verify mention handling", body)
+        self.assertTrue(body.endswith(f"\n~~~~\n{source}\n~~~~\n"))
 
 
 class DiscussionPublisherTests(unittest.TestCase):
-    def publish(self, source, preview=None):
+    def test_failed_preview_posts_reply_in_an_inert_fence(self):
+        source = "@octocat and `@as(u8, 1)`."
         with tempfile.TemporaryDirectory() as directory:
             files = Path(directory)
             (files / "event").write_text('{"issue":{"number":1005}}')
             (files / "response").write_text(source)
-            if preview is not None:
-                (files / "preview").write_text(preview)
+            gh = files / "gh"
+            gh.write_text("#!/bin/sh\ncat >/dev/null\nprintf '<p>partial preview'\nexit 1\n")
+            gh.chmod(0o700)
             result = subprocess.run(
                 ["bash", "-euo", "pipefail", "-c", """
                     source scripts/opencode_discussion.sh
@@ -56,13 +91,6 @@ class DiscussionPublisherTests(unittest.TestCase):
                     gh() {
                         case "$2" in
                             --paginate) echo '[]' ;;
-                            markdown)
-                                if [[ -f "$FIXTURE/preview" ]]; then
-                                    cat "$FIXTURE/preview"
-                                else
-                                    printf '<p>partial preview'
-                                    return 1
-                                fi ;;
                             "$repo/issues/1005/comments") cat "${4#body=@}" ;;
                             *) return 1 ;;
                         esac
@@ -77,28 +105,14 @@ class DiscussionPublisherTests(unittest.TestCase):
                     "GITHUB_SHA": "a" * 40,
                     "TMPDIR": directory,
                     "FIXTURE": directory,
+                    "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}",
                 },
                 capture_output=True,
                 text=True,
                 check=True,
             )
-        return result.stdout
 
-    def test_oversized_preview_posts_entire_reply_in_an_inert_fence(self):
-        source = '@octocat &#64;octocat\n\n~~~zig\n' + '@as(u8, 1);\n' * 1300 + '~~~'
-        preview = '<p>@octocat &#64;octocat</p><pre>' + '<span class="pl-c1">@as</span>' * 2300 + '</pre>'
-        body = self.publish(source, preview)
-
-        self.assertLess(len(source.encode()), 16_000)
-        self.assertGreater(len(preview.encode()), 65_536)
-        self.assertLess(len(body.encode()), 65_536)
-        self.assertTrue(body.startswith("<!-- opencode-v2-triage:10 -->\n\n"))
-        self.assertTrue(body.endswith(f"\n~~~~\n{source}\n~~~~\n"))
-
-    def test_failed_preview_posts_reply_in_an_inert_fence(self):
-        source = "@octocat and `@as(u8, 1)`."
-        body = self.publish(source)
-
+        body = result.stdout
         self.assertTrue(body.startswith("<!-- opencode-v2-triage:10 -->\n\n"))
         self.assertIn("GitHub's Markdown preview was unavailable", body)
         self.assertNotIn("partial preview", body)
