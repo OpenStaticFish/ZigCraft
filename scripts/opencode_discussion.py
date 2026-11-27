@@ -239,15 +239,16 @@ def linked_prs(timeline):
     return list(linked.values()), partial, len(timeline)
 
 
+def optional_lookup(path, parse, within_budget):
+    try:
+        return within_budget(lambda: parse(repo(path, optional=True)))
+    except (ValueError, OSError, HTTPException, KeyError, TypeError, AttributeError):
+        return None
+
+
 def github_evidence(target, workflows):
     sha = target["head"]
     within_budget = lookup_budget(15)
-
-    def lookup(path, parse):
-        try:
-            return within_budget(lambda: parse(repo(path, optional=True)))
-        except (ValueError, OSError, HTTPException, KeyError, TypeError, AttributeError):
-            return None
 
     def sample(data, status="sampled"):
         return {"status": "unavailable"} if data is None else {"status": status, "data": data}
@@ -258,13 +259,13 @@ def github_evidence(target, workflows):
         return {"sha": sha, "subject": excerpt(commit["commit"]["message"].partition("\n")[0], 512),
                 "changed_paths_first_30": [excerpt(f["filename"], 256) for f in records(commit["files"])[:30]]}
 
-    revision = lookup(f"commits/{sha}?per_page=30", revision_summary)
+    revision = optional_lookup(f"commits/{sha}?per_page=30", revision_summary, within_budget)
     timeline = f"issues/{target['number']}/timeline?per_page=100"
     linked = {}
     partial = False
     timeline_available = False
     for url in (timeline, timeline + "&page=2"):
-        page = lookup(url, linked_prs)
+        page = optional_lookup(url, linked_prs, within_budget)
         if page is None:
             partial = True
             break
@@ -276,7 +277,7 @@ def github_evidence(target, workflows):
             break
     else:
         partial = True  # The two-page budget may exclude later cross-references.
-    runs = lookup(f"actions/runs?head_sha={sha}&per_page=30", run_summaries)
+    runs = optional_lookup(f"actions/runs?head_sha={sha}&per_page=30", run_summaries, within_budget)
     by_origin = {"upstream": [], "fork": [], "unknown": []}
     for run in runs or []:
         if run["revision"] == sha:
@@ -294,12 +295,13 @@ def github_evidence(target, workflows):
         url = f"actions/workflows/{name}/runs?branch=dev&status=completed&per_page=3"
         eligible = {}
         for page in (url, url + "&page=2", url + "&page=3"):
-            history = lookup(page, run_summaries)
+            history = optional_lookup(page, run_summaries, within_budget)
             if history is None:
                 (unavailable_paths if page == url else partial_paths).append(path)
                 break
             for run in history:
                 if ((run["head_repository"] or "").casefold() == REPO.casefold() and run["head_branch"] == "dev"
+                        and run["event"] in {"push", "workflow_dispatch", "repository_dispatch", "schedule"}
                         and run["status"] == "completed" and run["revision"] != sha):
                     eligible.setdefault(run["id"], {**run, "queried_path": path})
             if len(eligible) >= 3 or len(history) < 3:
@@ -318,7 +320,8 @@ def github_evidence(target, workflows):
                                               "partial" if partial or len(linked) > 8 else "sampled"),
         "workflow_runs_at_revision_sample": sample(by_origin if runs is not None else None),
         "recent_completed_dev_runs_at_other_revisions": {
-            **sample(previous_runs, history_status), "unavailable_paths": unavailable_paths, "partial_paths": partial_paths},
+            **sample(None if history_status == "unavailable" else previous_runs, history_status),
+            "unavailable_paths": unavailable_paths, "partial_paths": partial_paths},
     }
 
 
@@ -347,7 +350,7 @@ def pack_samples(samples, named_workflows, limit):
     history = "recent_completed_dev_runs_at_other_revisions"
     groups = samples[at_revision].get("data", {})
     runs = [(at_revision, group, row) for group, rows in groups.items() for row in rows]
-    runs.extend((history, None, row) for row in samples[history]["data"])
+    runs.extend((history, None, row) for row in samples[history].get("data", []))
     totals = {key: sum(entry[0] == key for entry in runs) for key in (at_revision, history)}
     retained = {at_revision: 0, history: 0}
 
@@ -401,6 +404,7 @@ def request_text(target):
                       'A missing item in these bounded samples means unknown, not failed or never run. '
                       'Fork and unknown-origin runs are not upstream results, even at the same SHA. '
                       'Upstream runs may be on another branch; check head_branch before attributing results to dev. '
+                      'Direct dev history samples only pushes, schedules and dispatches, never PR events. '
                       'If github is absent, all GitHub evidence was omitted for size. '
                       'Cite relevant PR numbers and workflow run IDs. Return only JSON: '
                       '{"comment":"answer"}. No tools. Do not claim you ran tests or changed files.')

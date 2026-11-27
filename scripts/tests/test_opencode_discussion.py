@@ -131,7 +131,9 @@ class DiscussionFixture(unittest.TestCase):
             self.reads[url + "&page=2"] = {"workflow_runs": [
                 dict(upstream, id=999, head_repository={"full_name": "fork/ZigCraft"}),
                 dict(upstream, id=998, head_branch="feature"), upstream]}
-            self.reads[url + "&page=3"] = {"workflow_runs": [] if path == workflow else [run] * 3}
+            pr_from_dev = dict(upstream, id=777, event="pull_request",
+                               pull_requests=[{"head": {"ref": "dev"}, "base": {"ref": "release"}}])
+            self.reads[url + "&page=3"] = {"workflow_runs": [pr_from_dev] if path == workflow else [run] * 3}
         data = self.prepare()
         evidence = data["github"]
         self.assertCountEqual(list(data["files"])[:2], [workflow, other])
@@ -241,12 +243,15 @@ class DiscussionFixture(unittest.TestCase):
 
     def stalled_parser(self):
         handler = signal.getsignal(signal.SIGALRM)
-        with patch.object(discussion, "lookup_budget", side_effect=lambda _: lookup_budget(0.1)), \
-                patch.object(discussion, "run_summaries", side_effect=lambda _: signal.pause()) as parser:
-            data = self.prepare()
-        parser.assert_called_once()
-        self.assertEqual(data["github"]["workflow_runs_at_revision_sample"], {"status": "unavailable"})
-        self.assertEqual(data["files"][self.file], self.original.decode())
+        entered = []
+        def parse(payload):
+            entered.append(payload)
+            signal.pause()
+
+        with patch("opencode_deadline.time.monotonic", return_value=0):
+            result = discussion.optional_lookup("issues/1", parse, lookup_budget(0.1))
+        self.assertIsNone(result)
+        self.assertEqual(entered, [self.issue])
         self.assertEqual(signal.getsignal(signal.SIGALRM), handler)
         self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0, 0))
 
@@ -266,11 +271,17 @@ class DiscussionFixture(unittest.TestCase):
                  "state": "open", "pull_request": {}}
         self.reads["issues/1/timeline?per_page=100"] = [{"event": "cross-referenced", "source": {"issue": issue}}]
         sha = "a" * 40
+        path = ".github/workflows/test.yml"
+        self.comment["body"] = "/oc check test.yml"
+        tree = self.reads[f"git/trees/{sha}?recursive=1"]["tree"]
+        tree.append(dict(tree[0], path=path))
         self.reads[f"actions/runs?head_sha={sha}&per_page=30"]["workflow_runs"] = [
             dict(id=1, workflow_id=2, path=".github/workflows/test.yml", head_sha=sha, name="Test",
                  event="push", status="completed", conclusion="success", head_repository={"full_name": discussion.REPO},
                  head_branch="dev")]
         data = self.prepare()
+        self.assertEqual(data["github"]["recent_completed_dev_runs_at_other_revisions"],
+                         {"status": "unavailable", "unavailable_paths": [path], "partial_paths": []})
         target = discussion.target_for_event()
         prefix = (self.temp / "discussion-request/request.txt").read_text().split("not policy:\n")[0] + "not policy:\n"
         def check_at_limit(expected):
