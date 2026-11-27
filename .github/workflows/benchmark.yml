@@ -1,17 +1,11 @@
 name: Benchmark
 
 on:
-  pull_request:
-    branches: [dev]
-    types: [opened, synchronize, reopened, labeled]
-  push:
-    branches: [dev]
-  schedule:
-    - cron: "17 3 * * 3"
   workflow_dispatch:
     inputs:
       duration:
-        description: Benchmark duration per preset (seconds)
+        description: Benchmark duration per preset and scenario (seconds)
+        type: string
         required: false
         default: "60"
 
@@ -25,79 +19,35 @@ env:
   GIT_CONFIG_VALUE_0: main
   BENCHER_API_TOKEN: ${{ secrets.BENCHER_API_TOKEN }}
   BENCHER_PROJECT: ${{ secrets.BENCHER_PROJECT }}
-  BENCHER_DASHBOARD_URL: ${{ vars.BENCHER_DASHBOARD_URL }}
 
 jobs:
   benchmark:
     permissions:
       contents: read
-      pull-requests: write
-      issues: write
-      statuses: write
     runs-on: blacksmith-2vcpu-ubuntu-2404
-    # Long scheduled/manual acceptance captures remain externally bounded.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Check benchmark trigger gate
-        id: gate
-        uses: actions/github-script@v9
-        with:
-          script: |
-            if (context.eventName !== 'pull_request') {
-              core.setOutput('run', 'true');
-              return;
-            }
-
-            const labels = context.payload.pull_request.labels.map((label) => label.name);
-            if (labels.includes('run-benchmark')) {
-              core.setOutput('run', 'true');
-              return;
-            }
-
-            const files = await github.paginate(github.rest.pulls.listFiles, {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.payload.pull_request.number,
-              per_page: 100,
-            });
-            const shouldRun = files.some((file) => {
-              const name = file.filename;
-              return name === 'build.zig' || name.startsWith('src/') || name.startsWith('modules/') || name.startsWith('assets/shaders/') || name.startsWith('scripts/') || name.startsWith('docs/benchmarks/') || name === '.github/workflows/benchmark.yml';
-            });
-            core.setOutput('run', shouldRun ? 'true' : 'false');
-
-      - name: Explain skipped benchmark
-        if: steps.gate.outputs.run != 'true'
-        run: |
-          printf 'Skipping benchmark: no benchmark-relevant paths changed and run-benchmark label is absent.\n'
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Setup devenv
-        if: steps.gate.outputs.run == 'true'
         uses: ./.github/actions/setup-devenv
 
       - name: Setup Zig cache
-        if: steps.gate.outputs.run == 'true'
         uses: ./.github/actions/setup-zig-cache
         with:
           cache-key-prefix: zig-ci-graphics
 
       - name: Start headless Wayland compositor
-        if: steps.gate.outputs.run == 'true'
         uses: ./.github/actions/start-weston
 
       - name: Setup Lavapipe Vulkan
-        if: steps.gate.outputs.run == 'true'
         uses: ./.github/actions/setup-lavapipe
 
       - name: Run benchmark suite
-        if: steps.gate.outputs.run == 'true'
-        id: run_benchmark
         uses: ./.github/actions/run-with-log
         with:
           name: Benchmark
-          timeout: ${{ github.event_name == 'schedule' && '55m' || github.event_name == 'workflow_dispatch' && '55m' || '20m' }}
+          timeout: 55m
           log-file: benchmark.log
           command: mkdir -p "$MESA_SHADER_CACHE_DIR" && devenv shell --profile graphics -- bash scripts/run_benchmark.sh --duration "$BENCHMARK_DURATION" --presets low,medium,high --scenarios stationary,traversal,rapid-turn,teleport-eviction --benchmark-world overworld --output-dir benchmark-results --per-preset-timeout 600
         env:
@@ -106,23 +56,19 @@ jobs:
           MESA_SHADER_CACHE_DIR: /tmp/mesa_shader_cache
           SDL_AUDIODRIVER: dummy
           ZIGCRAFT_SAFE_MODE: "1"
-          # PR/push runs are bounded canaries. Scheduled and manually requested
-          # captures are longer acceptance evidence, not synthetic fixtures.
-          BENCHMARK_DURATION: ${{ github.event_name == 'schedule' && '60' || github.event_name == 'workflow_dispatch' && github.event.inputs.duration || '5' }}
+          BENCHMARK_DURATION: ${{ inputs.duration || '60' }}
 
       - name: Validate benchmark results
-        if: steps.gate.outputs.run == 'true'
         run: |
           for result in benchmark-results/*/*.json; do
             bash scripts/validate_benchmark_artifact.sh --result "$result"
           done
 
       - name: Stop headless Wayland compositor
-        if: always() && steps.gate.outputs.run == 'true'
+        if: always()
         uses: ./.github/actions/stop-weston
 
       - name: Reject Vulkan validation errors in benchmark log
-        if: steps.gate.outputs.run == 'true'
         run: |
           if rg -n -i 'vuid-|validation.*(error|failed)|(error|failed).*validation' benchmark.log; then
             printf 'Vulkan validation errors were reported during the benchmark.\n' >&2
@@ -130,13 +76,13 @@ jobs:
           fi
 
       - name: Install Bencher CLI
-        if: steps.gate.outputs.run == 'true' && env.BENCHER_API_TOKEN != '' && env.BENCHER_PROJECT != ''
+        if: env.BENCHER_API_TOKEN != '' && env.BENCHER_PROJECT != ''
         uses: bencherdev/bencher@30a740a2e4246560b1a5fd424057d84aa2b188d6
 
       - name: Publish Bencher trends
-        if: steps.gate.outputs.run == 'true' && env.BENCHER_API_TOKEN != '' && env.BENCHER_PROJECT != ''
+        if: env.BENCHER_API_TOKEN != '' && env.BENCHER_PROJECT != ''
         env:
-          BENCHER_BRANCH: ${{ github.head_ref || github.ref_name }}
+          BENCHER_BRANCH: ${{ github.ref_name }}
         run: |
           for preset in low medium high; do for scenario in stationary traversal rapid-turn teleport-eviction; do
             bencher run \
@@ -149,20 +95,8 @@ jobs:
               "cat benchmark-results/${preset}/${scenario}.json"
           done; done
 
-      - name: Comment Bencher dashboard
-        if: steps.gate.outputs.run == 'true' && github.event_name == 'pull_request' && env.BENCHER_DASHBOARD_URL != ''
-        uses: actions/github-script@v9
-        with:
-          script: |
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
-              body: `Benchmark trends: ${process.env.BENCHER_DASHBOARD_URL}`,
-            });
-
       - name: Upload benchmark artifacts
-        if: always() && steps.gate.outputs.run == 'true'
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: benchmark-results
@@ -171,25 +105,3 @@ jobs:
             benchmark.log
             weston.log
           retention-days: 30
-
-      - name: Publish commit status
-        if: always() && steps.gate.outputs.run == 'true'
-        uses: actions/github-script@v9
-        env:
-          BENCHMARK_RUN_OUTCOME: ${{ steps.run_benchmark.outcome }}
-        with:
-          script: |
-            const runOutcome = process.env.BENCHMARK_RUN_OUTCOME;
-            const failed = runOutcome === 'failure';
-            const description = failed
-              ? 'Benchmark regression or runtime failure'
-              : 'Benchmark completed';
-
-            await github.rest.repos.createCommitStatus({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              sha: context.sha,
-              state: failed ? 'failure' : 'success',
-              context: 'performance/benchmark',
-              description,
-            });
