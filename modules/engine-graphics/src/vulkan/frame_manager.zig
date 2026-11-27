@@ -1,13 +1,10 @@
 const std = @import("std");
 const c = @import("c").c;
-const build_options = @import("engine_graphics_options");
 const log = @import("engine-core").log;
 const rhi = @import("engine-rhi").rhi;
 const VulkanDevice = @import("../vulkan_device.zig").VulkanDevice;
 const SwapchainPresenter = @import("swapchain_presenter.zig").SwapchainPresenter;
 const Utils = @import("utils.zig");
-
-pub const DRY_RUN_ACTIVE = if (@hasDecl(build_options, "skip_present")) build_options.skip_present else false;
 
 pub const FrameManager = struct {
     vulkan_device: *VulkanDevice,
@@ -23,7 +20,6 @@ pub const FrameManager = struct {
     current_frame: usize = 0,
     current_image_index: u32 = 0,
     frame_in_progress: bool = false,
-    dry_run: bool = false,
 
     pub fn init(vulkan_device: *VulkanDevice) !FrameManager {
         var self = FrameManager{
@@ -34,7 +30,6 @@ pub const FrameManager = struct {
             .image_available_semaphores = undefined,
             .render_finished_semaphores = undefined,
             .in_flight_fences = undefined,
-            .dry_run = DRY_RUN_ACTIVE,
         };
 
         var pool_info = std.mem.zeroes(c.VkCommandPoolCreateInfo);
@@ -102,12 +97,11 @@ pub const FrameManager = struct {
         const device = self.vulkan_device.vk_device;
 
         // Wait for previous frame before reusing the command buffer.
-        _ = c.vkWaitForFences(device, 1, &self.in_flight_fences[self.current_frame], c.VK_TRUE, std.math.maxInt(u64));
+        try Utils.checkVk(c.vkWaitForFences(device, 1, &self.in_flight_fences[self.current_frame], c.VK_TRUE, std.math.maxInt(u64)));
 
         // Acquire image
-        if (self.dry_run) {
-            // In dry-run/headless mode, we skip image acquisition to avoid WSI/driver crashes.
-            // We just use image 0 as our target.
+        if (swapchain.skip_present) {
+            // The offscreen target is a regular Vulkan image and needs no acquisition.
             self.current_image_index = 0;
         } else {
             const result = swapchain.acquireNextImage(self.image_available_semaphores[self.current_frame]);
@@ -116,6 +110,10 @@ pub const FrameManager = struct {
             } else |err| {
                 if (err == error.OutOfDate) {
                     swapchain.framebuffer_resized = true;
+                    return false;
+                } else if (err == error.Timeout) {
+                    // The frame slot is reusable even when no image arrived.
+                    // Let the caller switch uploads to the slot we just waited on.
                     return false;
                 } else if (err == error.ValidationFailed) {
                     log.log.err("beginFrame: validation failure while acquiring swapchain image", .{});
@@ -136,6 +134,7 @@ pub const FrameManager = struct {
         var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
         begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         try Utils.checkVk(c.vkBeginCommandBuffer(cb, &begin_info));
+        swapchain.recordInitialLayout(cb, self.current_image_index);
 
         self.frame_in_progress = true;
         return true;
@@ -157,10 +156,7 @@ pub const FrameManager = struct {
         }
 
         var wait_semaphores: [2]c.VkSemaphore = .{ null, null };
-        var wait_stages: [2]c.VkPipelineStageFlags = .{
-            c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-            c.VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        };
+        var wait_stages: [2]c.VkPipelineStageFlags = undefined;
         var wait_count: u32 = 0;
 
         var submit_info = std.mem.zeroes(c.VkSubmitInfo);
@@ -168,6 +164,7 @@ pub const FrameManager = struct {
 
         if (!swapchain.skip_present) {
             wait_semaphores[wait_count] = self.image_available_semaphores[self.current_frame];
+            wait_stages[wait_count] = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
             wait_count += 1;
         }
 
@@ -190,6 +187,7 @@ pub const FrameManager = struct {
 
         if (transfer_semaphore) |sem| {
             wait_semaphores[wait_count] = sem;
+            wait_stages[wait_count] = c.VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
             wait_count += 1;
         }
 
@@ -207,6 +205,7 @@ pub const FrameManager = struct {
         try self.vulkan_device.submitGuarded(submit_info, self.in_flight_fences[self.current_frame]);
 
         if (!swapchain.skip_present) {
+            swapchain.initialized_images[self.current_image_index] = true;
             swapchain.present(self.render_finished_semaphores[self.current_image_index], self.current_image_index) catch |err| {
                 if (err == error.OutOfDate) {
                     swapchain.framebuffer_resized = true;

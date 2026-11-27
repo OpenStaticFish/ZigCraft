@@ -49,6 +49,7 @@ fn renderConfigFromSettings(settings: *const Settings) RenderSystem.Config {
     return .{
         .shadow_resolution = settings.getShadowResolution(),
         .msaa_samples = settings.msaa_samples,
+        .skip_present = build_options.skip_present,
         .anisotropic_filtering = settings.anisotropic_filtering,
         .texture_pack = settings.texture_pack,
         .max_texture_resolution = settings.max_texture_resolution,

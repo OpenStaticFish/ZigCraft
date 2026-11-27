@@ -33,7 +33,6 @@ const MockShadowRuntime = struct {
 const MockFrames = struct {
     current_frame: u32 = 0,
     frame_in_progress: bool = false,
-    dry_run: bool = true,
     command_buffers: [3]c.VkCommandBuffer = .{ null, null, null },
 
     pub fn abortFrame(_: *MockFrames) void {
@@ -346,25 +345,12 @@ test "rhi_state_control.setMSAA respects device limits" {
 // Wait Idle Tests
 // ============================================================================
 
-test "rhi_state_control.waitIdle early exit in dry run mode" {
-    var ctx = MockSimpleContext{ .allocator = testing.allocator };
-    ctx.frames.dry_run = true;
-    ctx.vulkan_device.vk_device = @ptrFromInt(0xDEAD);
-
-    rhi_state_control.waitIdle(&ctx);
-
-    try testing.expect(ctx.frames.dry_run);
-    try testing.expectEqual(@as(u32, 0), ctx.vulkan_device.fault_count);
-}
-
 test "rhi_state_control.waitIdle early exit with null device" {
     var ctx = MockSimpleContext{ .allocator = testing.allocator };
-    ctx.frames.dry_run = false;
     ctx.vulkan_device.vk_device = null;
 
     rhi_state_control.waitIdle(&ctx);
 
-    try testing.expect(!ctx.frames.dry_run);
     try testing.expect(ctx.vulkan_device.vk_device == null);
 }
 

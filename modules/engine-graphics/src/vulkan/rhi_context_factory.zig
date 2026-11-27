@@ -1,11 +1,9 @@
 const std = @import("std");
 const c = @import("c").c;
 const rhi = @import("engine-rhi").rhi;
-const log = @import("engine-core").log;
 const RenderDevice = @import("engine-rhi").render_device.RenderDevice;
 const Mat4 = @import("engine-math").Mat4;
 const build_options = @import("engine_graphics_options");
-const runtime_env = @import("engine-core").runtime_env;
 const resource_manager_pkg = @import("resource_manager.zig");
 const VulkanBuffer = resource_manager_pkg.VulkanBuffer;
 const TextureResource = resource_manager_pkg.TextureResource;
@@ -21,6 +19,7 @@ pub fn createRHI(
     shadow_resolution: u32,
     msaa_samples: u8,
     anisotropic_filtering: u8,
+    skip_present: bool,
     vtable: *const rhi.RHI.VTable,
 ) !rhi.RHI {
     const ctx = try allocator.create(VulkanContext);
@@ -40,6 +39,7 @@ pub fn createRHI(
         .window = window,
         .allocator = allocator,
     };
+    ctx.swapchain.skip_present = skip_present;
     ctx.runtime.framebuffer_resized = false;
 
     ctx.runtime.draw_call_count = 0;
@@ -96,11 +96,6 @@ pub fn createRHI(
     ctx.options.textures_enabled = true;
     ctx.options.vsync_enabled = true;
     ctx.options.present_mode = c.VK_PRESENT_MODE_FIFO_KHR;
-
-    ctx.options.safe_mode = runtime_env.safeModeEnabled();
-    if (ctx.options.safe_mode) {
-        log.log.warn("ZIGCRAFT_SAFE_MODE enabled: throttling uploads and forcing GPU idle each frame", .{});
-    }
 
     ctx.frames.command_pool = null;
     ctx.frames.frame_command_pools = [_]c.VkCommandPool{null} ** rhi.MAX_FRAMES_IN_FLIGHT;

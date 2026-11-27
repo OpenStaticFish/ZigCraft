@@ -972,7 +972,6 @@ fn defineBuildOptions(b: *std.Build, optimize: std.builtin.OptimizeMode) BuildOp
     engine_graphics_options.addOption(bool, "debug_shadows", enable_debug_shadows);
     engine_graphics_options.addOption(bool, "chunk_debug_mode", chunk_debug_mode);
     engine_graphics_options.addOption([]const u8, "chunk_debug_enable", chunk_debug_enable);
-    engine_graphics_options.addOption(bool, "skip_present", skip_present);
     engine_graphics_options.addOption(bool, "imgui", enable_imgui);
     engine_graphics_options.addOption(bool, "rmlui", enable_rmlui);
 

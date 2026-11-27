@@ -5,7 +5,7 @@ const frame_orchestration = @import("rhi_frame_orchestration.zig");
 const log = @import("engine-core").log;
 
 pub fn waitIdle(ctx: anytype) void {
-    if (!ctx.frames.dry_run and ctx.vulkan_device.vk_device != null) {
+    if (ctx.vulkan_device.vk_device != null) {
         _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
     }
 }
@@ -138,6 +138,7 @@ pub fn setVSync(ctx: anytype, enabled: bool) void {
     if (ctx.options.vsync_enabled == enabled) return;
 
     ctx.options.vsync_enabled = enabled;
+    if (ctx.swapchain.skip_present) return;
 
     var mode_count: u32 = 0;
     _ = c.vkGetPhysicalDeviceSurfacePresentModesKHR(ctx.vulkan_device.physical_device, ctx.vulkan_device.surface, &mode_count, null);

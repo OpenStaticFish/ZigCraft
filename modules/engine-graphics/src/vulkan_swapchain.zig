@@ -43,10 +43,7 @@ pub const VulkanSwapchain = struct {
     // Defaults to FIFO (VSync ON) which is guaranteed by the Vulkan spec.
     present_mode: c.VkPresentModeKHR = c.VK_PRESENT_MODE_FIFO_KHR,
 
-    pub fn init(allocator: std.mem.Allocator, device: *const VulkanDevice, window: *c.SDL_Window, msaa_samples: u8, present_mode: c.VkPresentModeKHR) !VulkanSwapchain {
-        const build_options = @import("engine_graphics_options");
-        const headless = if (@hasDecl(build_options, "skip_present")) build_options.skip_present else false;
-
+    pub fn init(allocator: std.mem.Allocator, device: *const VulkanDevice, window: *c.SDL_Window, msaa_samples: u8, present_mode: c.VkPresentModeKHR, headless: bool) !VulkanSwapchain {
         var self = VulkanSwapchain{
             .allocator = allocator,
             .device = device,

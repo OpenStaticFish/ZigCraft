@@ -23,6 +23,7 @@ pub const RenderSystem = struct {
     pub const Config = struct {
         shadow_resolution: u32,
         msaa_samples: u8,
+        skip_present: bool = false,
         anisotropic_filtering: u8,
         texture_pack: []const u8,
         max_texture_resolution: u32,
@@ -130,6 +131,7 @@ pub const RenderSystem = struct {
         var rhi = try backend_dispatcher.createRHI(allocator, window, .vulkan, .{
             .shadow_resolution = config.shadow_resolution,
             .msaa_samples = config.msaa_samples,
+            .skip_present = config.skip_present,
             .anisotropic_filtering = config.anisotropic_filtering,
         });
         errdefer rhi.deinit();

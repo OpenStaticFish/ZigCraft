@@ -58,7 +58,7 @@ pub fn recreateSwapchainInternal(ctx: anytype) void {
     var w: c_int = 0;
     var h: c_int = 0;
     _ = c.SDL_GetWindowSizeInPixels(ctx.window, &w, &h);
-    if (w == 0 or h == 0) return;
+    if (!ctx.swapchain.skip_present and (w == 0 or h == 0)) return;
 
     setup.destroyMainRenderPassAndPipelines(ctx);
     lifecycle.destroyHDRResources(ctx);
@@ -79,13 +79,10 @@ pub fn recreateSwapchainInternal(ctx: anytype) void {
         return;
     };
 
-    if (!ctx.swapchain.skip_present) {
-        lifecycle.transitionImagesToPresent(ctx, ctx.swapchain.swapchain.images.items) catch |err| {
-            log.log.warn("Failed to transition swapchain images to PRESENT: {}", .{err});
-        };
-    } else {
+    if (ctx.swapchain.skip_present) {
         lifecycle.transitionImagesToColorAttachment(ctx, ctx.swapchain.swapchain.images.items) catch |err| {
-            log.log.warn("Failed to transition headless image to COLOR_ATTACHMENT: {}", .{err});
+            _ = markSwapchainRecreateFailed(ctx, "offscreen image layout", err);
+            return;
         };
     }
 
@@ -122,16 +119,9 @@ pub fn recreateSwapchainInternal(ctx: anytype) void {
         return;
     };
 
-    ctx.draw.current_water_reflection_texture = if (ctx.water_system.reflection_texture_handle != 0)
-        ctx.water_system.reflection_texture_handle
-    else
-        ctx.draw.dummy_texture;
-    ctx.draw.current_scene_depth_texture = if (ctx.gpass.g_depth_handle != 0)
-        ctx.gpass.g_depth_handle
-    else
-        ctx.draw.dummy_texture;
+    setup.setWaterTextureHandles(ctx);
 
-    ctx.water_system.createWaterPipeline(ctx.allocator, ctx.vulkan_device.vk_device, ctx.render_pass_manager.hdr_render_pass) catch |err| {
+    ctx.water_system.createWaterPipeline(ctx.allocator, ctx.vulkan_device.vk_device, ctx.render_pass_manager.hdr_render_pass, ctx.options.msaa_samples) catch |err| {
         _ = markSwapchainRecreateFailed(ctx, "water pipeline", err);
         return;
     };
@@ -168,34 +158,12 @@ pub fn recreateSwapchainInternal(ctx: anytype) void {
 
     ctx.dynamic_resolution.setSwapchainExtent(ctx.swapchain.getExtent());
 
-    if (!ctx.options.safe_mode) {
-        var list: [32]c.VkImage = undefined;
-        var count: usize = 0;
-        const candidates = [_]c.VkImage{ ctx.hdr.hdr_image, ctx.gpass.g_normal_image, ctx.ssao_system.image, ctx.ssao_system.blur_image, ctx.ssao_system.noise_image, ctx.velocity.velocity_image };
-        for (candidates) |img| {
-            if (img != null) {
-                list[count] = img;
-                count += 1;
-            }
-        }
-        for (ctx.bloom.mip_images) |img| {
-            if (img != null) {
-                list[count] = img;
-                count += 1;
-            }
-        }
-
-        if (count > 0) {
-            lifecycle.transitionImagesToShaderRead(ctx, list[0..count], false, 1) catch |err| log.log.warn("Failed to transition images: {}", .{err});
-        }
-
-        if (ctx.shadow_system.shadow_image != null) {
-            lifecycle.transitionImagesToShaderRead(ctx, &[_]c.VkImage{ctx.shadow_system.shadow_image}, true, rhi.SHADOW_CASCADE_COUNT) catch |err| log.log.warn("Failed to transition Shadow image: {}", .{err});
-            for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
-                ctx.shadow_system.shadow_image_layouts[i] = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-            }
-        }
-    }
+    // Swapchain recreation does not replace the shadow image. Preserve the
+    // layout state maintained by the shadow passes.
+    lifecycle.initializeSampledFrameImages(ctx) catch |err| {
+        _ = markSwapchainRecreateFailed(ctx, "sampled image layouts", err);
+        return;
+    };
 
     markSwapchainRecreateSucceeded(ctx);
 }
@@ -240,7 +208,6 @@ pub fn prepareFrameState(ctx: anytype) void {
     ctx.draw.terrain_pipeline_bound = false;
     ctx.shadow_system.pipeline_bound = false;
     ctx.draw.descriptors_updated = false;
-    ctx.draw.bound_texture = 0;
 
     const command_buffer = ctx.frames.getCurrentCommandBuffer();
 

@@ -131,7 +131,6 @@ const RenderOptions = struct {
     present_mode: c.VkPresentModeKHR = c.VK_PRESENT_MODE_FIFO_KHR,
     anisotropic_filtering: u8 = 1,
     msaa_samples: u8 = 1,
-    safe_mode: bool = false,
     debug_shadows_active: bool = false,
     shadow_debug_channel: u32 = 0,
 };

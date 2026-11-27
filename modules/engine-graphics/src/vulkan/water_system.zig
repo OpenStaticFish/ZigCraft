@@ -278,7 +278,7 @@ pub const WaterSystem = struct {
         log.log.info("WaterSystem: reflection target created ({}x{})", .{ half_w, half_h });
     }
 
-    pub fn createWaterPipeline(self: *WaterSystem, allocator: std.mem.Allocator, device: c.VkDevice, main_render_pass: c.VkRenderPass) !void {
+    pub fn createWaterPipeline(self: *WaterSystem, allocator: std.mem.Allocator, device: c.VkDevice, main_render_pass: c.VkRenderPass, msaa_samples: u8) !void {
         if (self.water_pipeline_layout == null) return;
         if (main_render_pass == null) return error.InvalidRenderPass;
 
@@ -334,7 +334,7 @@ pub const WaterSystem = struct {
 
         var multisampling = std.mem.zeroes(c.VkPipelineMultisampleStateCreateInfo);
         multisampling.sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-        multisampling.rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT;
+        multisampling.rasterizationSamples = @import("render_pass_manager.zig").getMSAASampleCountFlag(msaa_samples);
 
         var depth_stencil = std.mem.zeroes(c.VkPipelineDepthStencilStateCreateInfo);
         depth_stencil.sType = c.VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;

@@ -17,7 +17,6 @@ const setup = @import("rhi_resource_setup.zig");
 const rhi_timing = @import("rhi_timing.zig");
 const screenshot = @import("screenshot.zig");
 const final_composition = @import("final_composition.zig");
-const runtime_env = @import("engine-core").runtime_env;
 const build_options = @import("engine_graphics_options");
 
 const MAX_FRAMES_IN_FLIGHT = rhi.MAX_FRAMES_IN_FLIGHT;
@@ -31,12 +30,12 @@ pub fn initContext(ctx: anytype, allocator: std.mem.Allocator, render_device: ?*
     ctx.vulkan_device.initDebugMessenger();
     ctx.resources = try ResourceManager.init(allocator, &ctx.vulkan_device);
     ctx.frames = try FrameManager.init(&ctx.vulkan_device);
-    ctx.swapchain = try SwapchainPresenter.init(allocator, &ctx.vulkan_device, ctx.window, ctx.options.msaa_samples, ctx.options.present_mode);
+    ctx.swapchain = try SwapchainPresenter.init(allocator, &ctx.vulkan_device, ctx.window, ctx.options.msaa_samples, ctx.options.present_mode, ctx.swapchain.skip_present);
+    ctx.dynamic_resolution = .{};
+    ctx.dynamic_resolution.setSwapchainExtent(ctx.swapchain.getExtent());
     ctx.descriptors = try DescriptorManager.init(allocator, &ctx.vulkan_device, &ctx.resources);
 
-    if (!ctx.swapchain.skip_present) {
-        try lifecycle.transitionImagesToPresent(ctx, ctx.swapchain.swapchain.images.items);
-    } else {
+    if (ctx.swapchain.skip_present) {
         try lifecycle.transitionImagesToColorAttachment(ctx, ctx.swapchain.swapchain.images.items);
     }
 
@@ -72,11 +71,6 @@ pub fn initContext(ctx: anytype, allocator: std.mem.Allocator, render_device: ?*
     ctx.options.vsync_enabled = true;
     ctx.options.present_mode = c.VK_PRESENT_MODE_FIFO_KHR;
 
-    ctx.options.safe_mode = runtime_env.safeModeEnabled();
-    if (ctx.options.safe_mode) {
-        log.log.warn("ZIGCRAFT_SAFE_MODE enabled: throttling uploads and forcing GPU idle each frame", .{});
-    }
-
     try setup.createShadowResources(ctx);
     try lifecycle.createHDRResources(ctx);
     try setup.createGPassResources(ctx);
@@ -98,7 +92,7 @@ pub fn initContext(ctx: anytype, allocator: std.mem.Allocator, render_device: ?*
     );
 
     try setup.createWaterResources(ctx);
-    try ctx.water_system.createWaterPipeline(ctx.allocator, ctx.vulkan_device.vk_device, ctx.render_pass_manager.hdr_render_pass);
+    try ctx.water_system.createWaterPipeline(ctx.allocator, ctx.vulkan_device.vk_device, ctx.render_pass_manager.hdr_render_pass, ctx.options.msaa_samples);
     try ctx.water_system.createReflectionTerrainPipelines(ctx.allocator, ctx.vulkan_device.vk_device, ctx.pipeline_manager.pipeline_layout);
 
     try setup.createPostProcessResources(ctx);
@@ -119,8 +113,7 @@ pub fn initContext(ctx: anytype, allocator: std.mem.Allocator, render_device: ?*
     ctx.draw.current_roughness_texture = ctx.draw.dummy_roughness_texture;
     ctx.draw.current_displacement_texture = ctx.draw.dummy_roughness_texture;
     ctx.draw.current_env_texture = ctx.draw.dummy_texture;
-    ctx.draw.current_water_reflection_texture = ctx.draw.dummy_texture;
-    ctx.draw.current_scene_depth_texture = ctx.draw.dummy_texture;
+    setup.setWaterTextureHandles(ctx);
     ctx.draw.current_lpv_texture = ctx.draw.dummy_texture_3d;
     ctx.draw.current_lpv_texture_g = ctx.draw.dummy_texture_3d;
     ctx.draw.current_lpv_texture_b = ctx.draw.dummy_texture_3d;
@@ -152,33 +145,11 @@ pub fn initContext(ctx: anytype, allocator: std.mem.Allocator, render_device: ?*
     try ctx.resources.flushTransfer();
     ctx.resources.setCurrentFrame(0);
 
-    if (!ctx.options.safe_mode) {
-        if (ctx.shadow_system.shadow_image != null) {
-            try lifecycle.transitionImagesToShaderRead(ctx, &[_]c.VkImage{ctx.shadow_system.shadow_image}, true, rhi.SHADOW_CASCADE_COUNT);
-            for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
-                ctx.shadow_system.shadow_image_layouts[i] = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-            }
-        }
-
-        var list: [32]c.VkImage = undefined;
-        var count: usize = 0;
-        const candidates = [_]c.VkImage{ ctx.hdr.hdr_image, ctx.gpass.g_normal_image, ctx.ssao_system.image, ctx.ssao_system.blur_image, ctx.ssao_system.noise_image, ctx.velocity.velocity_image };
-        for (candidates) |img| {
-            if (img != null) {
-                list[count] = img;
-                count += 1;
-            }
-        }
-        for (ctx.bloom.mip_images) |img| {
-            if (img != null) {
-                list[count] = img;
-                count += 1;
-            }
-        }
-        if (count > 0) {
-            lifecycle.transitionImagesToShaderRead(ctx, list[0..count], false, 1) catch |err| log.log.err("Failed to transition images during init: {}", .{err});
-        }
+    if (ctx.shadow_system.shadow_image != null) {
+        try lifecycle.transitionImagesToShaderRead(ctx, &.{ctx.shadow_system.shadow_image}, true, rhi.SHADOW_CASCADE_COUNT);
+        @memset(&ctx.shadow_system.shadow_image_layouts, c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
     }
+    try lifecycle.initializeSampledFrameImages(ctx);
 
     var query_pool_info = std.mem.zeroes(c.VkQueryPoolCreateInfo);
     query_pool_info.sType = c.VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;

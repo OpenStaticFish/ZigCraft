@@ -278,7 +278,11 @@ pub const WorldRenderer = struct {
         self.resetShadowStats();
         self.frame_serial += 1;
         self.cpu_cull_cache_valid = false;
-        self.vertex_allocator.tick(self.query.getFrameIndex());
+        const frame_index = self.query.getFrameIndex();
+        self.vertex_allocator.tick(frame_index);
+        // Scene passes share a descriptor set. Resolve the instance buffer
+        // before any of those passes bind it, even if the first draw is direct.
+        self.render_ctx.setInstanceBuffer(self.instance_buffers[frame_index]);
     }
 
     pub fn resetShadowStats(self: *WorldRenderer) void {

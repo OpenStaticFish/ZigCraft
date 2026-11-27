@@ -650,9 +650,6 @@ pub const WaterPass = struct {
         if (!ctx.render_ctx.beginWaterDraw(reflection_handle, scene_depth_handle)) return;
         defer ctx.render_ctx.endWaterDraw();
 
-        ctx.render_ctx.bindTexture(reflection_handle, 14);
-        ctx.render_ctx.bindTexture(scene_depth_handle, 15);
-
         const view_proj = ctx.camera.getJitteredProjectionMatrixReverseZ(ctx.aspect, ctx.viewport_width, ctx.viewport_height, ctx.taa_enabled).multiply(ctx.camera.getViewMatrixOriginCentered());
         ctx.world.renderFluid(view_proj, ctx.camera.position);
     }

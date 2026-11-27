@@ -237,8 +237,22 @@ pub fn transitionImagesToShaderRead(ctx: anytype, images: []const c.VkImage, is_
     c.vkFreeCommandBuffers(ctx.vulkan_device.vk_device, ctx.frames.command_pool, 1, &cmd);
 }
 
-pub fn transitionImagesToPresent(ctx: anytype, images: []const c.VkImage) !void {
-    return transitionImagesFromUndefined(ctx, images, c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0);
+pub fn initializeSampledFrameImages(ctx: anytype) !void {
+    // Optional passes may be skipped, but their images are still bound to
+    // shaders. Layout initialization is required in safe mode as well.
+    const candidates = [_]c.VkImage{
+        ctx.hdr.hdr_image,
+        ctx.gpass.g_normal_image,
+        ctx.velocity.velocity_image,
+    } ++ ctx.bloom.mip_images;
+    var images: [candidates.len]c.VkImage = undefined;
+    var count: usize = 0;
+    for (candidates) |image| {
+        if (image == null) continue;
+        images[count] = image;
+        count += 1;
+    }
+    if (count > 0) try transitionImagesToShaderRead(ctx, images[0..count], false, 1);
 }
 
 /// Headless final-composition passes load and retain this layout between

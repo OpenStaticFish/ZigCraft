@@ -1554,7 +1554,7 @@ fn processTimingResults(ctx: *VulkanContext) void {
     timing.processTimingResults(ctx);
 }
 
-pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_device: ?*RenderDevice, shadow_resolution: u32, msaa_samples: u8, anisotropic_filtering: u8) !rhi.RHI {
+pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_device: ?*RenderDevice, shadow_resolution: u32, msaa_samples: u8, anisotropic_filtering: u8, skip_present: bool) !rhi.RHI {
     return context_factory.createRHI(
         VulkanContext,
         allocator,
@@ -1563,6 +1563,7 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_dev
         shadow_resolution,
         msaa_samples,
         anisotropic_filtering,
+        skip_present,
         &VULKAN_RHI_VTABLE,
     );
 }

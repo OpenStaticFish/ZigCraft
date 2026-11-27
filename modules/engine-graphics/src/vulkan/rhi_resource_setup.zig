@@ -440,6 +440,15 @@ pub fn createWaterResources(ctx: anytype) !void {
     );
 }
 
+pub fn setWaterTextureHandles(ctx: anytype) void {
+    // Water shares the frame descriptor set with earlier scene draws. Select
+    // these swapchain-owned textures before the set is bound for any pass.
+    const reflection = ctx.water_system.reflection_texture_handle;
+    const depth = ctx.gpass.g_depth_handle;
+    ctx.draw.current_water_reflection_texture = if (reflection != 0) reflection else ctx.draw.dummy_texture;
+    ctx.draw.current_scene_depth_texture = if (depth != 0) depth else ctx.draw.dummy_texture;
+}
+
 pub fn createPostProcessResources(ctx: anytype) !void {
     const vk = ctx.vulkan_device.vk_device;
 
