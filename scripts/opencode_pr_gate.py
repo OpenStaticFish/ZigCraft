@@ -50,6 +50,19 @@ def start(number, base, head):
     status(head, "ai-merge-gate", "pending", "Awaiting pinned diff review")
 
 
+def text_field(record, key):
+    value = record.get(key) if isinstance(record, dict) else None
+    return value if isinstance(value, str) else ""
+
+
+def bot_bodies(records, login):
+    for record in records:
+        if isinstance(record, dict) and text_field(record.get("user"), "login") == login:
+            body = text_field(record, "body")
+            if body:
+                yield body
+
+
 def review_context(current):
     number = current["number"]
     unavailable = []
@@ -64,32 +77,34 @@ def review_context(current):
         unavailable.append(path)
         return expected()
 
-    body = (current.get("body") or "")[:6000]
+    body = text_field(current, "body")[:6000]
     # Only resolve local closing references, never a user-supplied URL.
     refs = re.findall(r"\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+#([1-9][0-9]{0,9})\b", body, re.I)
     issues = []
     for ref in list(dict.fromkeys(refs))[:4]:
         issue = optional(f"issues/{ref}", dict)
-        if issue:
-            issues.append({"number": ref, "title": issue.get("title"), "body_excerpt": (issue.get("body") or "")[:2000]})
+        if text_field(issue, "title"):
+            issues.append({"number": ref, "title": issue["title"], "body_excerpt": text_field(issue, "body")[:2000]})
     previous = []
-    last_page = (current.get("comments", 0) + 24) // 25
+    count = current.get("comments")
+    last_page = (count + 24) // 25 if type(count) is int and count > 0 else 0
     for page in range(last_page, max(0, last_page - 2), -1):
-        for item in reversed(optional(f"issues/{number}/comments?per_page=25&page={page}", list)):
-            text = item["body"] or ""
-            if item["user"]["login"] == "github-actions[bot]" and text.startswith(f"<!-- zigcraft-pr-gate:{number}:"):
+        comments = optional(f"issues/{number}/comments?per_page=25&page={page}", list)
+        for text in bot_bodies(reversed(comments), "github-actions[bot]"):
+            if text.startswith(f"<!-- zigcraft-pr-gate:{number}:"):
                 previous.append(text[:5500])
                 if len(previous) == 2:
                     break
         if len(previous) == 2:
             break
     # Include the formal reviews left by the pre-migration GitHub app, too.
-    legacy = [r for r in optional(f"pulls/{number}/reviews?per_page=100", list)
-              if (r.get("user") or {}).get("login") == "opencode-agent[bot]" and r.get("body")]
-    return {"unavailable": unavailable, "title": current.get("title", ""), "description_excerpt": body,
-            "labels": [label["name"] for label in current.get("labels", [])][:25],
+    legacy = list(bot_bodies(optional(f"pulls/{number}/reviews?per_page=100", list), "opencode-agent[bot]"))
+    labels = current.get("labels")
+    names = [text_field(label, "name") for label in labels] if isinstance(labels, list) else []
+    return {"unavailable": unavailable, "title": text_field(current, "title"), "description_excerpt": body,
+            "labels": list(filter(None, names))[:25],
             "linked_issue_excerpts": issues, "previous_gate_review_excerpts_newest_first": previous,
-            "formal_review_excerpts_from_first_100": [r["body"][:3000] for r in legacy[-2:]]}
+            "formal_review_excerpts_from_first_100": [body[:3000] for body in legacy[-2:]]}
 
 
 def prepare(number, base, head):
@@ -216,15 +231,18 @@ def render_verdict(obj, base, head, number, prose):
     checks = [(not obj["critical"], "All critical issues resolved"), (average >= 6, "SOLID average score >= 6.0"),
               (score >= 60, "Overall confidence >= 60%"), (obj["no_security_concerns"], "No security concerns"),
               (obj["test_status"] == "passed", f"Tests present and passing (evidence: {obj['test_status']})")]
+    reason = prose(obj["verdict_reason"])
+    if recommendation == "MERGE" and (any(obj[s] for s in ("critical", "high", "medium")) or score < 80):
+        recommendation = "DO NOT MERGE" if obj["critical"] else "MERGE WITH FIXES"
+        reason = "The review does not meet the merge gate's finding or confidence thresholds."
     lines.extend(["### Merge Readiness", "Informational checklist. The AI gate requires zero open critical, high "
                   "or medium issues, confidence ≥80%, and a MERGE verdict. CI tests are separate checks.",
                   "\n".join(f"- [{'x' if ok else ' '}] {label}" for ok, label in checks),
-                  "### Verdict", f"**{recommendation}**", f"<p>{prose(obj['verdict_reason'])}</p>"])
+                  "### Verdict", f"**{recommendation}**", f"<p>{reason}</p>"])
     machine = dict(reviewed_sha=head, critical_issues=len(obj["critical"]), high_priority_issues=len(obj["high"]),
                    medium_priority_issues=len(obj["medium"]), overall_confidence_score=score, recommendation=recommendation)
     lines.extend(["## Machine Readable Verdict", "```json\n" + json.dumps(machine, indent=2) + "\n```"])
-    passed = not any(obj[s] for s in ("critical", "high", "medium")) and score >= 80 and recommendation == "MERGE"
-    return passed, "\n\n".join(lines)
+    return recommendation == "MERGE", "\n\n".join(lines)
 
 
 def review_comment(number, base, head, text):

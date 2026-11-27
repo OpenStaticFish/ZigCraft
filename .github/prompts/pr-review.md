@@ -35,154 +35,49 @@ are supplied with the PR metadata. Say when the available evidence is insufficie
 
 ---
 
-**YOUR TASK:** Analyze the CURRENT code changes and previous reviews above, then output your review in the following STRICT STRUCTURE:
+**Your task:** Review the current diff. Return only the JSON object specified below.
+The publisher creates the formatted GitHub review, including headings, the SOLID
+table, readiness checklist, fixed-issue markers and machine-readable verdict.
 
 **CRITICAL INSTRUCTIONS:**
-1. **CHECK PREVIOUS ISSUES FIRST:** Look at the "Previous Automated Reviews" section above. For each issue previously reported (Critical, High, Medium, Low), verify if it still exists in the current code.
-2. **ACKNOWLEDGE FIXES:** If a previously reported issue has been fixed, state "✅ **[FIXED]** Previous issue: [brief description]" in the appropriate section.
+1. **CHECK PREVIOUS ISSUES FIRST:** For each previously reported issue, verify if it still exists in the current code.
+2. **ACKNOWLEDGE FIXES:** Put verified fixes in `fixed` under their original severity.
 3. **ONLY REPORT NEW/UNRESOLVED ISSUES:** Do NOT re-report issues that have already been fixed. Only report issues that are still present in the current code.
 4. **TRACK CHANGES:** If an issue was reported in a previous review but the code has changed, verify the new code and report the issue with updated file:line references if it still exists.
 
 ---
 
-## 📋 Summary
-First, check if the PR description mentions any linked issues (e.g., "Closes #123", "Fixes #456", "Resolves #789").
-
-## 📌 Review Metadata
-- **Reviewed Commit SHA:** `$HEAD_SHA`
-- **Reviewed PR:** #$PR_NUMBER
-
-If linked issues are found:
-- Mention the issue number(s) explicitly
-- Verify the PR actually implements what the issue(s) requested
-- State whether the implementation fully satisfies the issue requirements
-
-Then provide 2-3 sentences summarizing the PR purpose, scope, and overall quality.
-
-## 🔴 Critical Issues (Must Fix - Blocks Merge)
-**IMPORTANT:** Check previous reviews first. If critical issues were reported before, verify if they're fixed. If fixed, say "✅ All previously reported critical issues have been resolved."
-
-Only report NEW critical issues that could cause crashes, security vulnerabilities, data loss, or major bugs.
-
-For each issue, use this exact format:
-```
-**[CRITICAL]** `File:Line` - Issue Title
-**Confidence:** High|Medium|Low (how sure you are this is a real problem)
-**Description:** Clear explanation of the issue
-**Impact:** What could go wrong if merged
-**Suggested Fix:** Specific code changes needed
-```
-
-## ⚠️ High Priority Issues (Should Fix)
-Same approach as Critical - check previous reviews first, acknowledge fixes, only report unresolved issues.
-
-Same format as Critical, but with **[HIGH]** prefix.
-
-## 💡 Medium Priority Issues (Nice to Fix)
-Same approach - verify previous reports, acknowledge fixes, report only still-present issues.
-
-Same format, with **[MEDIUM]** prefix.
-
-## ℹ️ Low Priority Suggestions (Optional)
-Same approach.
-
-Same format, with **[LOW]** prefix.
-
-## 📊 SOLID Principles Score
-| Principle | Score | Notes |
-|-----------|-------|-------|
-| Single Responsibility | 0-10 | Brief justification |
-| Open/Closed | 0-10 | Brief justification |
-| Liskov Substitution | 0-10 | Brief justification |
-| Interface Segregation | 0-10 | Brief justification |
-| Dependency Inversion | 0-10 | Brief justification |
-| **Average** | **X.X** | |
-
-## 🎯 Final Assessment
-
-### Overall Confidence Score: XX%
-Rate your confidence in this PR being ready to merge (0-100%).
-**How to interpret:**
-- 0-30%: Major concerns, do not merge without significant rework
-- 31-60%: Moderate concerns, several issues need addressing
-- 61-80%: Minor concerns, mostly ready with some fixes
-- 81-100%: High confidence, ready to merge or with trivial fixes
-
-### Confidence Breakdown:
-- **Code Quality:** XX% (how well-written is the code?)
-- **Completeness:** XX% (does it fulfill requirements?)
-- **Risk Level:** XX% (how risky is this change?)
-- **Test Coverage:** XX% (are changes adequately tested?)
-
-### Merge Readiness:
-- [ ] All critical issues resolved
-- [ ] SOLID average score >= 6.0
-- [ ] Overall confidence >= 60%
-- [ ] No security concerns
-- [ ] Tests present and passing (if applicable)
-
-### Verdict:
-**MERGE** | **MERGE WITH FIXES** | **DO NOT MERGE**
-
-One-sentence explanation of the verdict.
-
-## Machine Readable Verdict
-
-The publisher appends this JSON block at the end of your review, using the
-validated findings and verdict. Do not generate a second, independent verdict.
-
-```json
-{
-  "reviewed_sha": "$HEAD_SHA",
-  "critical_issues": 0,
-  "high_priority_issues": 0,
-  "medium_priority_issues": 0,
-  "overall_confidence_score": 0,
-  "recommendation": "MERGE"
-}
-```
-
-Rules for the JSON block:
-- `reviewed_sha` must match the PR head SHA above.
-- Counts must be integers.
-- `overall_confidence_score` must be an integer from 0 to 100.
-- If any critical, high, or medium issues remain, the counts must reflect them.
-- Use `MERGE` only when there are no unresolved critical, high, or medium issues and the score is at least 80.
-
----
-
-**Review Guidelines:**
-1. **MOST IMPORTANT:** Always check previous reviews and verify if issues are fixed before reporting them again
-2. Acknowledge fixes explicitly with ✅ **[FIXED]** markers
-3. Check the PR description for linked issues ("Fixes #123", "Closes #456", etc.) and verify the implementation
-4. Be extremely specific with file paths and line numbers
-5. Confidence scores should reflect how certain you are - use "Low" when unsure
-6. If you have nothing meaningful to add to a section, write "None identified" instead of omitting it
-7. Always provide actionable fixes, never just complaints
+Check linked issues (e.g. "Closes #123"): identify them by number and assess
+which requirements the supplied changes satisfy. Reserve critical severity for
+crashes, vulnerabilities, data loss or major bugs; high means should fix,
+medium means nice to fix and low means optional. For each finding describe the
+impact and a specific actionable fix. Use Low confidence when unsure.
 
 ## Gateway response format
 
-Return one JSON object, without Markdown fences. The publisher renders the
-report above from these fields; do not return the Markdown template itself.
+Return one JSON object, without Markdown fences or surrounding commentary.
 All prose fields are plain text, single line, nonempty, at most 1000 characters.
 Use the exact keys below:
 
 - `reviewed_sha`, `reviewed_base`: the supplied head and base SHAs.
-- `summary`: the requested summary, including linked issue numbers, coverage and limitations.
+- `summary`: 2–3 sentences on purpose, scope, quality, linked issues, coverage and limitations.
 - `critical`, `high`, `medium`, `low`: arrays of unresolved findings, each with
   `location` (file:line), `title`, `confidence` (High, Medium or Low),
-  `description`, `impact`, `suggested_fix`. Use empty arrays for no findings.
+  `description`, `impact`, `suggested_fix`. Use at most 12 per array; use empty arrays for no findings.
 - `fixed`: object with the same four severity keys, each an array of brief
   descriptions of previously reported issues verified fixed. Do not count
   these as unresolved. At most 12 entries per array.
 - `solid`: object keyed by `S`, `O`, `L`, `I`, `D`. Each value has integer
-  `score` (0–10) and `notes`. The publisher computes the average.
+  `score` (0–10) and `notes` justifying it for Single Responsibility, Open/Closed,
+  Liskov Substitution, Interface Segregation and Dependency Inversion respectively.
 - `confidence_breakdown`: object with integer percentages (0–100) for
   `code_quality`, `completeness`, `risk_level`, `test_coverage`.
 - `no_security_concerns`: boolean, true only when supported by the review.
 - `test_status`: `passed`, `failed`, or `unverified`. Use `unverified` without
   direct test evidence. A workflow conclusion alone does not establish that
-  particular tests executed or passed. The readiness checklist is informational;
-  the machine-readable verdict rules above determine the AI gate.
-- `overall_confidence_score`, `recommendation`: use the rules above.
+  particular tests executed or passed. The readiness checklist is informational.
+- `overall_confidence_score`: integer 0–100 for readiness to merge. 0–30 signals
+  major concerns, 31–60 moderate concerns, 61–80 minor concerns, 81–100 high confidence.
+- `recommendation`: `MERGE`, `MERGE WITH FIXES` or `DO NOT MERGE`. Use `MERGE`
+  only with zero unresolved critical, high and medium findings and a score of at least 80.
 - `verdict_reason`: one sentence explaining the verdict.

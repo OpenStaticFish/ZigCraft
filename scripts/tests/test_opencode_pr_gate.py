@@ -107,7 +107,7 @@ class MergeGate(unittest.TestCase):
         gate.prepare(*self.target)
         prompt = (self.root / "pr-input/request.txt").read_text()
         for text in ("Previous finding", "Previous formal review", "Requested behavior", "automated-test",
-                     "**PR to review:** #3", "📊 SOLID Principles Score"):
+                     "**PR to review:** #3", "Single Responsibility", "Return one JSON object"):
             self.assertIn(text, prompt)
         self.decision["fixed"]["high"] = ["Released the previous allocation"]
         passed, report = gate.verdict(json.dumps(self.decision), self.base, self.head, self.number)
@@ -150,6 +150,27 @@ class MergeGate(unittest.TestCase):
         self.assertLessEqual(len(text.encode()), gate.pr.INPUT_LIMIT)
         self.assertNotIn(self.pr["body"], text)
 
+    def test_malformed_optional_records_keep_valid_evidence_and_diff(self):
+        self.pr.update(body="Fixes #55", comments=1, labels=[None, {}, {"name": "automated-test"}])
+        malformed = [None, {}, {"user": []}, {"body": 5, "user": {"login": "github-actions[bot]"}}]
+        marker = "<!-- zigcraft-pr-gate:3:previous -->"
+        self.comments.extend([{"body": marker, "user": {"login": "github-actions[bot]"}}, *malformed])
+
+        def mixed_records(path, **kwargs):
+            result = self.github(path, **kwargs)
+            if path == "issues/55":
+                return {"title": "Linked issue", "body": {}}
+            if path.startswith("pulls/3/reviews?"):
+                return malformed + result
+            return result
+
+        with patch.object(gate.pr, "api", side_effect=mixed_records):
+            gate.prepare(*self.target)
+        text = (self.root / "pr-input/request.txt").read_text()
+        for evidence in (marker, "Previous formal review", "Linked issue", '"automated-test"'):
+            self.assertIn(evidence, text)
+        self.assertTrue(text.endswith("diff --git a/source.zig b/source.zig\n"))
+
     def test_large_report_preserves_all_findings_and_verdict(self):
         item = {**self.finding, "impact": "`" * 1000, "description": "&" * 1000}
         self.decision.update(low=[item] * 12, test_status="failed")
@@ -165,15 +186,19 @@ class MergeGate(unittest.TestCase):
         self.assertEqual(machine["recommendation"], "MERGE")
 
     def test_every_blocking_severity_threshold_and_verdict_is_independent(self):
-        for field, value in [
-            ("critical", [self.finding]), ("high", [self.finding]), ("medium", [self.finding]),
-            ("overall_confidence_score", 79), ("recommendation", "MERGE WITH FIXES"),
-            ("recommendation", "DO NOT MERGE"),
+        for field, value, expected in [
+            ("critical", [self.finding], "DO NOT MERGE"), ("high", [self.finding], "MERGE WITH FIXES"),
+            ("medium", [self.finding], "MERGE WITH FIXES"), ("overall_confidence_score", 79, "MERGE WITH FIXES"),
+            ("recommendation", "MERGE WITH FIXES", "MERGE WITH FIXES"), ("recommendation", "DO NOT MERGE", "DO NOT MERGE"),
         ]:
             with self.subTest(field=field, value=value):
                 self.response.write_text(json.dumps({**self.decision, field: value}))
                 gate.publish(*self.target)
                 self.assertEqual(self.states[-1], ("ai-merge-gate", "failure"))
+                body = self.comments[0]["body"]
+                self.assertIn(f"### Verdict\n\n**{expected}**", body)
+                machine = json.loads(body.split("```json\n")[1].split("\n```")[0])
+                self.assertEqual(machine["recommendation"], expected)
         self.assertEqual(len(self.comments), 1)
         self.assertIn("DO NOT MERGE", self.comments[0]["body"])
 
