@@ -522,7 +522,8 @@ pub const App = struct {
             // handles the case where that frame never arrives.
             try self.applyPendingScreenTransitions();
             self.revealMenuWindowWhenReady();
-            self.limitFrameRateIfNeeded();
+            // No presentation occurred to provide VSync pacing.
+            std.Options.debug_io.sleep(.fromMilliseconds(8), .boot) catch {};
             return;
         }
 

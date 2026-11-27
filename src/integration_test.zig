@@ -61,6 +61,7 @@ const UploadScreen = struct {
     buffer: rhi.BufferHandle,
     payload: [64]u8 = [_]u8{0} ** 64,
     tick: u8 = 0,
+    overwrite_upload: bool = false,
     quit_on_draw: bool = false,
 
     pub const vtable = IScreen.VTable{
@@ -89,6 +90,10 @@ const UploadScreen = struct {
         self.tick +%= 1;
         self.payload[offset] = self.tick;
         try self.context.render_system.getRHI().resourceManager().updateBuffer(self.buffer, offset, self.payload[offset..][0..1]);
+        if (self.overwrite_upload) {
+            self.payload[offset] +%= 100;
+            try self.context.render_system.getRHI().resourceManager().updateBuffer(self.buffer, offset, self.payload[offset..][0..1]);
+        }
     }
 
     fn draw(ptr: *anyopaque, ui: *UISystem) !void {
@@ -337,6 +342,8 @@ test "smoke test: launch, generate, render, exit" {
         defer app.render_system.rhi.vtable = original_vtable;
 
         const previous_tick = active_upload_screen.tick;
+        active_upload_screen.overwrite_upload = true;
+        defer active_upload_screen.overwrite_upload = false;
         try app.runSingleFrame();
         try testing.expectEqual(previous_tick +% 1, active_upload_screen.tick);
         try testing.expect(!app.input.interface().shouldQuit());
@@ -380,7 +387,7 @@ test "smoke test: launch, generate, render, exit" {
     try app.runSingleFrame();
     try testing.expect(app.input.interface().shouldQuit());
     try testing.expectEqual(fault_count_before_late_quit, app.render_system.getRHI().query().getFaultCount());
-    try testing.expectEqual(skipped_tick +% 1, try readUploadedByte(vulkan, active_upload_screen.buffer, skipped_tick % active_upload_screen.payload.len));
+    try testing.expectEqual(skipped_tick +% 101, try readUploadedByte(vulkan, active_upload_screen.buffer, skipped_tick % active_upload_screen.payload.len));
 
     const val_count = app.render_system.getRHI().query().getValidationErrorCount();
     if (val_count > 0) {
