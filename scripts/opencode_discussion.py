@@ -159,14 +159,18 @@ def discussion_path(path):
                          r"scripts/[\w-]+\.(?:py|sh)", path))
 
 
-def files_at(sha, *, for_discussion=False):
+def files_at(sha, mode="edit"):
     tree = repo(f"git/trees/{sha}?recursive=1")
     if tree["truncated"]:
         raise ValueError("source tree is incomplete")
+    def candidate(path):
+        if mode == "respond":
+            return discussion_path(path)
+        return allowed_path(path) or (mode == "triage" and path == "README.md")
+
     return {e["path"]: e for e in tree["tree"]
-            if e["type"] == "blob" and (e["mode"] == "100644" or (for_discussion and e["mode"] == "100755"))
-            and 0 < e["size"] <= FILE_LIMIT
-            and (discussion_path(e["path"]) if for_discussion else allowed_path(e["path"]))}
+            if e["type"] == "blob" and (e["mode"] == "100644" or (mode == "respond" and e["mode"] == "100755"))
+            and 0 < e["size"] <= FILE_LIMIT and candidate(e["path"])}
 
 
 def read_blob(entry):
@@ -199,12 +203,16 @@ def records(value):
 def run_summaries(payload):
     summaries = []
     for run in records(payload["workflow_runs"]):
+        repository = (run.get("head_repository") or {}).get("full_name")
+        branch = run.get("head_branch")
         if (type(run["id"]) is not int or type(run["workflow_id"]) is not int
                 or not all(isinstance(run[k], str) for k in ("head_sha", "event", "path", "status"))
+                or not all(value is None or isinstance(value, str) for value in (branch, repository))
                 or not isinstance(run["name"], (str, type(None)))
                 or not isinstance(run["conclusion"], (str, type(None)))):
             raise TypeError("invalid workflow run metadata")
         summaries.append({"id": run["id"], "workflow_id": run["workflow_id"], "path": run["path"],
+                          "head_repository": repository, "head_branch": branch,
                           "workflow": excerpt(run["name"] or run["path"], 128), "event": run["event"],
                           "revision": run["head_sha"], "status": run["status"], "conclusion": run["conclusion"]})
     return summaries
@@ -270,7 +278,9 @@ def github_evidence(target, workflows):
     for path in workflows[:4]:
         name = quote(Path(path).name, safe="")
         history = lookup(path, f"actions/workflows/{name}/runs?branch=dev&status=completed&per_page=3", run_summaries)
-        previous_runs.extend({**run, "queried_path": path} for run in history or [] if run["revision"] != sha)
+        previous_runs.extend({**run, "queried_path": path} for run in history or []
+                             if run["head_repository"] == REPO and run["head_branch"] == "dev"
+                             and run["status"] == "completed" and run["revision"] != sha)
     return {
         "unavailable": unavailable,
         "revision_commit": revision,
@@ -305,7 +315,7 @@ def request_text(target):
                       'A missing item in these bounded samples means unknown, not failed or never run. '
                       'Cite relevant PR numbers and workflow run IDs. Return only JSON: '
                       '{"comment":"answer"}. No tools. Do not claim you ran tests or changed files.')
-        files = files_at(target["head"], for_discussion=mode == "respond")
+        files = files_at(target["head"], mode)
         query = f"{data['instruction']} {data['title']} {data['issue']}".lower()
         terms = set(re.findall(r"[a-z0-9]{3,}", query))
         title_terms = set(re.findall(r"[a-z0-9]{3,}", (data["title"] + " " + data["instruction"]).lower()))

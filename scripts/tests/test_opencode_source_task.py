@@ -10,6 +10,7 @@ from unittest.mock import patch
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 import opencode_source_task as task
+from test_opencode_prose import live_gfm, render_gfm
 
 
 class SourceTaskTest(unittest.TestCase):
@@ -67,6 +68,19 @@ class SourceTaskTest(unittest.TestCase):
         self.result.write_text(json.dumps({"finding": finding}))
         with self.assertRaises(ValueError):
             task.audit(self.folder)
+
+    @live_gfm
+    def test_gfm_audit_issue(self):
+        finding = dict(path="src/module.zig", line=1, scope="demo", priority="Medium", title="Demo",
+                       summary="#991 ```", impact="![image](/image.png)", fix="[link](/relative)")
+        self.result.write_text(json.dumps({"finding": finding}))
+        task.audit(self.folder)
+        body = json.loads(Path("audit-issue.json").read_text())["body"]
+        rendered = render_gfm(body)
+        self.assertIn(f'blob/{os.environ["GITHUB_SHA"]}/src/module.zig#L1"', rendered)
+        self.assertIn("Summary</h3>", rendered)
+        self.assertNotIn(">link</a>", rendered)
+        self.assertNotIn("<pre", rendered)
 
     def test_zero_results_skip_publication(self):
         self.result.write_text('{"finding":null}')

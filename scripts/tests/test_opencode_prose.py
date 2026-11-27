@@ -10,6 +10,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from opencode_prose import paragraphs
+from visual_inference import advisory
 
 
 MARKUP = "#991 @someone </p> </li> ![remote](https://example.org/img) ```"
@@ -26,6 +27,17 @@ def render_gfm(body):
 
 
 class RenderingTest(unittest.TestCase):
+    @live_gfm
+    def test_gfm_visual_issue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            response, issue = Path(tmp) / "response.txt", Path(tmp) / "issue.md"
+            response.write_text(json.dumps({"disposition": "finding", "observation": MARKUP}))
+            advisory("vision", response, issue, {"GITHUB_SHA": "a"*40, "GITHUB_RUN_ID": "123"})
+            rendered = render_gfm(issue.read_text())
+            self.assertIn('href="https://github.com/OpenStaticFish/ZigCraft/actions/runs/123"', rendered)
+            self.assertIn("Image observation", rendered)
+            self.assertNotIn("<pre", rendered)
+
     def test_full_checkout_publisher_entry_points(self):
         root = Path(__file__).resolve().parents[2]
         with tempfile.TemporaryDirectory() as tmp:

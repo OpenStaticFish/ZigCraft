@@ -5,6 +5,8 @@ from http.client import IncompleteRead
 import json
 import os
 from pathlib import Path
+import signal
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,6 +14,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import opencode_discussion as discussion
+from opencode_deadline import lookup_budget
+from test_opencode_prose import MARKUP, live_gfm, render_gfm
 
 
 class DiscussionFixture(unittest.TestCase):
@@ -116,11 +120,13 @@ class DiscussionFixture(unittest.TestCase):
                 "state": "closed", "pull_request": {"merged_at": "2026-11-01T00:00:00Z"},
             }}}, {"event": "cross-referenced", "source": {}}, None]
         run = dict(id=99, workflow_id=123, path=workflow, head_sha=sha, name="Smoke", event="workflow_dispatch",
-                   status="completed", conclusion="success")
+                   status="completed", conclusion="success", head_repository={"full_name": discussion.REPO}, head_branch="dev")
         self.reads[f"actions/runs?head_sha={sha}&per_page=30"] = {"workflow_runs": [run]}
         for path, wid, outcome in [(workflow, 123, "failure"), (other, 124, "success")]:
             url = f"actions/workflows/{Path(path).name}/runs?branch=dev&status=completed&per_page=3"
-            self.reads[url] = {"workflow_runs": [dict(run, id=wid, workflow_id=wid, path=path, head_sha="c"*40, conclusion=outcome)]}
+            upstream = dict(run, id=wid, workflow_id=wid, path=path, head_sha="c"*40, conclusion=outcome)
+            self.reads[url] = {"workflow_runs": [dict(upstream, id=999, head_repository={"full_name": "fork/ZigCraft"}),
+                                                 dict(upstream, id=998, head_branch="feature"), upstream]}
         data = self.prepare()
         evidence = data["github"]
         self.assertCountEqual(list(data["files"])[:2], [workflow, other])
@@ -152,6 +158,15 @@ class DiscussionFixture(unittest.TestCase):
         with self.assertRaises(discussion.Skip):
             discussion.run("respond")
         self.assertEqual([w[0] for w in self.writes], ["issues/1/comments"])
+
+    def test_triage_can_read_but_not_edit_readme(self):
+        os.environ["GITHUB_EVENT_NAME"] = "issues"
+        self.issue.update(title="README.md build instructions", body="The documented build fails")
+        tree = self.reads[f"git/trees/{'a'*40}?recursive=1"]["tree"]
+        tree.append(dict(tree[0], path="README.md"))
+        self.assertEqual(next(iter(self.prepare()["files"])), "README.md")
+        with self.assertRaises(discussion.Skip):
+            discussion.command("/oc edit README.md change the build instructions")
 
     def test_timeline_second_page_and_cap(self):
         url = "issues/1/timeline?per_page=100"
@@ -185,6 +200,41 @@ class DiscussionFixture(unittest.TestCase):
             self.prepare()
         paths = [call.args[0] for call in discussion.repo.call_args_list if call.kwargs.get("optional")]
         self.assertFalse(any(path.startswith(("actions/runs?", "issues/1/timeline?")) for path in paths))
+
+    def test_running_optional_lookup_is_interrupted(self):
+        # A broken alarm must not hang the test runner.
+        subprocess.run([sys.executable, "-B", "-m", "unittest", "test_opencode_discussion.DiscussionFixture.stalled_lookup"],
+                       cwd=Path(__file__).parent, check=True, timeout=5, capture_output=True)
+
+    def stalled_lookup(self):
+        interrupted = []
+
+        def block(path, *args, **kwargs):
+            if path.startswith("commits/") and kwargs.get("optional"):
+                interrupted.append(path)
+                signal.pause()
+            return self.repo(path, *args, **kwargs)
+
+        handler = signal.getsignal(signal.SIGALRM)
+        discussion.repo.side_effect = block
+        with patch.object(discussion, "lookup_budget", side_effect=lambda _: lookup_budget(0.1)):
+            data = self.prepare()
+        self.assertEqual(interrupted, [f"commits/{data['revision']}?per_page=30"])
+        self.assertIn("revision_commit", data["github"]["unavailable"])
+        self.assertEqual(data["files"][self.file], self.original.decode())
+        self.assertEqual(signal.getsignal(signal.SIGALRM), handler)
+        self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0, 0))
+
+    @live_gfm
+    def test_gfm_discussion_reply(self):
+        self.prepare()
+        self.response({"comment": "Evidence:\n\n" + MARKUP})
+        discussion.run("respond")
+        body = self.writes[-1][1]["body"]
+        self.assertTrue(body.startswith("<!-- opencode-v2-slash:2 -->"))
+        rendered = render_gfm(body)
+        self.assertEqual(rendered.count("</p>"), 2)
+        self.assertNotIn("<pre", rendered)
 
     def test_optional_evidence_packed_after_source(self):
         with patch.object(discussion, "github_evidence", return_value={"large": "\\" * discussion.REQUEST_LIMIT, "small": 1}):
