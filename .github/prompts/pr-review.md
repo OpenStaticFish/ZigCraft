@@ -32,6 +32,8 @@ ZigCraft is a high-performance Minecraft-style voxel engine built with Zig, SDL3
 
 Previous automated review excerpts and linked issue descriptions, when available,
 are supplied with the PR metadata. Say when the available evidence is insufficient.
+Binary placeholders and submodule IDs do not show their contents. Assess related
+source changes; withhold MERGE if they do not establish what changed.
 
 ---
 

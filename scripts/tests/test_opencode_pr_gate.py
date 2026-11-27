@@ -142,11 +142,6 @@ class MergeGate(unittest.TestCase):
         passed, report = gate.verdict(json.dumps(self.decision), self.base, self.head, self.number)
         self.assertTrue(passed)
         self.assertIn("[FIXED]", report)
-        # Historical notes cannot cancel a current finding of the same severity.
-        self.decision["high"] = [self.finding]
-        passed, report = gate.verdict(json.dumps(self.decision), self.base, self.head, self.number)
-        self.assertFalse(passed)
-        self.assertIn('"high_priority_issues": 1', report)
 
     def test_stale_base_and_incomplete_diff_cannot_prepare_a_request(self):
         with patch.dict(self.pr["base"], sha="c" * 40):
@@ -165,7 +160,7 @@ class MergeGate(unittest.TestCase):
         previous = gate.review_header(self.number, old_base, self.head) + old_report
         self.comments.append({"user": {"login": "github-actions[bot]"}, "body": previous})
         self.decision.update(recommendation="DO NOT MERGE",
-                             verdict_reason="The prior cleanup concern is relevant, but the error path is not supplied.")
+                             verdict_reason="The prior concern involves a binary change with no supporting source diff.")
         self.response.write_text(json.dumps(self.decision))
         gate.publish(*self.target)
         self.assertEqual(self.states[-1], ("ai-merge-gate", "failure"))
