@@ -36,15 +36,13 @@ class ReplyBodyTests(unittest.TestCase):
 
 
 class DiscussionPublisherTests(unittest.TestCase):
-    def test_oversized_preview_posts_entire_reply_in_an_inert_fence(self):
-        source = '@octocat &#64;octocat\n\n~~~zig\n' + '@as(u8, 1);\n' * 1300 + '~~~'
-        preview = '<p>@octocat &#64;octocat</p><pre>' + '<span class="pl-c1">@as</span>' * 2300 + '</pre>'
-
+    def publish(self, source, preview=None):
         with tempfile.TemporaryDirectory() as directory:
             files = Path(directory)
             (files / "event").write_text('{"issue":{"number":1005}}')
             (files / "response").write_text(source)
-            (files / "preview").write_text(preview)
+            if preview is not None:
+                (files / "preview").write_text(preview)
             result = subprocess.run(
                 ["bash", "-euo", "pipefail", "-c", """
                     source scripts/opencode_discussion.sh
@@ -52,7 +50,13 @@ class DiscussionPublisherTests(unittest.TestCase):
                     gh() {
                         case "$2" in
                             --paginate) echo '[]' ;;
-                            markdown) cat "$FIXTURE/preview" ;;
+                            markdown)
+                                if [[ -f "$FIXTURE/preview" ]]; then
+                                    cat "$FIXTURE/preview"
+                                else
+                                    printf '<p>partial preview'
+                                    return 1
+                                fi ;;
                             "$repo/issues/1005/comments") cat "${4#body=@}" ;;
                             *) return 1 ;;
                         esac
@@ -72,12 +76,27 @@ class DiscussionPublisherTests(unittest.TestCase):
                 text=True,
                 check=True,
             )
+        return result.stdout
+
+    def test_oversized_preview_posts_entire_reply_in_an_inert_fence(self):
+        source = '@octocat &#64;octocat\n\n~~~zig\n' + '@as(u8, 1);\n' * 1300 + '~~~'
+        preview = '<p>@octocat &#64;octocat</p><pre>' + '<span class="pl-c1">@as</span>' * 2300 + '</pre>'
+        body = self.publish(source, preview)
 
         self.assertLess(len(source.encode()), 16_000)
         self.assertGreater(len(preview.encode()), 65_536)
-        self.assertLess(len(result.stdout.encode()), 65_536)
-        self.assertTrue(result.stdout.startswith("<!-- opencode-v2-triage:10 -->\n\n"))
-        self.assertTrue(result.stdout.endswith(f"\n~~~~\n{source}\n~~~~\n"))
+        self.assertLess(len(body.encode()), 65_536)
+        self.assertTrue(body.startswith("<!-- opencode-v2-triage:10 -->\n\n"))
+        self.assertTrue(body.endswith(f"\n~~~~\n{source}\n~~~~\n"))
+
+    def test_failed_preview_posts_reply_in_an_inert_fence(self):
+        source = "@octocat and `@as(u8, 1)`."
+        body = self.publish(source)
+
+        self.assertTrue(body.startswith("<!-- opencode-v2-triage:10 -->\n\n"))
+        self.assertIn("GitHub's Markdown preview was unavailable", body)
+        self.assertNotIn("partial preview", body)
+        self.assertTrue(body.endswith(f"\n~~~\n{source}\n~~~\n"))
 
     def test_discussion_replies_are_not_review_history(self):
         verdict = '```json\n{"reviewed_sha":"example"}\n```'

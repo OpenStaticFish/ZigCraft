@@ -33,7 +33,10 @@ infer() {
 post_reply() {
     already_commented && return 0
     # Use GitHub's parser to distinguish mentions from literal code.
-    gh api markdown -f mode=gfm -f "context=$GITHUB_REPOSITORY" -F "text=@$tmp/response" > "$tmp/rendered"
+    if ! gh api markdown -f mode=gfm -f "context=$GITHUB_REPOSITORY" -F "text=@$tmp/response" > "$tmp/rendered"; then
+        # Discard any partial preview so the formatter uses its literal fallback.
+        : > "$tmp/rendered"
+    fi
     {
         printf '%s\n\n' "$marker"
         python3 scripts/opencode_discussion_markdown.py "$tmp/response" "$tmp/rendered"

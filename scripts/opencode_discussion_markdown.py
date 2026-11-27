@@ -47,7 +47,17 @@ class ReplyHTML(HTMLParser):
         self.parts.append(escape(data, quote=False))
 
 
+def literal_reply(markdown, reason):
+    # A fence longer than any run in the 16 KB source keeps the entire
+    # fallback literal, including mentions, and fits within the body limit.
+    fence = "~" * max(3, 1 + max(map(len, re.findall(r"~+", markdown)), default=0))
+    return f"{reason}; showing the original text.\n\n{fence}\n{markdown}\n{fence}\n"
+
+
 def reply_body(markdown, rendered):
+    if not rendered.strip():
+        return literal_reply(markdown, "GitHub's Markdown preview was unavailable")
+
     parser = ReplyHTML()
     parser.feed(rendered)
     parser.close()
@@ -60,10 +70,7 @@ def reply_body(markdown, rendered):
     if len(body.encode("utf-8")) <= 64_000:
         return body
 
-    # Leave room for the publisher marker. A fence longer than any run in
-    # the 16 KB source keeps the entire fallback literal, including mentions.
-    fence = "~" * max(3, 1 + max(map(len, re.findall(r"~+", markdown)), default=0))
-    return f"Formatted reply exceeded GitHub's comment limit; showing the original text.\n\n{fence}\n{markdown}\n{fence}\n"
+    return literal_reply(markdown, "Formatted reply exceeded GitHub's comment limit")
 
 
 if __name__ == "__main__":
