@@ -7,9 +7,9 @@ inputs:
     required: false
     default: devenv
   cache-paths:
-    description: Paths to cache
+    description: Additional paths to cache alongside the Nix store
     required: false
-    default: ~/.cache/nix
+    default: ""
 
 runs:
   using: composite
@@ -55,11 +55,14 @@ runs:
       run: devenv version
 
     - name: Cache Nix Store
+      # Start a fresh namespace: older archives include the runner's live
+      # ~/.cache/nix SQLite databases and must not be restored by prefix.
+      id: store
       continue-on-error: true
       uses: nix-community/cache-nix-action@v7
       with:
-        primary-key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ hashFiles('devenv.nix', 'devenv.yaml', 'devenv.lock') }}
-        restore-prefixes-first-match: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-
+        primary-key: ${{ inputs.cache-key-prefix }}-store-v2-${{ runner.os }}-${{ hashFiles('devenv.nix', 'devenv.yaml', 'devenv.lock') }}
+        restore-prefixes-first-match: ${{ inputs.cache-key-prefix }}-store-v2-${{ runner.os }}-
         paths: ${{ inputs.cache-paths }}
 
     - name: Mark devenv setup complete
@@ -70,5 +73,5 @@ runs:
         {
           echo "### devenv Setup"
           echo "- Duration: $((END - START))s"
-          echo "- Cache key: ${{ inputs.cache-key-prefix }}-${{ runner.os }}-${{ hashFiles('devenv.nix', 'devenv.yaml', 'devenv.lock') }}"
+          echo "- Cache key: ${{ steps.store.outputs.primary-key }}"
         } >> "$GITHUB_STEP_SUMMARY"

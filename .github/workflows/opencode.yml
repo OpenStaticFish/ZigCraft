@@ -46,6 +46,7 @@ jobs:
           retention-days: 1
 
   infer:
+    cache-mode: none
     needs: prepare
     if: needs.prepare.outputs.request != ''
     permissions:

@@ -48,9 +48,9 @@ runs:
         sha256sum: 624ea093d47d62cf56f17b8332d74b8decda4a1faa610ebc60a1de334b2b3dc9
         args: --accept-routes=false --shields-up
         hostname: zigcraft-${{ github.run_id }}-${{ github.run_attempt }}
-        retry: '1'
+        retry: "1"
         timeout: 60s
-        use-cache: 'false'
+        use-cache: "false"
         log-mode: quiet
     - name: Verify proxy peer, route and TLS
       id: tls
