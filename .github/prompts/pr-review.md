@@ -179,8 +179,10 @@ Use the exact keys below:
   `score` (0–10) and `notes`. The publisher computes the average.
 - `confidence_breakdown`: object with integer percentages (0–100) for
   `code_quality`, `completeness`, `risk_level`, `test_coverage`.
-- `no_security_concerns`, `tests_present_and_passing`: booleans. Only check a
-  readiness item when supported by evidence; otherwise use false. A workflow
-  conclusion alone does not establish that particular tests executed or passed.
+- `no_security_concerns`: boolean, true only when supported by the review.
+- `test_status`: `passed`, `failed`, or `unverified`. Use `unverified` without
+  direct test evidence. A workflow conclusion alone does not establish that
+  particular tests executed or passed. The readiness checklist is informational;
+  the machine-readable verdict rules above determine the AI gate.
 - `overall_confidence_score`, `recommendation`: use the rules above.
 - `verdict_reason`: one sentence explaining the verdict.

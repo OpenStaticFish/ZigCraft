@@ -12,14 +12,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from opencode_prose import paragraphs
 
 
+def render_gfm(body):
+    payload = {"mode": "gfm", "context": "OpenStaticFish/ZigCraft", "text": body}
+    return subprocess.check_output(["gh", "api", "markdown", "--method", "POST", "--input", "-"],
+                                   input=json.dumps(payload), text=True)
+
+
 class RenderingTest(unittest.TestCase):
     @unittest.skipUnless(os.getenv("OPENCODE_TEST_GITHUB_RENDER") == "1", "requires authenticated gh")
-    def test_wrapping_prose_with_inert_model_markup(self):
+    def test_gfm_wrapping_prose_with_inert_model_markup(self):
         text = "See #991 or OpenStaticFish/ZigCraft#991, @someone and https://example.org.\n\n"
         text += "    ```html\n<img src=x> ![image](https://example.org/image.png)\n```"
-        payload = {"mode": "gfm", "context": "OpenStaticFish/ZigCraft", "text": paragraphs(text)}
-        rendered = subprocess.check_output(["gh", "api", "markdown", "--method", "POST", "--input", "-"],
-                                           input=json.dumps(payload), text=True)
+        rendered = render_gfm(paragraphs(text))
         tags = []
 
         class CaptureTags(HTMLParser):

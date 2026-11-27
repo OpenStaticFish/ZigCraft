@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import re
 import sys
-from urllib.error import HTTPError
+from http.client import HTTPException
 
 # -I excludes the working directory. Only import from the pinned checkout.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -52,22 +52,30 @@ def start(number, base, head):
 
 def review_context(current):
     number = current["number"]
+    unavailable = []
+
+    def optional(path, expected):
+        try:
+            result = pr.api(path)
+            if isinstance(result, expected):
+                return result
+        except (OSError, ValueError, HTTPException):
+            pass
+        unavailable.append(path)
+        return expected()
+
     body = (current.get("body") or "")[:6000]
     # Only resolve local closing references, never a user-supplied URL.
     refs = re.findall(r"\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+#([1-9][0-9]{0,9})\b", body, re.I)
     issues = []
     for ref in list(dict.fromkeys(refs))[:4]:
-        try:
-            issue = pr.api(f"issues/{ref}")
-        except HTTPError as exc:
-            if exc.code != 404:
-                raise
-            continue
-        issues.append({"number": ref, "title": issue["title"], "body_excerpt": (issue["body"] or "")[:2000]})
+        issue = optional(f"issues/{ref}", dict)
+        if issue:
+            issues.append({"number": ref, "title": issue.get("title"), "body_excerpt": (issue.get("body") or "")[:2000]})
     previous = []
     last_page = (current.get("comments", 0) + 24) // 25
     for page in range(last_page, max(0, last_page - 2), -1):
-        for item in reversed(pr.api(f"issues/{number}/comments?per_page=25&page={page}")):
+        for item in reversed(optional(f"issues/{number}/comments?per_page=25&page={page}", list)):
             text = item["body"] or ""
             if item["user"]["login"] == "github-actions[bot]" and text.startswith(f"<!-- zigcraft-pr-gate:{number}:"):
                 previous.append(text[:5500])
@@ -76,12 +84,12 @@ def review_context(current):
         if len(previous) == 2:
             break
     # Include the formal reviews left by the pre-migration GitHub app, too.
-    legacy = [r for r in pr.api(f"pulls/{number}/reviews?per_page=100")
+    legacy = [r for r in optional(f"pulls/{number}/reviews?per_page=100", list)
               if (r.get("user") or {}).get("login") == "opencode-agent[bot]" and r.get("body")]
-    return {"title": current.get("title", ""), "description_excerpt": body,
+    return {"unavailable": unavailable, "title": current.get("title", ""), "description_excerpt": body,
             "labels": [label["name"] for label in current.get("labels", [])][:25],
             "linked_issue_excerpts": issues, "previous_gate_review_excerpts_newest_first": previous,
-            "previous_formal_review_excerpts": [r["body"][:3000] for r in legacy[-2:]]}
+            "formal_review_excerpts_from_first_100": [r["body"][:3000] for r in legacy[-2:]]}
 
 
 def prepare(number, base, head):
@@ -93,9 +101,21 @@ def prepare(number, base, head):
             or 1 + diff.count("\ndiff --git ") != current["changed_files"]):
         raise pr.PilotError("Missing, incomplete or invalid PR diff")
     prompt = PROMPT.read_text(encoding="utf-8").replace("$PR_NUMBER", number).replace("$HEAD_SHA", head)
-    metadata = json.dumps(review_context(current), ensure_ascii=False)
-    request = f"{prompt}\nBase SHA: {base}\nHead SHA: {head}\n\nUntrusted PR data:\n{metadata}\n\nUntrusted diff:\n{diff}"
-    if len(request.encode()) > pr.INPUT_LIMIT or not pr.eligible(number, base, head):
+    prefix = f"{prompt}\nBase SHA: {base}\nHead SHA: {head}\n\nOptional untrusted context (missing fields are unknown):\n"
+    suffix = f"\nUntrusted diff:\n{diff}"
+    remaining = pr.INPUT_LIMIT - len(prefix.encode()) - len(suffix.encode())
+    if remaining < 0:
+        raise pr.PilotError("Prompt and complete diff exceed the gateway limit")
+    context = []
+    if remaining:
+        for key, value in review_context(current).items():
+            field = json.dumps({key: value}, ensure_ascii=False) + "\n"
+            size = len(field.encode())
+            if size <= remaining:
+                context.append(field)
+                remaining -= size
+    request = prefix + "".join(context) + suffix
+    if not pr.eligible(number, base, head):
         raise pr.PilotError("PR changed or request exceeds the gateway limit")
     directory = Path(os.environ["RUNNER_TEMP"]) / "pr-input"
     directory.mkdir(mode=0o700)
@@ -123,29 +143,45 @@ def integer(value, maximum):
     return value
 
 
-def finding(item, severity):
+def finding(item, severity, prose):
     keys(item, ("location", "title", "confidence", "description", "impact", "suggested_fix"))
     if item["confidence"] not in ("High", "Medium", "Low"):
         raise pr.PilotError("Invalid finding confidence")
-    return (f"<p><strong>[{severity.upper()}]</strong> <code>{pr.plain_text(item['location'])}</code> – "
-            f"{pr.plain_text(item['title'])}<br><strong>Confidence:</strong> {item['confidence']}<br>"
-            f"<strong>Description:</strong> {pr.plain_text(item['description'])}<br>"
-            f"<strong>Impact:</strong> {pr.plain_text(item['impact'])}<br>"
-            f"<strong>Suggested Fix:</strong> {pr.plain_text(item['suggested_fix'])}</p>")
+    return (f"<p><strong>[{severity.upper()}]</strong> <code>{prose(item['location'])}</code> – "
+            f"{prose(item['title'])}<br><strong>Confidence:</strong> {item['confidence']}<br>"
+            f"<strong>Description:</strong> {prose(item['description'])}<br>"
+            f"<strong>Impact:</strong> {prose(item['impact'])}<br>"
+            f"<strong>Suggested Fix:</strong> {prose(item['suggested_fix'])}</p>")
 
 
 def verdict(raw, base, head, number):
     obj = json.loads(raw, object_pairs_hook=unique_keys)
+    passed, text = render_verdict(obj, base, head, number, pr.plain_text)
+    # Leave room for the comment's deduplication markers. Validate every full
+    # field first; shorten only free text, never the verdict or finding counts.
+    for limit in (500, 250, 125, 60, 24):
+        if len(text.encode()) <= 65000:
+            break
+
+        def abbreviated(value):
+            return pr.escape_text(value[:limit] + "…") if len(value) > limit else pr.escape_text(value)
+
+        passed, text = render_verdict(obj, base, head, number, abbreviated)
+        text = "Review prose abbreviated to fit GitHub's comment limit.\n\n" + text
+    return passed, text
+
+
+def render_verdict(obj, base, head, number, prose):
     keys(obj, {"reviewed_base", "reviewed_sha", "overall_confidence_score", "recommendation", "verdict_reason",
                "summary", "fixed", "solid", "confidence_breakdown", "no_security_concerns",
-               "tests_present_and_passing", *SEVERITIES})
+               "test_status", *SEVERITIES})
     if obj["reviewed_base"] != base or obj["reviewed_sha"] != head:
         raise pr.PilotError("Verdict does not match the reviewed revisions")
     score = integer(obj["overall_confidence_score"], 100)
     recommendation = obj["recommendation"]
     if recommendation not in ("MERGE", "MERGE WITH FIXES", "DO NOT MERGE"):
         raise pr.PilotError("Invalid gate recommendation")
-    lines = ["## 📋 Summary", f"<p>{pr.plain_text(obj['summary'])}</p>", "## 📌 Review Metadata",
+    lines = ["## 📋 Summary", f"<p>{prose(obj['summary'])}</p>", "## 📌 Review Metadata",
              f"- **Reviewed Commit SHA:** `{head}`\n- **Reviewed PR:** #{number}\n- **Base SHA:** `{base}`"]
     keys(obj["fixed"], SEVERITIES)
     for severity, heading in zip(SEVERITIES, HEADINGS):
@@ -154,8 +190,8 @@ def verdict(raw, base, head, number):
         if not all(isinstance(items, list) and len(items) <= 12 for items in (findings, fixed)):
             raise pr.PilotError("Invalid gate findings")
         lines.append(f"## {heading}")
-        lines.extend(f"<p>✅ <strong>[FIXED]</strong> Previous issue: {pr.plain_text(s)}</p>" for s in fixed)
-        lines.extend(finding(item, severity) for item in findings)
+        lines.extend(f"<p>✅ <strong>[FIXED]</strong> Previous issue: {prose(s)}</p>" for s in fixed)
+        lines.extend(finding(item, severity, prose) for item in findings)
         if not findings and not fixed:
             lines.append("None identified.")
     keys(obj["solid"], PRINCIPLES)
@@ -166,7 +202,7 @@ def verdict(raw, base, head, number):
         keys(entry, ("score", "notes"))
         value = integer(entry["score"], 10)
         total += value
-        rows.append(f"<tr><td>{name}</td><td>{value}</td><td>{pr.plain_text(entry['notes'])}</td></tr>")
+        rows.append(f"<tr><td>{name}</td><td>{value}</td><td>{prose(entry['notes'])}</td></tr>")
     average = total / len(PRINCIPLES)
     rows.append(f"<tr><th>Average</th><td>{average:.1f}</td><td></td></tr></tbody></table>")
     lines.extend(["## 📊 SOLID Principles Score", "".join(rows), "## 🎯 Final Assessment",
@@ -175,13 +211,15 @@ def verdict(raw, base, head, number):
     keys(breakdown, ("code_quality", "completeness", "risk_level", "test_coverage"))
     lines.append("\n".join(f"- **{key.replace('_', ' ').title()}:** {integer(breakdown[key], 100)}%"
                            for key in ("code_quality", "completeness", "risk_level", "test_coverage")))
-    if any(type(obj[key]) is not bool for key in ("no_security_concerns", "tests_present_and_passing")):
+    if type(obj["no_security_concerns"]) is not bool or obj["test_status"] not in ("passed", "failed", "unverified"):
         raise pr.PilotError("Invalid readiness flag")
     checks = [(not obj["critical"], "All critical issues resolved"), (average >= 6, "SOLID average score >= 6.0"),
               (score >= 60, "Overall confidence >= 60%"), (obj["no_security_concerns"], "No security concerns"),
-              (obj["tests_present_and_passing"], "Tests present and passing (if applicable)")]
-    lines.extend(["### Merge Readiness", "\n".join(f"- [{'x' if ok else ' '}] {label}" for ok, label in checks),
-                  "### Verdict", f"**{recommendation}**", f"<p>{pr.plain_text(obj['verdict_reason'])}</p>"])
+              (obj["test_status"] == "passed", f"Tests present and passing (evidence: {obj['test_status']})")]
+    lines.extend(["### Merge Readiness", "Informational checklist. The AI gate requires zero open critical, high "
+                  "or medium issues, confidence ≥80%, and a MERGE verdict. CI tests are separate checks.",
+                  "\n".join(f"- [{'x' if ok else ' '}] {label}" for ok, label in checks),
+                  "### Verdict", f"**{recommendation}**", f"<p>{prose(obj['verdict_reason'])}</p>"])
     machine = dict(reviewed_sha=head, critical_issues=len(obj["critical"]), high_priority_issues=len(obj["high"]),
                    medium_priority_issues=len(obj["medium"]), overall_confidence_score=score, recommendation=recommendation)
     lines.extend(["## Machine Readable Verdict", "```json\n" + json.dumps(machine, indent=2) + "\n```"])

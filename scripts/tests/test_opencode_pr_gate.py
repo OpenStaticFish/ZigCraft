@@ -10,6 +10,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import opencode_pr_gate as gate
+from test_opencode_prose import render_gfm
 
 
 class MergeGate(unittest.TestCase):
@@ -39,7 +40,7 @@ class MergeGate(unittest.TestCase):
             "solid": {k: {"score": 8, "notes": "Clear responsibility"} for k in gate.PRINCIPLES},
             "confidence_breakdown": dict(code_quality=85, completeness=80, risk_level=80, test_coverage=70),
             "fixed": {k: [] for k in gate.SEVERITIES}, "no_security_concerns": True,
-            "tests_present_and_passing": False,
+            "test_status": "unverified",
         }
         self.response = self.root / "pr-output/response.txt"
         self.response.parent.mkdir()
@@ -124,6 +125,45 @@ class MergeGate(unittest.TestCase):
         self.assertFalse((self.root / "pr-input").exists())
         self.assertEqual(self.states, [("ai-merge-gate", "pending"), ("ai-merge-gate", "failure"), ("ai-review", "failure")])
 
+    def test_optional_context_failure_keeps_complete_diff(self):
+        self.pr.update(body="Fixes #55", comments=1)
+
+        def unavailable(path, **kwargs):
+            if path.startswith(("issues/", "pulls/3/reviews")):
+                raise OSError("temporary GitHub failure")
+            return self.github(path, **kwargs)
+
+        with patch.object(gate.pr, "api", side_effect=unavailable):
+            gate.prepare(*self.target)
+        text = (self.root / "pr-input/request.txt").read_text()
+        for path in ("issues/55", "issues/3/comments?", "pulls/3/reviews?"):
+            self.assertIn(path, text.split('{"unavailable":')[1].splitlines()[0])
+        self.assertTrue(text.endswith("diff --git a/source.zig b/source.zig\n"))
+
+    def test_optional_context_cannot_displace_pinned_diff(self):
+        self.pr.update(body="界" * 6000)
+        diff = "diff --git a/t b/t\n" + ("d" * (gate.pr.INPUT_LIMIT - len(gate.PROMPT.read_bytes()) - 1000))
+        with patch.object(gate.pr, "api", side_effect=lambda path, **kw: diff if kw.get("diff") else self.github(path, **kw)):
+            gate.prepare(*self.target)
+        text = (self.root / "pr-input/request.txt").read_text()
+        self.assertTrue(text.endswith(diff))
+        self.assertLessEqual(len(text.encode()), gate.pr.INPUT_LIMIT)
+        self.assertNotIn(self.pr["body"], text)
+
+    def test_large_report_preserves_all_findings_and_verdict(self):
+        item = {**self.finding, "impact": "`" * 1000, "description": "&" * 1000}
+        self.decision.update(low=[item] * 12, test_status="failed")
+        raw = json.dumps(self.decision)
+        self.assertLess(len(raw.encode()), gate.pr.OUTPUT_LIMIT)
+        passed, report = gate.verdict(raw, self.base, self.head, self.number)
+        self.assertTrue(passed)  # Test status is informational, independent CI enforces test results.
+        self.assertIn("abbreviated", report)
+        self.assertLess(len(report.encode()), 65000)
+        self.assertEqual(report.count("<strong>[LOW]</strong>"), 12)
+        self.assertIn("evidence: failed", report)
+        machine = json.loads(report.split("```json\n")[1].split("\n```")[0])
+        self.assertEqual(machine["recommendation"], "MERGE")
+
     def test_every_blocking_severity_threshold_and_verdict_is_independent(self):
         for field, value in [
             ("critical", [self.finding]), ("high", [self.finding]), ("medium", [self.finding]),
@@ -178,6 +218,20 @@ class MergeGate(unittest.TestCase):
             gate.publish(*self.target)
         self.assertFalse(self.states)
         self.assertFalse(self.comments)
+
+    @unittest.skipUnless(os.getenv("OPENCODE_TEST_GITHUB_RENDER") == "1", "requires authenticated gh")
+    def test_gfm_complete_gate_report(self):
+        self.finding["description"] = "@someone </p> ![remote](https://example.org/image.png) ```json #991"
+        self.response.write_text(json.dumps(self.decision))
+        gate.publish(*self.target)
+        rendered = render_gfm(self.comments[-1]["body"])
+        self.assertIn("<table", rendered)
+        self.assertIn("<strong>Description:</strong>", rendered)
+        self.assertIn("Machine Readable Verdict", rendered)
+        self.assertNotIn("<img ", rendered)
+        self.assertNotIn('class="user-mention', rendered)
+        self.assertNotIn('href="https://example.org', rendered)
+        self.assertNotIn('/issues/991"', rendered)
 
     def test_changed_head_or_base_prevents_passing_either_revision(self):
         for side in ("base", "head"):
