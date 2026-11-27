@@ -1,5 +1,7 @@
 # Platform CI
 
+For the staged private inference rollout, caller switches and operator ownership, see [OpenCode CI](opencode-ci.md).
+
 `.github/workflows/build.yml` runs Linux/Lavapipe as the canonical correctness gate: formatting, debug/release-safe unit tests, shader validation, integration smoke, and world smoke.
 
 The Windows and macOS jobs are build-only and manual opt-in in this first iteration. They are kept in the workflow behind the `enable_platform_builds` dispatch input so the dependency setup and artifact paths are ready for stabilization without blocking PRs on non-Linux runner drift.

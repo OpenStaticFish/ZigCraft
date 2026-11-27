@@ -22,12 +22,7 @@ modules=(
 )
 
 if [[ -n "$input_module" ]]; then
-    if ! [[ "$input_module" =~ ^[a-zA-Z0-9_\ /-]+$ ]]; then
-        printf "ERROR: Invalid module input: '%s'\n" "$input_module" >&2
-        exit 1
-    fi
     selected="$input_module"
-    printf 'Manual dispatch: scanning %s\n' "$selected"
 else
     day=$((10#$(date +%j)))
     index=$((day % ${#modules[@]}))
@@ -35,5 +30,15 @@ else
     printf 'Scheduled run: day=%s index=%s -> %s\n' "$day" "$index" "$selected"
 fi
 
+case "$selected" in
+    engine/graphics|engine/core|engine/math|engine/input|engine/ui|engine/atmosphere|engine/audio|engine/ecs|engine/physics)
+        path="modules/${selected//\//-}/src" ;;
+    world) path="modules/world-core/src modules/world-runtime/src" ;;
+    world/meshing) path="modules/world-meshing/src" ;;
+    world/worldgen) path="modules/worldgen-overworld/src modules/worldgen-overworld-v2/src" ;;
+    game) path="modules/game-core/src modules/game-ui/src src/game" ;;
+    *) echo "Unknown audit module" >&2; exit 1 ;;
+esac
+
 write_output module "$selected"
-write_output module_path "src/${selected}"
+write_output scan_paths "$path"

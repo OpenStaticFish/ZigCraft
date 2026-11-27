@@ -1,119 +1,128 @@
 name: opencode
 
 on:
-  pull_request:
+  pull_request_target:
+    branches: [dev]
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
       pr_number:
-        description: "PR number to review (triggered by test-writer)"
+        description: PR number to review
         required: true
         type: number
       head_sha:
-        description: "Head SHA of the PR to review"
+        description: Exact head SHA of the PR to review
         required: true
         type: string
 
+permissions: {}
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pr_number }}
-  cancel-in-progress: true
+  group: opencode-gate-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: false
+
+env:
+  PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+  BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+  HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
 
 jobs:
-  opencode:
-    if: >
-      (github.event_name == 'pull_request' && github.event.pull_request.draft == false) ||
-      github.event_name == 'workflow_dispatch'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 45
+  prepare:
+    if: >-
+      github.repository == 'OpenStaticFish/ZigCraft' &&
+      github.event.repository.default_branch == 'dev' && github.ref == 'refs/heads/dev' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (!github.event.pull_request.draft && github.event.pull_request.user.login != 'dependabot[bot]' &&
+        github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
-      id-token: write
-      contents: write
-      pull-requests: write
-      issues: write
+      contents: read
+      pull-requests: read
       statuses: write
-
+    outputs:
+      bound: ${{ steps.start.outputs.bound }}
+      request: ${{ steps.prepare.outputs.request }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ inputs.head_sha || github.event.pull_request.head.sha }}
-          fetch-depth: 0
-          token: ${{ github.token }}
-
-      - name: Resolve PR context
-        id: resolve-pr
-        env:
-          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
-          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
-          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
-          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: bash scripts/resolve_pr_context.sh
-
-      - name: Configure git
-        run: bash scripts/configure_git_identity.sh "github-actions[bot]" "github-actions[bot]@users.noreply.github.com"
-
-      - name: Fetch previous opencode reviews
-        id: previous-reviews
-        run: bash scripts/fetch_previous_opencode_reviews.sh
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/opencode_v2_pr.py
+            scripts/opencode_pr_gate.py
+            .github/prompts/pr-review.md
+          sparse-checkout-cone-mode: false
+      - name: Verify PR head and set required status pending
+        id: start
         env:
           GH_TOKEN: ${{ github.token }}
-
-      - name: Setup devenv
-        uses: ./.github/actions/setup-devenv
-
-      - name: Prepare opencode cache
-        run: bash scripts/prepare_opencode_cache.sh
-
-      - name: Configure opencode CI permissions
-        run: bash scripts/configure_opencode_ci_permissions.sh
-
-      - uses: ./.github/actions/load-prompt
-        with:
-          prompt-file: .github/prompts/pr-review.md
-          variables: $PR_NUMBER $HEAD_SHA $PREVIOUS_REVIEWS
-
-      - name: Run opencode
-        id: ai_review
-        timeout-minutes: 40
-        uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          GH_TOKEN: ${{ github.token }}
-          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
-        with:
-          model: zhipuai-coding-plan/glm-5.2
-          variant: max
-          use_github_token: true
-          prompt: ${{ env.PROMPT }}
-
-      - name: Dump opencode diagnostics
-        if: always()
-        env:
-          AI_REVIEW_OUTCOME: ${{ steps.ai_review.outcome }}
-        run: bash scripts/dump_opencode_diagnostics.sh
-
-      - name: Upload opencode diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: opencode-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            /tmp/opencode-cache
-            ~/.local/share/opencode
-            ~/.cache/opencode
-          if-no-files-found: ignore
-          include-hidden-files: true
-          retention-days: 7
-
-      - name: Evaluate AI merge gate
-        id: ai_merge_gate
-        run: bash scripts/publish_ai_merge_gate.sh
+        run: python3 -I scripts/opencode_pr_gate.py start
+      - name: Prepare the pinned diff
+        id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
+        run: python3 -I scripts/opencode_pr_gate.py prepare
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ${{ steps.prepare.outputs.request }}
+          path: ${{ runner.temp }}/pr-input/request.txt
+          if-no-files-found: error
+          retention-days: 1
 
-      - name: Mark AI review complete
-        if: always()
+  infer:
+    cache-mode: none
+    needs: prepare
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/opencode-v2-infer.yml
+    with:
+      profile: review
+      request-artifact: ${{ needs.prepare.outputs.request }}
+
+  publish:
+    needs: [prepare, infer]
+    if: ${{ !cancelled() && needs.prepare.outputs.bound == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/opencode_v2_pr.py
+            scripts/opencode_pr_gate.py
+          sparse-checkout-cone-mode: false
+      - name: Require the successful response from this run
         env:
-          AI_REVIEW_OUTCOME: ${{ steps.ai_review.outcome }}
+          PREPARE: ${{ needs.prepare.result }}
+          INFER: ${{ needs.infer.result }}
+          RESPONSE: ${{ needs.infer.outputs.response-artifact }}
+        run: |
+          [[ "$PREPARE" == success && "$INFER" == success ]]
+          # A successful inference can be reused when only failed jobs rerun.
+          [[ "$RESPONSE" =~ ^opencode-response-$GITHUB_RUN_ID-([1-9][0-9]{0,8})$ ]]
+          (( BASH_REMATCH[1] <= GITHUB_RUN_ATTEMPT ))
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: ${{ needs.infer.outputs.response-artifact }}
+          path: ${{ runner.temp }}/pr-output
+      - name: Validate and publish the decision
+        id: verdict
+        env:
           GH_TOKEN: ${{ github.token }}
-        run: bash scripts/mark_ai_review_complete.sh
+        run: python3 -I scripts/opencode_pr_gate.py publish
+      - name: Fail the bound head status if a stage failed
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I scripts/opencode_pr_gate.py fail
+      - name: Require a passing decision
+        env:
+          PASSED: ${{ steps.verdict.outputs.passed }}
+        run: test "$PASSED" = true
