@@ -117,6 +117,8 @@ pub const App = struct {
     screenshot_delay_start: ?f32 = null,
     screenshot_settle_frames: u32 = 0,
     graphics_stall_timer: ?MonotonicTimer = null,
+    screenshot_readiness_timer: ?MonotonicTimer = null,
+    screenshot_capture_ready: bool = false,
     frame_start_counter: u64 = 0,
     reveal_window_when_menu_ready: bool = false,
 
@@ -400,6 +402,9 @@ pub const App = struct {
 
     pub fn runSingleFrame(self: *App) !void {
         self.frame_start_counter = c.SDL_GetPerformanceCounter();
+        if (build_options.screenshot_path.len > 0 and self.screenshot_readiness_timer == null) {
+            self.screenshot_readiness_timer = .{ .start_ticks = self.frame_start_counter };
+        }
         self.time.update();
         if (!build_options.benchmark) {
             self.audio_manager.update();
@@ -506,6 +511,7 @@ pub const App = struct {
 
         if (!frame_open) {
             if (self.benchmark_runner) |runner| try runner.skipFrame();
+            try self.checkScreenshotDeadline();
             if (build_options.smoke_test or build_options.screenshot_path.len > 0) {
                 const timer = self.graphics_stall_timer orelse MonotonicTimer{ .start_ticks = self.frame_start_counter };
                 self.graphics_stall_timer = timer;
@@ -566,6 +572,7 @@ pub const App = struct {
             }
 
             const capture_ready = self.smoke_test_frames >= target_frames and self.screenshot_settle_frames >= 30;
+            self.screenshot_capture_ready = capture_ready;
             const screenshot_delay_ready = build_options.screenshot_path.len > 0 and build_options.screenshot_delay_seconds > 0;
             const should_finish = if (screenshot_delay_ready and capture_ready) blk: {
                 // A delay is additional settling time, not a replacement for
@@ -583,7 +590,7 @@ pub const App = struct {
             // Headless frames are intentionally unthrottled. A frame-count
             // timeout can therefore expire before generation workers receive
             // meaningful CPU time; use a wall-time bound instead.
-            try self.checkScreenshotDeadline(capture_ready);
+            try self.checkScreenshotDeadline();
 
             if (should_finish) {
                 if (build_options.screenshot_path.len > 0) {
@@ -629,10 +636,12 @@ pub const App = struct {
         self.limitFrameRateIfNeeded();
     }
 
-    fn checkScreenshotDeadline(self: *const App, capture_ready: bool) !void {
+    fn checkScreenshotDeadline(self: *const App) !void {
         const requires_world_ready = build_options.shadow_test_scene or build_options.auto_world.len > 0;
-        if (build_options.screenshot_path.len > 0 and requires_world_ready and self.time.elapsed >= 90.0 and !capture_ready) {
-            return error.ScreenshotWorldNotReady;
+        if (requires_world_ready and !self.screenshot_capture_ready) {
+            if (self.screenshot_readiness_timer) |timer| {
+                if (timer.read() >= 90 * std.time.ns_per_s) return error.ScreenshotWorldNotReady;
+            }
         }
     }
 

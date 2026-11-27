@@ -302,6 +302,10 @@ test "smoke test: launch, generate, render, exit" {
     // Simulate a skipped acquire after successful frames. The screen still
     // updates, but its draw and the frame-completion callbacks must not run.
     const vulkan: *@import("engine-graphics").VulkanContext = @ptrCast(@alignCast(app.render_system.rhi.ptr));
+    // A normal frame has submitted the upload screen's copy. A subsequent
+    // upload in the same slot must not replay that batch.
+    try testing.expectEqual(@as(usize, 0), vulkan.resources.transfer.pendingCopyCount());
+    try testing.expectEqual(@as(c.VkAccessFlags, 0), vulkan.resources.transfer.getPendingDstAccessMask());
     if (!build_options.skip_present) {
         const acquired_frame_slot = vulkan.frames.current_frame;
         const tick = active_upload_screen.tick;

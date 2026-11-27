@@ -312,6 +312,8 @@ pub const TransferQueue = struct {
     pub fn resetTransferState(self: *TransferQueue) void {
         self.transfer_ready[self.current_frame] = false;
         self.transfer_submitted[self.current_frame] = false;
+        self.pending_copy_count[self.current_frame] = 0;
+        self.pending_dst_access_mask[self.current_frame] = 0;
     }
 
     fn discardPendingState(self: *TransferQueue, frame_index: usize) void {
@@ -388,9 +390,7 @@ pub const TransferQueue = struct {
         if (wait_result == c.VK_ERROR_DEVICE_LOST) return error.GpuLost;
         try Utils.checkVk(wait_result);
 
-        self.transfer_ready[self.current_frame] = false;
-        self.pending_copy_count[self.current_frame] = 0;
-        self.pending_dst_access_mask[self.current_frame] = 0;
+        self.resetTransferState();
     }
 
     pub fn flushSync(self: *TransferQueue, vk_device: c.VkDevice, queue_mutex: *sync.Mutex) !void {
