@@ -1,4 +1,5 @@
 import json
+from html.parser import HTMLParser
 import os
 from pathlib import Path
 import sys
@@ -115,10 +116,30 @@ class PullRequestPilot(unittest.TestCase):
 
     @live_gfm
     def test_gfm_complete_advisory_review(self):
-        self.response.write_text(json.dumps({"findings": [MARKUP], "limitations": "Diff only."}))
+        finding = "Allocation escapes: " + MARKUP
+        self.response.write_text(json.dumps({"findings": [finding], "limitations": "Diff only."}))
         pilot.report(*self.target, advisory=True)
         rendered = render_gfm(self.comments[-1]["body"])
-        self.assertIn("<li>", rendered)
+        # Only plain text may survive inside the finding's list item.
+        class FindingParser(HTMLParser):
+            in_item = False
+
+            def handle_starttag(self, tag, attrs):
+                if self.in_item:
+                    raise AssertionError(f"Unexpected element inside finding: {tag}")
+                self.in_item = tag == "li"
+
+            def handle_endtag(self, tag):
+                if tag == "li":
+                    self.in_item = False
+
+            def handle_data(self, data):
+                if self.in_item:
+                    item_text.append(data)
+
+        item_text = []
+        FindingParser().feed(rendered)
+        self.assertEqual("".join(item_text).replace("\u200b", ""), finding)
         self.assertIn("<strong>Limitations</strong>", rendered)
         self.assertNotIn("<pre", rendered)
 

@@ -127,13 +127,16 @@ class DiscussionFixture(unittest.TestCase):
         for path, wid, outcome in [(workflow, 123, "failure"), (other, 124, "success")]:
             url = f"actions/workflows/{Path(path).name}/runs?branch=dev&status=completed&per_page=3"
             upstream = dict(run, id=wid, workflow_id=wid, path=path, head_sha="c"*40, conclusion=outcome)
-            self.reads[url] = {"workflow_runs": [dict(upstream, id=999, head_repository={"full_name": "fork/ZigCraft"}),
-                                                 dict(upstream, id=998, head_branch="feature"), upstream]}
+            self.reads[url] = {"workflow_runs": [dict(run, id=i, path=path) for i in (97, 98, 99)]}
+            self.reads[url + "&page=2"] = {"workflow_runs": [
+                dict(upstream, id=999, head_repository={"full_name": "fork/ZigCraft"}),
+                dict(upstream, id=998, head_branch="feature"), upstream]}
+            self.reads[url + "&page=3"] = {"workflow_runs": [] if path == workflow else [run] * 3}
         data = self.prepare()
         evidence = data["github"]
         self.assertCountEqual(list(data["files"])[:2], [workflow, other])
         queried = [c.args[0].split("/")[2] for c in discussion.repo.call_args_list if c.args[0].startswith("actions/workflows/")]
-        self.assertCountEqual(queried, [Path(workflow).name, Path(other).name])
+        self.assertCountEqual(queried, [Path(workflow).name, Path(other).name] * 3)
         self.assertNotIn(".github/actions/test/.env", data["files"])
         self.assertEqual(evidence["revision_commit"]["data"]["changed_paths_first_30"], [workflow])
         linked = evidence["cross_referenced_prs_sample"]
@@ -142,7 +145,10 @@ class DiscussionFixture(unittest.TestCase):
         origins = evidence["workflow_runs_at_revision_sample"]["data"]
         self.assertEqual({k: [r["id"] for r in rows] for k, rows in origins.items()},
                          {"upstream": [99], "fork": [100], "unknown": [101]})
-        history = evidence["recent_completed_dev_runs_at_other_revisions"]["data"]
+        history_sample = evidence["recent_completed_dev_runs_at_other_revisions"]
+        self.assertEqual(history_sample["partial_paths"], [other])
+        self.assertEqual(history_sample["status"], "partial")
+        history = history_sample["data"]
         self.assertEqual(history[0]["revision"], "c"*40)
         self.assertCountEqual([(r["workflow_id"], r["path"], r["queried_path"], r["conclusion"])
                                for r in history],
@@ -210,7 +216,8 @@ class DiscussionFixture(unittest.TestCase):
 
     def test_running_optional_lookup_is_interrupted(self):
         # A broken alarm must not hang the test runner.
-        subprocess.run([sys.executable, "-B", "-m", "unittest", "test_opencode_discussion.DiscussionFixture.stalled_lookup"],
+        subprocess.run([sys.executable, "-B", "-m", "unittest", "test_opencode_discussion.DiscussionFixture.stalled_lookup",
+                        "test_opencode_discussion.DiscussionFixture.stalled_parser"],
                        cwd=Path(__file__).parent, check=True, timeout=5, capture_output=True)
 
     def stalled_lookup(self):
@@ -228,6 +235,17 @@ class DiscussionFixture(unittest.TestCase):
             data = self.prepare()
         self.assertEqual(interrupted, [f"commits/{data['revision']}?per_page=30"])
         self.assertEqual(data["github"]["revision_commit"], {"status": "unavailable"})
+        self.assertEqual(data["files"][self.file], self.original.decode())
+        self.assertEqual(signal.getsignal(signal.SIGALRM), handler)
+        self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0, 0))
+
+    def stalled_parser(self):
+        handler = signal.getsignal(signal.SIGALRM)
+        with patch.object(discussion, "lookup_budget", side_effect=lambda _: lookup_budget(0.1)), \
+                patch.object(discussion, "run_summaries", side_effect=lambda _: signal.pause()) as parser:
+            data = self.prepare()
+        parser.assert_called_once()
+        self.assertEqual(data["github"]["workflow_runs_at_revision_sample"], {"status": "unavailable"})
         self.assertEqual(data["files"][self.file], self.original.decode())
         self.assertEqual(signal.getsignal(signal.SIGALRM), handler)
         self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0, 0))
@@ -265,6 +283,21 @@ class DiscussionFixture(unittest.TestCase):
         check_at_limit(data)
         del data["github"]
         check_at_limit(data)
+
+    def test_budget_prioritizes_individual_named_runs(self):
+        named = ".github/workflows/infer.yml"
+        unrelated = {"id": 1, "path": ".github/workflows/build.yml"}
+        relevant = {"id": 2, "path": named}
+        at_revision = "workflow_runs_at_revision_sample"
+        history = "recent_completed_dev_runs_at_other_revisions"
+        earlier = dict(relevant, id=3, queried_path=named)
+        samples = {at_revision: {"status": "sampled", "data": {"upstream": [unrelated, relevant], "fork": [], "unknown": []}},
+                   history: {"status": "sampled", "data": [earlier, dict(earlier, id=4)]}}
+        expected = {at_revision: {"status": "partial", "data": {"upstream": [relevant], "fork": [], "unknown": []}},
+                    history: {"status": "omitted_budget"}}
+        self.assertEqual(discussion.pack_samples(samples, [named], len(json.dumps(expected))), expected)
+        expected[history] = {"status": "partial", "data": [earlier]}
+        self.assertEqual(discussion.pack_samples(samples, [named], len(json.dumps(expected))), expected)
 
     def test_markup_expansion_stays_within_comment_limit(self):
         self.prepare()

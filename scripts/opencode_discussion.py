@@ -241,11 +241,11 @@ def linked_prs(timeline):
 
 def github_evidence(target, workflows):
     sha = target["head"]
-    fetch = lookup_budget(15)
+    within_budget = lookup_budget(15)
 
     def lookup(path, parse):
         try:
-            return parse(fetch(repo, path, optional=True))
+            return within_budget(lambda: parse(repo(path, optional=True)))
         except (ValueError, OSError, HTTPException, KeyError, TypeError, AttributeError):
             return None
 
@@ -287,16 +287,27 @@ def github_evidence(target, workflows):
             by_origin[group].append(run)
     previous_runs = []
     unavailable_paths = []
+    partial_paths = []
     queried_paths = workflows[:4]
     for path in queried_paths:
         name = quote(Path(path).name, safe="")
-        history = lookup(f"actions/workflows/{name}/runs?branch=dev&status=completed&per_page=3", run_summaries)
-        if history is None:
-            unavailable_paths.append(path)
-        previous_runs.extend({**run, "queried_path": path} for run in history or []
-                             if (run["head_repository"] or "").casefold() == REPO.casefold() and run["head_branch"] == "dev"
-                             and run["status"] == "completed" and run["revision"] != sha)
-    history_status = "partial" if unavailable_paths or len(workflows) > len(queried_paths) else "sampled"
+        url = f"actions/workflows/{name}/runs?branch=dev&status=completed&per_page=3"
+        eligible = {}
+        for page in (url, url + "&page=2", url + "&page=3"):
+            history = lookup(page, run_summaries)
+            if history is None:
+                (unavailable_paths if page == url else partial_paths).append(path)
+                break
+            for run in history:
+                if ((run["head_repository"] or "").casefold() == REPO.casefold() and run["head_branch"] == "dev"
+                        and run["status"] == "completed" and run["revision"] != sha):
+                    eligible.setdefault(run["id"], {**run, "queried_path": path})
+            if len(eligible) >= 3 or len(history) < 3:
+                break
+        else:
+            partial_paths.append(path)
+        previous_runs.extend(list(eligible.values())[:3])
+    history_status = "partial" if partial_paths or unavailable_paths or len(workflows) > len(queried_paths) else "sampled"
     if not queried_paths:
         history_status = "not_requested"
     elif unavailable_paths == queried_paths:
@@ -307,8 +318,63 @@ def github_evidence(target, workflows):
                                               "partial" if partial or len(linked) > 8 else "sampled"),
         "workflow_runs_at_revision_sample": sample(by_origin if runs is not None else None),
         "recent_completed_dev_runs_at_other_revisions": {
-            **sample(previous_runs, history_status), "unavailable_paths": unavailable_paths},
+            **sample(previous_runs, history_status), "unavailable_paths": unavailable_paths, "partial_paths": partial_paths},
     }
+
+
+def pack_samples(samples, named_workflows, limit):
+    """Spend the GitHub portion of the request budget without separating data from its status."""
+    def size(value):
+        return len(json.dumps(value, ensure_ascii=False).encode())
+
+    if size(samples) <= limit:
+        return samples
+    packed = {key: {"status": "omitted_budget"} for key in samples}
+    remaining = limit - size(packed)
+    if remaining < 0:
+        return None
+
+    def store(key, value):
+        nonlocal remaining
+        cost = size(value) - size(packed[key])
+        if cost <= remaining:
+            packed[key] = value
+            remaining -= cost
+            return True
+        return False
+
+    at_revision = "workflow_runs_at_revision_sample"
+    history = "recent_completed_dev_runs_at_other_revisions"
+    groups = samples[at_revision].get("data", {})
+    runs = [(at_revision, group, row) for group, rows in groups.items() for row in rows]
+    runs.extend((history, None, row) for row in samples[history]["data"])
+    totals = {key: sum(entry[0] == key for entry in runs) for key in (at_revision, history)}
+    retained = {at_revision: 0, history: 0}
+
+    def add_run(key, group, row):
+        sample = samples[key]
+        if group is None:
+            data = [*packed[key].get("data", []), row]
+        else:
+            data = dict(packed[key].get("data", {name: [] for name in groups}))
+            data[group] = [*data[group], row]
+        status = sample["status"] if retained[key] + 1 == totals[key] else "partial"
+        candidate = {**sample, "status": status, "data": data}
+        if store(key, candidate):
+            retained[key] += 1
+
+    other = []
+    for key, group, row in runs:
+        if row.get("queried_path", row["path"]) in named_workflows:
+            add_run(key, group, row)
+        else:
+            other.append((key, group, row))
+    for key, sample in samples.items():
+        if not totals.get(key):
+            store(key, sample)
+    for entry in other:
+        add_run(*entry)
+    return packed
 
 
 def request_text(target):
@@ -369,19 +435,11 @@ def request_text(target):
         raise ValueError("prepared request exceeds budget")
     if mode == "respond":
         samples = github_evidence(target, named_workflows)
-        evidence = data["github"] = {key: {"status": "omitted_budget"} for key in samples}
-        manifest = serialize()
-        if len(manifest.encode()) > REQUEST_LIMIT:
-            return text
-        text = manifest
-        for key, value in samples.items():
-            omitted = evidence[key]
-            evidence[key] = value
-            candidate = serialize()
-            if len(candidate.encode()) <= REQUEST_LIMIT:
-                text = candidate
-            else:
-                evidence[key] = omitted
+        remaining = REQUEST_LIMIT - len(text.encode()) - len(', "github": ')
+        packed = pack_samples(samples, named_workflows, remaining)
+        if packed is not None:
+            data["github"] = packed
+            text = serialize()
     return text
 
 
