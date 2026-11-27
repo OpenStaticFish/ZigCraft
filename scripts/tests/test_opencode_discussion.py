@@ -153,6 +153,18 @@ class DiscussionFixture(unittest.TestCase):
             discussion.run("respond")
         self.assertEqual([w[0] for w in self.writes], ["issues/1/comments"])
 
+    def test_timeline_second_page_and_cap(self):
+        url = "issues/1/timeline?per_page=100"
+        self.reads[url] = [{"event": "commented"}] * 100
+        pr = {"number": 21, "repository_url": discussion.API + discussion.ROOT, "title": "Linked",
+              "state": "open", "pull_request": {"merged_at": None}}
+        self.reads[url + "&page=2"] = [{"event": "cross-referenced", "source": {"issue": pr}}]
+        for count, partial in [(1, False), (100, True)]:
+            self.reads[url + "&page=2"] += [{"event": "commented"}] * (count - 1)
+            data = discussion.github_evidence({"head": "a" * 40, "number": 1}, [])
+            self.assertEqual([row["number"] for row in data["cross_referenced_prs_sample"]], [21])
+            self.assertEqual(data["cross_referenced_prs_partial"], partial)
+
     def test_unavailable_actions_metadata_does_not_block_source_answer(self):
         sha = "a" * 40
         self.reads[f"commits/{sha}?per_page=30"]["commit"]["message"] = ""

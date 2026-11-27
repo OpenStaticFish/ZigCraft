@@ -59,18 +59,18 @@ Return one JSON object, without Markdown fences or surrounding commentary.
 All prose fields are plain text, single line, nonempty, at most 1000 characters.
 Use the exact keys below:
 
+Keep locations concise (maximum 384 UTF-8 bytes after HTML escaping).
+
 - `reviewed_sha`, `reviewed_base`: the supplied head and base SHAs.
 - `summary`: 2–3 sentences on purpose, scope, quality, linked issues, coverage and limitations.
 - `critical`, `high`, `medium`, `low`: arrays of unresolved findings, each with
   `location` (file:line), `title`, `confidence` (High, Medium or Low),
   `description`, `impact`, `suggested_fix`. Use at most 12 per array; use empty arrays for no findings.
 - `fixed`: object with the same four severity keys, each an array of at most 12
-  resolved findings. Identify each by `source` (`comment-<id>` for a gate comment
-  or `review-<id>` for a formal review) and `quote` (the exact prior finding title
-  or a distinctive verbatim excerpt). Supply `location` (`path:line` on the new
-  side of a hunk in the supplied diff) and `explanation` (how that line resolves
-  that finding). If a prior blocker cannot be verified, report it as unresolved
-  at its severity, explaining the missing evidence. Do not silently omit it.
+  plain-text notes explaining how the current code resolves a previously reported
+  finding. Reference the relevant code. Where evidence is insufficient, say so
+  rather than claiming a fix. These notes explain your assessment. The required
+  gate evaluates the unresolved findings and verdict for the current SHA.
 - `solid`: object keyed by `S`, `O`, `L`, `I`, `D`. Each value has integer
   `score` (0–10) and `notes` justifying it for Single Responsibility, Open/Closed,
   Liskov Substitution, Interface Segregation and Dependency Inversion respectively.

@@ -227,7 +227,7 @@ def linked_prs(timeline):
                                        "state": issue["state"], "merged_at": issue["pull_request"].get("merged_at")}
         except (KeyError, TypeError, AttributeError):
             partial = True
-    return list(linked.values())[-8:], partial
+    return list(linked.values()), partial, len(timeline)
 
 
 def github_evidence(target, workflows):
@@ -256,7 +256,21 @@ def github_evidence(target, workflows):
                 "changed_paths_first_30": [excerpt(f["filename"], 256) for f in records(commit["files"])[:30]]}
 
     revision = lookup("revision_commit", f"commits/{sha}?per_page=30", revision_summary)
-    linked = lookup("cross_referenced_prs_sample", f"issues/{target['number']}/timeline?per_page=100", linked_prs)
+    timeline = f"issues/{target['number']}/timeline?per_page=100"
+    linked = {}
+    partial = False
+    for url in (timeline, timeline + "&page=2"):
+        page = lookup("cross_referenced_prs_sample", url, linked_prs)
+        if page is None:
+            partial = True
+            break
+        entries, incomplete, count = page
+        linked.update((entry["number"], entry) for entry in entries)
+        partial |= incomplete
+        if count < 100:
+            break
+    else:
+        partial = True  # The two-page budget may exclude later cross-references.
     runs = lookup("workflow_runs_at_revision_sample", f"actions/runs?head_sha={sha}&per_page=30", run_summaries)
     previous_runs = []
     for path in workflows[:4]:
@@ -266,8 +280,8 @@ def github_evidence(target, workflows):
     return {
         "unavailable": unavailable,
         "revision_commit": revision,
-        "cross_referenced_prs_sample": linked[0] if linked else [],
-        "cross_referenced_prs_partial": linked[1] if linked else True,
+        "cross_referenced_prs_sample": list(linked.values())[-8:],
+        "cross_referenced_prs_partial": partial or len(linked) > 8,
         "workflow_runs_at_revision_sample": [r for r in runs or [] if r["revision"] == sha],
         "recent_completed_dev_runs_at_other_revisions": previous_runs,
     }

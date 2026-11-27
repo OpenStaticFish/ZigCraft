@@ -18,8 +18,6 @@ HEADINGS = ("🔴 Critical Issues (Must Fix - Blocks Merge)", "⚠️ High Prior
 PRINCIPLES = dict(S="Single Responsibility", O="Open/Closed", L="Liskov Substitution",
                   I="Interface Segregation", D="Dependency Inversion")
 PROMPT = Path(__file__).resolve().parents[1] / ".github/prompts/pr-review.md"
-CONTEXT_HEADER = "\nOptional untrusted context (missing fields are unknown):\n"
-DIFF_HEADER = "\nUntrusted diff:\n"
 
 
 def output(key, value):
@@ -61,8 +59,8 @@ def bot_excerpts(records, login, limit, prefix=""):
     for record in records:
         if isinstance(record, dict) and text_field(record.get("user"), "login") == login:
             body = text_field(record, "body")
-            if body and body.startswith(prefix) and type(record.get("id")) is int:
-                yield {"id": record["id"], "text": body[:limit]}
+            if body and body.startswith(prefix):
+                yield body[:limit]
 
 
 def review_context(current):
@@ -119,8 +117,8 @@ def prepare(number, base, head):
             or 1 + diff.count("\ndiff --git ") != current["changed_files"]):
         raise pr.PilotError("Missing, incomplete or invalid PR diff")
     prompt = PROMPT.read_text(encoding="utf-8").replace("$PR_NUMBER", number).replace("$HEAD_SHA", head)
-    prefix = f"{prompt}\nBase SHA: {base}\nHead SHA: {head}\n{CONTEXT_HEADER}"
-    suffix = DIFF_HEADER + diff
+    prefix = f"{prompt}\nBase SHA: {base}\nHead SHA: {head}\n\nOptional untrusted context (missing fields are unknown):\n"
+    suffix = f"\nUntrusted diff:\n{diff}"
     remaining = pr.INPUT_LIMIT - len(prefix.encode()) - len(suffix.encode())
     if remaining < 0:
         raise pr.PilotError("Prompt and complete diff exceed the gateway limit")
@@ -161,64 +159,49 @@ def integer(value, maximum):
     return value
 
 
+def location_text(value):
+    rendered = pr.plain_text(value)
+    if len(rendered.encode()) > 384:
+        raise pr.PilotError("Location exceeds the review budget")
+    return rendered
+
+
 def finding(item, severity, prose):
     keys(item, ("location", "title", "confidence", "description", "impact", "suggested_fix"))
     if item["confidence"] not in ("High", "Medium", "Low"):
         raise pr.PilotError("Invalid finding confidence")
-    return (f"<p><strong>[{severity.upper()}]</strong> <code>{pr.plain_text(item['location'])}</code> – "
+    return (f"<p><strong>[{severity.upper()}]</strong> <code>{location_text(item['location'])}</code> – "
             f"{prose(item['title'])}<br><strong>Confidence:</strong> {item['confidence']}<br>"
             f"<strong>Description:</strong> {prose(item['description'])}<br>"
             f"<strong>Impact:</strong> {prose(item['impact'])}<br>"
             f"<strong>Suggested Fix:</strong> {prose(item['suggested_fix'])}</p>")
 
 
-def citation_evidence(request, base, head):
-    # Only the trusted prepare job creates these delimiters. Metadata values
-    # are single-line JSON, so their contents cannot inject a diff boundary.
-    _, header, payload = request.partition(f"\nBase SHA: {base}\nHead SHA: {head}\n{CONTEXT_HEADER}")
-    context, boundary, diff = payload.partition(DIFF_HEADER)
-    if not header or not boundary:
-        raise pr.PilotError("Review evidence does not match the pinned request")
-    sources = {}
-    history = {"previous_gate_review_excerpts_newest_first": "comment", "formal_review_excerpts_from_first_100": "review"}
-    for line in context.split("\n"):
-        if line:
-            for key, entries in json.loads(line).items():
-                if key in history:
-                    for entry in entries:
-                        sources[f"{history[key]}-{entry['id']}"] = entry["text"]
-    hunks = {}
-    path = None
-    for line in diff.split("\n"):
-        if line.startswith("diff --git "):
-            path = None
-        elif path is None and line.startswith("+++ b/"):
-            path = line[6:].rstrip("\t")
-        elif path and (match := re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", line)):
-            start = int(match[1])
-            hunks.setdefault(path, []).append(range(start, start + int(match[2] or 1)))
-    return sources, hunks
+def review_header(number, base, head):
+    return f"<!-- zigcraft-pr-gate:{number}:{base}:{head} -->\n<!-- zigcraft-static-review -->\n\n"
 
 
-def verdict(raw, base, head, number, request=None):
+def verdict(raw, base, head, number):
     obj = json.loads(raw, object_pairs_hook=unique_keys)
-    evidence = citation_evidence(request, base, head) if request is not None else ({}, {})
-    passed, text = render_verdict(obj, base, head, number, pr.plain_text, evidence)
+    passed, text = render_verdict(obj, base, head, number, pr.plain_text)
     # Leave room for the comment's deduplication markers. Validate every full
     # field first; shorten only free text, never the verdict or finding counts.
-    for limit in (500, 250, 125, 60, 24):
-        if len(text.encode()) <= 65000:
+    budget = 65536 - len(review_header(number, base, head).encode())
+    for limit in (500, 250, 125, 60, 24, 8, 1):
+        if len(text.encode()) <= budget:
             break
 
         def abbreviated(value):
             return pr.escape_text(value[:limit] + "…") if len(value) > limit else pr.escape_text(value)
 
-        passed, text = render_verdict(obj, base, head, number, abbreviated, evidence)
+        passed, text = render_verdict(obj, base, head, number, abbreviated)
         text = "Review prose abbreviated to fit GitHub's comment limit.\n\n" + text
+    if len(text.encode()) > budget:
+        raise pr.PilotError("Review does not fit the comment budget")
     return passed, text
 
 
-def render_verdict(obj, base, head, number, prose, evidence):
+def render_verdict(obj, base, head, number, prose):
     keys(obj, {"reviewed_base", "reviewed_sha", "overall_confidence_score", "recommendation", "verdict_reason",
                "summary", "fixed", "solid", "confidence_breakdown", "no_security_concerns",
                "test_status", *SEVERITIES})
@@ -231,29 +214,13 @@ def render_verdict(obj, base, head, number, prose, evidence):
     lines = ["## 📋 Summary", f"<p>{prose(obj['summary'])}</p>", "## 📌 Review Metadata",
              f"- **Reviewed Commit SHA:** `{head}`\n- **Reviewed PR:** #{number}\n- **Base SHA:** `{base}`"]
     keys(obj["fixed"], SEVERITIES)
-    sources, hunks = evidence
-    if sources:
-        lines.append("Earlier findings without an explicit disposition in this review remain unverified.")
-    counts = {}
     for severity, heading in zip(SEVERITIES, HEADINGS):
         findings = obj[severity]
         fixed = obj["fixed"][severity]
         if not all(isinstance(items, list) and len(items) <= 12 for items in (findings, fixed)):
             raise pr.PilotError("Invalid gate findings")
         lines.append(f"## {heading}")
-        counts[severity] = len(findings)
-        for entry in fixed:
-            keys(entry, ("source", "quote", "location", "explanation"))
-            source = pr.plain_text(entry["source"])
-            quote = prose(entry["quote"])
-            location = pr.plain_text(entry["location"])
-            explanation = prose(entry["explanation"])
-            path, _, line = entry["location"].rpartition(":")
-            cited = (entry["quote"] in sources.get(entry["source"], "") and re.fullmatch(r"[1-9][0-9]{0,9}", line)
-                     and any(int(line) in span for span in hunks.get(path, ())))
-            label = "✅ <strong>[FIXED]</strong>" if cited else "<strong>[UNVERIFIED]</strong>"
-            counts[severity] += int(not cited)
-            lines.append(f"<p>{label} {source}: {quote}<br><code>{location}</code> – {explanation}</p>")
+        lines.extend(f"<p>✅ <strong>[FIXED]</strong> Previous issue: {prose(note)}</p>" for note in fixed)
         lines.extend(finding(item, severity, prose) for item in findings)
         if not findings and not fixed:
             lines.append("None identified.")
@@ -276,19 +243,19 @@ def render_verdict(obj, base, head, number, prose, evidence):
                            for key in ("code_quality", "completeness", "risk_level", "test_coverage")))
     if type(obj["no_security_concerns"]) is not bool or obj["test_status"] not in ("passed", "failed", "unverified"):
         raise pr.PilotError("Invalid readiness flag")
-    checks = [(not counts["critical"], "All critical issues resolved"), (average >= 6, "SOLID average score >= 6.0"),
+    checks = [(not obj["critical"], "All critical issues resolved"), (average >= 6, "SOLID average score >= 6.0"),
               (score >= 60, "Overall confidence >= 60%"), (obj["no_security_concerns"], "No security concerns"),
               (obj["test_status"] == "passed", f"Tests present and passing (evidence: {obj['test_status']})")]
     reason = prose(obj["verdict_reason"])
-    if recommendation == "MERGE" and (any(counts[s] for s in ("critical", "high", "medium")) or score < 80):
-        recommendation = "DO NOT MERGE" if counts["critical"] else "MERGE WITH FIXES"
+    if recommendation == "MERGE" and (any(obj[s] for s in ("critical", "high", "medium")) or score < 80):
+        recommendation = "DO NOT MERGE" if obj["critical"] else "MERGE WITH FIXES"
         reason = "The review does not meet the merge gate's finding or confidence thresholds."
     lines.extend(["### Merge Readiness", "Informational checklist. The AI gate requires zero open critical, high "
                   "or medium issues, confidence ≥80%, and a MERGE verdict. CI tests are separate checks.",
                   "\n".join(f"- [{'x' if ok else ' '}] {label}" for ok, label in checks),
                   "### Verdict", f"**{recommendation}**", f"<p>{reason}</p>"])
-    machine = dict(reviewed_sha=head, critical_issues=counts["critical"], high_priority_issues=counts["high"],
-                   medium_priority_issues=counts["medium"], overall_confidence_score=score, recommendation=recommendation)
+    machine = dict(reviewed_sha=head, critical_issues=len(obj["critical"]), high_priority_issues=len(obj["high"]),
+                   medium_priority_issues=len(obj["medium"]), overall_confidence_score=score, recommendation=recommendation)
     lines.extend(["## Machine Readable Verdict", "```json\n" + json.dumps(machine, indent=2) + "\n```"])
     return recommendation == "MERGE", "\n\n".join(lines)
 
@@ -296,8 +263,8 @@ def render_verdict(obj, base, head, number, prose, evidence):
 def review_comment(number, base, head, text):
     marker = f"<!-- zigcraft-pr-gate:{number}:{base}:{head} -->\n"
     # The advisory pilot recognizes static reviews when cutover is enabled.
-    body = marker + "<!-- zigcraft-static-review -->\n\n" + text
-    if len(body) > 65536:
+    body = review_header(number, base, head) + text
+    if len(body.encode()) > 65536:
         raise pr.PilotError("Rendered gate review exceeds the comment limit")
     for page in range(1, 101):
         comments = pr.api(f"issues/{number}/comments?per_page=25&page={page}")
@@ -314,8 +281,7 @@ def review_comment(number, base, head, text):
 
 def publish(number, base, head):
     raw = pr.response_data(Path(os.environ["RUNNER_TEMP"]) / "pr-output")
-    request = (Path(os.environ["RUNNER_TEMP"]) / "review-input/request.txt").read_text(encoding="utf-8")
-    passed, text = verdict(raw, base, head, number, request)
+    passed, text = verdict(raw, base, head, number)
     authorize_event()
     if not pr.eligible(number, base, head):
         raise pr.PilotError("PR changed before publication")

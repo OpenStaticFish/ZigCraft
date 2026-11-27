@@ -118,10 +118,6 @@ jobs:
         with:
           name: ${{ needs.infer.outputs.response-artifact }}
           path: ${{ runner.temp }}/pr-output
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
-        with:
-          name: ${{ needs.prepare.outputs.request }}
-          path: ${{ runner.temp }}/review-input
       - name: Validate and publish the decision
         id: verdict
         env:

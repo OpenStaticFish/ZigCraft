@@ -44,9 +44,6 @@ class MergeGate(unittest.TestCase):
         }
         self.response = self.root / "pr-output/response.txt"
         self.response.parent.mkdir()
-        evidence = self.root / "review-input/request.txt"
-        evidence.parent.mkdir()
-        evidence.write_text(f"\nBase SHA: {self.base}\nHead SHA: {self.head}\n{gate.CONTEXT_HEADER}{gate.DIFF_HEADER}")
         self.response.write_text(json.dumps(self.decision))
         self.comments = []
         self.states = []
@@ -113,19 +110,15 @@ class MergeGate(unittest.TestCase):
         for text in ("Previous finding", "Previous formal review", "Requested behavior", "automated-test",
                      "**PR to review:** #3", "Single Responsibility", "Return one JSON object"):
             self.assertIn(text, prompt)
-        prompt += "--- a/source.zig\n+++ b/source.zig\n@@ -1 +1,2 @@\n existing\n+defer allocator.free(buf);\n"
-        fix = dict(source="comment-17", quote="Previous finding", location="source.zig:2",
-                   explanation="Released the previous allocation")
-        self.decision["fixed"]["high"] = [fix]
-        passed, report = gate.verdict(json.dumps(self.decision), self.base, self.head, self.number, prompt)
+        self.decision["fixed"]["high"] = ["source.zig:2 releases the previous allocation."]
+        passed, report = gate.verdict(json.dumps(self.decision), self.base, self.head, self.number)
         self.assertTrue(passed)
         self.assertIn("[FIXED]", report)
-        for change in ({"source": "comment-19"}, {"quote": "Unrelated issue"}, {"location": "source.zig:3"}):
-            self.decision["fixed"]["high"] = [{**fix, **change}]
-            passed, report = gate.verdict(json.dumps(self.decision), self.base, self.head, self.number, prompt)
-            self.assertFalse(passed)
-            self.assertNotIn("[FIXED]", report)
-            self.assertIn("[UNVERIFIED]", report)
+        # Historical notes cannot cancel a current finding of the same severity.
+        self.decision["high"] = [self.finding]
+        passed, report = gate.verdict(json.dumps(self.decision), self.base, self.head, self.number)
+        self.assertFalse(passed)
+        self.assertIn('"high_priority_issues": 1', report)
 
     def test_stale_base_and_incomplete_diff_cannot_prepare_a_request(self):
         with patch.dict(self.pr["base"], sha="c" * 40):
@@ -200,6 +193,16 @@ class MergeGate(unittest.TestCase):
         self.assertIn("evidence: failed", report)
         machine = json.loads(report.split("```json\n")[1].split("\n```")[0])
         self.assertEqual(machine["recommendation"], "MERGE")
+
+    def test_comment_budget_includes_escaped_locations_and_markers(self):
+        path = "`" * 70 + ".zig:1"
+        self.decision["low"] = [{**self.finding, "location": path, "description": "&" * 900}] * 12
+        gate.review_comment(*self.target, gate.verdict(json.dumps(self.decision), self.base, self.head, self.number)[1])
+        self.assertLessEqual(len(self.comments[0]["body"].encode()), 65536)
+        self.assertIn(gate.pr.escape_text(path), self.comments[0]["body"])
+        self.decision["low"][0]["location"] = "`" * 1000
+        with self.assertRaisesRegex(gate.pr.PilotError, "Location"):
+            gate.verdict(json.dumps(self.decision), self.base, self.head, self.number)
 
     def test_every_blocking_severity_threshold_and_verdict_is_independent(self):
         for field, value, expected in [

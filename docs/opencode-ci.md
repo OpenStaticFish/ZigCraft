@@ -2,6 +2,8 @@
 
 Every OpenCode CI caller, including the required PR gate, requests `gpt-6.2-sol` with `reasoning.effort: medium` through CLIProxyAPI. The `default`, `review`, and `vision` profiles distinguish the workload and whether to attach an image; none can select another model or upstream provider.
 
+The reviewer revisits earlier findings and explains fixes in the report. Each `ai-merge-gate` decision uses the current pinned review: matching head and base, zero unresolved critical, high or medium findings, confidence of at least 80, and a `MERGE` recommendation. Previous reviews provide context; their decisions do not carry forward to another commit.
+
 Only `opencode-v2-infer.yml` may join the tailnet. It runs on disposable GitHub-hosted Ubuntu. Preparation, comment/PR publication, Zig checks, visual capture, profiling and benchmarks run elsewhere. The proxy and tailnet need an operator; they do not need a self-hosted Actions runner.
 
 ## Provision before enabling a caller
