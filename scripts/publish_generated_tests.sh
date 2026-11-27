@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# The publisher reconstructs the single allowed file from the original
-# immutable response on a fresh pinned checkout. It executes no proposed Zig.
+# Publish only the validated index on a fresh pinned checkout; execute no Zig.
 set -euo pipefail
 
 branch="feature/opencode-test-writer-$GITHUB_RUN_ID"
@@ -11,8 +10,7 @@ if [[ -n "$prior" ]]; then
 fi
 gh api --silent 'repos/{owner}/{repo}/labels/automated-test'
 bash scripts/configure_git_identity.sh "opencode[bot]" "opencode[bot]@users.noreply.github.com"
-git add -- "$TEST_TARGET"
-[[ "$(git diff --cached --name-only)" == "$TEST_TARGET" ]]
+export GIT_INDEX_FILE="$RUNNER_TEMP/opencode-test-index"
 # Deterministic commit identity lets a retry complete a PR after a successful
 # push without replacing an existing branch (including a human's changes).
 GIT_AUTHOR_DATE=$(git show -s --format=%cI HEAD)
@@ -29,13 +27,17 @@ elif [[ "${remote%%$'\t'*}" != "$(git rev-parse HEAD)" ]]; then
 fi
 [[ "$(gh api "repos/{owner}/{repo}/git/ref/heads/$branch" --jq .object.sha)" == "$(git rev-parse HEAD)" ]]
 [[ "$(gh api 'repos/{owner}/{repo}/git/ref/heads/dev' --jq .object.sha)" == "$GITHUB_SHA" ]]
-cat >> "$RUNNER_TEMP/test-pr-body.md" <<EOF
+{
+    printf '## Module\n%s (automated test coverage)\n\n## Tests added\n' "$MODULE"
+    sed 's/^/- /' "$RUNNER_TEMP/test-names"
+    cat <<EOF
 
 ## Verification
-- Formatting, the focused test \`$FOCUSED_TEST\`, and the full CPU unit suite passed against \`$GITHUB_SHA\`.
-- Only the test file changed. Integration tests require a display and Vulkan driver and were not run in the CPU validation container.
+- Formatting, a focused test, and the full CPU unit suite passed against \`$GITHUB_SHA\`. All proposed tests were discovered.
+- Only test files changed. Integration tests require a display and Vulkan driver and were not run in the CPU validation container.
 - [Validation job]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)
 EOF
+} > "$RUNNER_TEMP/test-pr-body.md"
 gh pr create --base dev --head "$branch" --label automated-test \
     --title "test: add regression tests for $MODULE" \
     --body-file "$RUNNER_TEMP/test-pr-body.md"

@@ -1,5 +1,4 @@
 name: Issue Triage
-
 on:
   issues:
     types: [opened]
@@ -10,69 +9,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  prepare:
+  triage:
     if: >-
       vars.OPENCODE_V2_TRIAGE_ENABLED == 'true' &&
       github.repository == 'OpenStaticFish/ZigCraft' &&
       github.event.repository.default_branch == 'dev' && github.ref == 'refs/heads/dev'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      issues: read
-      pull-requests: read
-    outputs:
-      request: ${{ steps.prepare.outputs.request }}
-      binding: ${{ steps.prepare.outputs.binding }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - id: prepare
-        run: python3 scripts/opencode_discussion.py prepare
-        env:
-          GH_TOKEN: ${{ github.token }}
-      - if: steps.prepare.outputs.request != ''
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ${{ steps.prepare.outputs.request }}
-          path: ${{ runner.temp }}/discussion-request/request.txt
-          if-no-files-found: error
-          retention-days: 1
-
-  infer:
-    cache-mode: none
-    needs: prepare
-    if: needs.prepare.outputs.request != ''
-    permissions:
-      contents: read
-      id-token: write
-    uses: ./.github/workflows/opencode-v2-infer.yml
-    secrets:
-      OPENCODE_PROXY_BASE_URL: ${{ secrets.OPENCODE_PROXY_BASE_URL }}
-      OPENCODE_PROXY_KEY: ${{ secrets.OPENCODE_PROXY_KEY }}
-    with:
-      request-artifact: ${{ needs.prepare.outputs.request }}
-      profile: default
-
-  publish:
-    needs: [prepare, infer]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
     permissions:
       contents: read
       issues: write
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ${{ needs.infer.outputs.response-artifact }}
-          path: ${{ runner.temp }}/discussion-response
-      - run: python3 scripts/opencode_discussion.py respond
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EXPECTED_BINDING: ${{ needs.prepare.outputs.binding }}
+      pull-requests: read
+      id-token: write
+    uses: ./.github/workflows/opencode-v2-infer.yml
+    with:
+      task: triage

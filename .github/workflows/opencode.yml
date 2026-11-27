@@ -1,7 +1,4 @@
 name: opencode
-
-# Issue and PR conversation comments run the default-branch workflow. Inline
-# pull_request_review_comment workflows run from a PR ref and cannot authorize inference.
 on:
   issue_comment:
     types: [created]
@@ -12,149 +9,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  prepare:
+  slash:
     if: >-
       vars.OPENCODE_V2_SLASH_ENABLED == 'true' &&
       github.repository == 'OpenStaticFish/ZigCraft' &&
       github.event.repository.default_branch == 'dev' && github.ref == 'refs/heads/dev' &&
       (contains(github.event.comment.body, '/oc') || contains(github.event.comment.body, '/opencode'))
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
     permissions:
-      contents: read
-      issues: read
-      pull-requests: read
-    outputs:
-      mode: ${{ steps.prepare.outputs.mode }}
-      binding: ${{ steps.prepare.outputs.binding }}
-      request: ${{ steps.prepare.outputs.request }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - id: prepare
-        run: python3 scripts/opencode_discussion.py prepare
-        env:
-          GH_TOKEN: ${{ github.token }}
-      - if: steps.prepare.outputs.request != ''
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: ${{ steps.prepare.outputs.request }}
-          path: ${{ runner.temp }}/discussion-request/request.txt
-          if-no-files-found: error
-          retention-days: 1
-
-  infer:
-    cache-mode: none
-    needs: prepare
-    if: needs.prepare.outputs.request != ''
-    permissions:
-      contents: read
+      contents: write
+      issues: write
+      pull-requests: write
       id-token: write
     uses: ./.github/workflows/opencode-v2-infer.yml
     secrets:
-      OPENCODE_PROXY_BASE_URL: ${{ secrets.OPENCODE_PROXY_BASE_URL }}
-      OPENCODE_PROXY_KEY: ${{ secrets.OPENCODE_PROXY_KEY }}
+      OPENCODE_PAT: ${{ secrets.OPENCODE_PAT }}
     with:
-      request-artifact: ${{ needs.prepare.outputs.request }}
-      profile: default
-
-  respond:
-    needs: [prepare, infer]
-    if: needs.prepare.outputs.mode == 'respond'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      issues: write
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ${{ needs.infer.outputs.response-artifact }}
-          path: ${{ runner.temp }}/discussion-response
-      - run: python3 scripts/opencode_discussion.py respond
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EXPECTED_BINDING: ${{ needs.prepare.outputs.binding }}
-
-  validate-edit:
-    needs: [prepare, infer]
-    if: needs.prepare.outputs.mode == 'edit'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      issues: read
-      pull-requests: read
-    outputs:
-      valid: ${{ steps.validate.outputs.valid }}
-      digest: ${{ steps.validate.outputs.digest }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ${{ needs.infer.outputs.response-artifact }}
-          path: ${{ runner.temp }}/discussion-response
-      - id: validate
-        run: python3 scripts/opencode_discussion.py validate-edit
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EXPECTED_BINDING: ${{ needs.prepare.outputs.binding }}
-      - if: steps.validate.outputs.valid == 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: slash-edit-preview-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/proposed-edit.diff
-          if-no-files-found: error
-          retention-days: 3
-
-  edit:
-    needs: [prepare, infer, validate-edit]
-    if: needs.validate-edit.outputs.valid == 'true' && vars.OPENCODE_V2_SLASH_ENABLED == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    # Review slash-edit-preview before releasing the repository-scoped App.
-    environment: opencode-test-publish
-    permissions:
-      contents: read
-      issues: read
-      pull-requests: read
-    env:
-      EXPECTED_BINDING: ${{ needs.prepare.outputs.binding }}
-      EXPECTED_PATCH: ${{ needs.validate-edit.outputs.digest }}
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: ${{ needs.infer.outputs.response-artifact }}
-          path: ${{ runner.temp }}/discussion-response
-      - id: validate
-        run: python3 scripts/opencode_discussion.py validate-edit
-        env:
-          GH_TOKEN: ${{ github.token }}
-      - id: app
-        if: steps.validate.outputs.valid == 'true'
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
-        with:
-          app-id: ${{ vars.OPENCODE_APP_ID }}
-          private-key: ${{ secrets.OPENCODE_APP_PRIVATE_KEY }}
-          permission-contents: write
-          permission-pull-requests: write
-      - if: steps.validate.outputs.valid == 'true'
-        run: python3 scripts/opencode_discussion.py edit
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EDIT_TOKEN: ${{ steps.app.outputs.token }}
-          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+      task: slash

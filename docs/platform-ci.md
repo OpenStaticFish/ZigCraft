@@ -1,6 +1,6 @@
 # Platform CI
 
-For the staged private inference rollout, caller switches and operator ownership, see [OpenCode CI](opencode-ci.md).
+For the private model provider, Tailscale setup and workflow switches, see [OpenCode CI](opencode-ci.md).
 
 `.github/workflows/build.yml` runs Linux/Lavapipe as the canonical correctness gate: formatting, debug/release-safe unit tests, shader validation, integration smoke, and world smoke.
 

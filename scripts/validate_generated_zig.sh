@@ -4,8 +4,10 @@
 set -euo pipefail
 
 source_tree=$(mktemp -d "$RUNNER_TEMP/test-source.XXXXXXXX")
-git archive HEAD | tar -x -C "$source_tree"
-cp -- "$TEST_TARGET" "$source_tree/$TEST_TARGET"
+tree=$(GIT_INDEX_FILE="$RUNNER_TEMP/opencode-test-index" git write-tree)
+git archive "$tree" | tar -x -C "$source_tree"
+mapfile -t targets < <(git diff --name-only HEAD "$tree")
+first_test=$(head -n 1 "$RUNNER_TEMP/test-names")
 # No image download. Supply only Ubuntu's merged-/usr symlinks; executables
 # come from the read-only hosted OS and the same devenv store as normal CI.
 layout=$(mktemp -d "$RUNNER_TEMP/test-layout.XXXXXXXX")
@@ -48,15 +50,19 @@ run_isolated() {
 # Don't forward compiler/test output (including potential runner commands).
 focused=$(mktemp -d "$RUNNER_TEMP/test-focus.XXXXXXXX")
 cp -a "$source_tree/." "$focused"
-run_isolated "$focused" zig fmt --check "$TEST_TARGET" >/dev/null 2>&1 || {
+run_isolated "$focused" zig fmt --check "${targets[@]}" >/dev/null 2>&1 || {
     echo 'Generated test formatting failed.' >&2; exit 1
 }
-if ! run_isolated "$focused" zig build test -j2 "-Dtest-filter=$FOCUSED_TEST" 2>&1 |
-    awk -v test="test.$FOCUSED_TEST...OK" 'index($0, test) {found=1} END {exit !found}'; then
+if ! run_isolated "$focused" zig build test -j2 "-Dtest-filter=$first_test" 2>&1 |
+    awk -v test="test.$first_test...OK" 'index($0, test) {found=1} END {exit !found}'; then
     echo 'Focused test failed or was not discovered by the runner.' >&2
     exit 1
 fi
 rm -rf -- "$focused"
-run_isolated "$source_tree" zig build test -j2 >/dev/null 2>&1 || {
-    echo 'Full unit suite failed.' >&2; exit 1
-}
+if ! run_isolated "$source_tree" zig build test -j2 2>&1 |
+    awk 'NR == FNR {missing["test." $0 "...OK"]; next}
+         {for (name in missing) if (index($0, name)) delete missing[name]}
+         END {exit length(missing) != 0}' "$RUNNER_TEMP/test-names" -; then
+    echo 'Full unit suite failed or a proposed test was not discovered.' >&2
+    exit 1
+fi

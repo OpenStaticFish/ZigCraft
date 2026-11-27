@@ -6,9 +6,9 @@ on:
     paths:
       - ".github/workflows/**"
       - ".github/actions/**"
+      - ".github/opencode/**"
       - "scripts/*.sh"
       - "scripts/*.py"
-      - "scripts/tests/**"
       - ".github/prompts/**"
       - ".shellcheckrc"
       - "devenv.nix"
@@ -19,9 +19,9 @@ on:
     paths:
       - ".github/workflows/**"
       - ".github/actions/**"
+      - ".github/opencode/**"
       - "scripts/*.sh"
       - "scripts/*.py"
-      - "scripts/tests/**"
       - ".github/prompts/**"
       - ".shellcheckrc"
       - "devenv.nix"
@@ -63,8 +63,8 @@ jobs:
         run: |
           ruby -e 'require "yaml"; Dir[".github/actions/**/action.{yml,yaml}"].sort.each { |f| YAML.load_file(f); puts "OK #{f}" }'
 
-      - name: Check OpenCode caller and adapter contracts (offline)
-        run: python3 -B -m unittest discover -s scripts/tests
+      - name: Check OpenCode provider config
+        run: jq -e '.providers.zigcraft.models[.model | split("/")[1]] != null' .github/opencode/provider.json
 
       - name: Check shell script syntax
         run: devenv shell --profile unit -- bash -n scripts/*.sh
