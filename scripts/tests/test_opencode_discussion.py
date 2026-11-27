@@ -79,8 +79,9 @@ class DiscussionFixture(unittest.TestCase):
         self.assertTrue(fields["request"].endswith("-11-2"))
         request = (self.temp / "discussion-request/request.txt").read_bytes()
         self.assertLessEqual(len(request), 96 * 1024)
-        self.assertIn(self.original.strip(), request)
-        return json.loads(request.decode().split("not policy:\n")[1])
+        data = json.loads(request.decode().split("not policy:\n")[1])
+        self.assertIn(self.original.decode(), data["files"].values())
+        return data
 
     def response(self, value):
         folder = self.temp / "discussion-response"
@@ -126,7 +127,8 @@ class DiscussionFixture(unittest.TestCase):
             dict(run, id=101, head_repository=None), dict(run, id=102, head_sha="d"*40)]}
         for path, wid, outcome in [(workflow, 123, "failure"), (other, 124, "success")]:
             pinned_url = f"actions/workflows/{Path(path).name}/runs?head_sha={sha}&per_page=30"
-            self.reads[pinned_url] = {"workflow_runs": [run] if path == workflow else []}
+            first = dict(run, path=workflow + "@main", head_repository=None, head_branch=None, name=None)
+            self.reads[pinned_url] = {"workflow_runs": [first] if path == workflow else []}
             url = f"actions/workflows/{Path(path).name}/runs?branch=dev&status=completed&per_page=3"
             upstream = dict(run, id=wid, workflow_id=wid, path=path, head_sha="c"*40, conclusion=outcome)
             self.reads[url] = {"workflow_runs": [dict(run, id=i, path=path) for i in (97, 98, 99)]}
@@ -149,6 +151,9 @@ class DiscussionFixture(unittest.TestCase):
         origins = evidence["workflow_runs_at_revision_sample"]["data"]
         self.assertEqual({k: [r["id"] for r in rows] for k, rows in origins.items()},
                          {"upstream": [99], "fork": [100], "unknown": [101]})
+        reconciled = origins["upstream"][0]
+        self.assertEqual((reconciled["path"], reconciled["queried_path"], reconciled["head_branch"], reconciled["workflow"]),
+                         (workflow + "@main", workflow, "dev", "Smoke"))
         history_sample = evidence["recent_completed_dev_runs_at_other_revisions"]
         self.assertEqual(history_sample["partial_paths"], [other])
         self.assertEqual(history_sample["status"], "partial")
@@ -325,7 +330,7 @@ class DiscussionFixture(unittest.TestCase):
     def test_budget_prioritizes_individual_named_runs(self):
         named = ".github/workflows/infer.yml"
         unrelated = {"id": 1, "path": ".github/workflows/build.yml"}
-        relevant = {"id": 2, "path": named}
+        relevant = {"id": 2, "path": named + "@refs/heads/dev"}
         at_revision = "workflow_runs_at_revision_sample"
         history = "recent_completed_dev_runs_at_other_revisions"
         earlier = dict(relevant, id=3, queried_path=named)
@@ -336,6 +341,21 @@ class DiscussionFixture(unittest.TestCase):
         self.assertEqual(discussion.pack_samples(samples, [named], len(json.dumps(expected))), expected)
         expected[history] = {"status": "partial", "data": [earlier]}
         self.assertEqual(discussion.pack_samples(samples, [named], len(json.dumps(expected))), expected)
+
+    def test_escape_heavy_files_fit_in_rank_order(self):
+        paths = [f".github/workflows/ci-{i}.yml" for i in range(5)]
+        self.comment["body"] = "/oc compare " + " and ".join(paths)
+        tree = self.reads[f"git/trees/{'a'*40}?recursive=1"]["tree"]
+        self.original = b"\x01" * 6144
+        self.reads["git/blobs/heavy"] = {"encoding": "base64", "content": base64.b64encode(self.original).decode()}
+        tree[:] = [dict(tree[0], path=p, sha="heavy", size=len(self.original)) for p in paths]
+        data = self.prepare()
+        kept = data["files"]
+        self.assertEqual(list(kept), paths[:3])
+        self.assertEqual(kept[paths[0]], "\x01" * 6144)
+        self.assertEqual(kept[paths[1]], "\x01" * 6144)
+        self.assertTrue(0 < len(kept[paths[2]]) < 6144)
+        self.assertEqual(set(kept[paths[2]]), {"\x01"})
 
     def test_markup_expansion_stays_within_comment_limit(self):
         self.prepare()

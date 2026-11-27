@@ -33,6 +33,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  github-markdown:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Render synthetic publisher output on GitHub
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENCODE_TEST_GITHUB_RENDER: "1"
+        run: python3 -B -m unittest discover -v -s scripts/tests -k gfm
+
   actionlint:
     runs-on: ubuntu-latest
     permissions:
@@ -65,13 +79,6 @@ jobs:
 
       - name: Check OpenCode caller and adapter contracts (offline)
         run: devenv shell --profile unit -- python3 -B -m unittest discover -s scripts/tests
-
-      - name: Verify synthetic OpenCode reports with GitHub Markdown
-        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-        env:
-          GH_TOKEN: ${{ github.token }}
-          OPENCODE_TEST_GITHUB_RENDER: "1"
-        run: python3 -B -m unittest discover -s scripts/tests -k gfm
 
       - name: Check shell script syntax
         run: devenv shell --profile unit -- bash -n scripts/*.sh
