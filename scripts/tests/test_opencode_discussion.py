@@ -1,6 +1,7 @@
 """Offline event-to-publication fixtures; no token or private service required."""
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from http.client import IncompleteRead
 import json
 import os
@@ -127,7 +128,8 @@ class DiscussionFixture(unittest.TestCase):
             dict(run, id=101, head_repository=None), dict(run, id=102, head_sha="d"*40)]}
         for path, wid, outcome in [(workflow, 123, "failure"), (other, 124, "success")]:
             pinned_url = f"actions/workflows/{Path(path).name}/runs?head_sha={sha}&per_page=30"
-            first = dict(run, path=workflow + "@main", head_repository=None, head_branch=None, name=None)
+            first = dict(run, path=workflow + "@main", head_repository=None, head_branch=None, name=None,
+                         status="in_progress", conclusion=None)
             self.reads[pinned_url] = {"workflow_runs": [first] if path == workflow else []}
             url = f"actions/workflows/{Path(path).name}/runs?branch=dev&status=completed&per_page=3"
             upstream = dict(run, id=wid, workflow_id=wid, path=path, head_sha="c"*40, conclusion=outcome)
@@ -152,6 +154,7 @@ class DiscussionFixture(unittest.TestCase):
         self.assertEqual({k: [r["id"] for r in rows] for k, rows in origins.items()},
                          {"upstream": [99], "fork": [100], "unknown": [101]})
         reconciled = origins["upstream"][0]
+        self.assertEqual((reconciled["status"], reconciled["conclusion"]), ("completed", "success"))
         self.assertEqual((reconciled["path"], reconciled["queried_path"], reconciled["head_branch"], reconciled["workflow"]),
                          (workflow + "@main", workflow, "dev", "Smoke"))
         history_sample = evidence["recent_completed_dev_runs_at_other_revisions"]
@@ -246,7 +249,19 @@ class DiscussionFixture(unittest.TestCase):
         with patch("opencode_deadline.time.monotonic", side_effect=[0, 1, 16, 17]):
             self.prepare()
         paths = [call.args[0] for call in discussion.repo.call_args_list if call.kwargs.get("optional")]
-        self.assertFalse(any(path.startswith(("actions/runs?", "issues/1/timeline?")) for path in paths))
+        self.assertFalse(any(path.startswith(("commits/", "issues/1/timeline?")) for path in paths))
+
+    def test_timer_cannot_displace_another_timer_or_run_in_worker(self):
+        call = lookup_budget(15)
+        signal.setitimer(signal.ITIMER_REAL, 60)
+        try:
+            with self.assertRaises(RuntimeError):
+                call(lambda: None)
+            self.assertGreater(signal.getitimer(signal.ITIMER_REAL)[0], 0)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        with ThreadPoolExecutor(1) as worker, self.assertRaises(RuntimeError):
+            worker.submit(call, lambda: None).result()
 
     def test_running_optional_lookup_is_interrupted(self):
         # A broken alarm must not hang the test runner.
@@ -256,19 +271,31 @@ class DiscussionFixture(unittest.TestCase):
 
     def stalled_lookup(self):
         interrupted = []
+        sha = "a" * 40
+        workflow = ".github/workflows/test.yml"
+        self.comment["body"] = "/oc check test.yml"
+        tree = self.reads[f"git/trees/{sha}?recursive=1"]["tree"]
+        tree.append(dict(tree[0], path=workflow))
+        self.reads[f"actions/workflows/test.yml/runs?head_sha={sha}&per_page=30"] = {"workflow_runs": [
+            dict(id=123, workflow_id=1, head_sha=sha, path=workflow, event="push", name="Test", status="completed",
+                 conclusion="success", head_repository={"full_name": discussion.REPO}, head_branch="dev")]}
 
         def block(path, *args, **kwargs):
-            if path.startswith("commits/") and kwargs.get("optional"):
+            if "/timeline?" in path and kwargs.get("optional"):
                 interrupted.append(path)
                 signal.pause()
             return self.repo(path, *args, **kwargs)
 
         handler = signal.getsignal(signal.SIGALRM)
         discussion.repo.side_effect = block
-        with patch.object(discussion, "lookup_budget", side_effect=lambda _: lookup_budget(0.1)):
+        with patch("opencode_deadline.time.monotonic", return_value=0), \
+                patch.object(discussion, "lookup_budget", side_effect=lambda _: lookup_budget(0.1)):
             data = self.prepare()
-        self.assertEqual(interrupted, [f"commits/{data['revision']}?per_page=30"])
-        self.assertEqual(data["github"]["revision_commit"], {"status": "unavailable"})
+        self.assertEqual(interrupted, ["issues/1/timeline?per_page=100"])
+        self.assertEqual(data["github"]["cross_referenced_prs_sample"], {"status": "unavailable"})
+        self.assertEqual(data["github"]["workflow_runs_at_revision_sample"]["data"]["upstream"][0]["id"], 123)
+        paths = [c.args[0] for c in discussion.repo.call_args_list]
+        self.assertLess(paths.index(f"actions/workflows/test.yml/runs?head_sha={sha}&per_page=30"), paths.index(interrupted[0]))
         self.assertEqual(data["files"][self.file], self.original.decode())
         self.assertEqual(signal.getsignal(signal.SIGALRM), handler)
         self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0, 0))

@@ -36,6 +36,8 @@ Restrict who can change `dev`, workflows, local actions, prompts and publisher h
 
 Audit and test-writer schedules are paused. Restore each weekly inference trigger by reviewed workflow change only after recording a hosted result for that caller. Record **both** visual paths (the black golden may need separate review), one edit PR with ordinary CI, and one fixture or run per caller in [#991](https://github.com/OpenStaticFish/ZigCraft/issues/991).
 
+The `github-markdown` check verifies rendering only. To verify publication side effects, use a disposable repository and a consenting second test account with mentions enabled. Create a target issue; publish synthetic issue and comment bodies containing its `#number` and the test account's `@login` through the prose formatter. On separate threads, publish the same references unescaped as positive controls. Confirm that only the controls appear in the target issue’s cross-reference timeline and the recipient’s mention notifications. Record the fixture URLs and results before claiming notification or cross-reference coverage.
+
 ## Operations and rollback
 
 - Input artifacts contain bounded data from this repo/run, not credentials. Only the short `response.txt` crosses from inference to validation. No shared OpenCode auth, session or cache directories. The proxy environment is never passed to callers or publishers.

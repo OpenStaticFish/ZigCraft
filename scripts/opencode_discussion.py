@@ -284,9 +284,11 @@ def pinned_run_sample(sha, workflows, within_budget):
                 run["queried_path"] = path
             saved = runs_by_id.setdefault(run["id"], run)
             if saved is not run:
-                for key in ("head_repository", "head_branch", "conclusion"):
+                for key in ("head_repository", "head_branch"):
                     if not saved[key]:
                         saved[key] = run[key]
+                # Status and conclusion describe one snapshot (including reruns).
+                saved["status"], saved["conclusion"] = run["status"], run["conclusion"]
                 if saved["workflow"] == saved["path"]:
                     saved["workflow"] = run["workflow"]
     if not available:
@@ -313,24 +315,6 @@ def github_evidence(target, workflows):
         return {"sha": sha, "subject": excerpt(commit["commit"]["message"].partition("\n")[0], 512),
                 "changed_paths_first_30": [excerpt(f["filename"], 256) for f in records(commit["files"])[:30]]}
 
-    revision = optional_lookup(f"commits/{sha}?per_page=30", revision_summary, within_budget)
-    timeline = f"issues/{target['number']}/timeline?per_page=100"
-    linked = {}
-    partial = False
-    timeline_available = False
-    for url in (timeline, timeline + "&page=2"):
-        page = optional_lookup(url, linked_prs, within_budget)
-        if page is None:
-            partial = True
-            break
-        timeline_available = True
-        entries, incomplete, count = page
-        linked.update((entry["number"], entry) for entry in entries)
-        partial |= incomplete
-        if count < 100:
-            break
-    else:
-        partial = True  # The two-page budget may exclude later cross-references.
     pinned = pinned_run_sample(sha, workflows, within_budget)
     previous_runs = []
     unavailable_paths = []
@@ -368,6 +352,24 @@ def github_evidence(target, workflows):
         history_status = "not_requested"
     elif unavailable_paths == queried_paths:
         history_status = "unavailable"
+    revision = optional_lookup(f"commits/{sha}?per_page=30", revision_summary, within_budget)
+    timeline = f"issues/{target['number']}/timeline?per_page=100"
+    linked = {}
+    partial = False
+    timeline_available = False
+    for url in (timeline, timeline + "&page=2"):
+        page = optional_lookup(url, linked_prs, within_budget)
+        if page is None:
+            partial = True
+            break
+        timeline_available = True
+        entries, incomplete, count = page
+        linked.update((entry["number"], entry) for entry in entries)
+        partial |= incomplete
+        if count < 100:
+            break
+    else:
+        partial = True  # The two-page budget may exclude later cross-references.
     return {
         "revision_commit": sample(revision),
         "cross_referenced_prs_sample": sample(list(linked.values())[-8:] if timeline_available else None,
