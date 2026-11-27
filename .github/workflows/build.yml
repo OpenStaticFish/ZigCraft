@@ -269,6 +269,15 @@ jobs:
           log-file: integration-test.log
           command: devenv shell --profile graphics -- zig build test-integration -Dskip-present=true
 
+      - name: Run presentation smoke test
+        if: needs.changes.outputs.code_changes == 'true'
+        uses: ./.github/actions/run-with-log
+        with:
+          name: Presentation Test
+          timeout: 5m
+          log-file: presentation-test.log
+          command: devenv shell --profile graphics -- zig build test-integration
+
       - name: Run world load smoke test (headless)
         if: needs.changes.outputs.code_changes == 'true'
         uses: ./.github/actions/run-with-log
@@ -287,7 +296,7 @@ jobs:
         if: needs.changes.outputs.code_changes == 'true'
         run: |
           set -euo pipefail
-          if rg -n -e 'Vulkan validation error|Validation Error:|VUID-' integration-test.log world-smoke-test.log; then
+          if rg -n -e 'Vulkan validation error|Validation Error:|VUID-' integration-test.log presentation-test.log world-smoke-test.log; then
             echo "Vulkan validation errors were found in integration logs." >&2
             exit 1
           fi
@@ -304,6 +313,7 @@ jobs:
           name: integration-test-logs
           path: |
             integration-test.log
+            presentation-test.log
             world-smoke-test.log
             weston.log
           if-no-files-found: ignore

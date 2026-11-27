@@ -237,20 +237,21 @@ pub const TransferQueue = struct {
         if (staging == null or self.pending_copy_count[idx] == 0) return;
 
         const copies = self.pending_copies[idx][0..self.pending_copy_count[idx]];
+        if (!self.is_dedicated) orderTransferWrites(cmd);
         var unordered_start: usize = 0;
         for (copies, 0..) |pc, i| {
+            // Bound the overlap search even for full batches of disjoint writes.
+            if (i - unordered_start == 32) {
+                orderTransferWrites(cmd);
+                unordered_start = i;
+            }
             for (copies[unordered_start..i]) |earlier| {
                 if (pc.dst_buffer != earlier.dst_buffer or
                     pc.dst_offset >= earlier.dst_offset + earlier.size or
                     earlier.dst_offset >= pc.dst_offset + pc.size) continue;
 
                 // Overlapping destination ranges must observe submission order.
-                const barrier = c.VkMemoryBarrier{
-                    .sType = c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
-                    .srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
-                    .dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
-                };
-                c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, null, 0, null);
+                orderTransferWrites(cmd);
                 unordered_start = i;
                 break;
             }
@@ -260,6 +261,15 @@ pub const TransferQueue = struct {
             region.size = pc.size;
             c.vkCmdCopyBuffer(cmd, staging, pc.dst_buffer, 1, &region);
         }
+    }
+
+    fn orderTransferWrites(cmd: c.VkCommandBuffer) void {
+        const barrier = c.VkMemoryBarrier{
+            .sType = c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
+        };
+        c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, null, 0, null);
     }
 
     pub fn getPendingDstAccessMask(self: *TransferQueue) c.VkAccessFlags {

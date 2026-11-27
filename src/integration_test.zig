@@ -86,7 +86,9 @@ const UploadScreen = struct {
 
     fn update(ptr: *anyopaque, _: f32) !void {
         const self: *UploadScreen = @ptrCast(@alignCast(ptr));
-        const offset = self.tick % self.payload.len;
+        // Reuse the previous submitted range in the skipped-frame test,
+        // then overwrite it again within the same upload batch.
+        const offset = (if (self.overwrite_upload) self.tick -% 1 else self.tick) % self.payload.len;
         self.tick +%= 1;
         self.payload[offset] = self.tick;
         try self.context.render_system.getRHI().resourceManager().updateBuffer(self.buffer, offset, self.payload[offset..][0..1]);
@@ -387,7 +389,7 @@ test "smoke test: launch, generate, render, exit" {
     try app.runSingleFrame();
     try testing.expect(app.input.interface().shouldQuit());
     try testing.expectEqual(fault_count_before_late_quit, app.render_system.getRHI().query().getFaultCount());
-    try testing.expectEqual(skipped_tick +% 101, try readUploadedByte(vulkan, active_upload_screen.buffer, skipped_tick % active_upload_screen.payload.len));
+    try testing.expectEqual(skipped_tick +% 101, try readUploadedByte(vulkan, active_upload_screen.buffer, (skipped_tick -% 1) % active_upload_screen.payload.len));
 
     const val_count = app.render_system.getRHI().query().getValidationErrorCount();
     if (val_count > 0) {
