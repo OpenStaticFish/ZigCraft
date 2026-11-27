@@ -32,12 +32,11 @@ infer() {
 }
 post_reply() {
     already_commented && return 0
-    # Keep Markdown intact and break potential mentions even after GitHub decodes entities.
-    # The publisher's first-line marker distinguishes this reply from a review.
+    # Use GitHub's parser to distinguish mentions from literal code.
+    gh api markdown -f mode=gfm -f "context=$GITHUB_REPOSITORY" -F "text=@$tmp/response" > "$tmp/rendered"
     {
         printf '%s\n\n' "$marker"
-        jq -Rrs 'gsub("(?:(?<![A-Za-z0-9_])@|&#0*64;|&#[xX]0*40;|&commat;)(?=[A-Za-z0-9&])"; "@\u200b")' \
-            "$tmp/response"
+        python3 scripts/opencode_discussion_markdown.py "$tmp/response" "$tmp/rendered"
     } > "$tmp/reply"
     [[ $(wc -c < "$tmp/reply") -le 65536 ]]
     gh api "$repo/issues/$number/comments" -F "body=@$tmp/reply" --silent
