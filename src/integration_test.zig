@@ -273,6 +273,16 @@ test "smoke test: launch, generate, render, exit" {
         try testing.expect(!app.input.interface().shouldQuit());
     }
 
+    // Exercise the real Vulkan frame-start guard with the state left by a
+    // failed rebuild. A new recreation request should let the next frame draw.
+    const vulkan: *@import("engine-graphics").VulkanContext = @ptrCast(@alignCast(app.render_system.rhi.ptr));
+    vulkan.runtime.swapchain_recreate_failed = true;
+    vulkan.runtime.pipeline_rebuild_needed = true;
+    try app.runSingleFrame();
+    try testing.expect(!vulkan.frames.frame_in_progress);
+    try testing.expect(!app.input.interface().shouldQuit());
+    app.render_system.rhi.context().requestSwapchainRecreate();
+
     const fault_count_before_late_quit = app.render_system.getRHI().query().getFaultCount();
     try app.runSingleFrame();
     try testing.expect(app.input.interface().shouldQuit());

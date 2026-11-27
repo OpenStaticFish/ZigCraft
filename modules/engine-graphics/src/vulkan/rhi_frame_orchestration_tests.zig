@@ -95,20 +95,6 @@ test "markSwapchainRecreateSucceeded clears failure state" {
     try testing.expect(!ctx.runtime.pipeline_rebuild_needed);
 }
 
-test "beginFrame skips command recording after a swapchain layout failure" {
-    const VulkanContext = @import("rhi_context_types.zig").VulkanContext;
-    const createRHI = @import("../rhi_vulkan.zig").createRHI;
-
-    // Frame start must stop before accessing the Vulkan device.
-    const backend = try createRHI(testing.allocator, @ptrFromInt(1), null, 1024, 1, 1, true);
-    const ctx: *VulkanContext = @ptrCast(@alignCast(backend.ptr));
-    defer testing.allocator.destroy(ctx);
-
-    _ = frame_orchestration.markSwapchainRecreateFailed(ctx, "sampled image layouts", error.OutOfMemory);
-    try testing.expect(!backend.context().beginFrame());
-    try testing.expect(!ctx.frames.frame_in_progress);
-}
-
 test "prepareFrameState texture binding no update when same" {
     const bound_texture: u32 = 100;
     const current_texture: u32 = 100;
