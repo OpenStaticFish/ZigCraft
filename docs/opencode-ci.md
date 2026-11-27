@@ -2,7 +2,7 @@
 
 Every OpenCode CI caller, including the required PR gate, requests `gpt-6.2-sol` with `reasoning.effort: medium` through CLIProxyAPI. The `default`, `review`, and `vision` profiles distinguish the workload and whether to attach an image; none can select another model or upstream provider.
 
-The required gate accepts same-repository PRs only, including manual dispatches. Review history samples gate comments and formal review bodies; inline findings are not fetched. Each `ai-merge-gate` decision uses the current pinned review: matching head and base, zero unresolved critical, high or medium findings, confidence of at least 80, and a `MERGE` recommendation. Prior verdicts do not carry forward.
+The gate accepts same-repository PRs only. It samples prior gate comments and review bodies, excluding inline findings. To pass, the current base/head review must recommend `MERGE` with confidence ≥80 and no open critical, high or medium findings. Binary and submodule changes use reviewer judgment: supporting source must explain the change. No separate manual override is part of this policy.
 
 The 96 KiB request must fit the **complete UTF-8 diff**. Near the limit, compact instructions preserve the previous diff range, report format and merge criteria. History uses spare space. Oversized diffs fail before inference.
 

@@ -33,6 +33,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  review-fetch-smoke:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          sparse-checkout: scripts/opencode_*.py
+          sparse-checkout-cone-mode: false
+      - name: Fetch and verify the live PR refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 -I scripts/opencode_pr_gate.py fetch
+
   actionlint:
     runs-on: ubuntu-latest
     permissions:

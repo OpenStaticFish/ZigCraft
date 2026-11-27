@@ -193,13 +193,18 @@ def pack_history(entries, key, remaining, complete):
     return fields, remaining, status
 
 
-def pinned_diff(number, base, head):
+def fetch_refs(number, base, head):
     git = ["git", "-c", "credential.helper=!gh auth git-credential"]
     refs = ["refs/review/base", "refs/review/head"]
     subprocess.run([*git, "fetch", "--quiet", "--atomic", "--no-tags", "--no-recurse-submodules", "origin",
                     f"+refs/heads/dev:{refs[0]}", f"+refs/pull/{number}/head:{refs[1]}"], check=True)
     if subprocess.check_output([*git, "rev-parse", *refs], text=True).splitlines() != [base, head]:
         raise pr.PilotError("PR refs moved before pinned diff")
+    return git
+
+
+def pinned_diff(number, base, head):
+    git = fetch_refs(number, base, head)
     bases = subprocess.check_output([*git, "merge-base", "--all", base, head], text=True).splitlines()
     if len(bases) != 1:
         raise pr.PilotError("Ambiguous merge base")
@@ -286,8 +291,9 @@ def integer(value, maximum):
 
 def location_text(value):
     rendered = pr.plain_text(value)
-    if len(rendered.encode()) > 384:
-        raise pr.PilotError("Location exceeds the review budget")
+    path, _, line = value.rpartition(":")
+    if not path.strip() or not re.fullmatch(r"[1-9][0-9]*", line) or len(rendered.encode()) > 384:
+        raise pr.PilotError("Location must be a bounded file:line citation")
     return rendered
 
 
@@ -366,7 +372,7 @@ def render_verdict(obj, base, head, number, prose):
     keys(breakdown, ("code_quality", "completeness", "risk_level", "test_coverage"))
     lines.append("\n".join(f"- **{key.replace('_', ' ').title()}:** {integer(breakdown[key], 100)}%"
                            for key in ("code_quality", "completeness", "risk_level", "test_coverage")))
-    if type(obj["no_security_concerns"]) is not bool or obj["test_status"] not in ("passed", "failed", "unverified"):
+    if type(obj["no_security_concerns"]) is not bool or obj["test_status"] != "unverified":
         raise pr.PilotError("Invalid readiness flag")
     checks = [(not obj["critical"], "All critical issues resolved"), (average >= 6, "SOLID average score >= 6.0"),
               (score >= 60, "Overall confidence >= 60%"), (obj["no_security_concerns"], "No security concerns"),
@@ -428,7 +434,7 @@ def fail(number, base, head):
 
 if __name__ == "__main__":
     try:
-        {"start": start, "prepare": prepare, "publish": publish, "fail": fail}[sys.argv[1]](*pr.target())
+        {"fetch": fetch_refs, "start": start, "prepare": prepare, "publish": publish, "fail": fail}[sys.argv[1]](*pr.target())
     except Exception as error:
         # API errors, diffs, responses and parse errors may contain untrusted data.
         sys.exit(f"PR gate failed ({type(error).__name__}).")

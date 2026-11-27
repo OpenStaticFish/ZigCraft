@@ -104,10 +104,10 @@ class DiscussionFixture(unittest.TestCase):
         workflow = ".github/workflows/opencode-v2-infer.yml"
         other = ".github/workflows/opencode-copy.yml"
         self.issue.update(title="OpenCode CI migration", body=f"Move inference to {workflow}")
-        self.comment["body"] = "/oc is this solved?"
+        self.comment["body"] = "/oc compare `opencode-copy.yml`; ignore docs/more.yml."
         tree = self.reads[f"git/trees/{sha}?recursive=1"]["tree"]
-        for path in [workflow, ".github/actions/opencode-v2/action.yml", "scripts/opencode_discussion.py",
-                     ".github/actions/test/.env"]:
+        for path in [workflow, other, ".github/workflows/copy.yml", ".github/workflows/more.yml",
+                     ".github/actions/opencode-v2/action.yml", "scripts/opencode_discussion.py", ".github/actions/test/.env"]:
             tree.append(dict(tree[0], path=path))
         self.reads[f"commits/{sha}?per_page=30"]["files"] = [{"filename": workflow}]
         self.reads["issues/1/timeline?per_page=100"] = [
@@ -123,16 +123,17 @@ class DiscussionFixture(unittest.TestCase):
             self.reads[url] = {"workflow_runs": [dict(run, id=wid, workflow_id=wid, path=path, head_sha="c"*40, conclusion=outcome)]}
         data = self.prepare()
         evidence = data["github"]
-        self.assertEqual(next(iter(data["files"])), workflow)
+        self.assertCountEqual(list(data["files"])[:2], [workflow, other])
+        queried = [c.args[0].split("/")[2] for c in discussion.repo.call_args_list if c.args[0].startswith("actions/workflows/")]
+        self.assertCountEqual(queried, [Path(workflow).name, Path(other).name])
         self.assertNotIn(".github/actions/test/.env", data["files"])
         self.assertEqual(evidence["revision_commit"]["changed_paths_first_30"], [workflow])
         self.assertEqual(evidence["cross_referenced_prs_sample"][0]["number"], 22)
         self.assertTrue(evidence["cross_referenced_prs_partial"])
         self.assertEqual(evidence["workflow_runs_at_revision_sample"][0]["conclusion"], "success")
         self.assertEqual(evidence["recent_completed_dev_runs_at_other_revisions"][0]["revision"], "c"*40)
-        history = discussion.github_evidence({"head": sha, "number": 1}, [workflow, other])
-        self.assertEqual([(r["workflow_id"], r["path"], r["queried_path"], r["conclusion"])
-                          for r in history["recent_completed_dev_runs_at_other_revisions"]],
+        self.assertCountEqual([(r["workflow_id"], r["path"], r["queried_path"], r["conclusion"])
+                               for r in evidence["recent_completed_dev_runs_at_other_revisions"]],
                          [(123, workflow, workflow, "failure"), (124, other, other, "success")])
         with self.assertRaises(discussion.Skip):
             discussion.command(f"/oc edit {workflow} update this")
@@ -196,35 +197,15 @@ class DiscussionFixture(unittest.TestCase):
 
     def test_malformed_optional_evidence_still_answers_from_source(self):
         sha = "a" * 40
-        del self.reads[f"commits/{sha}?per_page=30"]["files"]
+        self.reads[f"commits/{sha}?per_page=30"]["sha"] = "b" * 40
         self.reads[f"actions/runs?head_sha={sha}&per_page=30"] = {}
         self.reads["issues/1/timeline?per_page=100"] = {"unexpected": "object"}
-        evidence = self.prepare()["github"]
-        self.assertEqual(set(evidence["unavailable"]),
-                         {"revision_commit", "workflow_runs_at_revision_sample", "cross_referenced_prs_sample"})
-
-    def test_wrong_optional_commit_does_not_replace_pinned_source(self):
-        sha = "a" * 40
-        self.reads[f"commits/{sha}?per_page=30"].update(sha="b" * 40, commit={"message": "unrelated revision"})
         data = self.prepare()
         self.assertEqual(data["revision"], sha)
         self.assertEqual(data["files"][self.file], self.original.decode())
         self.assertIsNone(data["github"]["revision_commit"])
-        self.assertIn("revision_commit", data["github"]["unavailable"])
-        self.assertNotIn("unrelated revision", str(data))
-
-    def test_named_workflows_match_complete_filename_or_path(self):
-        tree = self.reads[f"git/trees/{'a' * 40}?recursive=1"]["tree"]
-        for name in ("ci.yml", "build-ci.yml", "other.yml", "more.yml"):
-            tree.append(dict(tree[0], path=f".github/workflows/{name}"))
-        for n in range(6):
-            tree.append(dict(tree[0], path=f".github/workflows/build-ci-compare-{n}.yml"))
-        self.comment["body"] = "/oc compare `build-ci.yml` and .github/workflows/other.yml. Ignore docs/more.yml"
-        files = self.prepare()["files"]
-        paths = [call.args[0].split("/")[2] for call in discussion.repo.call_args_list
-                 if call.args[0].startswith("actions/workflows/")]
-        self.assertCountEqual(paths, ["build-ci.yml", "other.yml"])
-        self.assertCountEqual(list(files)[:2], [".github/workflows/build-ci.yml", ".github/workflows/other.yml"])
+        self.assertEqual(set(data["github"]["unavailable"]),
+                         {"revision_commit", "workflow_runs_at_revision_sample", "cross_referenced_prs_sample"})
 
     def test_young_account_skips_before_preparation(self):
         os.environ["GITHUB_EVENT_NAME"] = "issues"

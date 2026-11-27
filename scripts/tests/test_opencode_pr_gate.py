@@ -309,40 +309,33 @@ class MergeGate(unittest.TestCase):
 
     def test_documented_diff_budget_and_previous_verdict_only_boundary(self):
         header = "diff --git a/t b/t\n--- a/t\n+++ b/t\n@@ -0,0 +1 @@\n+"
-        old_limit = gate.pr.INPUT_LIMIT - 1088 - len(f"\nBase SHA: {self.base}\nHead SHA: {self.head}\n\nUntrusted diff:\n")
-        for size in (89 * 1024, 94 * 1024, old_limit, gate.pr.INPUT_LIMIT):
+        framing = f"\nBase SHA: {self.base}\nHead SHA: {self.head}\n\nUntrusted diff:\n"
+        old_limit = gate.pr.INPUT_LIMIT - 1088 - len(framing)
+        omitted = "Prior gate history: omitted\nFormal review history: omitted\n"
+        compact_limit = gate.pr.INPUT_LIMIT - len(gate.COMPACT_PROMPT.encode() + framing.encode()
+                                                   + b"Untrusted context; no inline comments:\n" + omitted.encode())
+        self.assertGreaterEqual(compact_limit, old_limit)
+        for size in (89 * 1024, 94 * 1024, compact_limit, compact_limit + 1):
             diff = header + "x" * (size - len(header) - 1) + "\n"
             with tempfile.TemporaryDirectory() as runner, patch.dict(os.environ, RUNNER_TEMP=runner), \
                     patch.object(gate, "pinned_diff", return_value=(diff, 1)):
                 request = Path(runner) / "pr-input/request.txt"
-                if size <= old_limit:
+                if size <= compact_limit:
                     gate.prepare(*self.target)
-                    self.assertTrue(request.read_text().endswith(diff))
+                    text = request.read_text()
+                    self.assertTrue(text.endswith(diff))
                     self.assertLessEqual(request.stat().st_size, gate.pr.INPUT_LIMIT)
-                    self.assertEqual(request.read_text().startswith(gate.COMPACT_PROMPT), size > 89 * 1024)
+                    self.assertEqual(text.startswith(gate.COMPACT_PROMPT), size > 89 * 1024)
                     if size > 89 * 1024:
-                        self.assertIn("Withhold MERGE for binary/gitlink", request.read_text())
-                        self.assertIn("Untrusted context", request.read_text())
-                        self.assertIn("max 12 verified fix notes each", request.read_text())
-                        self.assertIn("locations <=384 UTF-8 bytes after HTML escaping", request.read_text())
+                        for rule in ("Withhold MERGE for binary/gitlink", "Untrusted context", "max 12 verified fix notes each",
+                                     "locations <=384 UTF-8 bytes after HTML escaping"):
+                            self.assertIn(rule, text)
+                    if size == compact_limit:
+                        self.assertIn(omitted, text)
                 else:
                     with self.assertRaisesRegex(gate.pr.PilotError, "complete diff exceed"):
                         gate.prepare(*self.target)
                     self.assertFalse(request.exists())
-
-    def test_full_diff_with_no_context_room_marks_history_omitted(self):
-        self.pr["comments"] = 1
-        self.comments.append({"user": {"login": "github-actions[bot]"},
-                              "body": gate.review_header(*self.target) + "Prior concern"})
-        gate.prepare(*self.target)
-        text = (self.root / "pr-input/request.txt").read_text()
-        prefix = text[:text.index("Prior gate history:")]
-        diff = text[text.index("\nUntrusted diff:"):]
-        expected = prefix + "Prior gate history: omitted\nFormal review history: omitted\n" + diff
-        with tempfile.TemporaryDirectory() as runner, patch.dict(os.environ, RUNNER_TEMP=runner), \
-                patch.object(gate.pr, "INPUT_LIMIT", len(expected.encode())):
-            gate.prepare(*self.target)
-            self.assertEqual((Path(runner) / "pr-input/request.txt").read_text(), expected)
 
     def test_formal_excerpts_shrink_individually_and_report_omission(self):
         entries = [{"head": self.head, "body": "Newest concern. " * 500},
@@ -392,7 +385,7 @@ class MergeGate(unittest.TestCase):
     def test_large_report_preserves_all_findings_and_verdict(self):
         item = {**self.finding, "impact": "`" * 1000, "description": "&" * 1000}
         locations = ["`" * 70 + f".zig:{line}" for line in range(1, 13)]
-        self.decision.update(low=[{**item, "location": location} for location in locations], test_status="passed")
+        self.decision["low"] = [{**item, "location": location} for location in locations]
         raw = json.dumps(self.decision)
         self.assertLess(len(raw.encode()), gate.pr.OUTPUT_LIMIT)
         passed, report = gate.verdict(raw, self.base, self.head, self.number)
@@ -408,9 +401,10 @@ class MergeGate(unittest.TestCase):
         machine = json.loads(report.split("```json\n")[1].split("\n```")[0])
         self.assertEqual(machine["recommendation"], "MERGE")
 
-        self.decision["low"][0]["location"] = "`" * 1000
-        with self.assertRaisesRegex(gate.pr.PilotError, "Location"):
-            gate.verdict(json.dumps(self.decision), self.base, self.head, self.number)
+        for invalid in ("unknown", ":2", "file:0", "`" * 100 + ":1"):
+            self.decision["low"][0]["location"] = invalid
+            with self.assertRaisesRegex(gate.pr.PilotError, "Location"):
+                gate.verdict(json.dumps(self.decision), self.base, self.head, self.number)
 
     def test_every_blocking_severity_threshold_and_verdict_is_independent(self):
         for field, value, expected in [
@@ -456,6 +450,7 @@ class MergeGate(unittest.TestCase):
                 json.dumps(self.decision).replace('"critical":', '"critical":["bug"], "critical":')]
         for field, value in (
             ("reviewed_sha", self.base), ("reviewed_base", self.head),
+            ("test_status", "passed"), ("test_status", "failed"),
             ("overall_confidence_score", True), ("overall_confidence_score", 101),
             ("overall_confidence_score", 80.5), ("critical", False), ("high", [7]),
             ("low", ["\n::error::"]), ("recommendation", "merge"), ("other", "MERGE"),
