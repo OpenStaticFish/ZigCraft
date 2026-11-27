@@ -11,6 +11,13 @@ on:
         description: Reviewed proxy profile
         required: true
         type: string
+    secrets:
+      OPENCODE_PROXY_BASE_URL:
+        description: Private gateway endpoint from the opencode-proxy environment
+        required: true
+      OPENCODE_PROXY_KEY:
+        description: Gateway client key from the opencode-proxy environment
+        required: true
     outputs:
       response-artifact:
         description: Current-run artifact containing only response.txt
