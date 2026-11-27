@@ -21,6 +21,7 @@ pub const FrameManager = struct {
     current_image_index: u32 = 0,
     frame_in_progress: bool = false,
     retirement_error: ?anyerror = null,
+    submit_frame: *const fn (*VulkanDevice, c.VkSubmitInfo, c.VkFence) anyerror!void = &VulkanDevice.submitGuarded,
 
     pub fn init(vulkan_device: *VulkanDevice) !FrameManager {
         var self = FrameManager{
@@ -124,9 +125,6 @@ pub const FrameManager = struct {
             }
         }
 
-        // Reset fence before submitting the next frame.
-        _ = c.vkResetFences(device, 1, &self.in_flight_fences[self.current_frame]);
-
         // Reset the per-frame pool after its fence signals. This lets the driver
         // recycle all transient command-buffer storage for the frame at once.
         const cb = self.command_buffers[self.current_frame];
@@ -141,18 +139,17 @@ pub const FrameManager = struct {
         return true;
     }
 
-    pub fn endFrame(self: *FrameManager, swapchain: *SwapchainPresenter, transfer_cb: ?c.VkCommandBuffer, transfer_semaphore: ?c.VkSemaphore) !void {
+    pub fn endFrame(self: *FrameManager, swapchain: *SwapchainPresenter, transfer_cb: ?c.VkCommandBuffer, transfer_semaphore: ?c.VkSemaphore) anyerror!void {
         if (!self.frame_in_progress) return error.InvalidState;
         defer self.frame_in_progress = false;
-
         const cb = self.command_buffers[self.current_frame];
-        try Utils.checkVk(c.vkEndCommandBuffer(cb));
+        Utils.checkVk(c.vkEndCommandBuffer(cb)) catch |err| return self.failRetirement(err);
 
         // Shared-queue uploads are submitted with graphics, so this CB is ended here.
         // Dedicated-queue uploads are ended in submitTransfer() before the separate submit.
         if (transfer_semaphore == null) {
             if (transfer_cb) |tcb| {
-                try Utils.checkVk(c.vkEndCommandBuffer(tcb));
+                Utils.checkVk(c.vkEndCommandBuffer(tcb)) catch |err| return self.failRetirement(err);
             }
         }
 
@@ -203,7 +200,8 @@ pub const FrameManager = struct {
             submit_info.pSignalSemaphores = &self.render_finished_semaphores[self.current_image_index];
         }
 
-        try self.vulkan_device.submitGuarded(submit_info, self.in_flight_fences[self.current_frame]);
+        self.submitFrame(submit_info) catch |err| return self.failRetirement(err);
+        defer self.current_frame = (self.current_frame + 1) % rhi.MAX_FRAMES_IN_FLIGHT;
 
         if (!swapchain.skip_present) {
             swapchain.initialized_images[self.current_image_index] = true;
@@ -218,8 +216,17 @@ pub const FrameManager = struct {
                 }
             };
         }
+    }
 
-        self.current_frame = (self.current_frame + 1) % rhi.MAX_FRAMES_IN_FLIGHT;
+    fn failRetirement(self: *FrameManager, err: anyerror) anyerror!void {
+        self.retirement_error = err;
+        return err;
+    }
+
+    fn submitFrame(self: *FrameManager, info: c.VkSubmitInfo) !void {
+        const fence = &self.in_flight_fences[self.current_frame];
+        try Utils.checkVk(c.vkResetFences(self.vulkan_device.vk_device, 1, fence));
+        try self.submit_frame(self.vulkan_device, info, fence.*);
     }
 
     pub fn abortFrame(self: *FrameManager, swapchain: *SwapchainPresenter) void {
@@ -247,7 +254,7 @@ pub const FrameManager = struct {
             submit_info.pWaitDstStageMask = &wait_stage;
             swapchain.framebuffer_resized = true;
         }
-        self.vulkan_device.submitGuarded(submit_info, self.in_flight_fences[frame]) catch |err| {
+        self.submitFrame(submit_info) catch |err| {
             log.log.errWithTrace("Failed to retire aborted frame slot: {}", .{err});
             self.retirement_error = err;
         };

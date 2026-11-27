@@ -169,6 +169,10 @@ fn timeOutImageAcquire(_: c.VkDevice, _: c.VkSwapchainKHR, _: u64, _: c.VkSemaph
     return c.VK_TIMEOUT;
 }
 
+fn failGraphicsSubmit(_: *@import("engine-graphics").VulkanDevice, _: c.VkSubmitInfo, _: c.VkFence) anyerror!void {
+    return error.OutOfMemory;
+}
+
 fn loseGraphicsDevice(_: *anyopaque) anyerror!bool {
     return error.GpuLost;
 }
@@ -420,6 +424,14 @@ test "smoke test: launch, generate, render, exit" {
         vulkan.frames.retirement_error = error.GpuLost;
         defer vulkan.frames.retirement_error = null;
         try testing.expectError(error.GpuLost, app.runSingleFrame());
+    }
+
+    if (build_options.skip_present) {
+        app.input.interface().setShouldQuit(false);
+        active_upload_screen.quit_on_draw = false;
+        vulkan.frames.submit_frame = &failGraphicsSubmit;
+        try app.runSingleFrame();
+        try testing.expectError(error.OutOfMemory, app.runSingleFrame());
     }
 
     const val_count = app.render_system.getRHI().query().getValidationErrorCount();
