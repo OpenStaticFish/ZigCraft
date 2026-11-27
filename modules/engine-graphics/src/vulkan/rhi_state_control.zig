@@ -73,7 +73,7 @@ pub fn recover(ctx: anytype) !void {
     log.log.info("RHI: Attempting GPU recovery (Attempt {d}/{d})...", .{ ctx.vulkan_device.recovery_count, ctx.vulkan_device.max_recovery_attempts });
 
     if (ctx.frames.frame_in_progress) {
-        ctx.frames.abortFrame();
+        ctx.frames.abortFrame(&ctx.swapchain);
     }
     ctx.runtime.main_pass_active = false;
     ctx.shadow_system.pass_active = false;

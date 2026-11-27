@@ -391,6 +391,31 @@ test "smoke test: launch, generate, render, exit" {
     try testing.expectEqual(fault_count_before_late_quit, app.render_system.getRHI().query().getFaultCount());
     try testing.expectEqual(skipped_tick +% 101, try readUploadedByte(vulkan, active_upload_screen.buffer, (skipped_tick -% 1) % active_upload_screen.payload.len));
 
+    if (!build_options.skip_present) {
+        const aborted_slot = vulkan.frames.current_frame;
+        app.input.interface().setShouldQuit(false);
+        active_upload_screen.quit_on_draw = false;
+
+        // The abort requests recreation. Fail the format-list allocation
+        // after Vulkan has already torn down the previous swapchain.
+        const swapchain = &vulkan.swapchain.swapchain;
+        const allocator = swapchain.allocator;
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+        {
+            swapchain.allocator = failing.allocator();
+            defer swapchain.allocator = allocator;
+            try app.runSingleFrame();
+        }
+        try testing.expect(failing.has_induced_failure);
+        try testing.expect(vulkan.runtime.swapchain_recreate_failed);
+        try testing.expect(swapchain.handle == null);
+        try testing.expectEqual(aborted_slot, vulkan.frames.current_frame);
+
+        app.render_system.rhi.context().requestSwapchainRecreate();
+        try app.runSingleFrame();
+        try testing.expect(aborted_slot != vulkan.frames.current_frame);
+    }
+
     const val_count = app.render_system.getRHI().query().getValidationErrorCount();
     if (val_count > 0) {
         std.debug.print("Integration test finished with {} Vulkan validation errors\n", .{val_count});

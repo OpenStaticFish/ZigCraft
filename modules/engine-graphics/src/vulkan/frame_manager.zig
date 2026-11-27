@@ -221,7 +221,7 @@ pub const FrameManager = struct {
         self.current_frame = (self.current_frame + 1) % rhi.MAX_FRAMES_IN_FLIGHT;
     }
 
-    pub fn abortFrame(self: *FrameManager) void {
+    pub fn abortFrame(self: *FrameManager, swapchain: *SwapchainPresenter) void {
         if (!self.frame_in_progress) return;
         const frame = self.current_frame;
         const device = self.vulkan_device.vk_device;
@@ -234,11 +234,18 @@ pub const FrameManager = struct {
             log.log.err("Failed to reset aborted graphics command pool: {d}", .{reset_result});
         }
 
-        // beginFrame reset this fence, but an aborted frame has no graphics
-        // submission to signal it. Queue an empty submission so this slot can
-        // be reused without destroying/recreating synchronization objects.
+        // Retire the frame slot and consume the acquire signal, if any.
+        // Recreate the WSI swapchain before another acquire: the discarded
+        // commands did not make the acquired image ready for presentation.
         var submit_info = std.mem.zeroes(c.VkSubmitInfo);
         submit_info.sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        const wait_stage: c.VkPipelineStageFlags = c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        if (!swapchain.skip_present) {
+            submit_info.waitSemaphoreCount = 1;
+            submit_info.pWaitSemaphores = &self.image_available_semaphores[frame];
+            submit_info.pWaitDstStageMask = &wait_stage;
+            swapchain.framebuffer_resized = true;
+        }
         self.vulkan_device.submitGuarded(submit_info, self.in_flight_fences[frame]) catch |err| {
             log.log.errWithTrace("Failed to retire aborted frame slot: {}", .{err});
         };

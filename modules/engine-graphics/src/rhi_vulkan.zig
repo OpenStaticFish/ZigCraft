@@ -143,21 +143,8 @@ fn abortFrame(ctx_ptr: *anyopaque) void {
     // vkDeviceWaitIdle only covers submitted work and cannot make references in
     // an unsubmitted recording command buffer safe to destroy.
     ctx.resources.abortCurrentFrame();
-    ctx.frames.abortFrame();
+    ctx.frames.abortFrame(&ctx.swapchain);
     if (ctx.screenshot_capture.staging != null) screenshot.discardCapture(ctx);
-
-    // Recreate semaphores
-    const device = ctx.vulkan_device.vk_device;
-    const frame = ctx.frames.current_frame;
-
-    c.vkDestroySemaphore(device, ctx.frames.image_available_semaphores[frame], null);
-    var semaphore_info = std.mem.zeroes(c.VkSemaphoreCreateInfo);
-    semaphore_info.sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    _ = c.vkCreateSemaphore(device, &semaphore_info, null, &ctx.frames.image_available_semaphores[frame]);
-
-    const image_idx = ctx.frames.current_image_index;
-    c.vkDestroySemaphore(device, ctx.frames.render_finished_semaphores[image_idx], null);
-    _ = c.vkCreateSemaphore(device, &semaphore_info, null, &ctx.frames.render_finished_semaphores[image_idx]);
 
     ctx.runtime.draw_call_count = 0;
     ctx.runtime.main_pass_active = false;
