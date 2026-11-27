@@ -61,14 +61,18 @@ def review_excerpt(body, limit):
         return body
     # Scan the complete report before bounding it: summaries and fixed notes
     # can precede the first open finding by thousands of characters.
-    rows = [f"{severity}: {html.unescape(location)} – {html.unescape(title)}"
-            for severity, location, title in re.findall(
-                r"^<p><strong>\[(CRITICAL|HIGH|MEDIUM|LOW)\]</strong> <code>(.*?)</code> – (.*?)<br>", body, re.M)]
+    rows = [f"{severity}: {html.unescape(location)} – {html.unescape(title)[:100]}: {html.unescape(description)[:300]}"
+            for severity, location, title, description in re.findall(
+                r"^<p><strong>\[(CRITICAL|HIGH|MEDIUM|LOW)\]</strong> <code>(.*?)</code> – (.*?)<br>"
+                r"<strong>Confidence:</strong> [^<]+<br><strong>Description:</strong> (.*?)<br>", body, re.M)]
     if not rows:
         # The previous gate published its severity groups in preformatted lists.
         for severity, items in re.findall(r"\*\*(Critical|High|Medium|Low) \(\d+\)\*\*\s*<pre>(.*?)</pre>", body, re.S):
             rows.extend(f"{severity}: {html.unescape(item[2:])}" for item in items.splitlines() if item.startswith("• "))
     note = "[Partial previous review: details truncated]\n"
+    marker = re.match(r"<!-- zigcraft-pr-gate:\d+:([0-9a-f]{40}):([0-9a-f]{40}) -->", body)
+    if marker:
+        note += f"Base: {marker[1]} Head: {marker[2]}\n"
     budget = limit - len(note)
     if not rows:
         return note + body[:budget]
@@ -76,12 +80,12 @@ def review_excerpt(body, limit):
     return note + "\n".join(row if len(row) <= width else row[:width - 1] + "…" for row in rows)[:budget]
 
 
-def bot_excerpts(records, login, limit, prefix=""):
+def bot_bodies(records, login, prefix=""):
     for record in records:
         if isinstance(record, dict) and text_field(record.get("user"), "login") == login:
             body = text_field(record, "body")
             if body and body.startswith(prefix):
-                yield review_excerpt(body, limit)
+                yield body
 
 
 def review_context(current):
@@ -113,20 +117,23 @@ def review_context(current):
     last_page = (count + 24) // 25 if type(count) is int and count > 0 else 0
     for page in range(last_page, max(0, last_page - 2), -1):
         comments = optional(f"issues/{number}/comments?per_page=25&page={page}", list)
-        for entry in bot_excerpts(reversed(comments), "github-actions[bot]", 5500, f"<!-- zigcraft-pr-gate:{number}:"):
+        for entry in bot_bodies(reversed(comments), "github-actions[bot]", f"<!-- zigcraft-pr-gate:{number}:"):
             previous.append(entry)
             if len(previous) == 2:
                 break
         if len(previous) == 2:
             break
     # Include the formal reviews left by the pre-migration GitHub app, too.
-    legacy = list(bot_excerpts(optional(f"pulls/{number}/reviews?per_page=100", list), "opencode-agent[bot]", 3000))
+    legacy = []
+    for review in optional(f"pulls/{number}/reviews?per_page=100", list):
+        if isinstance(review, dict) and text_field(review.get("user"), "login") == "opencode-agent[bot]":
+            if text := text_field(review, "body"):
+                legacy.append({"head": text_field(review, "commit_id") or None, "excerpt": review_excerpt(text, 3000)})
     labels = current.get("labels")
     names = [text_field(label, "name") for label in labels] if isinstance(labels, list) else []
-    return {"unavailable": unavailable, "title": text_field(current, "title"), "description_excerpt": body,
+    return previous, {"unavailable": unavailable, "title": text_field(current, "title"), "description_excerpt": body,
             "labels": list(filter(None, names))[:25],
-            "linked_issue_excerpts": issues, "previous_gate_review_excerpts_newest_first": previous,
-            "formal_review_excerpts_from_first_100": legacy[-2:]}
+            "linked_issue_excerpts": issues, "formal_review_excerpts_from_first_100": legacy[-2:]}
 
 
 def prepare(number, base, head):
@@ -138,20 +145,37 @@ def prepare(number, base, head):
             or 1 + diff.count("\ndiff --git ") != current["changed_files"]):
         raise pr.PilotError("Missing, incomplete or invalid PR diff")
     prompt = PROMPT.read_text(encoding="utf-8").replace("$PR_NUMBER", number).replace("$HEAD_SHA", head)
-    prefix = f"{prompt}\nBase SHA: {base}\nHead SHA: {head}\n\nOptional untrusted context (missing fields are unknown):\n"
+    prefix = (f"{prompt}\nBase SHA: {base}\nHead SHA: {head}\n\nOptional untrusted context (missing fields are unknown). "
+              "Inline review comments are not included.\n")
+    history_status = "Prior gate history: omitted\n"
     suffix = f"\nUntrusted diff:\n{diff}"
-    remaining = pr.INPUT_LIMIT - len(prefix.encode()) - len(suffix.encode())
+    remaining = pr.INPUT_LIMIT - len(prefix.encode()) - len(history_status) - len(suffix.encode())
     if remaining < 0:
         raise pr.PilotError("Prompt and complete diff exceed the gateway limit")
     context = []
     if remaining:
-        for key, value in review_context(current).items():
+        previous, metadata = review_context(current)
+        # Pack the newest history first, before any optional description or issue.
+        # All three status words have the same byte length, even at zero headroom.
+        missing_pages = any("/comments?" in path for path in metadata["unavailable"])
+        history_status = "Prior gate history: partial\n" if missing_pages else "Prior gate history: sampled\n"
+        for body in previous:
+            for limit in (5500, 2000, 800, 400, 240):
+                field = json.dumps({"previous_gate_review": review_excerpt(body, limit)}, ensure_ascii=False) + "\n"
+                if len(field.encode()) <= remaining:
+                    context.append(field)
+                    remaining -= len(field.encode())
+                    break
+            else:
+                history_status = "Prior gate history: partial\n" if context else "Prior gate history: omitted\n"
+                break
+        for key, value in metadata.items():
             field = json.dumps({key: value}, ensure_ascii=False) + "\n"
             size = len(field.encode())
             if size <= remaining:
                 context.append(field)
                 remaining -= size
-    request = prefix + "".join(context) + suffix
+    request = prefix + history_status + "".join(context) + suffix
     if not pr.eligible(number, base, head):
         raise pr.PilotError("PR changed or request exceeds the gateway limit")
     directory = Path(os.environ["RUNNER_TEMP"]) / "pr-input"
@@ -275,7 +299,7 @@ def render_verdict(obj, base, head, number, prose):
                   "or medium issues, confidence ≥80%, and a MERGE verdict. CI tests are separate checks.",
                   "\n".join(f"- [{'x' if ok else ' '}] {label}" for ok, label in checks),
                   "### Verdict", f"**{recommendation}**", f"<p>{reason}</p>"])
-    machine = dict(reviewed_sha=head, critical_issues=len(obj["critical"]), high_priority_issues=len(obj["high"]),
+    machine = dict(reviewed_sha=head, reviewed_base=base, critical_issues=len(obj["critical"]), high_priority_issues=len(obj["high"]),
                    medium_priority_issues=len(obj["medium"]), overall_confidence_score=score, recommendation=recommendation)
     lines.extend(["## Machine Readable Verdict", "```json\n" + json.dumps(machine, indent=2) + "\n```"])
     return recommendation == "MERGE", "\n\n".join(lines)

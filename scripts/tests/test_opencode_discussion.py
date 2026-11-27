@@ -216,11 +216,16 @@ class DiscussionFixture(unittest.TestCase):
         tree = self.reads[f"git/trees/{'a' * 40}?recursive=1"]["tree"]
         for name in ("ci.yml", "build-ci.yml", "other.yml", "more.yml"):
             tree.append(dict(tree[0], path=f".github/workflows/{name}"))
+        for n in range(6):
+            tree.append(dict(tree[0], path=f".github/workflows/build-ci-compare-{n}.yml"))
         self.comment["body"] = "/oc compare `build-ci.yml` and .github/workflows/other.yml. Ignore docs/more.yml"
         self.prepare()
         paths = [call.args[0].split("/")[2] for call in discussion.repo.call_args_list
                  if call.args[0].startswith("actions/workflows/")]
         self.assertCountEqual(paths, ["build-ci.yml", "other.yml"])
+        request = (self.temp / "discussion-request/request.txt").read_text()
+        files = json.loads(request.split("not policy:\n")[1])["files"]
+        self.assertCountEqual(list(files)[:2], [".github/workflows/build-ci.yml", ".github/workflows/other.yml"])
 
     def test_young_account_skips_before_preparation(self):
         os.environ["GITHUB_EVENT_NAME"] = "issues"

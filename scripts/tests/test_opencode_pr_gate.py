@@ -136,7 +136,8 @@ class MergeGate(unittest.TestCase):
     def test_history_keeps_blocker_after_long_summary_and_fixed_notes(self):
         self.decision["summary"] = "&" * 1000
         self.decision["fixed"]["critical"] = ["`" * 500]
-        self.decision["medium"] = [{**self.finding, "title": "Lost & leaked allocation"}]
+        self.decision["medium"] = [{**self.finding, "title": "Lost & leaked allocation",
+                                    "description": "The error path skips cleanup"}]
         self.response.write_text(json.dumps(self.decision))
         gate.publish(*self.target)
         self.assertGreater(self.comments[0]["body"].index("Lost &amp; leaked allocation"), 5500)
@@ -145,6 +146,9 @@ class MergeGate(unittest.TestCase):
         request = (self.root / "pr-input/request.txt").read_text()
         self.assertIn("[Partial previous review: details truncated]", request)
         self.assertIn("MEDIUM: src/example.zig:10 – Lost & leaked allocation", request)
+        self.assertIn("The error path skips cleanup", request)
+        self.assertIn(f"Base: {self.base} Head: {self.head}", request)
+        self.assertIn("Inline review comments are not included", request)
 
     def test_gateway_response_at_review_byte_limit_can_publish(self):
         limit = adapter.RESPONSE_LIMIT
@@ -184,7 +188,10 @@ class MergeGate(unittest.TestCase):
         self.assertTrue(text.endswith("diff --git a/source.zig b/source.zig\n"))
 
     def test_optional_context_cannot_displace_pinned_diff(self):
-        self.pr.update(body="界" * 6000)
+        self.pr.update(body="界" * 6000, comments=1)
+        self.comments.append({"user": {"login": "github-actions[bot]"},
+                              "body": gate.review_header(self.number, self.base, self.head) + "summary" * 900
+                              + "\n**High (1)**\n<pre>• source.zig:10: stale handle used after free</pre>"})
         diff = "diff --git a/t b/t\n" + ("d" * (gate.pr.INPUT_LIMIT - len(gate.PROMPT.read_bytes()) - 1000))
         with patch.object(gate.pr, "api", side_effect=lambda path, **kw: diff if kw.get("diff") else self.github(path, **kw)):
             gate.prepare(*self.target)
@@ -192,6 +199,28 @@ class MergeGate(unittest.TestCase):
         self.assertTrue(text.endswith(diff))
         self.assertLessEqual(len(text.encode()), gate.pr.INPUT_LIMIT)
         self.assertNotIn(self.pr["body"], text)
+        self.assertIn("source.zig:10: stale handle used after free", text)
+        self.assertIn("[Partial previous review: details truncated]", text)
+
+    def test_machine_verdict_distinguishes_bases_for_same_head(self):
+        for base in [self.base, "c" * 40]:
+            _, report = gate.verdict(json.dumps({**self.decision, "reviewed_base": base}), base, self.head, self.number)
+            machine = json.loads(report.split("```json\n")[1].split("\n```")[0])
+            self.assertEqual((machine["reviewed_sha"], machine["reviewed_base"]), (self.head, base))
+
+    def test_full_diff_with_no_context_room_marks_history_omitted(self):
+        self.pr["comments"] = 1
+        self.comments.append({"user": {"login": "github-actions[bot]"},
+                              "body": gate.review_header(*self.target) + "Prior concern"})
+        gate.prepare(*self.target)
+        text = (self.root / "pr-input/request.txt").read_text()
+        prefix = text[:text.index("Prior gate history:")]
+        diff = text[text.index("\nUntrusted diff:"):]
+        expected = prefix + "Prior gate history: omitted\n" + diff
+        with tempfile.TemporaryDirectory() as runner, patch.dict(os.environ, RUNNER_TEMP=runner), \
+                patch.object(gate.pr, "INPUT_LIMIT", len(expected.encode())):
+            gate.prepare(*self.target)
+            self.assertEqual((Path(runner) / "pr-input/request.txt").read_text(), expected)
 
     def test_malformed_optional_records_keep_valid_evidence_and_diff(self):
         self.pr.update(body="Fixes #55", comments=1, labels=[None, {}, {"name": "automated-test"}])
