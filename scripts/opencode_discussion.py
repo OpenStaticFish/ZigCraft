@@ -242,7 +242,7 @@ def github_evidence(target, workflows):
         if payload is not None:
             try:
                 return parse(payload)
-            except (KeyError, TypeError, AttributeError):
+            except (KeyError, TypeError, AttributeError, ValueError):
                 pass  # Incomplete metadata must not prevent a source-based answer.
         unavailable.append(field)
         return None
@@ -325,7 +325,11 @@ def request_text(target):
 
         ranked = sorted(files, key=relevance)
         if mode == "respond":
-            named_workflows = [p for p in ranked if p.startswith(".github/workflows/") and Path(p).name.lower() in query]
+            # Match an entire filename or repository path, not a suffix of
+            # another workflow's name. A sentence-ending period is punctuation.
+            mentions = set(re.findall(r"(?<![\w./-])(?:\./)?([\w./-]+\.ya?ml)(?![\w/-]|\.[\w])", query))
+            named_workflows = [p for p in ranked if p.startswith(".github/workflows/")
+                               and (p.lower() in mentions or Path(p).name.lower() in mentions)]
             data["github"] = github_evidence(target, named_workflows)
         for path in ranked[:5]:
             data["files"][path] = excerpt(read_blob(files[path]), 6144)

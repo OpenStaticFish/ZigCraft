@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / ".github/actions/opencode-v2"))
+import adapter
 import opencode_pr_gate as gate
 from test_opencode_prose import render_gfm
 
@@ -130,6 +132,41 @@ class MergeGate(unittest.TestCase):
         gate.fail(*self.target)
         self.assertFalse((self.root / "pr-input").exists())
         self.assertEqual(self.states, [("ai-merge-gate", "pending"), ("ai-merge-gate", "failure"), ("ai-review", "failure")])
+
+    def test_history_keeps_blocker_after_long_summary_and_fixed_notes(self):
+        self.decision["summary"] = "&" * 1000
+        self.decision["fixed"]["critical"] = ["`" * 500]
+        self.decision["medium"] = [{**self.finding, "title": "Lost & leaked allocation"}]
+        self.response.write_text(json.dumps(self.decision))
+        gate.publish(*self.target)
+        self.assertGreater(self.comments[0]["body"].index("Lost &amp; leaked allocation"), 5500)
+        self.pr["comments"] = 1
+        gate.prepare(*self.target)
+        request = (self.root / "pr-input/request.txt").read_text()
+        self.assertIn("[Partial previous review: details truncated]", request)
+        self.assertIn("MEDIUM: src/example.zig:10 – Lost & leaked allocation", request)
+
+    def test_gateway_response_at_review_byte_limit_can_publish(self):
+        limit = adapter.RESPONSE_LIMIT
+        self.assertEqual(limit, gate.pr.OUTPUT_LIMIT)
+        self.assertIn(f"{limit} UTF-8 bytes", gate.PROMPT.read_text())
+        self.decision["high"] = [{**self.finding, "description": "界" * 830}] * 12
+        raw = json.dumps(self.decision, ensure_ascii=False, separators=(",", ":"))
+        room = limit - len(raw.encode())
+        self.assertGreater(room, 0)
+        raw = raw[:-1] + " " * room + "}"
+
+        def transport(text):
+            return adapter.response([json.dumps({"type": "text", "part": {"text": text}}).encode(),
+                                     b'{"type":"step_finish","part":{"reason":"stop"}}'])
+
+        self.response.write_bytes(transport(raw).encode())
+        self.assertEqual(self.response.stat().st_size, limit)
+        gate.publish(*self.target)
+        self.assertEqual(self.states[-1], ("ai-merge-gate", "failure"))
+        self.assertIn('"high_priority_issues": 12', self.comments[-1]["body"])
+        with self.assertRaises(adapter.StageError):
+            transport(raw[:-1] + " }")
 
     def test_optional_context_failure_keeps_complete_diff(self):
         self.pr.update(body="Fixes #55", comments=1)

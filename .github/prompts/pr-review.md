@@ -56,6 +56,13 @@ impact and a specific actionable fix. Use Low confidence when unsure.
 ## Gateway response format
 
 Return one JSON object, without Markdown fences or surrounding commentary.
+The entire serialized JSON response, including keys, punctuation and whitespace,
+must fit in 32768 UTF-8 bytes. Aim for under 12000 bytes. Put the reviewed SHAs,
+score, recommendation and unresolved findings first. Use compact JSON and short
+sentences. Shorten fixed notes, summary and scoring explanations before cutting
+finding detail. Group related instances of the same defect. If the review cannot
+be represented completely within budget, state the limitation and do not recommend
+MERGE. Always finish the JSON object and include every required key.
 All prose fields are plain text, single line, nonempty, at most 1000 characters.
 Use the exact keys below:
 

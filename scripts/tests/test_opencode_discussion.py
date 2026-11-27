@@ -200,9 +200,27 @@ class DiscussionFixture(unittest.TestCase):
         evidence = json.loads(request.split("not policy:\n")[1])["github"]
         self.assertEqual(set(evidence["unavailable"]),
                          {"revision_commit", "workflow_runs_at_revision_sample", "cross_referenced_prs_sample"})
-        self.reads[f"commits/{sha}?per_page=30"]["sha"] = "b" * 40
-        with self.assertRaisesRegex(ValueError, "unexpected commit revision"):
-            discussion.github_evidence({"head": sha, "number": 1}, [])
+
+    def test_wrong_optional_commit_does_not_replace_pinned_source(self):
+        sha = "a" * 40
+        self.reads[f"commits/{sha}?per_page=30"].update(sha="b" * 40, commit={"message": "unrelated revision"})
+        self.prepare()
+        data = json.loads((self.temp / "discussion-request/request.txt").read_text().split("not policy:\n")[1])
+        self.assertEqual(data["revision"], sha)
+        self.assertEqual(data["files"][self.file], self.original.decode())
+        self.assertIsNone(data["github"]["revision_commit"])
+        self.assertIn("revision_commit", data["github"]["unavailable"])
+        self.assertNotIn("unrelated revision", str(data))
+
+    def test_named_workflows_match_complete_filename_or_path(self):
+        tree = self.reads[f"git/trees/{'a' * 40}?recursive=1"]["tree"]
+        for name in ("ci.yml", "build-ci.yml", "other.yml", "more.yml"):
+            tree.append(dict(tree[0], path=f".github/workflows/{name}"))
+        self.comment["body"] = "/oc compare `build-ci.yml` and .github/workflows/other.yml. Ignore docs/more.yml"
+        self.prepare()
+        paths = [call.args[0].split("/")[2] for call in discussion.repo.call_args_list
+                 if call.args[0].startswith("actions/workflows/")]
+        self.assertCountEqual(paths, ["build-ci.yml", "other.yml"])
 
     def test_young_account_skips_before_preparation(self):
         os.environ["GITHUB_EVENT_NAME"] = "issues"

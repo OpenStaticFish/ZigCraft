@@ -1,5 +1,6 @@
 """Publish the required head status from the trusted gateway response."""
 
+import html
 import json
 import os
 from pathlib import Path
@@ -55,12 +56,32 @@ def text_field(record, key):
     return value if isinstance(value, str) else ""
 
 
+def review_excerpt(body, limit):
+    if len(body) <= limit:
+        return body
+    # Scan the complete report before bounding it: summaries and fixed notes
+    # can precede the first open finding by thousands of characters.
+    rows = [f"{severity}: {html.unescape(location)} – {html.unescape(title)}"
+            for severity, location, title in re.findall(
+                r"^<p><strong>\[(CRITICAL|HIGH|MEDIUM|LOW)\]</strong> <code>(.*?)</code> – (.*?)<br>", body, re.M)]
+    if not rows:
+        # The previous gate published its severity groups in preformatted lists.
+        for severity, items in re.findall(r"\*\*(Critical|High|Medium|Low) \(\d+\)\*\*\s*<pre>(.*?)</pre>", body, re.S):
+            rows.extend(f"{severity}: {html.unescape(item[2:])}" for item in items.splitlines() if item.startswith("• "))
+    note = "[Partial previous review: details truncated]\n"
+    budget = limit - len(note)
+    if not rows:
+        return note + body[:budget]
+    width = max(1, budget // len(rows) - 1)
+    return note + "\n".join(row if len(row) <= width else row[:width - 1] + "…" for row in rows)[:budget]
+
+
 def bot_excerpts(records, login, limit, prefix=""):
     for record in records:
         if isinstance(record, dict) and text_field(record.get("user"), "login") == login:
             body = text_field(record, "body")
             if body and body.startswith(prefix):
-                yield body[:limit]
+                yield review_excerpt(body, limit)
 
 
 def review_context(current):
