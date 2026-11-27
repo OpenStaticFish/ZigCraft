@@ -84,6 +84,7 @@ gh api --paginate "$repo/pulls/$number/reviews?per_page=100" > "$tmp/reviews"
     done < "$tmp/links"
     echo 'Previous automated reviews:'
     jq -s '[.[][] | select(.user.login | IN("github-actions[bot]","opencode-agent[bot]"))
+        | select((.body // "") | test("^<!-- opencode-v2-(triage|slash):") | not)
         | select(.submitted_at or ((.body // "") | test("^<!-- zigcraft-(pr-gate|v2-advisory|static-review)|```json[\\s\\S]*\"reviewed_sha\"")))
         | {date:(.submitted_at // .created_at),body}] | sort_by(.date) | reverse | .[:3]
         | map(.body |= .[:3500])' "$tmp/comments" "$tmp/reviews"

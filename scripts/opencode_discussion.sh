@@ -32,10 +32,12 @@ infer() {
 }
 post_reply() {
     already_commented && return 0
-    # Prevent model text from masquerading as a bot's machine-readable review.
+    # Keep Markdown intact and break potential mentions even after GitHub decodes entities.
+    # The publisher's first-line marker distinguishes this reply from a review.
     {
-        echo "$marker"
-        jq -Rrs '"<pre>" + (@html | gsub("`";"&#96;") | gsub("@";"&#64;")) + "</pre>"' "$tmp/response"
+        printf '%s\n\n' "$marker"
+        jq -Rrs 'gsub("(?:(?<![A-Za-z0-9_])@|&#0*64;|&#[xX]0*40;|&commat;)(?=[A-Za-z0-9&])"; "@\u200b")' \
+            "$tmp/response"
     } > "$tmp/reply"
     [[ $(wc -c < "$tmp/reply") -le 65536 ]]
     gh api "$repo/issues/$number/comments" -F "body=@$tmp/reply" --silent
