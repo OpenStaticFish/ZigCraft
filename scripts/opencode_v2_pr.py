@@ -150,9 +150,17 @@ def plain_text(value):
         raise PilotError("Invalid review field")
     if any(unicodedata.category(c).startswith("C") or c in "\u2028\u2029" for c in value):
         raise PilotError("Invalid review text")
-    # Escape model text inside <pre>, including mention syntax and the raw
-    # backtick fences recognized by the legacy ai-merge-gate comment parser.
-    return html.escape(value).replace("@", "@\u200b").replace("`", "&#96;")
+    return escape_text(value)
+
+
+def escape_text(value):
+    # Neutralize references after GitHub decodes the HTML entities.
+    escaped = html.escape(value, quote=False).replace("@", "@\u200b")
+    return re.sub(r"#(?=[0-9])", "#\u200b", escaped).replace("`", "&#96;")
+
+
+def findings_list(findings):
+    return "<ul>" + "".join(f"<li>{plain_text(item)}</li>" for item in findings) + "</ul>"
 
 
 def response_data(directory):
@@ -173,9 +181,8 @@ def review_text(directory):
     findings = obj["findings"]
     if not isinstance(findings, list) or len(findings) > 12:
         raise PilotError("Invalid advisory findings")
-    lines = [f"• {plain_text(finding)}" for finding in findings]
-    text = "\n".join(lines) if lines else "The reviewer reported no findings in the supplied diff."
-    return f"**Findings**\n<pre>{text}</pre>\n\n**Limitations**\n<pre>{plain_text(obj['limitations'])}</pre>"
+    text = findings_list(findings) if findings else "The reviewer reported no findings in the supplied diff."
+    return f"**Findings**\n\n{text}\n\n**Limitations**\n\n<p>{plain_text(obj['limitations'])}</p>"
 
 
 def report(number, base, head, advisory):

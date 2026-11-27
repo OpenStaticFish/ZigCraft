@@ -7,6 +7,8 @@ import stat
 import sys
 from pathlib import Path
 
+from opencode_prose import paragraphs
+
 
 PROMPTS = Path(__file__).resolve().parents[1] / ".github/prompts"
 PNG_LIMIT = 4 * 1024 * 1024
@@ -109,9 +111,8 @@ def advisory(profile, response, output, env):
         raise ValueError("Invalid capture provenance")
     context = "Failure diagnosis" if profile == "default" else "Image observation"
     url = f"https://github.com/OpenStaticFish/ZigCraft/actions/runs/{run}"
-    # A single indented code-block line renders model output inert in the issue.
     output.write_text(f"{context} for `{sha}` ([workflow run]({url})).\n\n"
-                      f"    {observation.replace('@', '＠')}\n", encoding="utf-8")
+                      f"{paragraphs(observation)}\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

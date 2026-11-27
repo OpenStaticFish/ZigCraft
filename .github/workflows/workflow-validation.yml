@@ -66,6 +66,13 @@ jobs:
       - name: Check OpenCode caller and adapter contracts (offline)
         run: python3 -B -m unittest discover -s scripts/tests
 
+      - name: Verify synthetic OpenCode reports with GitHub Markdown
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OPENCODE_TEST_GITHUB_RENDER: "1"
+        run: python3 -B -m unittest discover -s scripts/tests -k gfm
+
       - name: Check shell script syntax
         run: devenv shell --profile unit -- bash -n scripts/*.sh
 

@@ -8,6 +8,8 @@ import re
 import subprocess
 import sys
 
+from opencode_prose import paragraphs
+
 
 def require(condition, message):
     if not condition:
@@ -110,7 +112,7 @@ def audit(folder):
             f"**Module:** `{data['module']}` · **Location:** [{path}:{line}]({location}) "
             f"(`{finding['scope']}`)\n")
     for key in ("summary", "impact", "fix"):
-        body += f"\n### {key.capitalize()}\n\n    {finding[key]}\n"
+        body += f"\n### {key.capitalize()}\n\n{paragraphs(finding[key])}\n"
     Path(os.environ["RUNNER_TEMP"], "audit-issue.json").write_text(json.dumps({
         "title": f"[Audit][{finding['priority']}] {finding['title']}",
         "labels": ["automated-audit"], "body": body,

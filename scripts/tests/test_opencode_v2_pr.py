@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import opencode_v2_pr as pilot
+from test_opencode_prose import MARKUP, live_gfm, render_gfm
 
 
 class PullRequestPilot(unittest.TestCase):
@@ -102,12 +103,24 @@ class PullRequestPilot(unittest.TestCase):
         self.assertNotIn("```json", body)
         self.assertNotIn("@maintainer", body)
         self.assertIn("&lt;/pre&gt;", body)
+        self.assertIn("<ul><li>", body)
+        self.assertIn("<p>Diff-only.</p>", body)
+        self.assertNotIn("<pre>", body)
 
     def test_changed_base_or_head_prevents_publication(self):
         for side in ("base", "head"):
             with patch.dict(self.pr[side], {"sha": "0" * 40}), self.assertRaises(pilot.PilotError):
                 pilot.report(*self.target, advisory=True)
         self.assertFalse(self.comments)
+
+    @live_gfm
+    def test_gfm_complete_advisory_review(self):
+        self.response.write_text(json.dumps({"findings": [MARKUP], "limitations": "Diff only."}))
+        pilot.report(*self.target, advisory=True)
+        rendered = render_gfm(self.comments[-1]["body"])
+        self.assertIn("<li>", rendered)
+        self.assertIn("<strong>Limitations</strong>", rendered)
+        self.assertNotIn("<pre", rendered)
 
     def test_advisory_cutover_does_not_duplicate_existing_gateway_gate_review(self):
         number, base, head = self.target
