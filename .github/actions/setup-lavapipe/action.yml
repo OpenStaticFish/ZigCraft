@@ -8,15 +8,11 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        # Lavapipe ICD and the Khronos validation layers are resolved from the
-        # floating nixpkgs-unstable flake registry, matching how dev's CI has
-        # always resolved them. They are NOT pinned to devenv.lock's nixpkgs:
-        # the pinned (nixos-unstable) rev does not keep vulkan-validation-layers
-        # in the binary cache, so pinning forces a from-source build that fails
-        # (missing git in the sandbox). The integration-test correctness signal
-        # is governed by the binary's SDL3/vulkan-loader versions, which the
-        # devenv nixpkgs pin already locks to the pre-migration versions.
-        LVP_PATH=$(nix build --no-link --print-out-paths nixpkgs#mesa.drivers)/share/vulkan/icd.d/lvp_icd.x86_64.json
+        # The driver is loaded into the game process and must match its glibc.
+        rev=$(jq -er '.nodes[.nodes.root.inputs.nixpkgs].locked.rev' devenv.lock)
+        LVP_PATH=$(nix build --no-link --print-out-paths "github:NixOS/nixpkgs/$rev#mesa")/share/vulkan/icd.d/lvp_icd.x86_64.json
+        test -r "$LVP_PATH"
+        # Keep the separately distributed validation layer on the cached channel.
         LAYER_PATH=$(nix build --no-link --print-out-paths nixpkgs#vulkan-validation-layers)/share/vulkan/explicit_layer.d
         {
           echo "VK_ICD_FILENAMES=$LVP_PATH"
