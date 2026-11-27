@@ -8,6 +8,8 @@ on:
     types: [labeled]
   workflow_dispatch:
 
+permissions: {}
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -18,67 +20,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      id-token: write
       contents: read
-      issues: write
-      pull-requests: read
-
+    outputs:
+      screenshot-artifact: ${{ steps.upload.outputs.artifact-id && steps.evidence.outputs.artifact }}
+      capture: ${{ steps.capture.outcome }}
+      image: ${{ steps.image.outcome }}
+      comparison: ${{ steps.compare.outcome }}
+      diagnostics: ${{ steps.evidence.outputs.diagnostics }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup devenv
-        uses: ./.github/actions/setup-devenv
-
-      - name: Start headless Wayland compositor
-        uses: ./.github/actions/start-weston
-
-      - name: Prepare opencode cache
-        run: |
-          mkdir -p /tmp/opencode-cache
-          echo "XDG_CACHE_HOME=/tmp/opencode-cache" >> "$GITHUB_ENV"
-
-      - name: Load visual verification prompt
-        uses: ./.github/actions/load-prompt
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          prompt-file: .github/prompts/visual-test-verify.md
-          env-var: VISUAL_VERIFY_PROMPT
-
-      - name: Load visual diagnosis prompt
-        uses: ./.github/actions/load-prompt
-        with:
-          prompt-file: .github/prompts/visual-test-diagnose.md
-          env-var: VISUAL_DIAGNOSE_PROMPT
-          variables: $WORKFLOW_URL
-        env:
-          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-      - name: Ensure visual-test label exists
-        run: |
-          if ! gh label list --json name --jq '.[].name' | grep -q '^visual-test$'; then
-            gh label create "visual-test" \
-              --description "Issues from automated visual regression tests" \
-              --color "E06C75"
-          fi
-          if ! gh label list --json name --jq '.[].name' | grep -q '^run-visual-test$'; then
-            gh label create "run-visual-test" \
-              --description "Run deterministic visual regression workflow on a PR" \
-              --color "E06C75"
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.OPENCODE_PAT }}
-
-      - name: Setup Lavapipe Vulkan
-        uses: ./.github/actions/setup-lavapipe
+          persist-credentials: false
+      - uses: ./.github/actions/setup-devenv
+      - uses: ./.github/actions/start-weston
+      - uses: ./.github/actions/setup-lavapipe
 
       - name: Run menu screenshot capture
-        id: screenshot
-        continue-on-error: true
+        id: capture
         uses: ./.github/actions/run-with-log
         with:
           name: Visual Test
           timeout: 20m
           log-file: build-output.log
-          command: devenv shell --profile graphics -- zig build run -Dscreenshot-path=screenshot.png -Dskip-present=true
+          command: devenv shell --profile graphics -- zig build run -Dscreenshot-path="$RUNNER_TEMP/menu-capture.png" -Dskip-present=true
         env:
           ZIG_GLOBAL_CACHE_DIR: /tmp/zig-cache-global
           XDG_RUNTIME_DIR: /tmp/runtime-runner
@@ -86,71 +50,147 @@ jobs:
           ZIGCRAFT_SMOKE_FRAMES: "5"
           ZIGCRAFT_SAFE_RENDER: "1"
 
-      - name: Check screenshot exists
-        id: check_screenshot
-        if: always()
+      - name: Validate screenshot and strip metadata
+        id: image
         run: |
-          if [ -f screenshot.png ]; then
-            echo "screenshot_exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "screenshot_exists=false" >> "$GITHUB_OUTPUT"
+          if ! /usr/bin/python3 -c 'import PIL.Image'; then
+            sudo apt-get update -qq
+            sudo apt-get install -y python3-pil
           fi
+          /usr/bin/python3 scripts/visual_inference.py normalize "$RUNNER_TEMP/menu-capture.png" "$RUNNER_TEMP/image.png"
 
       - name: Compare against golden image
-        id: golden_diff
-        if: steps.check_screenshot.outputs.screenshot_exists == 'true'
+        id: compare
+        shell: bash
         run: |
-          nix shell nixpkgs#imagemagick -c bash scripts/compare_visual_golden.sh screenshot.png docs/visual-test/golden/menu.png visual-diff.png
+          set -o pipefail
+          nix shell nixpkgs#imagemagick -c bash scripts/compare_visual_golden.sh \
+            "$RUNNER_TEMP/image.png" docs/visual-test/golden/menu.png "$RUNNER_TEMP/visual-diff.png" \
+            2>&1 | tee "$RUNNER_TEMP/comparison.log"
         env:
           VISUAL_DIFF_RMSE_TOLERANCE: "0.015"
 
-      - name: Upload screenshot artifact
-        if: always() && steps.check_screenshot.outputs.screenshot_exists == 'true'
-        uses: actions/upload-artifact@v7
+      - name: Collect bounded diagnostic signals
+        id: evidence
+        if: ${{ !cancelled() }}
+        run: |
+          echo "artifact=menu-screenshot-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          python3 scripts/visual_inference.py signals build-output.log weston.log "$RUNNER_TEMP/comparison.log" >> "$GITHUB_OUTPUT"
+      - name: Upload validated screenshot
+        id: upload
+        if: ${{ !cancelled() && steps.image.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: menu-screenshot
-          path: |
-            screenshot.png
-            visual-diff.png
+          name: ${{ steps.evidence.outputs.artifact }}
+          path: ${{ runner.temp }}/image.png
           retention-days: 30
-
-      - name: Check build log exists
-        id: check_log
-        if: always()
-        run: 'test -f build-output.log && echo "exists=true" >> "$GITHUB_OUTPUT" || echo "exists=false" >> "$GITHUB_OUTPUT"'
-
-      - name: Upload build log artifact
-        if: always() && steps.check_log.outputs.exists == 'true'
-        uses: actions/upload-artifact@v7
+          if-no-files-found: error
+      - name: Upload comparison image when available
+        if: ${{ !cancelled() && steps.image.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: build-output-log
-          path: |
-            build-output.log
-            weston.log
-          retention-days: 7
-
+          name: visual-diff-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/visual-diff.png
+          retention-days: 30
+          if-no-files-found: ignore
       - name: Stop headless Wayland compositor
         if: always()
         uses: ./.github/actions/stop-weston
 
-      - name: Run opencode visual verification
-        if: always() && steps.check_screenshot.outputs.screenshot_exists == 'true'
-        continue-on-error: true
-        uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a
-        env:
-          GITHUB_TOKEN: ${{ secrets.OPENCODE_PAT }}
-          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+  # PRs and the existing weekly schedule remain deterministic-only during rollout.
+  prepare:
+    needs: visual-test
+    if: >-
+      !cancelled() && (needs.visual-test.result == 'success' || needs.visual-test.result == 'failure') &&
+      github.event_name == 'workflow_dispatch' && github.repository == 'OpenStaticFish/ZigCraft' &&
+      github.event.repository.default_branch == 'dev' && github.ref == 'refs/heads/dev' &&
+      vars.OPENCODE_VISUAL_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      profile: ${{ steps.prepare.outputs.profile }}
+      request-artifact: ${{ steps.prepare.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          model: minimax-coding-plan/MiniMax-M3
-          prompt: ${{ env.VISUAL_VERIFY_PROMPT }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify current dev SHA and dispatcher permissions
+        run: bash scripts/authorize_source_task.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Download this capture's image
+        if: needs.visual-test.result == 'success' && needs.visual-test.outputs.screenshot-artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.visual-test.outputs.screenshot-artifact }}
+          path: ${{ runner.temp }}/capture
+      - name: Prepare visual request
+        id: prepare
+        env:
+          CAPTURE_RESULT: ${{ needs.visual-test.result }}
+          CAPTURE: ${{ needs.visual-test.outputs.capture }}
+          IMAGE: ${{ needs.visual-test.outputs.image }}
+          COMPARISON: ${{ needs.visual-test.outputs.comparison }}
+          DIAGNOSTICS: ${{ needs.visual-test.outputs.diagnostics }}
+        run: |
+          python3 scripts/visual_inference.py prepare "$RUNNER_TEMP/capture/image.png" "$RUNNER_TEMP/request" >> "$GITHUB_OUTPUT"
+          echo "artifact=visual-request-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.prepare.outputs.artifact }}
+          path: ${{ runner.temp }}/request/
+          retention-days: 1
+          if-no-files-found: error
 
-      - name: Run opencode failure diagnosis
-        if: failure() || steps.screenshot.outcome == 'failure' || steps.check_screenshot.outputs.screenshot_exists != 'true'
-        continue-on-error: true
-        uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a
-        env:
-          GITHUB_TOKEN: ${{ secrets.OPENCODE_PAT }}
-          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+  infer:
+    needs: prepare
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    uses: ./.github/workflows/opencode-v2-infer.yml
+    permissions:
+      contents: read
+    with:
+      request-artifact: ${{ needs.prepare.outputs.request-artifact }}
+      profile: ${{ needs.prepare.outputs.profile }}
+
+  publish:
+    needs: [prepare, infer]
+    if: ${{ !cancelled() && needs.infer.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          model: minimax-coding-plan/MiniMax-M3
-          prompt: ${{ env.VISUAL_DIAGNOSE_PROMPT }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require a named response
+        env:
+          RESPONSE: ${{ needs.infer.outputs.response-artifact }}
+        run: test -n "$RESPONSE"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.infer.outputs.response-artifact }}
+          path: ${{ runner.temp }}/response
+      - name: Validate advisory
+        env:
+          PROFILE: ${{ needs.prepare.outputs.profile }}
+        run: |
+          python3 scripts/visual_inference.py advisory "$PROFILE" "$RUNNER_TEMP/response/response.txt" "$RUNNER_TEMP/issue.md"
+      - name: Publish at most one finding for the tested revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -f "$RUNNER_TEMP/issue.md" || exit 0
+          title="[Visual Test] Menu capture advisory at $GITHUB_SHA"
+          gh api --method GET --paginate "repos/$GITHUB_REPOSITORY/issues" \
+            -f 'creator=github-actions[bot]' -f state=all -F per_page=100 \
+            --jq '.[] | select(.pull_request == null) | .title' > "$RUNNER_TEMP/existing-titles"
+          if grep -Fxq "$title" "$RUNNER_TEMP/existing-titles"; then exit 0; fi
+          bash scripts/authorize_source_task.sh
+          gh issue create --repo "$GITHUB_REPOSITORY" --label visual-test \
+            --title "$title" --body-file "$RUNNER_TEMP/issue.md"

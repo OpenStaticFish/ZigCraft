@@ -2,4 +2,10 @@
 modules/engine-graphics/**   @OpenStaticFish
 modules/world-persistence/** @OpenStaticFish
 .github/workflows/**         @OpenStaticFish
+.github/actions/opencode-v2/** @OpenStaticFish
+.github/prompts/**           @OpenStaticFish
+scripts/opencode*.py         @OpenStaticFish
+scripts/*generated*.sh       @OpenStaticFish
+scripts/visual_inference*    @OpenStaticFish
+scripts/authorize_source_task.sh @OpenStaticFish
 assets/shaders/**            @OpenStaticFish

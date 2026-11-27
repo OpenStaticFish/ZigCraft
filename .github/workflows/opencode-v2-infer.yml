@@ -1,0 +1,86 @@
+name: Private OpenCode inference
+
+on:
+  workflow_call:
+    inputs:
+      request-artifact:
+        description: Name of the immutable request artifact prepared in this run
+        required: true
+        type: string
+      profile:
+        description: Reviewed proxy profile
+        required: true
+        type: string
+    outputs:
+      response-artifact:
+        description: Current-run artifact containing only response.txt
+        value: ${{ jobs.infer.outputs.response-artifact }}
+
+permissions: {}
+jobs:
+  infer:
+    if: >-
+      github.repository == 'OpenStaticFish/ZigCraft' &&
+      github.event.repository.default_branch == 'dev' &&
+      github.ref == 'refs/heads/dev' &&
+      contains(fromJSON('["workflow_dispatch","pull_request_target","issues","issue_comment"]'), github.event_name)
+    environment: opencode-proxy
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      response-artifact: ${{ steps.artifact.outputs.name }}
+    steps:
+      - name: Require a current trusted revision and a named request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST: ${{ inputs.request-artifact }}
+        run: |
+          echo "INFERENCE_START=$(date +%s)" >> "$GITHUB_ENV"
+          [[ "$REQUEST" =~ ^[a-zA-Z0-9_-]+$ ]]
+          [[ "$GITHUB_SHA" == "$(gh api "repos/$GITHUB_REPOSITORY/branches/dev" --jq .commit.sha)" ]]
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            for user in "$GITHUB_ACTOR" "$GITHUB_TRIGGERING_ACTOR"; do
+              [[ "$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$user/permission" --jq .user.permissions.push)" == true ]]
+            done
+          fi
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: .github/actions/opencode-v2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: ${{ inputs.request-artifact }}
+          path: ${{ runner.temp }}/opencode-request
+      - name: Invoke reviewed profile
+        id: inference
+        uses: ./.github/actions/opencode-v2
+        with:
+          profile: ${{ inputs.profile }}
+          base-url: ${{ secrets.OPENCODE_PROXY_BASE_URL }}
+          client-key: ${{ secrets.OPENCODE_PROXY_KEY }}
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+      - id: artifact
+        run: echo "name=opencode-response-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ runner.temp }}/opencode-response/response.txt
+          if-no-files-found: error
+          retention-days: 1
+      - name: Remove local request, response and CLI
+        if: always()
+        run: |
+          rm -f -- "$RUNNER_TEMP/opencode-request/request.txt" "$RUNNER_TEMP/opencode-request/image.png" \
+            "$RUNNER_TEMP/opencode-response/response.txt" "$RUNNER_TEMP/opencode-v2.tar.gz" "$RUNNER_TEMP/opencode"
+      - name: Record inference outcome
+        if: always()
+        env:
+          PROFILE: ${{ inputs.profile }}
+          OUTCOME: ${{ steps.inference.outcome }}
+        run: |
+          case "$PROFILE" in default|review|vision) ;; *) PROFILE=invalid ;; esac
+          echo "Profile: $PROFILE · inference: $OUTCOME · duration: $(( $(date +%s) - INFERENCE_START ))s · [run and stage timings]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT)" >> "$GITHUB_STEP_SUMMARY"

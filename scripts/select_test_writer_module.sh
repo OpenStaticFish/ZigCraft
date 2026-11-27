@@ -30,12 +30,7 @@ other_modules=(
 )
 
 if [[ -n "$input_module" ]]; then
-    if ! [[ "$input_module" =~ ^[a-zA-Z0-9_/-]+$ ]]; then
-        printf "ERROR: Invalid module input: '%s'\n" "$input_module" >&2
-        exit 1
-    fi
     selected="$input_module"
-    printf 'Manual dispatch: writing tests for %s\n' "$selected"
 else
     graphics_count=${#graphics_modules[@]}
     other_count=${#other_modules[@]}
@@ -43,11 +38,11 @@ else
     parity=$((slot % 2))
 
     if [[ "$parity" -eq 0 ]]; then
-        index=$((slot % graphics_count))
+        index=$((slot / 2 % graphics_count))
         selected="${graphics_modules[$index]}"
         printf 'Graphics slot: parity=%s index=%s -> %s\n' "$parity" "$index" "$selected"
     else
-        index=$((slot % other_count))
+        index=$((slot / 2 % other_count))
         selected="${other_modules[$index]}"
         printf 'Other slot: parity=%s index=%s -> %s\n' "$parity" "$index" "$selected"
     fi
@@ -96,16 +91,16 @@ case "$selected" in
         scan_paths="modules/world-meshing/src/meshing/greedy_mesher.zig modules/world-meshing/src/meshing/ao_calculator.zig modules/world-meshing/src/meshing/lighting_sampler.zig modules/world-meshing/src/meshing/biome_color_sampler.zig modules/world-meshing/src/meshing/boundary.zig"
         ;;
     world/worldgen)
-        scan_paths="modules/world-worldgen/src/overworld_generator.zig modules/world-worldgen/src/biome.zig modules/world-worldgen/src/caves.zig modules/world-worldgen/src/terrain_shape_generator.zig modules/world-worldgen/src/coastal_generator.zig modules/world-worldgen/src/noise_sampler.zig modules/world-worldgen/src/height_sampler.zig modules/world-worldgen/src/surface_builder.zig"
+        scan_paths="modules/worldgen-overworld/src/overworld_generator.zig modules/worldgen-overworld/src/biome.zig modules/worldgen-overworld/src/caves.zig modules/worldgen-overworld/src/terrain_shape_generator.zig modules/worldgen-overworld/src/coastal_generator.zig modules/worldgen-overworld/src/noise_sampler.zig modules/worldgen-overworld/src/height_sampler.zig modules/worldgen-overworld/src/surface_builder.zig"
         ;;
     engine/ecs)
         scan_paths="modules/engine-ecs/src/storage.zig modules/engine-ecs/src/manager.zig modules/engine-ecs/src/entity.zig modules/engine-ecs/src/components.zig"
         ;;
     game)
-        scan_paths="src/game/player.zig src/game/screen.zig src/game/inventory.zig src/game/settings/ src/game/input_mapper.zig src/game/session.zig"
+        scan_paths="modules/game-core/src/player.zig modules/game-core/src/inventory.zig modules/game-core/src/settings modules/game-core/src/input_mapper.zig modules/game-core/src/session.zig"
         ;;
     *)
-        scan_paths="src/${selected}"
+        echo "Unknown test-writer module" >&2; exit 1
         ;;
 esac
 
