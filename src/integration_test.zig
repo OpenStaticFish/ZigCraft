@@ -72,7 +72,7 @@ const UploadScreen = struct {
     pub fn init(allocator: std.mem.Allocator, context: EngineContext) !*UploadScreen {
         const upload_screen = try allocator.create(UploadScreen);
         const rm = context.render_system.getRHI().resourceManager();
-        const buffer = try rm.createBuffer(upload_screen.payload.len, .vertex);
+        const buffer = try rm.createBuffer(upload_screen.payload.len, .storage);
         upload_screen.* = .{ .context = context, .buffer = buffer };
         return upload_screen;
     }
@@ -85,9 +85,10 @@ const UploadScreen = struct {
 
     fn update(ptr: *anyopaque, _: f32) !void {
         const self: *UploadScreen = @ptrCast(@alignCast(ptr));
-        self.payload[0] = self.tick;
+        const offset = self.tick % self.payload.len;
         self.tick +%= 1;
-        try self.context.render_system.getRHI().resourceManager().updateBuffer(self.buffer, 0, self.payload[0..]);
+        self.payload[offset] = self.tick;
+        try self.context.render_system.getRHI().resourceManager().updateBuffer(self.buffer, offset, self.payload[offset..][0..1]);
     }
 
     fn draw(ptr: *anyopaque, ui: *UISystem) !void {
@@ -153,12 +154,53 @@ const ReplaceDuringDrawScreen = struct {
     }
 };
 
-fn skipGraphicsFrame(_: *anyopaque) bool {
+fn skipGraphicsFrame(_: *anyopaque) anyerror!bool {
     return false;
+}
+
+fn loseGraphicsDevice(_: *anyopaque) anyerror!bool {
+    return error.GpuLost;
 }
 
 fn unexpectedFrameCompletion(_: *anyopaque) void {
     unreachable;
+}
+
+fn readUploadedByte(vulkan: *@import("engine-graphics").VulkanContext, handle: rhi.BufferHandle, offset: usize) !u8 {
+    const utils = @import("engine-graphics").vulkan_utils;
+    const device = vulkan.vulkan_device.vk_device;
+    const src = vulkan.resources.buffers.get(handle).?;
+    const dst = try utils.createVulkanBuffer(&vulkan.vulkan_device, 1, c.VK_BUFFER_USAGE_TRANSFER_DST_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    defer c.vkFreeMemory(device, dst.memory, null);
+    defer c.vkDestroyBuffer(device, dst.buffer, null);
+    defer c.vkUnmapMemory(device, dst.memory);
+
+    const pool = vulkan.frames.command_pool;
+    const alloc = c.VkCommandBufferAllocateInfo{
+        .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = pool,
+        .level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    var cmd: c.VkCommandBuffer = null;
+    try utils.checkVk(c.vkAllocateCommandBuffers(device, &alloc, &cmd));
+    defer c.vkFreeCommandBuffers(device, pool, 1, &cmd);
+    const begin = c.VkCommandBufferBeginInfo{ .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    try utils.checkVk(c.vkBeginCommandBuffer(cmd, &begin));
+    const region = c.VkBufferCopy{ .srcOffset = offset, .dstOffset = 0, .size = 1 };
+    c.vkCmdCopyBuffer(cmd, src.buffer, dst.buffer, 1, &region);
+    const host_read = c.VkMemoryBarrier{
+        .sType = c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = c.VK_ACCESS_HOST_READ_BIT,
+    };
+    c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host_read, 0, null, 0, null);
+    try utils.checkVk(c.vkEndCommandBuffer(cmd));
+    const submit = c.VkSubmitInfo{ .sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
+    try vulkan.vulkan_device.submitGuarded(submit, null);
+    try utils.checkVk(c.vkQueueWaitIdle(vulkan.vulkan_device.queue));
+    const mapped: *const u8 = @ptrCast(dst.mapped_ptr.?);
+    return mapped.*;
 }
 
 test "smoke test: launch, generate, render, exit" {
@@ -255,6 +297,7 @@ test "smoke test: launch, generate, render, exit" {
 
     // Simulate a skipped acquire after successful frames. The screen still
     // updates, but its draw and the frame-completion callbacks must not run.
+    const skipped_tick = active_upload_screen.tick;
     {
         app.render_system.waitIdle();
         const original_vtable = app.render_system.rhi.vtable;
@@ -271,6 +314,9 @@ test "smoke test: launch, generate, render, exit" {
         try app.runSingleFrame();
         try testing.expectEqual(previous_tick +% 1, active_upload_screen.tick);
         try testing.expect(!app.input.interface().shouldQuit());
+
+        render_vtable.beginFrame = loseGraphicsDevice;
+        try testing.expectError(error.GpuLost, app.runSingleFrame());
     }
 
     // Exercise the real Vulkan frame-start guard with the state left by a
@@ -287,6 +333,7 @@ test "smoke test: launch, generate, render, exit" {
     try app.runSingleFrame();
     try testing.expect(app.input.interface().shouldQuit());
     try testing.expectEqual(fault_count_before_late_quit, app.render_system.getRHI().query().getFaultCount());
+    try testing.expectEqual(skipped_tick +% 1, try readUploadedByte(vulkan, active_upload_screen.buffer, skipped_tick % active_upload_screen.payload.len));
 
     const val_count = app.render_system.getRHI().query().getValidationErrorCount();
     if (val_count > 0) {

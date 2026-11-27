@@ -347,9 +347,17 @@ pub const TransferQueue = struct {
         if (!self.transfer_ready[self.current_frame]) return;
 
         const cb = self.command_buffers[self.current_frame];
+        if (self.hasPendingCopies()) {
+            self.recordPendingCopies(cb);
+
+            var barrier = std.mem.zeroes(c.VkMemoryBarrier);
+            barrier.sType = c.VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = c.VK_ACCESS_MEMORY_READ_BIT;
+            c.vkCmdPipelineBarrier(cb, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier, 0, null, 0, null);
+        }
         const end_result = c.vkEndCommandBuffer(cb);
         if (end_result != c.VK_SUCCESS) {
-            self.transfer_ready[self.current_frame] = false;
             if (end_result == c.VK_ERROR_DEVICE_LOST) return error.GpuLost;
             return error.BackendError;
         }
@@ -373,6 +381,8 @@ pub const TransferQueue = struct {
         try Utils.checkVk(wait_result);
 
         self.transfer_ready[self.current_frame] = false;
+        self.pending_copy_count[self.current_frame] = 0;
+        self.pending_dst_access_mask[self.current_frame] = 0;
     }
 
     pub fn flushSync(self: *TransferQueue, vk_device: c.VkDevice, queue_mutex: *sync.Mutex) !void {

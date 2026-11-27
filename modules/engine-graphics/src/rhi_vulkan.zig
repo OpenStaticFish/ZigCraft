@@ -69,7 +69,7 @@ fn destroyBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle) void {
     ctx.resources.destroyBuffer(handle);
 }
 
-fn beginFrame(ctx_ptr: *anyopaque) bool {
+fn beginFrame(ctx_ptr: *anyopaque) anyerror!bool {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
@@ -85,13 +85,7 @@ fn beginFrame(ctx_ptr: *anyopaque) bool {
 
     var flushed_inter_frame_transfer = false;
     if (ctx.resources.transfer.transfer_ready[ctx.resources.transfer.current_frame]) {
-        ctx.resources.flushTransfer() catch |err| {
-            log.log.errWithTrace("Failed to flush inter-frame transfers: {}", .{err});
-            if (err == error.BackendError) {
-                ctx.runtime.gpu_fault_detected = true;
-                return false;
-            }
-        };
+        try ctx.resources.flushTransfer();
         flushed_inter_frame_transfer = true;
     }
 
@@ -100,14 +94,7 @@ fn beginFrame(ctx_ptr: *anyopaque) bool {
     if (ctx.runtime.pipeline_rebuild_needed) return false;
 
     // Begin frame (acquire image, reset fences/CBs)
-    const frame_started = ctx.frames.beginFrame(&ctx.swapchain) catch |err| {
-        if (err == error.GpuLost) {
-            ctx.runtime.gpu_fault_detected = true;
-        } else {
-            log.log.errWithTrace("beginFrame failed: {}", .{err});
-        }
-        return false;
-    };
+    const frame_started = try ctx.frames.beginFrame(&ctx.swapchain);
 
     if (frame_started) {
         processTimingResults(ctx);

@@ -455,7 +455,7 @@ pub const App = struct {
 
         self.render_system.setViewport(window_width, window_height);
 
-        var frame_open = self.render_system.beginFrame();
+        var frame_open = try self.render_system.beginFrame();
         defer if (frame_open) self.render_system.abortFrame();
 
         if (frame_open) try self.render_system.updateGlobalUniforms(.{
@@ -502,6 +502,7 @@ pub const App = struct {
         if (self.input.interface().shouldQuit()) return;
 
         if (!frame_open) {
+            try self.checkScreenshotDeadline(false);
             try self.applyPendingScreenTransitions();
             self.revealMenuWindowWhenReady();
             self.limitFrameRateIfNeeded();
@@ -571,9 +572,7 @@ pub const App = struct {
             // Headless frames are intentionally unthrottled. A frame-count
             // timeout can therefore expire before generation workers receive
             // meaningful CPU time; use a wall-time bound instead.
-            if (build_options.screenshot_path.len > 0 and requires_world_ready and self.time.elapsed >= 90.0 and !capture_ready) {
-                return error.ScreenshotWorldNotReady;
-            }
+            try self.checkScreenshotDeadline(capture_ready);
 
             if (should_finish) {
                 if (build_options.screenshot_path.len > 0) {
@@ -617,6 +616,13 @@ pub const App = struct {
         }
 
         self.limitFrameRateIfNeeded();
+    }
+
+    fn checkScreenshotDeadline(self: *const App, capture_ready: bool) !void {
+        const requires_world_ready = build_options.shadow_test_scene or build_options.auto_world.len > 0;
+        if (build_options.screenshot_path.len > 0 and requires_world_ready and self.time.elapsed >= 90.0 and !capture_ready) {
+            return error.ScreenshotWorldNotReady;
+        }
     }
 
     fn revealMenuWindowWhenReady(self: *App) void {
