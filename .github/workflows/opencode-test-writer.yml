@@ -1,6 +1,8 @@
 name: opencode-test-writer
 
 on:
+  schedule:
+    - cron: "0 4 * * 2"
   workflow_dispatch:
     inputs:
       module:
@@ -13,74 +15,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  prepare:
+  write:
     if: >-
       vars.OPENCODE_TEST_WRITER_ENABLED == 'true' &&
       github.repository == 'OpenStaticFish/ZigCraft' && github.ref == 'refs/heads/dev' &&
       github.event.repository.default_branch == 'dev'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: read
-    outputs:
-      ready: ${{ steps.upload.outcome == 'success' }}
-      module: ${{ steps.select.outputs.module }}
-      request: test-request-${{ github.run_id }}-${{ github.run_attempt }}
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - run: bash scripts/authorize_source_task.sh
-        env:
-          GH_TOKEN: ${{ github.token }}
-      - id: select
-        run: bash scripts/select_test_writer_module.sh
-        env:
-          INPUT_MODULE: ${{ inputs.module }}
-      - id: existing
-        run: bash scripts/check_existing_test_prs.sh
-        env:
-          BASE_BRANCH: dev
-          GH_TOKEN: ${{ github.token }}
-      - if: steps.existing.outputs.skip == 'false'
-        run: python3 scripts/opencode_source_task.py test-writer "$RUNNER_TEMP/request"
-        env:
-          MODULE: ${{ steps.select.outputs.module }}
-          SCAN_PATHS: ${{ steps.select.outputs.scan_paths }}
-      - id: upload
-        if: steps.existing.outputs.skip == 'false'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: test-request-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/request/request.txt
-          if-no-files-found: error
-          retention-days: 1
-
-  infer:
-    needs: prepare
-    if: needs.prepare.outputs.ready == 'true'
-    permissions:
-      contents: read
       id-token: write
     uses: ./.github/workflows/opencode-v2-infer.yml
-    secrets:
-      OPENCODE_PROXY_BASE_URL: ${{ secrets.OPENCODE_PROXY_BASE_URL }}
-      OPENCODE_PROXY_KEY: ${{ secrets.OPENCODE_PROXY_KEY }}
     with:
-      request-artifact: ${{ needs.prepare.outputs.request }}
-      profile: default
+      task: test-writer
 
   validate:
-    needs: infer
+    needs: write
+    if: needs.write.outputs.tests-artifact != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 65
     permissions:
       contents: read
     outputs:
-      digest: ${{ steps.apply.outputs.digest }}
-      changed: ${{ steps.apply.outputs.changed }}
+      tree: ${{ steps.apply.outputs.tree }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -88,35 +44,22 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: ${{ needs.infer.outputs.response-artifact }}
-          path: ${{ runner.temp }}/response
+          name: ${{ needs.write.outputs.tests-artifact }}
+          path: ${{ runner.temp }}/proposal
       - id: apply
-        run: python3 scripts/opencode_source_task.py apply-tests "$RUNNER_TEMP/response"
-      - if: steps.apply.outputs.changed == 'true'
-        uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31
-      - if: steps.apply.outputs.changed == 'true'
-        env:
-          FOCUSED_TEST: ${{ steps.apply.outputs.filter }}
+        run: bash scripts/apply_generated_tests.sh
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31
+      - name: Validate proposed Zig in an isolated unit devenv
         run: |
           revision=$(jq -er '.nodes.nixpkgs.locked.rev' devenv.lock)
           nix profile add "github:NixOS/nixpkgs/$revision#devenv"
           devenv shell --profile unit -- bash scripts/validate_generated_zig.sh
-          git diff -- src/tests.zig > "$RUNNER_TEMP/tests.patch"
-      - if: steps.apply.outputs.changed == 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: validated-tests-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/tests.patch
-          if-no-files-found: error
-          retention-days: 3
 
   publish:
-    needs: [prepare, infer, validate]
-    if: needs.validate.outputs.changed == 'true' && vars.OPENCODE_TEST_WRITER_ENABLED == 'true'
+    needs: [write, validate]
+    if: needs.validate.outputs.tree != '' && vars.OPENCODE_TEST_WRITER_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # Review the validated-tests artifact before releasing the repo-scoped App.
-    environment: opencode-test-publish
     permissions:
       contents: read
       pull-requests: read
@@ -127,30 +70,21 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: ${{ needs.infer.outputs.response-artifact }}
-          path: ${{ runner.temp }}/response
+          name: ${{ needs.write.outputs.tests-artifact }}
+          path: ${{ runner.temp }}/proposal
       - id: apply
-        run: python3 scripts/opencode_source_task.py apply-tests "$RUNNER_TEMP/response"
+        run: bash scripts/apply_generated_tests.sh
       - id: existing
         env:
-          EXPECTED: ${{ needs.validate.outputs.digest }}
-          ACTUAL: ${{ steps.apply.outputs.digest }}
+          VALIDATED_TREE: ${{ needs.validate.outputs.tree }}
           GH_TOKEN: ${{ github.token }}
           BASE_BRANCH: dev
         run: |
-          [[ -n "$EXPECTED" && "$ACTUAL" == "$EXPECTED" ]]
+          [[ "$(GIT_INDEX_FILE="$RUNNER_TEMP/opencode-test-index" git write-tree)" == "$VALIDATED_TREE" ]]
           bash scripts/authorize_source_task.sh
           bash scripts/check_existing_test_prs.sh
-      - id: app
-        if: steps.existing.outputs.skip == 'false'
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
-        with:
-          app-id: ${{ vars.OPENCODE_APP_ID }}
-          private-key: ${{ secrets.OPENCODE_APP_PRIVATE_KEY }}
-          permission-contents: write
-          permission-pull-requests: write
       - if: steps.existing.outputs.skip == 'false'
         env:
-          GH_TOKEN: ${{ steps.app.outputs.token }}
-          MODULE: ${{ needs.prepare.outputs.module }}
+          GH_TOKEN: ${{ secrets.OPENCODE_PAT }}
+          MODULE: ${{ steps.apply.outputs.module }}
         run: bash scripts/publish_generated_tests.sh

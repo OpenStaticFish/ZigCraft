@@ -1,0 +1,48 @@
+{
+  "model": "zigcraft/gpt-6.2-sol",
+  "share": "disabled",
+  "update": "disable",
+  "snapshots": false,
+  "providers": {
+    "zigcraft": {
+      "name": "ZigCraft private proxy",
+      "env": ["OPENCODE_PROXY_KEY"],
+      "package": "@opencode/ai/providers/openai-compatible/responses",
+      "settings": { "baseURL": "{env:OPENCODE_PROXY_BASE_URL}", "transport": "http" },
+      "body": { "store": false, "reasoning": { "effort": "medium" } },
+      "models": {
+        "gpt-6.2-sol": {
+          "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] }
+        }
+      }
+    }
+  },
+  "policies": [
+    { "action": "provider.use", "resource": "*", "effect": "deny" },
+    { "action": "provider.use", "resource": "zigcraft", "effect": "allow" },
+    { "action": "mcp.use", "resource": "*", "effect": "deny" },
+    { "action": "plugin.use", "resource": "*", "effect": "deny" },
+    { "action": "tool.use", "resource": "external_directory:*", "effect": "deny" }
+  ],
+  "permissions": [
+    { "action": "*", "resource": "*", "effect": "deny" },
+    { "action": "read", "resource": "*", "effect": "allow" },
+    { "action": "glob", "resource": "*", "effect": "allow" },
+    { "action": "grep", "resource": "*", "effect": "allow" }
+  ],
+  "agents": {
+    "inspect": {
+      "description": "Inspect the trusted repository and answer the supplied task.",
+      "mode": "primary"
+    },
+    "test-writer": {
+      "description": "Write regression tests; CI runs them on a separate runner.",
+      "mode": "primary",
+      "permissions": [
+        { "action": "edit", "resource": "modules/*_tests.zig", "effect": "allow" },
+        { "action": "edit", "resource": "src/*_tests.zig", "effect": "allow" },
+        { "action": "edit", "resource": "src/tests.zig", "effect": "allow" }
+      ]
+    }
+  }
+}

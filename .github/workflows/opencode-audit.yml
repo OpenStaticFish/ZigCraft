@@ -1,6 +1,8 @@
 name: opencode-audit
 
 on:
+  schedule:
+    - cron: "0 6 * * 1"
   workflow_dispatch:
     inputs:
       module:
@@ -13,92 +15,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  prepare:
+  audit:
     if: >-
       vars.OPENCODE_AUDIT_ENABLED == 'true' &&
       github.repository == 'OpenStaticFish/ZigCraft' && github.ref == 'refs/heads/dev' &&
       github.event.repository.default_branch == 'dev'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    outputs:
-      module: ${{ steps.select.outputs.module }}
-      paths: ${{ steps.select.outputs.scan_paths }}
-      request: audit-request-${{ github.run_id }}-${{ github.run_attempt }}
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - run: bash scripts/authorize_source_task.sh
-        env:
-          GH_TOKEN: ${{ github.token }}
-      - id: select
-        run: bash scripts/select_audit_module.sh
-        env:
-          INPUT_MODULE: ${{ inputs.module }}
-      - run: python3 scripts/opencode_source_task.py audit "$RUNNER_TEMP/request"
-        env:
-          MODULE: ${{ steps.select.outputs.module }}
-          SCAN_PATHS: ${{ steps.select.outputs.scan_paths }}
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: audit-request-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/request/request.txt
-          if-no-files-found: error
-          retention-days: 1
-
-  infer:
-    needs: prepare
-    permissions:
-      contents: read
-      id-token: write
-    uses: ./.github/workflows/opencode-v2-infer.yml
-    secrets:
-      OPENCODE_PROXY_BASE_URL: ${{ secrets.OPENCODE_PROXY_BASE_URL }}
-      OPENCODE_PROXY_KEY: ${{ secrets.OPENCODE_PROXY_KEY }}
-    with:
-      request-artifact: ${{ needs.prepare.outputs.request }}
-      profile: review
-
-  publish:
-    needs: [prepare, infer]
-    if: vars.OPENCODE_AUDIT_ENABLED == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
     permissions:
       contents: read
       issues: write
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
-        with:
-          name: ${{ needs.infer.outputs.response-artifact }}
-          path: ${{ runner.temp }}/response
-      - id: validate
-        run: python3 scripts/opencode_source_task.py check-finding "$RUNNER_TEMP/response"
-        env:
-          MODULE: ${{ needs.prepare.outputs.module }}
-          SCAN_PATHS: ${{ needs.prepare.outputs.paths }}
-      - if: steps.validate.outputs.found == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MARKER: ${{ steps.validate.outputs.marker }}
-        run: |
-          bash scripts/authorize_source_task.sh
-          # Search both open and closed issues. The location key survives retries,
-          # rebases and wording changes; the run key permits only one issue per run.
-          duplicate=$(gh api --paginate 'repos/{owner}/{repo}/issues?state=all&labels=automated-audit&per_page=100' \
-            --jq ".[] | select((.body // \"\") | contains(\"<!-- opencode-audit:$MARKER -->\") or contains(\"<!-- opencode-audit-run:$GITHUB_RUN_ID -->\")) | .number")
-          if [[ -n "$duplicate" ]]; then
-            echo "Finding already filed."
-            exit 0
-          fi
-          if ! gh api --silent 'repos/{owner}/{repo}/labels/automated-audit'; then
-            gh label create automated-audit --color 1D76DB --description 'Automated ZigCraft audit findings'
-          fi
-          gh api --silent --method POST 'repos/{owner}/{repo}/issues' --input "$RUNNER_TEMP/audit-issue.json"
+      pull-requests: read
+      id-token: write
+    uses: ./.github/workflows/opencode-v2-infer.yml
+    with:
+      task: audit

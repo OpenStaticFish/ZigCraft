@@ -20,13 +20,8 @@ concurrency:
   group: opencode-gate-${{ github.event.pull_request.number || inputs.pr_number }}
   cancel-in-progress: false
 
-env:
-  PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
-  BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
-  HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
-
 jobs:
-  prepare:
+  bind:
     if: >-
       github.repository == 'OpenStaticFish/ZigCraft' &&
       github.event.repository.default_branch == 'dev' && github.ref == 'refs/heads/dev' &&
@@ -34,98 +29,45 @@ jobs:
        (!github.event.pull_request.draft && github.event.pull_request.user.login != 'dependabot[bot]' &&
         github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: read
       statuses: write
-    outputs:
-      bound: ${{ steps.start.outputs.bound }}
-      request: ${{ steps.prepare.outputs.request }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
-          sparse-checkout: |
-            scripts/opencode_v2_pr.py
-            scripts/opencode_pr_gate.py
-            .github/prompts/pr-review.md
-          sparse-checkout-cone-mode: false
-      - name: Verify PR head and set required status pending
-        id: start
+      - run: bash scripts/opencode_review.sh pending
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 -I scripts/opencode_pr_gate.py start
-      - name: Prepare the pinned diff
-        id: prepare
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 -I scripts/opencode_pr_gate.py prepare
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: ${{ steps.prepare.outputs.request }}
-          path: ${{ runner.temp }}/pr-input/request.txt
-          if-no-files-found: error
-          retention-days: 1
 
-  infer:
+  review:
     cache-mode: none
-    needs: prepare
+    needs: bind
     permissions:
       contents: read
+      issues: read
+      pull-requests: write
+      statuses: write
       id-token: write
     uses: ./.github/workflows/opencode-v2-infer.yml
-    secrets:
-      OPENCODE_PROXY_BASE_URL: ${{ secrets.OPENCODE_PROXY_BASE_URL }}
-      OPENCODE_PROXY_KEY: ${{ secrets.OPENCODE_PROXY_KEY }}
     with:
-      profile: review
-      request-artifact: ${{ needs.prepare.outputs.request }}
+      task: review
 
-  publish:
-    needs: [prepare, infer]
-    if: ${{ !cancelled() && needs.prepare.outputs.bound == 'true' }}
+  # Covers failures before the runner starts the script, including on a retry.
+  failed:
+    if: failure() && needs.bind.result == 'success'
+    needs: [bind, review]
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
     permissions:
       contents: read
-      pull-requests: write
       statuses: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
-          sparse-checkout: |
-            scripts/opencode_v2_pr.py
-            scripts/opencode_pr_gate.py
-          sparse-checkout-cone-mode: false
-      - name: Require the successful response from this run
-        env:
-          PREPARE: ${{ needs.prepare.result }}
-          INFER: ${{ needs.infer.result }}
-          RESPONSE: ${{ needs.infer.outputs.response-artifact }}
-        run: |
-          [[ "$PREPARE" == success && "$INFER" == success ]]
-          # A successful inference can be reused when only failed jobs rerun.
-          [[ "$RESPONSE" =~ ^opencode-response-$GITHUB_RUN_ID-([1-9][0-9]{0,8})$ ]]
-          (( BASH_REMATCH[1] <= GITHUB_RUN_ATTEMPT ))
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
-        with:
-          name: ${{ needs.infer.outputs.response-artifact }}
-          path: ${{ runner.temp }}/pr-output
-      - name: Validate and publish the decision
-        id: verdict
+      - run: bash scripts/opencode_review.sh failed
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 -I scripts/opencode_pr_gate.py publish
-      - name: Fail the bound head status if a stage failed
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 -I scripts/opencode_pr_gate.py fail
-      - name: Require a passing decision
-        env:
-          PASSED: ${{ steps.verdict.outputs.passed }}
-        run: test "$PASSED" = true

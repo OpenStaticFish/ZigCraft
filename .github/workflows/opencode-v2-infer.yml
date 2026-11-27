@@ -1,95 +1,119 @@
-name: Private OpenCode inference
+name: OpenCode via private proxy
 
 on:
   workflow_call:
     inputs:
-      request-artifact:
-        description: Name of the immutable request artifact prepared in this run
+      task:
         required: true
         type: string
-      profile:
-        description: Reviewed proxy profile
-        required: true
+      visual-artifact:
+        type: string
+      capture-result:
         type: string
     secrets:
+      # Supplied by the job environment; callers need not forward these.
       OPENCODE_PROXY_BASE_URL:
-        description: Private gateway endpoint from the opencode-proxy environment
-        required: true
+        required: false
       OPENCODE_PROXY_KEY:
-        description: Gateway client key from the opencode-proxy environment
-        required: true
+        required: false
+      OPENCODE_PAT:
+        description: Only the slash caller supplies the token that opens edit PRs
+        required: false
     outputs:
-      response-artifact:
-        description: Current-run artifact containing only response.txt
-        value: ${{ jobs.infer.outputs.response-artifact }}
+      tests-artifact:
+        description: Proposed tests, if the test writer produced a patch
+        value: ${{ jobs.run.outputs.tests-artifact }}
 
-permissions: {}
+# The Tailscale federated identity is bound to this workflow on dev.
+# The caller supplies the minimum GITHUB_TOKEN permissions for its task.
 jobs:
-  infer:
-    cache-mode: none
+  run:
     if: >-
       github.repository == 'OpenStaticFish/ZigCraft' &&
-      github.event.repository.default_branch == 'dev' &&
-      github.ref == 'refs/heads/dev' &&
-      contains(fromJSON('["workflow_dispatch","pull_request_target","issues","issue_comment"]'), github.event_name)
-    environment: opencode-proxy
-    permissions:
-      contents: read
-      id-token: write
+      github.event.repository.default_branch == 'dev' && github.ref == 'refs/heads/dev'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    environment: opencode-proxy
+    timeout-minutes: 45
+    env:
+      TASK: ${{ inputs.task }}
     outputs:
-      response-artifact: ${{ steps.artifact.outputs.name }}
+      tests-artifact: ${{ steps.tests.outputs.artifact-id && format('opencode-tests-{0}-{1}', github.run_id, github.run_attempt) }}
     steps:
-      - name: Require a current trusted revision and a named request
+      - name: Verify task and trusted revision before joining
         env:
           GH_TOKEN: ${{ github.token }}
-          REQUEST: ${{ inputs.request-artifact }}
         run: |
-          echo "INFERENCE_START=$(date +%s)" >> "$GITHUB_ENV"
-          [[ "$REQUEST" =~ ^[a-zA-Z0-9_-]+$ ]]
-          [[ "$GITHUB_SHA" == "$(gh api "repos/$GITHUB_REPOSITORY/branches/dev" --jq .commit.sha)" ]]
-          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
-            for user in "$GITHUB_ACTOR" "$GITHUB_TRIGGERING_ACTOR"; do
-              [[ "$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$user/permission" --jq .user.permissions.push)" == true ]]
-            done
-          fi
+          case "$TASK:$GITHUB_EVENT_NAME" in
+            review:pull_request_target|review:workflow_dispatch|triage:issues|slash:issue_comment) ;;
+            audit:schedule|audit:workflow_dispatch|test-writer:schedule|test-writer:workflow_dispatch) ;;
+            visual:schedule|visual:workflow_dispatch|smoke:workflow_dispatch) ;;
+            *) exit 1 ;;
+          esac
+          [[ "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/dev" --jq .object.sha)" == "$GITHUB_SHA" ]]
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-          sparse-checkout: .github/actions/opencode-v2
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+          fetch-depth: 0
+      - if: inputs.task == 'visual'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: ${{ inputs.request-artifact }}
-          path: ${{ runner.temp }}/opencode-request
-      - name: Invoke reviewed profile
-        id: inference
-        uses: ./.github/actions/opencode-v2
-        with:
-          profile: ${{ inputs.profile }}
-          base-url: ${{ secrets.OPENCODE_PROXY_BASE_URL }}
-          client-key: ${{ secrets.OPENCODE_PROXY_KEY }}
-          oidc-client-id: ${{ vars.TS_OIDC_CLIENT_ID }}
-          oidc-audience: ${{ vars.TS_OIDC_AUDIENCE }}
-      - id: artifact
-        run: echo "name=opencode-response-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: ${{ steps.artifact.outputs.name }}
-          path: ${{ runner.temp }}/opencode-response/response.txt
-          if-no-files-found: error
-          retention-days: 1
-      - name: Remove local request, response and CLI
-        if: always()
+          name: ${{ inputs.visual-artifact }}
+          path: ${{ runner.temp }}/visual-evidence
+      - name: Install pinned OpenCode CLI
         run: |
-          rm -f -- "$RUNNER_TEMP/opencode-request/request.txt" "$RUNNER_TEMP/opencode-request/image.png" \
-            "$RUNNER_TEMP/opencode-response/response.txt" "$RUNNER_TEMP/opencode-v2.tar.gz" "$RUNNER_TEMP/opencode"
-      - name: Record inference outcome
-        if: always()
+          mkdir -p "$RUNNER_TEMP/opencode-bin"
+          archive="$RUNNER_TEMP/opencode.tar.gz"
+          curl -fsSL --proto '=https' --max-time 120 \
+            https://github.com/anomalyco/opencode/releases/download/v2.3.0/opencode-linux-x64.tar.gz -o "$archive"
+          echo "fc0f81522aceeabac47693d88389efa2bc517ce74c2c38fd6967819fcc6e4d3b  $archive" | sha256sum -c --status
+          tar -xzf "$archive" -C "$RUNNER_TEMP/opencode-bin" opencode
+          install -m755 scripts/opencode_ci.sh "$RUNNER_TEMP/opencode-bin/opencode-ci"
+          echo "$RUNNER_TEMP/opencode-bin" >> "$GITHUB_PATH"
+      - name: Join the private proxy network
+        id: join
+        uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4
+        with:
+          oauth-client-id: ${{ vars.TS_OIDC_CLIENT_ID }}
+          audience: ${{ vars.TS_OIDC_AUDIENCE }}
+          tags: tag:ci
+          version: 1.104.4
+          sha256sum: 624ea093d47d62cf56f17b8332d74b8decda4a1faa610ebc60a1de334b2b3dc9
+          args: --shields-up
+          use-cache: "false"
+          log-mode: quiet
+      - name: Run OpenCode task
         env:
-          PROFILE: ${{ inputs.profile }}
-          OUTCOME: ${{ steps.inference.outcome }}
+          OPENCODE_PROXY_BASE_URL: ${{ secrets.OPENCODE_PROXY_BASE_URL }}
+          OPENCODE_PROXY_KEY: ${{ secrets.OPENCODE_PROXY_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          CAPTURE_RESULT: ${{ inputs.capture-result }}
         run: |
-          case "$PROFILE" in default|review|vision) ;; *) PROFILE=invalid ;; esac
-          echo "Profile: $PROFILE · inference: $OUTCOME · duration: $(( $(date +%s) - INFERENCE_START ))s · [run and stage timings]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT)" >> "$GITHUB_STEP_SUMMARY"
+          sudo -n tailscale set --accept-routes=false
+          [[ "$OPENCODE_PROXY_BASE_URL" =~ ^https://[a-z0-9.-]+\.ts\.net(:[0-9]+)?/v1$ && -n "$OPENCODE_PROXY_KEY" ]]
+          if [[ "$TASK" == smoke ]]; then
+            reply=$(opencode-ci <<< 'Reply with exactly ZIGCRAFT_PROXY_OK')
+            [[ "$reply" == ZIGCRAFT_PROXY_OK ]]
+          else
+            bash "scripts/opencode_${TASK}.sh"
+          fi
+      - if: always() && steps.join.outcome == 'success'
+        name: Disconnect from Tailscale
+        run: timeout 15 sudo -n tailscale logout
+      - if: inputs.task == 'slash'
+        name: Open proposed edit PR
+        env:
+          GH_TOKEN: ${{ secrets.OPENCODE_PAT }}
+        run: |
+          proposal="$RUNNER_TEMP/opencode-edit-pr.json"
+          if [[ -s "$proposal" ]]; then
+            gh api "repos/$GITHUB_REPOSITORY/pulls" --input "$proposal" --silent
+          fi
+      - id: tests
+        if: inputs.task == 'test-writer'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: opencode-tests-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/opencode-tests.patch
+          if-no-files-found: ignore
+          retention-days: 1
