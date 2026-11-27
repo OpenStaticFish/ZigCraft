@@ -37,6 +37,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      issues: read
       pull-requests: read
       statuses: write
     outputs:
@@ -57,7 +58,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 -I scripts/opencode_pr_gate.py start
-      - name: Prepare the pinned diff
+      - name: Prepare pinned diff, metadata and prior reviews
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}

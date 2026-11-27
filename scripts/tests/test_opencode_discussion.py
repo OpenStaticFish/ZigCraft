@@ -72,6 +72,7 @@ class DiscussionFixture(unittest.TestCase):
         request = (self.temp / "discussion-request/request.txt").read_bytes()
         self.assertLessEqual(len(request), 96 * 1024)
         self.assertIn(self.original.strip(), request)
+        return request.decode()
 
     def response(self, value):
         folder = self.temp / "discussion-response"
@@ -94,7 +95,10 @@ class DiscussionFixture(unittest.TestCase):
 
     def test_old_account_triage(self):
         os.environ["GITHUB_EVENT_NAME"] = "issues"
-        self.prepare()
+        request = self.prepare()
+        self.assertIn(Path(".github/prompts/triage.md").read_text(), request)
+        self.assertIn('{"skip":true}', request)
+        self.assertIn('{"comment":', request)
         self.response({"skip": True})
         with self.assertRaises(discussion.Skip):
             discussion.run("respond")
@@ -103,6 +107,35 @@ class DiscussionFixture(unittest.TestCase):
         with self.assertRaises(discussion.Skip):
             discussion.run("respond")
         self.assertEqual([w[0] for w in self.writes], ["issues/1/comments"])
+
+    def test_audit_triage_supplies_related_issues_and_prs(self):
+        os.environ["GITHUB_EVENT_NAME"] = "issues"
+        self.issue["labels"] = [{"name": "automated-audit"}]
+        url = discussion.API + discussion.ROOT
+        items = [dict(title="Self", number=1, state="open", repository_url=url),
+                 dict(title="Related fix", number=8, state="open", repository_url=url, pull_request={}),
+                 dict(title="Unrelated repo", number=9, state="closed", repository_url=url + "-other")]
+        discussion.api.return_value = {"items": items}
+        request = self.prepare()
+        self.assertIn('"title": "Related fix", "type": "pull request"', request)
+        self.assertNotIn('"title": "Self"', request)
+        self.assertNotIn("Unrelated repo", request)
+        discussion.api.assert_called_once_with(
+            "/search/issues?q=repo%3AOpenStaticFish%2FZigCraft+in%3Atitle+Update+the+fixture&per_page=6")
+
+    def test_inline_command_retains_context_and_authorization(self):
+        self.comment["body"] = "About this issue: /opencode what does the code do?"
+        request = self.prepare()
+        self.assertIn(r'"instruction": "About this issue:\nwhat does the code do?"', request)
+        self.reads["collaborators/author/permission"]["permission"] = "read"
+        with self.assertRaises(discussion.Skip):
+            discussion.run("respond")
+
+    def test_command_requires_standalone_token(self):
+        for body in ["Read ./oc", "look at https://host/oc x", "/october soon", "/opencode"]:
+            with self.subTest(body=body), self.assertRaises(discussion.Skip):
+                discussion.command(body)
+        self.assertEqual(discussion.command("Explain this /oc"), ("respond", "", "Explain this"))
 
     def test_young_account_skips_before_preparation(self):
         os.environ["GITHUB_EVENT_NAME"] = "issues"

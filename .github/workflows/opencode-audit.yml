@@ -1,6 +1,8 @@
 name: opencode-audit
 
 on:
+  schedule:
+    - cron: "0 6 * * 1"
   workflow_dispatch:
     inputs:
       module:
@@ -22,6 +24,8 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      issues: read
+      pull-requests: read
     outputs:
       module: ${{ steps.select.outputs.module }}
       paths: ${{ steps.select.outputs.scan_paths }}
@@ -38,6 +42,12 @@ jobs:
         run: bash scripts/select_audit_module.sh
         env:
           INPUT_MODULE: ${{ inputs.module }}
+      - name: Collect open audit issues and pull requests for duplicate checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue list --state open --label automated-audit --limit 50 --json number,title > "$RUNNER_TEMP/open_issues.json"
+          gh pr list --state open --limit 50 --json number,title > "$RUNNER_TEMP/open_prs.json"
       - run: python3 scripts/opencode_source_task.py audit "$RUNNER_TEMP/request"
         env:
           MODULE: ${{ steps.select.outputs.module }}

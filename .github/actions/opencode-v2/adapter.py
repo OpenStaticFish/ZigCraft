@@ -20,6 +20,9 @@ REQUEST_LIMIT = 96 * 1024
 RESPONSE_LIMIT = 32 * 1024
 IMAGE_LIMIT = 4 * 1024 * 1024
 ACCOUNT = "zc-inference"
+AGENT_STEPS = 16
+SOURCE_ROOTS = ("src", "modules", "assets/shaders", "docs")
+ROOT_FILES = ("README.md", "build.zig", "build.zig.zon")
 
 
 class StageError(ValueError):
@@ -50,7 +53,7 @@ def bounded_file(path, limit):
 def request():
     directory = Path(os.environ["RUNNER_TEMP"]) / "opencode-request"
     profile = os.environ["PROFILE"]
-    require(profile in {"default", "review", "vision"}, "Unknown inference profile")
+    require(profile in {"smoke", "default", "review", "vision"}, "Unknown inference profile")
     files = {p.name for p in directory.iterdir()}
     require(files == ({"request.txt", "image.png"} if profile == "vision" else {"request.txt"}),
             "Unexpected request artifact contents")
@@ -63,34 +66,72 @@ def request():
     return text, image
 
 
-def config(url, vision):
+def copy_sources(work):
+    """Populate a data-only workspace from the trusted checkout, never from a PR head."""
+    entries = command("git", "ls-files", "--stage", "-z", "--", *SOURCE_ROOTS, *ROOT_FILES)
+    paths = []
+    for entry in entries.decode().split("\0"):
+        if not entry:
+            continue
+        header, name = entry.split("\t", 1)
+        path = Path(name)
+        if (not header.startswith("100644 ") or not re.fullmatch(r"[a-zA-Z0-9_./-]+", name)
+                or any(part.startswith(".") for part in path.parts) or path.name == "AGENTS.md"
+                or path.suffix not in {".zig", ".zon", ".frag", ".vert", ".comp", ".md"}):
+            continue
+        target = work / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, target)
+        paths.append(name)
+    require("build.zig" in paths and any(p.startswith("modules/") for p in paths),
+            "Missing trusted source checkout")
+    (work / "source-index.txt").write_text("\n".join(paths) + "\n")
+
+
+def config(url, vision, *, repository=False):
     selection = json.loads(MODEL_CONFIG.read_text())
-    deny = [{"action": "*", "resource": "*", "effect": "deny"}]
+    permissions = [{"action": "*", "resource": "*", "effect": "deny"}]
+    policies = [{"action": "tool.use", "resource": "*", "effect": "deny"}]
+    tools = []
+    if repository:
+        for path in (*ROOT_FILES, "source-index.txt", *(f"{root}/*" for root in SOURCE_ROOTS)):
+            permissions.append({"action": "read", "resource": path, "effect": "allow"})
+            policies.append({"action": "tool.use", "resource": f"read:{path}", "effect": "allow"})
+        # V2.3 also advertises its built-in skill with deny-all permissions.
+        # Supply just the permitted built-in tool on the Responses wire.
+        tools.append({
+            "type": "function", "name": "read",
+            "description": "Read a repository file. Read source-index.txt to discover paths.",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string"}, "offset": {"type": "integer", "minimum": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 2000},
+            }, "required": ["path"], "additionalProperties": False},
+            "strict": False,
+        })
     return {
         "model": "zigcraft/selected",
         "share": "disabled",
         "update": "disable",
         "snapshots": False,
-        "permissions": deny,
+        "permissions": permissions,
         "policies": [
             {"action": "provider.use", "resource": "*", "effect": "deny"},
             {"action": "provider.use", "resource": "zigcraft", "effect": "allow"},
-            {"action": "tool.use", "resource": "*", "effect": "deny"},
+            *policies,
             {"action": "mcp.use", "resource": "*", "effect": "deny"},
             {"action": "skill.use", "resource": "*", "effect": "deny"},
         ],
-        "agents": {"inference": {"description": "Answer the supplied request using only its data.",
-                                 "mode": "primary", "steps": 1, "permissions": deny}},
+        "agents": {"inference": {"description": "Analyze the supplied evidence and available repository files.",
+                                 "mode": "primary", "steps": AGENT_STEPS if repository else 1,
+                                 "permissions": permissions}},
         "providers": {"zigcraft": {
             "name": "ZigCraft proxy",
             "env": ["ZIGCRAFT_PROXY_KEY"],
             "package": "@opencode/ai/providers/openai-compatible/responses",
             "settings": {"baseURL": url, "timeout": 120000, "transport": "http"},
-            # V2.3 can still advertise its built-in skill even with a deny-all
-            # agent. Remove tools on the wire as well as denying execution.
-            "body": {"tools": [], "store": False, "reasoning": {"effort": selection["reasoning_effort"]}},
+            "body": {"tools": tools, "store": False, "reasoning": {"effort": selection["reasoning_effort"]}},
             "models": {"selected": {"modelID": selection["model"], "capabilities": {
-                "tools": False, "input": ["text", "image"] if vision else ["text"],
+                "tools": repository, "input": ["text", "image"] if vision else ["text"],
                 "output": ["text"],
             }}},
         }},
@@ -136,19 +177,26 @@ def connect():
     command("sudo", "-n", "tee", "-a", "/etc/hosts", input=f"\n{ipv4} {host}\n".encode())
 
 
-def response(events):
+def response(events, *, repository=False):
     parts = []
     completed = False
     total = 0
+    stream_limit = 4 * 1024 * 1024 if repository else 512 * 1024
     for raw in events:
         total += len(raw)
-        require(total <= 512 * 1024, "Oversized CLI event stream")
+        require(total <= stream_limit, "Oversized CLI event stream")
         event = json.loads(raw)
         kind = event["type"]
+        require(not completed, "Unexpected event after completion")
         if kind == "text":
             parts.append(event["part"]["text"])
+        elif kind == "tool_use" and repository:
+            require(event["part"]["tool"] == "read", "Unexpected agent tool")
         elif kind == "step_finish":
-            require(not completed and event["part"]["reason"] == "stop", "Incomplete model response")
+            if repository and event["part"]["reason"] == "tool-calls":
+                parts.clear()
+                continue
+            require(event["part"]["reason"] == "stop", "Incomplete model response")
             completed = True
         elif kind in {"error", "retry"}:
             status = event["error"].get("status")
@@ -193,8 +241,9 @@ def infer():
     key = os.environ.get("ZIGCRAFT_PROXY_KEY", "")
     require(key.strip(), "Missing proxy client key")
     runner = Path(os.environ["RUNNER_TEMP"])
-    # RUNNER_TEMP/checkout can be inaccessible to the dedicated uid. Copy only
-    # reviewed executable/config and validated evidence outside the workspace.
+    repository = os.environ["PROFILE"] != "smoke"
+    # The dedicated uid gets a fresh workspace with no Git metadata, plugins,
+    # GitHub token, runner caches or repository-provided OpenCode config.
     with tempfile.TemporaryDirectory(prefix="zigcraft-", dir="/tmp") as tmp:
         root = Path(tmp)
         root.chmod(0o711)
@@ -203,7 +252,9 @@ def infer():
         state = root / "cli"
         work = state / "work"
         work.mkdir(parents=True)
-        (work / "opencode.json").write_text(json.dumps(config(url, image is not None)))
+        if repository:
+            copy_sources(work)
+        (work / "opencode.json").write_text(json.dumps(config(url, image is not None, repository=repository)))
         if image:
             (state / "image.png").write_bytes(image)
         command("sudo", "-n", "chown", "-R", ACCOUNT, str(state))
@@ -213,13 +264,15 @@ def infer():
                 prompt.seek(0)
                 process = subprocess.Popen(
                     ["sudo", "-n", "-u", ACCOUNT, "--preserve-env=ZIGCRAFT_PROXY_KEY",
-                     "timeout", "--kill-after=5", "180", "/usr/bin/python3", "-I", str(root / "adapter.py"), "child"],
+                     "timeout", "--kill-after=5", "900" if repository else "180",
+                     "/usr/bin/python3", "-I", str(root / "adapter.py"), "child"],
                     cwd=state, stdin=prompt, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 )
                 try:
                     with process.stdout:
                         # Process retry/error events immediately, before backoff expires.
-                        result = response(iter(lambda: process.stdout.readline(512 * 1024 + 1), b""))
+                        lines = iter(lambda: process.stdout.readline(512 * 1024 + 1), b"")
+                        result = response(lines, repository=repository)
                     require(process.wait() == 0, "CLI exited unsuccessfully")
                 finally:
                     # This uid was created for this invocation; also stop any

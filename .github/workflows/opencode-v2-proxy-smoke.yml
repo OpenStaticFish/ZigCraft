@@ -38,7 +38,7 @@ jobs:
       OPENCODE_PROXY_BASE_URL: ${{ secrets.OPENCODE_PROXY_BASE_URL }}
       OPENCODE_PROXY_KEY: ${{ secrets.OPENCODE_PROXY_KEY }}
     with:
-      profile: default
+      profile: smoke
       request-artifact: ${{ needs.prepare.outputs.artifact }}
   verify:
     needs: infer

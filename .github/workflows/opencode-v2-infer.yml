@@ -31,13 +31,13 @@ jobs:
       github.repository == 'OpenStaticFish/ZigCraft' &&
       github.event.repository.default_branch == 'dev' &&
       github.ref == 'refs/heads/dev' &&
-      contains(fromJSON('["workflow_dispatch","pull_request_target","issues","issue_comment"]'), github.event_name)
+      contains(fromJSON('["workflow_dispatch","schedule","pull_request_target","issues","issue_comment"]'), github.event_name)
     environment: opencode-proxy
     permissions:
       contents: read
       id-token: write
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     outputs:
       response-artifact: ${{ steps.artifact.outputs.name }}
     steps:
@@ -58,7 +58,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-          sparse-checkout: .github/actions/opencode-v2
+          sparse-checkout: |
+            .github/actions/opencode-v2
+            src
+            modules
+            assets/shaders
+            docs
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: ${{ inputs.request-artifact }}
@@ -91,5 +96,5 @@ jobs:
           PROFILE: ${{ inputs.profile }}
           OUTCOME: ${{ steps.inference.outcome }}
         run: |
-          case "$PROFILE" in default|review|vision) ;; *) PROFILE=invalid ;; esac
+          case "$PROFILE" in default|review|vision|smoke) ;; *) PROFILE=invalid ;; esac
           echo "Profile: $PROFILE · inference: $OUTCOME · duration: $(( $(date +%s) - INFERENCE_START ))s · [run and stage timings]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT)" >> "$GITHUB_STEP_SUMMARY"

@@ -5,7 +5,7 @@ set -euo pipefail
 
 source_tree=$(mktemp -d "$RUNNER_TEMP/test-source.XXXXXXXX")
 git archive HEAD | tar -x -C "$source_tree"
-cp src/tests.zig "$source_tree/src/tests.zig"
+cp -- "$TEST_TARGET" "$source_tree/$TEST_TARGET"
 # No image download. Supply only Ubuntu's merged-/usr symlinks; executables
 # come from the read-only hosted OS and the same devenv store as normal CI.
 layout=$(mktemp -d "$RUNNER_TEMP/test-layout.XXXXXXXX")
@@ -48,7 +48,7 @@ run_isolated() {
 # Don't forward compiler/test output (including potential runner commands).
 focused=$(mktemp -d "$RUNNER_TEMP/test-focus.XXXXXXXX")
 cp -a "$source_tree/." "$focused"
-run_isolated "$focused" zig fmt --check src/tests.zig >/dev/null 2>&1 || {
+run_isolated "$focused" zig fmt --check "$TEST_TARGET" >/dev/null 2>&1 || {
     echo 'Generated test formatting failed.' >&2; exit 1
 }
 if ! run_isolated "$focused" zig build test -j2 "-Dtest-filter=$FOCUSED_TEST" 2>&1 |

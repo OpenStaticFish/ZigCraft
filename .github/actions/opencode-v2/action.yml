@@ -1,5 +1,5 @@
 name: OpenCode V2 private inference
-description: One tool-free Responses request on an ephemeral hosted Linux runner
+description: Run a repository-aware OpenCode task through the private Responses endpoint
 inputs:
   profile:
     description: Reviewed profile name

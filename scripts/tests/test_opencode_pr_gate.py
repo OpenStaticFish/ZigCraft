@@ -25,22 +25,26 @@ class MergeGate(unittest.TestCase):
         self.target = (self.number, self.base, self.head)
         self.pr = {
             "number": 3, "state": "open", "draft": False, "user": {"login": "dev"},
-            "head": {"sha": self.head, "repo": {"full_name": gate.pr.REPO}},
+            "head": {"sha": self.head, "ref": "feature/test", "repo": {"full_name": gate.pr.REPO}},
             "base": {"sha": self.base, "ref": "dev", "repo": {"full_name": gate.pr.REPO}},
-            "changed_files": 1,
+            "changed_files": 1, "title": "Add tests", "body": "Fixes #42",
+            "labels": [{"name": "automated-test"}],
         }
         self.decision = {
-            "reviewed_sha": self.head, "reviewed_base": self.base,
+            "reviewed_sha": self.head,
             "overall_confidence_score": 80, "recommendation": "MERGE",
-            "critical": [], "high": [], "medium": [], "low": ["<pre>@name"],
+            "critical_issues": 0, "high_priority_issues": 0, "medium_priority_issues": 0,
         }
         self.response = self.root / "pr-output/response.txt"
         self.response.parent.mkdir()
-        self.response.write_text(json.dumps(self.decision))
+        self.response.write_text(self.review())
         self.comments = []
         self.states = []
         self.permission = "write"
         self.enterContext(patch.object(gate.pr, "api", side_effect=self.github))
+
+    def review(self, text="## 📋 Summary\nGood <pre>@name", **changes):
+        return text + "\n\n```json\n" + json.dumps({**self.decision, **changes}) + "\n```\n"
 
     def github(self, path, *, diff=False, body=None, method=None):
         if path == "pulls/3":
@@ -54,6 +58,10 @@ class MergeGate(unittest.TestCase):
             return {}
         if path == "issues/3/comments?per_page=25&page=1":
             return self.comments
+        if path == "pulls/3/reviews?per_page=25&page=1":
+            return [{"user": {"login": "opencode-agent[bot]"}, "body": "Earlier allocator finding"}]
+        if path == "issues/42":
+            return {"title": "Test allocator lifetimes", "body": "Check deinit"}
         if path == "issues/3/comments" and body:
             self.comments.append({"id": 27, **body, "user": {"login": "github-actions[bot]"}})
             return {}
@@ -76,8 +84,11 @@ class MergeGate(unittest.TestCase):
         self.assertEqual(self.states, [("ai-merge-gate", "pending")])
         self.assertIn("request=opencode-gate-request-123-2", (self.root / "output").read_text())
         request = (self.root / "pr-input/request.txt").read_text()
-        for expected in (self.head, self.base, "diff --git"):
+        for expected in (self.head, self.base, "diff --git", "automated-test", "Fixes #42",
+                         "#3", "Earlier allocator finding", "Test allocator lifetimes", "Check deinit"):
             self.assertIn(expected, request)
+        for placeholder in ("$HEAD_SHA", "$PR_NUMBER", "$PREVIOUS_REVIEWS"):
+            self.assertNotIn(placeholder, request)
 
     def test_unauthorized_pr_actor_cannot_run_inference_or_publish(self):
         self.permission = "read"
@@ -101,12 +112,12 @@ class MergeGate(unittest.TestCase):
 
     def test_every_blocking_severity_threshold_and_verdict_is_independent(self):
         for field, value in [
-            ("critical", ["bug"]), ("high", ["bug"]), ("medium", ["bug"]),
+            ("critical_issues", 1), ("high_priority_issues", 1), ("medium_priority_issues", 1),
             ("overall_confidence_score", 79), ("recommendation", "MERGE WITH FIXES"),
             ("recommendation", "DO NOT MERGE"),
         ]:
             with self.subTest(field=field, value=value):
-                self.response.write_text(json.dumps({**self.decision, field: value}))
+                self.response.write_text(self.review(**{field: value}))
                 gate.publish(*self.target)
                 self.assertEqual(self.states[-1], ("ai-merge-gate", "failure"))
         self.assertEqual(len(self.comments), 1)
@@ -118,8 +129,11 @@ class MergeGate(unittest.TestCase):
         gate.publish(*self.target)
         self.assertEqual(self.states[-1], ("ai-merge-gate", "success"))
         self.assertEqual(len(self.comments), 2)
-        self.assertNotIn("<pre>@name", self.comments[-1]["body"])
-        self.response.write_text(json.dumps({**self.decision, "high": ["bug"]}))
+        body = self.comments[-1]["body"]
+        self.assertNotIn("<pre>@name", body)
+        self.assertIn("## 📋 Summary", body)
+        self.assertEqual(json.loads(body.split("```json\n")[1].split("\n```")[0]), self.decision)
+        self.response.write_text(self.review("**[HIGH]** `src/main.zig:9` - bug", high_priority_issues=1))
         gate.publish(*self.target)
         self.assertEqual(self.states[-1], ("ai-merge-gate", "failure"))
         self.assertEqual(len(self.comments), 2)
@@ -127,15 +141,16 @@ class MergeGate(unittest.TestCase):
         self.assertTrue(gate.pr.already_reviewed(*self.target))
 
     def test_invalid_stale_or_missing_artifacts_cannot_publish(self):
-        raws = ["not JSON", "{}", "x" * (gate.pr.OUTPUT_LIMIT + 1),
-                json.dumps(self.decision).replace('"critical":', '"critical":["bug"], "critical":')]
+        raws = ["not JSON", "{}", "x" * (gate.pr.OUTPUT_LIMIT + 1), self.review() + "extra",
+                self.review() + self.review(), self.review("\n"), self.review("hi\x00"),
+                self.review().replace('"critical_issues":', '"critical_issues":1, "critical_issues":')]
         for field, value in (
-            ("reviewed_sha", self.base), ("reviewed_base", self.head),
+            ("reviewed_sha", self.base),
             ("overall_confidence_score", True), ("overall_confidence_score", 101),
-            ("overall_confidence_score", 80.5), ("critical", False), ("high", [7]),
-            ("low", ["\n::error::"]), ("recommendation", "merge"), ("other", "MERGE"),
+            ("overall_confidence_score", 80.5), ("critical_issues", False), ("high_priority_issues", [7]),
+            ("medium_priority_issues", -1), ("recommendation", "merge"), ("other", "MERGE"),
         ):
-            raws.append(json.dumps({**self.decision, field: value}))
+            raws.append(self.review(**{field: value}))
         for raw in raws:
             with self.subTest(raw=raw[:20]), self.assertRaises(ValueError):
                 self.response.write_text(raw)

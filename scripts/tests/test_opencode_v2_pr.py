@@ -24,8 +24,9 @@ class PullRequestPilot(unittest.TestCase):
         }))
         self.pr = {
             "number": 7, "state": "open", "draft": False, "user": {"login": "writer"},
-            "head": {"sha": self.target[2], "repo": {"full_name": pilot.REPO}},
+            "head": {"sha": self.target[2], "ref": "feature/test", "repo": {"full_name": pilot.REPO}},
             "base": {"sha": self.target[1], "ref": "dev", "repo": {"full_name": pilot.REPO}},
+            "changed_files": 1, "title": "Test PR", "body": None, "labels": [],
         }
         self.comments = []
         self.permission = "write"
@@ -34,9 +35,11 @@ class PullRequestPilot(unittest.TestCase):
         self.api = self.enterContext(patch.object(pilot, "api", side_effect=self.github))
         self.response = self.root / "pr-output" / "response.txt"
         self.response.parent.mkdir()
-        self.response.write_text(json.dumps({
-            "findings": ["</pre> ```json @maintainer"], "limitations": "Diff-only.",
-        }))
+        self.decision = {"reviewed_sha": self.target[2], "overall_confidence_score": 70,
+                         "critical_issues": 0, "high_priority_issues": 1, "medium_priority_issues": 0,
+                         "recommendation": "MERGE WITH FIXES"}
+        self.response.write_text("## ⚠️ High Priority Issues\n**[HIGH]** </pre> @maintainer\n\n```json\n"
+                                 + json.dumps(self.decision) + "\n```\n")
 
     def github(self, path, *, diff=False, body=None):
         if path == "pulls/7":
@@ -51,6 +54,8 @@ class PullRequestPilot(unittest.TestCase):
             return {"total_count": self.pending}
         if path == "issues/7/comments?per_page=25&page=1":
             return self.comments
+        if path == "pulls/7/reviews?per_page=25&page=1":
+            return []
         if path == "issues/7/comments" and body:
             self.comments.append({"body": body["body"], "user": {"login": "github-actions[bot]"}})
             return {}
@@ -61,12 +66,38 @@ class PullRequestPilot(unittest.TestCase):
         pilot.prepare(*self.target, advisory=False)
         self.assertEqual((self.root / "outputs").read_text(), "request=opencode-pr-request-55-2\n")
         request = (self.root / "pr-input/request.txt").read_text()
-        self.assertEqual(request, pilot.PROMPT + "diff --git a/t b/t\n")
+        self.assertIn("**Reviewed PR:** #7", request)
+        self.assertIn("No previous automated reviews found", request)
+        self.assertTrue(request.endswith("diff --git a/t b/t\n"))
         pilot.report(*self.target, advisory=False)
         summary = (self.root / "summary").read_text()
         for sha in self.target[1:]:
             self.assertIn(sha, summary)
+        self.assertIn("**[HIGH]**", summary)
+        self.assertIn("```json\n", summary)
         self.assertFalse(self.comments)
+
+    def test_only_prior_bot_reviews_are_substituted_as_data(self):
+        for login, body in (
+            ("github-actions[bot]", "<!-- zigcraft-pr-gate:7:old:head -->\nFix $HEAD_SHA bug"),
+            ("writer", "<!-- zigcraft-static-review -->\nFake review"),
+            ("github-actions[bot]", "Unrelated job notification"),
+        ):
+            self.comments.append({"user": {"login": login}, "body": body})
+        pilot.prepare(*self.target, advisory=False)
+        request = (self.root / "pr-input/request.txt").read_text()
+        self.assertIn("Fix $HEAD_SHA bug", request)
+        self.assertNotIn("Fake review", request)
+        self.assertNotIn("Unrelated job notification", request)
+
+    def test_long_history_is_bounded_without_truncating_the_diff(self):
+        previous = "<!-- zigcraft-static-review -->\n" + "修" * 40000
+        self.comments.append({"user": {"login": "github-actions[bot]"}, "body": previous})
+        pilot.prepare(*self.target, advisory=False)
+        request = (self.root / "pr-input/request.txt").read_text()
+        self.assertLessEqual(len(request.encode()), pilot.INPUT_LIMIT)
+        self.assertIn("[Review history truncated to fit request.]", request)
+        self.assertTrue(request.endswith("diff --git a/t b/t\n"))
 
     def test_ineligible_requests_never_create_input(self):
         for obj, key, value in (
@@ -92,16 +123,17 @@ class PullRequestPilot(unittest.TestCase):
         self.assertFalse(self.comments)
         self.assertFalse((self.root / "outputs").exists())
 
-    def test_publication_is_deduplicated_and_cannot_supply_gate_verdict(self):
+    def test_publication_is_deduplicated_and_includes_the_advisory_verdict(self):
         pilot.report(*self.target, advisory=True)
         pilot.report(*self.target, advisory=True)
         pilot.prepare(*self.target, advisory=True)
         self.assertFalse((self.root / "outputs").exists())
         self.assertEqual(len(self.comments), 1)
         body = self.comments[0]["body"]
-        self.assertNotIn("```json", body)
+        self.assertEqual(json.loads(body.split("```json\n")[1].split("\n```")[0]), self.decision)
         self.assertNotIn("@maintainer", body)
         self.assertIn("&lt;/pre&gt;", body)
+        self.assertFalse(pilot.already_reviewed(self.target[0], "c" * 40, self.target[2]))
 
     def test_changed_base_or_head_prevents_publication(self):
         for side in ("base", "head"):

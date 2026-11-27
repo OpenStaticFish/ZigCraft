@@ -46,6 +46,7 @@ jobs:
     permissions:
       actions: read
       contents: read
+      issues: read
       pull-requests: read
     outputs:
       request: ${{ steps.prepare.outputs.request }}
@@ -54,9 +55,11 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-          sparse-checkout: scripts/opencode_v2_pr.py
+          sparse-checkout: |
+            scripts/opencode_v2_pr.py
+            .github/prompts/pr-review.md
           sparse-checkout-cone-mode: false
-      - name: Authorize actor and collect pinned diff
+      - name: Authorize actor and prepare PR review context
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}

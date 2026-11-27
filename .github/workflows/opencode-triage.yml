@@ -20,6 +20,7 @@ jobs:
     permissions:
       contents: read
       issues: read
+      pull-requests: read
     outputs:
       request: ${{ steps.prepare.outputs.request }}
       binding: ${{ steps.prepare.outputs.binding }}

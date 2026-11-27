@@ -2,7 +2,7 @@ name: visual-test
 
 on:
   schedule:
-    - cron: "43 4 * * 2"
+    - cron: "43 4 * * *"
   pull_request:
     branches: [dev]
     types: [labeled]
@@ -97,12 +97,13 @@ jobs:
         if: always()
         uses: ./.github/actions/stop-weston
 
-  # PRs and the existing weekly schedule remain deterministic-only during rollout.
+  # PR capture jobs never enter the private inference workflow.
   prepare:
     needs: visual-test
     if: >-
       !cancelled() && (needs.visual-test.result == 'success' || needs.visual-test.result == 'failure') &&
-      github.event_name == 'workflow_dispatch' && github.repository == 'OpenStaticFish/ZigCraft' &&
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') &&
+      github.repository == 'OpenStaticFish/ZigCraft' &&
       github.event.repository.default_branch == 'dev' && github.ref == 'refs/heads/dev' &&
       vars.OPENCODE_VISUAL_ENABLED == 'true'
     runs-on: ubuntu-latest
@@ -117,7 +118,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Verify current dev SHA and dispatcher permissions
+      - name: Authorize scheduled run or dispatch on current dev
         run: bash scripts/authorize_source_task.sh
         env:
           GH_TOKEN: ${{ github.token }}
