@@ -46,7 +46,7 @@ runs:
         tags: tag:zigcraft-opencode
         version: 1.104.4
         sha256sum: 624ea093d47d62cf56f17b8332d74b8decda4a1faa610ebc60a1de334b2b3dc9
-        args: --accept-routes=false --shields-up
+        args: --shields-up
         hostname: zigcraft-${{ github.run_id }}-${{ github.run_attempt }}
         retry: "1"
         timeout: 60s
@@ -57,7 +57,10 @@ runs:
       shell: bash
       env:
         BASE_URL: ${{ inputs.base-url }}
-      run: python3 "$GITHUB_ACTION_PATH/adapter.py" connect
+      run: |
+        # The join action passes --accept-routes itself; the CLI rejects duplicate flags.
+        sudo -n tailscale set --accept-routes=false
+        python3 "$GITHUB_ACTION_PATH/adapter.py" connect
     - name: Run standalone OpenCode
       id: model
       shell: bash
