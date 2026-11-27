@@ -4,9 +4,9 @@ Every OpenCode CI caller, including the required PR gate, requests `gpt-6.2-sol`
 
 The reviewer revisits earlier findings and explains fixes in the report. Each `ai-merge-gate` decision uses the current pinned review: matching head and base, zero unresolved critical, high or medium findings, confidence of at least 80, and a `MERGE` recommendation. Previous reviews provide context; their decisions do not carry forward to another commit.
 
-The 96 KiB request limit includes the review instructions, revision identifiers, and the **complete UTF-8 diff**. With the full report prompt, budget **89 KiB for the diff** (down from roughly 94 KiB with the verdict-only prompt). The exact ceiling is 98,304 bytes minus the mandatory prompt and framing for that PR. Larger diffs are accepted when they still fit; optional history and metadata use only the remaining space. A diff that cannot fit is rejected before inference rather than reviewed in part.
+The 96 KiB request limit includes the review instructions, revision identifiers, and the **complete UTF-8 diff**. If the full instructions no longer fit, the gate uses a compact prompt with the same response fields, report and merge criteria. This preserves the entire diff range supported by the former 1,088-byte verdict-only prompt. Optional history and metadata use only remaining space. A diff too large for either prompt is rejected before inference rather than reviewed in part.
 
-The required status is published from the validated response artifact. The former workflow that parsed bot comments for its verdict is retired; the fenced verdict in the GitHub comment is a report, not an input to the required status.
+The required status is published from the validated response artifact. [The gateway migration](https://github.com/OpenStaticFish/ZigCraft/commit/5f83ab70) removed `publish_ai_merge_gate.sh` and `evaluate_ai_merge_gate.sh` and replaced their workflow steps. The fenced verdict in the GitHub comment is a report, not an input to the required status.
 
 Only `opencode-v2-infer.yml` may join the tailnet. It runs on disposable GitHub-hosted Ubuntu. Preparation, comment/PR publication, Zig checks, visual capture, profiling and benchmarks run elsewhere. The proxy and tailnet need an operator; they do not need a self-hosted Actions runner.
 

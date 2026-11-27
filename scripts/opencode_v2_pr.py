@@ -38,7 +38,7 @@ class NoRedirect(HTTPRedirectHandler):
         raise PilotError("GitHub API redirect refused")
 
 
-def api(path, *, diff=False, body=None, method=None):
+def api(path, *, diff=False, body=None, method=None, pagination=None):
     request = Request(
         f"https://api.github.com/repos/{REPO}/{path}",
         data=json.dumps(body).encode() if body is not None else None,
@@ -52,6 +52,10 @@ def api(path, *, diff=False, body=None, method=None):
     limit = INPUT_LIMIT - len(PROMPT.encode()) if diff else 4 * 1024 * 1024
     with build_opener(NoRedirect()).open(request, timeout=30) as response:
         data = response.read(limit + 1)
+        if pagination is not None:
+            links = response.headers.get("Link", "")
+            last = re.search(r'<[^>]*[?&]page=(\d{1,9})(?:&[^>]*)?>;\s*rel="last"', links)
+            pagination["last"] = int(last[1]) if last else (None if links else 1)
     if len(data) > limit:
         raise PilotError("GitHub data exceeds size limit; human review required")
     return data.decode("utf-8") if diff else json.loads(data)

@@ -52,10 +52,11 @@ class MergeGate(unittest.TestCase):
         self.permission = "write"
         self.enterContext(patch.object(gate.pr, "api", side_effect=self.github))
 
-    def github(self, path, *, diff=False, body=None, method=None):
+    def github(self, path, *, diff=False, body=None, method=None, pagination=None):
         if path == "pulls/3":
             return self.pr
         if path == "pulls/3/reviews?per_page=100":
+            pagination["last"] = 1
             return [{"id": 9, "user": {"login": "opencode-agent[bot]"}, "body": "Previous formal review"}]
         if path == "issues/55":
             return {"title": "Linked issue", "body": "Requested behavior"}
@@ -150,9 +151,10 @@ class MergeGate(unittest.TestCase):
     def test_review_search_finds_later_pages_and_reports_caps(self):
         gate_entry = {"user": {"login": "github-actions[bot]"}, "body": gate.review_header(*self.target) + "Prior blocker"}
         formal_entry = {"user": {"login": "opencode-agent[bot]"}, "body": "Formal blocker"}
-        for comment_count, formal_count, complete in [(75, 101, True), (125, 200, False)]:
+        for comment_count, formal_count, complete in [(75, 201, True), (125, 301, False)]:
             self.pr["comments"] = comment_count
-            # The gate comment is on the third page back; the formal review is record 101.
+            # The gate comment is on the third page back. Page three holds
+            # the newest bot review even when later human reviews fill page four.
             gate_page = (comment_count + 24) // 25 - 2
 
             def pages(path, **kwargs):
@@ -163,14 +165,19 @@ class MergeGate(unittest.TestCase):
                     return batch
                 if path.startswith("pulls/3/reviews?"):
                     if path.endswith("&page=2"):
-                        return [formal_entry] + [{}] * (formal_count - 101)
+                        return [{**formal_entry, "body": "Older formal review"}] + [{}] * 99
+                    if path.endswith("&page=3"):
+                        return [formal_entry] + [{}] * (min(formal_count, 300) - 201)
+                    if path.endswith("&page=4"):
+                        return [{}]
+                    kwargs["pagination"]["last"] = (formal_count + 99) // 100
                     return [{}] * 100
                 return self.github(path, **kwargs)
 
             with self.subTest(complete=complete), patch.object(gate.pr, "api", side_effect=pages):
                 previous, context = gate.review_context(self.pr)
                 self.assertEqual(previous, [gate_entry["body"]])
-                self.assertEqual(context["formal_review_excerpts"][0]["excerpt"], formal_entry["body"])
+                self.assertEqual(context["formal_review_excerpts"][0]["body"], formal_entry["body"])
                 self.assertEqual(context["history_coverage"]["comment_search_complete"], complete)
                 self.assertEqual(context["history_coverage"]["formal_search_complete"], complete)
 
@@ -251,16 +258,18 @@ class MergeGate(unittest.TestCase):
 
     def test_documented_diff_budget_and_previous_verdict_only_boundary(self):
         header = "diff --git a/t b/t\n--- a/t\n+++ b/t\n@@ -0,0 +1 @@\n+"
-        for kib in (89, 94):
-            diff = header + "x" * (kib * 1024 - len(header) - 1) + "\n"
+        old_limit = gate.pr.INPUT_LIMIT - 1088 - len(f"\nBase SHA: {self.base}\nHead SHA: {self.head}\n\nUntrusted diff:\n")
+        for size in (89 * 1024, 94 * 1024, old_limit, gate.pr.INPUT_LIMIT):
+            diff = header + "x" * (size - len(header) - 1) + "\n"
             with tempfile.TemporaryDirectory() as runner, patch.dict(os.environ, RUNNER_TEMP=runner), \
                     patch.object(gate.pr, "api", side_effect=lambda path, **kw: diff if kw.get("diff") else self.github(path, **kw)):
                 request = Path(runner) / "pr-input/request.txt"
-                if kib == 89:
+                if size <= old_limit:
                     gate.prepare(*self.target)
                     self.assertTrue(request.read_text().endswith(diff))
+                    self.assertLessEqual(request.stat().st_size, gate.pr.INPUT_LIMIT)
+                    self.assertEqual(request.read_text().startswith(gate.COMPACT_PROMPT), size > 89 * 1024)
                 else:
-                    # 94 KiB left 2 KiB for the former 1,088-byte prompt and revision headers.
                     with self.assertRaisesRegex(gate.pr.PilotError, "complete diff exceed"):
                         gate.prepare(*self.target)
                     self.assertFalse(request.exists())
@@ -273,11 +282,56 @@ class MergeGate(unittest.TestCase):
         text = (self.root / "pr-input/request.txt").read_text()
         prefix = text[:text.index("Prior gate history:")]
         diff = text[text.index("\nUntrusted diff:"):]
-        expected = prefix + "Prior gate history: omitted\n" + diff
+        expected = prefix + "Prior gate history: omitted\nFormal review history: omitted\n" + diff
         with tempfile.TemporaryDirectory() as runner, patch.dict(os.environ, RUNNER_TEMP=runner), \
                 patch.object(gate.pr, "INPUT_LIMIT", len(expected.encode())):
             gate.prepare(*self.target)
             self.assertEqual((Path(runner) / "pr-input/request.txt").read_text(), expected)
+
+    def test_formal_excerpts_shrink_individually_and_report_omission(self):
+        entries = [{"head": self.head, "body": "Newest concern. " * 500},
+                   {"head": self.base, "body": "Older concern. " * 500}]
+        fields, remaining, status = gate.pack_history(entries, "previous_formal_review", 550, True)
+        self.assertEqual(len(fields), 1)
+        newest = json.loads(fields[0])["previous_formal_review"]
+        self.assertEqual(newest["head"], self.head)
+        self.assertIn("Newest concern", newest["excerpt"])
+        self.assertIn("truncated", newest["excerpt"])
+        self.assertEqual(remaining + len(fields[0].encode()), 550)
+        self.assertEqual(status, "partial")
+
+    def test_status_writers_and_legacy_comment_parser_cutover(self):
+        # Check actual context writers too, including workflows which inherit
+        # repository-default permissions instead of requesting statuses:write.
+        owners = subprocess.check_output(["git", "grep", "-lF", "ai-merge-gate", "--",
+                                          ".github/actions", ".github/workflows", "scripts", ":!scripts/tests"],
+                                         cwd=ROOT, text=True).splitlines()
+        self.assertEqual(owners, ["scripts/opencode_pr_gate.py"])
+        # Ruby/Psych is the workflow YAML parser used by workflow-validation.
+        listing = subprocess.check_output(["ruby", "-ryaml", "-rjson", "-e", """
+          jobs = {}
+          Dir['.github/workflows/*.{yml,yaml}'].each do |file|
+            workflow = YAML.load_file(file)
+            workflow.fetch('jobs').each do |name, job|
+              perms = job.fetch('permissions', workflow['permissions'])
+              if perms == 'write-all' || (perms.is_a?(Hash) && perms['statuses'] == 'write')
+                jobs[File.basename(file) + ':' + name] = job['steps']
+              end
+            end
+          end
+          puts JSON.generate(jobs)
+        """], cwd=ROOT, text=True)
+        jobs = json.loads(listing)
+        self.assertEqual(set(jobs), {"opencode-pr.yml:prepare", "opencode-pr.yml:publish", "benchmark.yml:benchmark"})
+        benchmark = json.dumps(jobs["benchmark.yml:benchmark"])
+        self.assertIn("context: 'performance/benchmark'", benchmark)
+        self.assertNotIn("ai-merge-gate", benchmark)
+        publish = jobs["opencode-pr.yml:publish"]
+        self.assertTrue(any(s.get("with", {}).get("name") == "${{ needs.infer.outputs.response-artifact }}" for s in publish))
+        self.assertIn("python3 -I scripts/opencode_pr_gate.py publish", [s.get("run") for s in publish])
+        for retired in ("evaluate_ai_merge_gate.sh", "publish_ai_merge_gate.sh"):
+            self.assertFalse((ROOT / "scripts" / retired).exists())
+            self.assertNotIn(retired, listing)
 
     def test_malformed_optional_records_keep_valid_evidence_and_diff(self):
         self.pr.update(body="Fixes #55", comments=1, labels=[None, {}, {"name": "automated-test"}])
