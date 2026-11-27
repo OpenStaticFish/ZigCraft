@@ -10,6 +10,7 @@ concurrency:
 
 jobs:
   triage:
+    cache-mode: none
     if: >-
       vars.OPENCODE_V2_TRIAGE_ENABLED == 'true' &&
       github.repository == 'OpenStaticFish/ZigCraft' &&

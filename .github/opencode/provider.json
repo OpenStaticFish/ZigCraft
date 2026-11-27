@@ -11,7 +11,9 @@
       "settings": { "baseURL": "{env:OPENCODE_PROXY_BASE_URL}", "transport": "http" },
       "body": { "store": false, "reasoning": { "effort": "medium" } },
       "models": {
-        "gpt-6.2-sol": { "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] } }
+        "gpt-6.2-sol": {
+          "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] }
+        }
       }
     }
   },
@@ -29,7 +31,10 @@
     { "action": "grep", "resource": "*", "effect": "allow" }
   ],
   "agents": {
-    "inspect": { "description": "Inspect the trusted repository and answer the supplied task.", "mode": "primary" },
+    "inspect": {
+      "description": "Inspect the trusted repository and answer the supplied task.",
+      "mode": "primary"
+    },
     "test-writer": {
       "description": "Write regression tests; CI runs them on a separate runner.",
       "mode": "primary",

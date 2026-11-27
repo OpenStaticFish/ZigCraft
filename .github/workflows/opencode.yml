@@ -10,6 +10,7 @@ concurrency:
 
 jobs:
   slash:
+    cache-mode: none
     if: >-
       vars.OPENCODE_V2_SLASH_ENABLED == 'true' &&
       github.repository == 'OpenStaticFish/ZigCraft' &&

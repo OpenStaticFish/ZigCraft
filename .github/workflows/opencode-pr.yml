@@ -43,6 +43,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 
   review:
+    cache-mode: none
     needs: bind
     permissions:
       contents: read
