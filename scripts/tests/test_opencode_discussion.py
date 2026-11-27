@@ -1,6 +1,7 @@
 """Offline event-to-publication fixtures; no token or private service required."""
 
 import base64
+from http.client import IncompleteRead
 import json
 import os
 from pathlib import Path
@@ -112,7 +113,7 @@ class DiscussionFixture(unittest.TestCase):
             {"event": "cross-referenced", "source": {"issue": {
                 "number": 22, "repository_url": discussion.API + discussion.ROOT, "title": "Migration",
                 "state": "closed", "pull_request": {"merged_at": "2026-11-01T00:00:00Z"},
-            }}}]
+            }}}, {"event": "cross-referenced", "source": {}}, None]
         self.reads[f"actions/runs?head_sha={sha}&per_page=30"]["workflow_runs"] = [
             {"id": 99, "workflow_id": 123, "path": workflow, "head_sha": sha, "name": "Smoke", "event": "workflow_dispatch",
              "status": "completed", "conclusion": "success"}]
@@ -126,6 +127,7 @@ class DiscussionFixture(unittest.TestCase):
         self.assertNotIn(".github/actions/test/.env", data["files"])
         self.assertEqual(data["github"]["revision_commit"]["changed_paths_first_30"], [workflow])
         self.assertEqual(data["github"]["cross_referenced_prs_sample"][0]["number"], 22)
+        self.assertTrue(data["github"]["cross_referenced_prs_partial"])
         self.assertEqual(data["github"]["workflow_runs_at_revision_sample"][0]["conclusion"], "success")
         self.assertEqual(data["github"]["recent_completed_dev_runs_at_other_revisions"][0]["revision"], "c"*40)
         self.assertEqual(data["github"]["workflow_runs_at_revision_sample"][0]["workflow_id"], 123)
@@ -158,7 +160,7 @@ class DiscussionFixture(unittest.TestCase):
 
         def unavailable(path, *args, **kwargs):
             if path.startswith("actions/runs?"):
-                raise OSError("temporary outage")
+                raise IncompleteRead(b"partial response")
             return self.repo(path, *args, **kwargs)
 
         discussion.repo.side_effect = unavailable

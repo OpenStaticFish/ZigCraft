@@ -64,9 +64,13 @@ Use the exact keys below:
 - `critical`, `high`, `medium`, `low`: arrays of unresolved findings, each with
   `location` (file:line), `title`, `confidence` (High, Medium or Low),
   `description`, `impact`, `suggested_fix`. Use at most 12 per array; use empty arrays for no findings.
-- `fixed`: object with the same four severity keys, each an array of brief
-  descriptions of previously reported issues verified fixed. Do not count
-  these as unresolved. At most 12 entries per array.
+- `fixed`: object with the same four severity keys, each an array of at most 12
+  resolved findings. Identify each by `source` (`comment-<id>` for a gate comment
+  or `review-<id>` for a formal review) and `quote` (the exact prior finding title
+  or a distinctive verbatim excerpt). Supply `location` (`path:line` on the new
+  side of a hunk in the supplied diff) and `explanation` (how that line resolves
+  that finding). If a prior blocker cannot be verified, report it as unresolved
+  at its severity, explaining the missing evidence. Do not silently omit it.
 - `solid`: object keyed by `S`, `O`, `L`, `I`, `D`. Each value has integer
   `score` (0–10) and `notes` justifying it for Single Responsibility, Open/Closed,
   Liskov Substitution, Interface Segregation and Dependency Inversion respectively.

@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import sys
 from datetime import datetime, timedelta, timezone
+from http.client import HTTPException
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -209,17 +210,24 @@ def run_summaries(payload):
 
 
 def linked_prs(timeline):
+    if not isinstance(timeline, list):
+        raise TypeError("invalid timeline")
     linked = {}
-    for event in records(timeline):
-        if event["event"] != "cross-referenced":
-            continue
-        issue = event["source"]["issue"]
-        if issue["repository_url"] == API + ROOT and issue.get("pull_request"):
-            linked[issue["number"]] = {
-                "number": issue["number"], "title": excerpt(issue["title"], 256),
-                "state": issue["state"], "merged_at": issue["pull_request"].get("merged_at"),
-            }
-    return list(linked.values())[-8:]
+    partial = False
+    for event in timeline:
+        try:
+            if event["event"] != "cross-referenced":
+                continue
+            issue = event["source"]["issue"]
+            if issue["repository_url"] != API + ROOT or "pull_request" not in issue:
+                continue
+            if type(issue["number"]) is not int or issue["state"] not in ("open", "closed"):
+                raise TypeError("invalid linked PR")
+            linked[issue["number"]] = {"number": issue["number"], "title": excerpt(issue["title"], 256),
+                                       "state": issue["state"], "merged_at": issue["pull_request"].get("merged_at")}
+        except (KeyError, TypeError, AttributeError):
+            partial = True
+    return list(linked.values())[-8:], partial
 
 
 def github_evidence(target, workflows):
@@ -229,7 +237,7 @@ def github_evidence(target, workflows):
     def lookup(field, path, parse):
         try:
             payload = repo(path, optional=True)
-        except (ValueError, OSError):
+        except (ValueError, OSError, HTTPException):
             payload = None
         if payload is not None:
             try:
@@ -258,7 +266,8 @@ def github_evidence(target, workflows):
     return {
         "unavailable": unavailable,
         "revision_commit": revision,
-        "cross_referenced_prs_sample": linked or [],
+        "cross_referenced_prs_sample": linked[0] if linked else [],
+        "cross_referenced_prs_partial": linked[1] if linked else True,
         "workflow_runs_at_revision_sample": [r for r in runs or [] if r["revision"] == sha],
         "recent_completed_dev_runs_at_other_revisions": previous_runs,
     }

@@ -44,6 +44,9 @@ class MergeGate(unittest.TestCase):
         }
         self.response = self.root / "pr-output/response.txt"
         self.response.parent.mkdir()
+        evidence = self.root / "review-input/request.txt"
+        evidence.parent.mkdir()
+        evidence.write_text(f"\nBase SHA: {self.base}\nHead SHA: {self.head}\n{gate.CONTEXT_HEADER}{gate.DIFF_HEADER}")
         self.response.write_text(json.dumps(self.decision))
         self.comments = []
         self.states = []
@@ -54,7 +57,7 @@ class MergeGate(unittest.TestCase):
         if path == "pulls/3":
             return self.pr
         if path == "pulls/3/reviews?per_page=100":
-            return [{"user": {"login": "opencode-agent[bot]"}, "body": "Previous formal review"}]
+            return [{"id": 9, "user": {"login": "opencode-agent[bot]"}, "body": "Previous formal review"}]
         if path == "issues/55":
             return {"title": "Linked issue", "body": "Requested behavior"}
         if path == "collaborators/dev/permission":
@@ -101,18 +104,28 @@ class MergeGate(unittest.TestCase):
         self.assertFalse(self.comments)
 
     def test_review_prompt_receives_previous_findings_and_linked_issue(self):
-        self.pr.update(body="Fixes #55", comments=1, labels=[{"name": "automated-test"}])
-        self.comments.append({"user": {"login": "github-actions[bot]"},
+        self.pr.update(body="<!-- Fixes #1 -->\n```md\nCloses #2\nResolves #3\n```\n`Fixes #4`\nFixes #55",
+                       comments=1, labels=[{"name": "automated-test"}])
+        self.comments.append({"id": 17, "user": {"login": "github-actions[bot]"},
                               "body": f"<!-- zigcraft-pr-gate:3:{self.base}:{self.head} -->\nPrevious finding"})
         gate.prepare(*self.target)
         prompt = (self.root / "pr-input/request.txt").read_text()
         for text in ("Previous finding", "Previous formal review", "Requested behavior", "automated-test",
                      "**PR to review:** #3", "Single Responsibility", "Return one JSON object"):
             self.assertIn(text, prompt)
-        self.decision["fixed"]["high"] = ["Released the previous allocation"]
-        passed, report = gate.verdict(json.dumps(self.decision), self.base, self.head, self.number)
+        prompt += "--- a/source.zig\n+++ b/source.zig\n@@ -1 +1,2 @@\n existing\n+defer allocator.free(buf);\n"
+        fix = dict(source="comment-17", quote="Previous finding", location="source.zig:2",
+                   explanation="Released the previous allocation")
+        self.decision["fixed"]["high"] = [fix]
+        passed, report = gate.verdict(json.dumps(self.decision), self.base, self.head, self.number, prompt)
         self.assertTrue(passed)
         self.assertIn("[FIXED]", report)
+        for change in ({"source": "comment-19"}, {"quote": "Unrelated issue"}, {"location": "source.zig:3"}):
+            self.decision["fixed"]["high"] = [{**fix, **change}]
+            passed, report = gate.verdict(json.dumps(self.decision), self.base, self.head, self.number, prompt)
+            self.assertFalse(passed)
+            self.assertNotIn("[FIXED]", report)
+            self.assertIn("[UNVERIFIED]", report)
 
     def test_stale_base_and_incomplete_diff_cannot_prepare_a_request(self):
         with patch.dict(self.pr["base"], sha="c" * 40):
@@ -154,7 +167,7 @@ class MergeGate(unittest.TestCase):
         self.pr.update(body="Fixes #55", comments=1, labels=[None, {}, {"name": "automated-test"}])
         malformed = [None, {}, {"user": []}, {"body": 5, "user": {"login": "github-actions[bot]"}}]
         marker = "<!-- zigcraft-pr-gate:3:previous -->"
-        self.comments.extend([{"body": marker, "user": {"login": "github-actions[bot]"}}, *malformed])
+        self.comments.extend([{"id": 17, "body": marker, "user": {"login": "github-actions[bot]"}}, *malformed])
 
         def mixed_records(path, **kwargs):
             result = self.github(path, **kwargs)
@@ -173,7 +186,8 @@ class MergeGate(unittest.TestCase):
 
     def test_large_report_preserves_all_findings_and_verdict(self):
         item = {**self.finding, "impact": "`" * 1000, "description": "&" * 1000}
-        self.decision.update(low=[item] * 12, test_status="failed")
+        locations = ["modules/" + "nested/" * 36 + f"source.zig:{line}" for line in range(1, 13)]
+        self.decision.update(low=[{**item, "location": location} for location in locations], test_status="failed")
         raw = json.dumps(self.decision)
         self.assertLess(len(raw.encode()), gate.pr.OUTPUT_LIMIT)
         passed, report = gate.verdict(raw, self.base, self.head, self.number)
@@ -181,6 +195,8 @@ class MergeGate(unittest.TestCase):
         self.assertIn("abbreviated", report)
         self.assertLess(len(report.encode()), 65000)
         self.assertEqual(report.count("<strong>[LOW]</strong>"), 12)
+        for location in locations:
+            self.assertIn(f"<code>{location}</code>", report)
         self.assertIn("evidence: failed", report)
         machine = json.loads(report.split("```json\n")[1].split("\n```")[0])
         self.assertEqual(machine["recommendation"], "MERGE")
