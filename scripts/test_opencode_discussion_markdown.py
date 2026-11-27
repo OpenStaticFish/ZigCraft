@@ -17,7 +17,7 @@ class ReplyBodyTests(unittest.TestCase):
         preview = (
             '<p><a class="user-mention notranslate" href="https://github.com/octocat">'
             '@octocat</a> &#64;octocat @org/team and <code>@as</code>. '
-            '<a href="https://example.com/@project">project</a></p>\n'
+            '<a href="https://example.com/@project">https://example.com/@project</a></p>\n'
             '<div><pre><span>@import</span>("std");\n\n'
             'const n = <span>@as</span>(u8, 1);</pre></div>\n'
         )
@@ -26,12 +26,18 @@ class ReplyBodyTests(unittest.TestCase):
         self.assertNotIn("user-mention", body)
         self.assertIn("<code>@as</code>", body)
         self.assertIn('<span>@import</span>("std");&#10;&#10;const n = <span>@as</span>(u8, 1);', body)
-        self.assertIn('href="https://example.com/@project"', body)
+        self.assertIn('<a href="https://example.com/@project">https://example.com/@project</a>', body)
         self.assertEqual(len(body.splitlines()), 1)
 
     def test_reply_without_prose_mentions_preserves_source(self):
         source = '**Bold.** `@import("std")` and `actions/checkout@v6`.\n'
         preview = '<p><strong>Bold.</strong> <code>@import("std")</code> and <code>actions/checkout@v6</code>.</p>'
+        self.assertEqual(reply_body(source, preview), source)
+
+    def test_autolink_without_mentions_preserves_source(self):
+        url = "https://example.com/@project"
+        source = f"<{url}>\n"
+        preview = f'<p><a href="{url}">{url}</a></p>'
         self.assertEqual(reply_body(source, preview), source)
 
 

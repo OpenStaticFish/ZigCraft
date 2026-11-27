@@ -7,6 +7,9 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 
+LITERAL_TAGS = {"a", "code", "pre"}
+
+
 class ReplyHTML(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -16,22 +19,22 @@ class ReplyHTML(HTMLParser):
         self.changed = False
 
     def handle_starttag(self, tag, attrs):
-        if tag in {"code", "pre"}:
-            self.literal_depth += 1
         if tag == "a":
             classes = (dict(attrs).get("class") or "").split()
             self.mention_link = bool({"user-mention", "team-mention"}.intersection(classes))
             self.changed |= self.mention_link
             if self.mention_link:
                 return
+        if tag in LITERAL_TAGS:
+            self.literal_depth += 1
         self.parts.append(self.get_starttag_text())
 
     def handle_endtag(self, tag):
-        if tag in {"code", "pre"}:
-            self.literal_depth -= 1
         if tag == "a" and self.mention_link:
             self.mention_link = False
             return
+        if tag in LITERAL_TAGS:
+            self.literal_depth -= 1
         self.parts.append(f"</{tag}>")
 
     def handle_startendtag(self, tag, attrs):
