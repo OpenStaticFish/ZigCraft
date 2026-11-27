@@ -43,7 +43,7 @@ runs:
       with:
         oauth-client-id: ${{ inputs.oidc-client-id }}
         audience: ${{ inputs.oidc-audience }}
-        tags: tag:zigcraft-opencode
+        tags: tag:ci
         version: 1.104.4
         sha256sum: 624ea093d47d62cf56f17b8332d74b8decda4a1faa610ebc60a1de334b2b3dc9
         args: --shields-up
