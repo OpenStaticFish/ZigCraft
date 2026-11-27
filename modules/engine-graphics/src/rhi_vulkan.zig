@@ -83,11 +83,14 @@ fn beginFrame(ctx_ptr: *anyopaque) anyerror!bool {
         try frame_orchestration.recreateSwapchainInternal(ctx);
     }
 
-    var flushed_inter_frame_transfer = false;
-    if (ctx.resources.transfer.transfer_ready[ctx.resources.transfer.current_frame]) {
-        try ctx.resources.flushTransfer();
-        flushed_inter_frame_transfer = true;
+    const inter_frame_transfer = ctx.resources.transfer.transfer_ready[ctx.resources.transfer.current_frame];
+    if (inter_frame_transfer or ctx.runtime.previous_frame_skipped) {
+        // Updates outside a recording frame can touch resources referenced by
+        // either graphics slot. Wait before copying into them or draining a
+        // deletion queue on a retry; the current slot's fence alone is insufficient.
+        try Utils.checkVk(c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device));
     }
+    if (inter_frame_transfer) try ctx.resources.flushTransfer();
 
     // A failed rebuild may already have destroyed resources needed to draw.
     // A fresh resize or quality request can retry, but only success resumes rendering.
@@ -120,12 +123,13 @@ fn beginFrame(ctx_ptr: *anyopaque) anyerror!bool {
     }
 
     ctx.resources.setCurrentFrame(ctx.frames.current_frame);
+    ctx.runtime.previous_frame_skipped = !frame_started;
 
     if (!frame_started) {
         return false;
     }
 
-    ctx.runtime.transfer_barrier_needed = flushed_inter_frame_transfer;
+    ctx.runtime.transfer_barrier_needed = inter_frame_transfer;
     render_state.applyPendingDescriptorUpdates(ctx, ctx.frames.current_frame);
     frame_orchestration.prepareFrameState(ctx);
     return true;

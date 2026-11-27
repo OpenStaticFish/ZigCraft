@@ -187,6 +187,7 @@ const RuntimeState = struct {
     direct_ui_composed_this_frame: bool = false,
     transfer_barrier_needed: bool = false,
     pipeline_rebuild_needed: bool = false,
+    previous_frame_skipped: bool = false,
     swapchain_recreate_failed: bool = false,
     frame_index: usize,
     image_index: u32,
