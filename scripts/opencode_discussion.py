@@ -201,21 +201,38 @@ def records(value):
 
 
 def run_summaries(payload):
+    rows = payload["workflow_runs"]
+    if not isinstance(rows, list):
+        raise TypeError("invalid workflow runs page")
     summaries = []
-    for run in records(payload["workflow_runs"]):
-        repository = (run.get("head_repository") or {}).get("full_name")
+    partial = False
+    for run in rows:
+        if (not isinstance(run, dict) or type(run.get("id")) is not int or type(run.get("workflow_id")) is not int
+                or not all(isinstance(run.get(k), str) and run[k] for k in ("head_sha", "event", "path", "status"))):
+            partial = True
+            continue
+        head_repo = run.get("head_repository")
+        repository = head_repo.get("full_name") if isinstance(head_repo, dict) else None
         branch = run.get("head_branch")
-        if (type(run["id"]) is not int or type(run["workflow_id"]) is not int
-                or not all(isinstance(run[k], str) for k in ("head_sha", "event", "path", "status"))
-                or not all(value is None or isinstance(value, str) for value in (branch, repository))
-                or not isinstance(run["name"], (str, type(None)))
-                or not isinstance(run["conclusion"], (str, type(None)))):
-            raise TypeError("invalid workflow run metadata")
+        name = run.get("name")
+        conclusion = run.get("conclusion")
+        if head_repo is not None and not isinstance(repository, str):
+            repository = None
+            partial = True
+        if branch is not None and not isinstance(branch, str):
+            branch = None
+            partial = True
+        if not isinstance(name, str) or not name:
+            name = run["path"]
+            partial = True
+        if conclusion is not None and not isinstance(conclusion, str):
+            conclusion = None
+            partial = True
         summaries.append({"id": run["id"], "workflow_id": run["workflow_id"], "path": run["path"],
                           "head_repository": repository, "head_branch": branch,
-                          "workflow": excerpt(run["name"] or run["path"], 128), "event": run["event"],
-                          "revision": run["head_sha"], "status": run["status"], "conclusion": run["conclusion"]})
-    return summaries
+                          "workflow": excerpt(name, 128), "event": run["event"],
+                          "revision": run["head_sha"], "status": run["status"], "conclusion": conclusion})
+    return summaries, partial, len(rows)
 
 
 def linked_prs(timeline):
@@ -244,6 +261,34 @@ def optional_lookup(path, parse, within_budget):
         return within_budget(lambda: parse(repo(path, optional=True)))
     except (ValueError, OSError, HTTPException, KeyError, TypeError, AttributeError):
         return None
+
+
+def pinned_run_sample(sha, workflows, within_budget):
+    by_origin = {"upstream": [], "fork": [], "unknown": []}
+    seen = set()
+    available = False
+    partial = len(workflows) > 4
+    endpoints = [f"actions/workflows/{quote(Path(path).name, safe='')}/runs" for path in workflows[:4]]
+    for endpoint in [*endpoints, "actions/runs"]:
+        page = optional_lookup(f"{endpoint}?head_sha={sha}&per_page=30", run_summaries, within_budget)
+        if page is None:
+            partial = True
+            continue
+        available = True
+        runs, incomplete, count = page
+        partial |= incomplete or count >= 30
+        for run in runs:
+            if run["revision"] != sha or run["id"] in seen:
+                continue
+            seen.add(run["id"])
+            origin = run["head_repository"]
+            group = "unknown"
+            if origin:
+                group = "upstream" if origin.casefold() == REPO.casefold() else "fork"
+            by_origin[group].append(run)
+    if not available:
+        return {"status": "unavailable"}
+    return {"status": "partial" if partial else "sampled", "data": by_origin}
 
 
 def github_evidence(target, workflows):
@@ -277,15 +322,7 @@ def github_evidence(target, workflows):
             break
     else:
         partial = True  # The two-page budget may exclude later cross-references.
-    runs = optional_lookup(f"actions/runs?head_sha={sha}&per_page=30", run_summaries, within_budget)
-    by_origin = {"upstream": [], "fork": [], "unknown": []}
-    for run in runs or []:
-        if run["revision"] == sha:
-            origin = run["head_repository"]
-            group = "unknown"
-            if origin:
-                group = "upstream" if origin.casefold() == REPO.casefold() else "fork"
-            by_origin[group].append(run)
+    pinned = pinned_run_sample(sha, workflows, within_budget)
     previous_runs = []
     unavailable_paths = []
     partial_paths = []
@@ -294,19 +331,27 @@ def github_evidence(target, workflows):
         name = quote(Path(path).name, safe="")
         url = f"actions/workflows/{name}/runs?branch=dev&status=completed&per_page=3"
         eligible = {}
+        incomplete = False
         for page in (url, url + "&page=2", url + "&page=3"):
             history = optional_lookup(page, run_summaries, within_budget)
             if history is None:
-                (unavailable_paths if page == url else partial_paths).append(path)
+                if page == url:
+                    unavailable_paths.append(path)
+                else:
+                    incomplete = True
                 break
-            for run in history:
+            rows, malformed, count = history
+            incomplete |= malformed
+            for run in rows:
                 if ((run["head_repository"] or "").casefold() == REPO.casefold() and run["head_branch"] == "dev"
                         and run["event"] in {"push", "workflow_dispatch", "repository_dispatch", "schedule"}
                         and run["status"] == "completed" and run["revision"] != sha):
                     eligible.setdefault(run["id"], {**run, "queried_path": path})
-            if len(eligible) >= 3 or len(history) < 3:
+            if len(eligible) >= 3 or count < 3:
                 break
         else:
+            incomplete = True
+        if incomplete:
             partial_paths.append(path)
         previous_runs.extend(list(eligible.values())[:3])
     history_status = "partial" if partial_paths or unavailable_paths or len(workflows) > len(queried_paths) else "sampled"
@@ -318,7 +363,7 @@ def github_evidence(target, workflows):
         "revision_commit": sample(revision),
         "cross_referenced_prs_sample": sample(list(linked.values())[-8:] if timeline_available else None,
                                               "partial" if partial or len(linked) > 8 else "sampled"),
-        "workflow_runs_at_revision_sample": sample(by_origin if runs is not None else None),
+        "workflow_runs_at_revision_sample": pinned,
         "recent_completed_dev_runs_at_other_revisions": {
             **sample(None if history_status == "unavailable" else previous_runs, history_status),
             "unavailable_paths": unavailable_paths, "partial_paths": partial_paths},

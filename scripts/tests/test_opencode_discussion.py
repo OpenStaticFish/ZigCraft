@@ -125,6 +125,8 @@ class DiscussionFixture(unittest.TestCase):
             run, dict(run, id=100, head_repository={"full_name": "fork/ZigCraft"}),
             dict(run, id=101, head_repository=None), dict(run, id=102, head_sha="d"*40)]}
         for path, wid, outcome in [(workflow, 123, "failure"), (other, 124, "success")]:
+            pinned_url = f"actions/workflows/{Path(path).name}/runs?head_sha={sha}&per_page=30"
+            self.reads[pinned_url] = {"workflow_runs": [run] if path == workflow else []}
             url = f"actions/workflows/{Path(path).name}/runs?branch=dev&status=completed&per_page=3"
             upstream = dict(run, id=wid, workflow_id=wid, path=path, head_sha="c"*40, conclusion=outcome)
             self.reads[url] = {"workflow_runs": [dict(run, id=i, path=path) for i in (97, 98, 99)]}
@@ -138,7 +140,7 @@ class DiscussionFixture(unittest.TestCase):
         evidence = data["github"]
         self.assertCountEqual(list(data["files"])[:2], [workflow, other])
         queried = [c.args[0].split("/")[2] for c in discussion.repo.call_args_list if c.args[0].startswith("actions/workflows/")]
-        self.assertCountEqual(queried, [Path(workflow).name, Path(other).name] * 3)
+        self.assertCountEqual(queried, [Path(workflow).name, Path(other).name] * 4)
         self.assertNotIn(".github/actions/test/.env", data["files"])
         self.assertEqual(evidence["revision_commit"]["data"]["changed_paths_first_30"], [workflow])
         linked = evidence["cross_referenced_prs_sample"]
@@ -157,6 +159,31 @@ class DiscussionFixture(unittest.TestCase):
                          [(123, workflow, workflow, "failure"), (124, other, other, "success")])
         with self.assertRaises(discussion.Skip):
             discussion.command(f"/oc edit {workflow} update this")
+
+    def test_named_run_survives_malformed_siblings_and_full_repository_page(self):
+        sha = "a" * 40
+        path = ".github/workflows/smoke.yml"
+        self.comment["body"] = "/oc what happened in smoke.yml?"
+        tree = self.reads[f"git/trees/{sha}?recursive=1"]["tree"]
+        tree.append(dict(tree[0], path=path))
+        run = dict(id=77, workflow_id=1, path=path, head_sha=sha, status="completed", event="push",
+                   conclusion="success", head_branch="dev", head_repository={"full_name": discussion.REPO})
+        other = dict(run, workflow_id=2, path=".github/workflows/other.yml", name="Other")
+        self.reads[f"actions/runs?head_sha={sha}&per_page=30"] = {
+            "workflow_runs": [dict(other, id=i) for i in range(30)]}
+        endpoint = "actions/workflows/smoke.yml/runs?"
+        self.reads[endpoint + f"head_sha={sha}&per_page=30"] = {"workflow_runs": [None, {}, run]}
+        history_url = endpoint + "branch=dev&status=completed&per_page=3"
+        self.reads[history_url] = {"workflow_runs": [None, {}, dict(run, head_sha="b"*40)]}
+        self.reads[history_url + "&page=2"] = {"workflow_runs": [dict(run, id=78, head_sha="c"*40)]}
+        evidence = self.prepare()["github"]
+        pinned = evidence["workflow_runs_at_revision_sample"]
+        named = [r for r in pinned["data"]["upstream"] if r["path"] == path]
+        self.assertEqual([(r["id"], r["workflow"]) for r in named], [(77, path)])
+        self.assertEqual(pinned["status"], "partial")
+        history = evidence["recent_completed_dev_runs_at_other_revisions"]
+        self.assertEqual([r["id"] for r in history["data"]], [77, 78])
+        self.assertEqual((history["status"], history["partial_paths"]), ("partial", [path]))
 
     def test_old_account_triage(self):
         os.environ["GITHUB_EVENT_NAME"] = "issues"
