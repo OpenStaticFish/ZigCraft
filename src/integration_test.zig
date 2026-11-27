@@ -393,6 +393,7 @@ test "smoke test: launch, generate, render, exit" {
 
     if (!build_options.skip_present) {
         const aborted_slot = vulkan.frames.current_frame;
+        const suspended_tick = active_upload_screen.tick;
         app.input.interface().setShouldQuit(false);
         active_upload_screen.quit_on_draw = false;
 
@@ -414,6 +415,11 @@ test "smoke test: launch, generate, render, exit" {
         app.render_system.rhi.context().requestSwapchainRecreate();
         try app.runSingleFrame();
         try testing.expect(aborted_slot != vulkan.frames.current_frame);
+        try testing.expectEqual(suspended_tick +% 1, try readUploadedByte(vulkan, active_upload_screen.buffer, suspended_tick % active_upload_screen.payload.len));
+
+        vulkan.frames.retirement_error = error.GpuLost;
+        defer vulkan.frames.retirement_error = null;
+        try testing.expectError(error.GpuLost, app.runSingleFrame());
     }
 
     const val_count = app.render_system.getRHI().query().getValidationErrorCount();

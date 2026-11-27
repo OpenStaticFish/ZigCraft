@@ -214,6 +214,7 @@ pub const ResourceManager = struct {
     }
 
     pub fn prepareTransfer(self: *ResourceManager) !c.VkCommandBuffer {
+        self.transfer.pending_staging_buffer[self.transfer.current_frame] = self.staging_ring.buffer;
         return self.transfer.prepareTransfer();
     }
 

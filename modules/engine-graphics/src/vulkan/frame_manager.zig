@@ -20,6 +20,7 @@ pub const FrameManager = struct {
     current_frame: usize = 0,
     current_image_index: u32 = 0,
     frame_in_progress: bool = false,
+    retirement_error: ?anyerror = null,
 
     pub fn init(vulkan_device: *VulkanDevice) !FrameManager {
         var self = FrameManager{
@@ -248,6 +249,7 @@ pub const FrameManager = struct {
         }
         self.vulkan_device.submitGuarded(submit_info, self.in_flight_fences[frame]) catch |err| {
             log.log.errWithTrace("Failed to retire aborted frame slot: {}", .{err});
+            self.retirement_error = err;
         };
         self.frame_in_progress = false;
     }

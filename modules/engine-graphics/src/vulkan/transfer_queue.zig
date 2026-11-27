@@ -234,7 +234,8 @@ pub const TransferQueue = struct {
     pub fn recordPendingCopies(self: *TransferQueue, cmd: c.VkCommandBuffer) void {
         const idx = self.current_frame;
         const staging = self.pending_staging_buffer[idx];
-        if (staging == null or self.pending_copy_count[idx] == 0) return;
+        if (self.pending_copy_count[idx] == 0) return;
+        std.debug.assert(staging != null);
 
         const copies = self.pending_copies[idx][0..self.pending_copy_count[idx]];
         if (!self.is_dedicated) orderTransferWrites(cmd);
