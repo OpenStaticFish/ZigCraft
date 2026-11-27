@@ -102,6 +102,9 @@ class PullRequestPilot(unittest.TestCase):
         self.assertNotIn("```json", body)
         self.assertNotIn("@maintainer", body)
         self.assertIn("&lt;/pre&gt;", body)
+        self.assertIn("<ul><li>", body)
+        self.assertIn("<p>Diff-only.</p>", body)
+        self.assertNotIn("<pre>", body)
 
     def test_changed_base_or_head_prevents_publication(self):
         for side in ("base", "head"):

@@ -57,6 +57,7 @@ class SourceTaskTest(unittest.TestCase):
         issue = json.loads(Path("audit-issue.json").read_text())
         self.assertIn("opencode-audit-run:7", issue["body"])
         self.assertIn("src/module.zig#L1", issue["body"])
+        self.assertIn("<p>Evidence</p>", issue["body"])
         marker = Path("outputs").read_text().splitlines()[0]
         finding["title"] = "Reworded"
         self.result.write_text(json.dumps({"finding": finding}))

@@ -93,7 +93,7 @@ class DiscussionFixture(unittest.TestCase):
         self.assertEqual([w[0] for w in self.writes], ["issues/1/comments"])
         body = self.writes[0][1]["body"]
         self.assertIn("<p>Look at the source.</p><p>", body)
-        self.assertIn("&#64;&#8203;someone", body)
+        self.assertIn("@\u200bsomeone", body)
         for forbidden in ["```", "@someone", "<pre>", "<img"]:
             self.assertNotIn(forbidden, body)
 
@@ -141,6 +141,31 @@ class DiscussionFixture(unittest.TestCase):
         with self.assertRaises(discussion.Skip):
             discussion.run("respond")
         self.assertEqual([w[0] for w in self.writes], ["issues/1/comments"])
+
+    def test_unavailable_actions_metadata_does_not_block_source_answer(self):
+        sha = "a" * 40
+        self.reads[f"commits/{sha}?per_page=30"]["commit"]["message"] = ""
+        self.reads[f"git/trees/{sha}?recursive=1"]["tree"][0]["mode"] = "100755"
+
+        def unavailable(path, *args, **kwargs):
+            if path.startswith("actions/runs?"):
+                raise OSError("temporary outage")
+            return self.repo(path, *args, **kwargs)
+
+        discussion.repo.side_effect = unavailable
+        self.prepare()
+        request = (self.temp / "discussion-request/request.txt").read_text()
+        evidence = json.loads(request.split("not policy:\n")[1])["github"]
+        self.assertEqual(evidence["unavailable"], ["workflow_runs_at_revision_sample"])
+        self.assertEqual(evidence["revision_commit"]["subject"], "")
+
+    def test_markup_expansion_stays_within_comment_limit(self):
+        self.prepare()
+        self.response({"comment": "&" * 16000})
+        discussion.run("respond")
+        body = self.writes[-1][1]["body"]
+        self.assertLessEqual(len(body.encode()), 64000)
+        self.assertTrue(body.endswith("[truncated]</p>"))
 
     def test_young_account_skips_before_preparation(self):
         os.environ["GITHUB_EVENT_NAME"] = "issues"

@@ -3,7 +3,6 @@
 import base64
 import difflib
 import hashlib
-import html
 import json
 import os
 from pathlib import Path
@@ -15,6 +14,7 @@ from urllib.parse import quote, urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from opencode_slash_patch import allowed_path, apply_patch, publish_pr
+from opencode_prose import paragraphs
 
 
 REPO = "OpenStaticFish/ZigCraft"
@@ -162,7 +162,8 @@ def files_at(sha, *, for_discussion=False):
     if tree["truncated"]:
         raise ValueError("source tree is incomplete")
     return {e["path"]: e for e in tree["tree"]
-            if e["type"] == "blob" and e["mode"] == "100644" and 0 < e["size"] <= FILE_LIMIT
+            if e["type"] == "blob" and (e["mode"] == "100644" or (for_discussion and e["mode"] == "100755"))
+            and 0 < e["size"] <= FILE_LIMIT
             and (discussion_path(e["path"]) if for_discussion else allowed_path(e["path"]))}
 
 
@@ -194,31 +195,46 @@ def run_summary(run):
 
 def github_evidence(target, workflows):
     sha = target["head"]
-    commit = repo(f"commits/{sha}?per_page=30")
-    if commit["sha"] != sha:
-        raise ValueError("unexpected commit revision")
-    changed = [excerpt(f["filename"], 256) for f in commit["files"][:30]]
-    timeline = repo(f"issues/{target['number']}/timeline?per_page=100")
+    unavailable = []
+
+    def lookup(field, path):
+        try:
+            result = repo(path, optional=True)
+        except (ValueError, OSError):
+            result = None
+        if result is None:
+            unavailable.append(field)
+        return result
+
+    commit = lookup("revision_commit", f"commits/{sha}?per_page=30")
+    revision = None
+    if commit is not None:
+        if commit["sha"] != sha:
+            raise ValueError("unexpected commit revision")
+        revision = {"sha": sha, "subject": excerpt(commit["commit"]["message"].partition("\n")[0], 512),
+                    "changed_paths_first_30": [excerpt(f["filename"], 256) for f in commit["files"][:30]]}
+    timeline = lookup("cross_referenced_prs_sample", f"issues/{target['number']}/timeline?per_page=100")
     linked = {}
-    for event in timeline:
+    for event in timeline or []:
         issue = event.get("source", {}).get("issue", {}) if event["event"] == "cross-referenced" else {}
         if issue.get("repository_url") == API + ROOT and issue.get("pull_request"):
             linked[issue["number"]] = {
                 "number": issue["number"], "title": excerpt(issue["title"], 256),
                 "state": issue["state"], "merged_at": issue["pull_request"].get("merged_at"),
             }
-    runs = repo(f"actions/runs?head_sha={sha}&per_page=30")["workflow_runs"]
+    runs = lookup("workflow_runs_at_revision_sample", f"actions/runs?head_sha={sha}&per_page=30")
     previous_runs = []
     for path in workflows[:4]:
         name = quote(Path(path).name, safe="")
-        history = repo(f"actions/workflows/{name}/runs?branch=dev&status=completed&per_page=3", optional=True)
+        history = lookup(path, f"actions/workflows/{name}/runs?branch=dev&status=completed&per_page=3")
         if history:
             previous_runs.extend(run_summary(r) for r in history["workflow_runs"] if r["head_sha"] != sha)
     return {
-        "revision_commit": {"sha": sha, "subject": excerpt(commit["commit"]["message"].splitlines()[0], 512),
-                            "changed_paths_first_30": changed},
+        "unavailable": unavailable,
+        "revision_commit": revision,
         "cross_referenced_prs_sample": list(linked.values())[-8:],
-        "workflow_runs_at_revision_sample": [run_summary(r) for r in runs if r["head_sha"] == sha],
+        "workflow_runs_at_revision_sample": [run_summary(r) for r in runs["workflow_runs"]
+                                             if r["head_sha"] == sha] if runs else [],
         "recent_completed_dev_runs_at_other_revisions": previous_runs,
     }
 
@@ -258,7 +274,7 @@ def request_text(target):
 
         ranked = sorted(files, key=relevance)
         if mode == "respond":
-            named_workflows = [p for p in ranked if p.startswith(".github/workflows/") and Path(p).name in query]
+            named_workflows = [p for p in ranked if p.startswith(".github/workflows/") and Path(p).name.lower() in query]
             data["github"] = github_evidence(target, named_workflows)
         for path in ranked[:5]:
             data["files"][path] = excerpt(read_blob(files[path]), 6144)
@@ -304,16 +320,11 @@ def run(action):
         if (not 0 < len(comment.encode()) <= 16000
                 or re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", comment)):
             raise ValueError("invalid comment content")
-        # GitHub resolves mentions even after decoding HTML entities. Break the
-        # username with a zero-width space so model output cannot notify users.
-        safe = html.escape(comment).replace("`", "&#96;").replace("@", "&#64;&#8203;")
-        # Keep GitHub's HTML block parser out of Markdown mode even across
-        # paragraphs: raw Markdown images, mentions and fences remain inert.
-        paragraphs = re.split(r"\n\s*\n", safe.replace("\r\n", "\n").replace("\r", "\n"))
-        rendered = "".join("<p>" + p.replace("\n", "<br>") + "</p>" for p in paragraphs)
-        body = f"{target['marker']}\n{rendered}"
+        body = f"{target['marker']}\n{paragraphs(comment)}"
         if len(body.encode()) > 64000:
-            raise ValueError("rendered comment exceeds budget")
+            # Escaped punctuation can expand substantially. Shorten the source
+            # (not rendered HTML) so truncation cannot split a character or tag.
+            body = f"{target['marker']}\n{paragraphs(comment[:8000] + '… [truncated]')}"
         repo(f"issues/{target['number']}/comments", {"body": body})
     elif action in {"validate-edit", "edit"} and target["mode"] == "edit":
         original = source_file(target)

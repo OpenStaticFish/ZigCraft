@@ -78,7 +78,7 @@ class VisualInferenceTest(unittest.TestCase):
         self.assertNotIn("private diagnostic payload", request)
         self.response.write_text('{"disposition":"finding","observation":"Golden is black."}')
         visual.advisory(profile, self.response, self.issue, self.env)
-        self.assertIn("    Golden is black.", self.issue.read_text())
+        self.assertIn("<p>Golden is black.</p>", self.issue.read_text())
         self.assertIn(self.env["GITHUB_SHA"], self.issue.read_text())
 
     def test_reject_malformed_evidence_and_response(self):

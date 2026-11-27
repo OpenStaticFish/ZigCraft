@@ -48,6 +48,7 @@ jobs:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
           sparse-checkout: |
+            scripts/opencode_prose.py
             scripts/opencode_v2_pr.py
             scripts/opencode_pr_gate.py
             .github/prompts/pr-review.md
@@ -98,6 +99,7 @@ jobs:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
           sparse-checkout: |
+            scripts/opencode_prose.py
             scripts/opencode_v2_pr.py
             scripts/opencode_pr_gate.py
           sparse-checkout-cone-mode: false

@@ -88,8 +88,8 @@ def verdict(raw, base, head):
         findings = obj[severity]
         if not isinstance(findings, list) or len(findings) > 12:
             raise pr.PilotError("Invalid gate findings")
-        text = "\n".join(f"• {pr.plain_text(item)}" for item in findings)
-        lines.append(f"**{severity.title()} ({len(findings)})**" + (f"\n<pre>{text}</pre>" if text else ""))
+        heading = f"**{severity.title()} ({len(findings)})**"
+        lines.append(heading + "\n\n" + pr.findings_list(findings) if findings else heading)
     passed = not any(obj[s] for s in ("critical", "high", "medium")) and score >= 80 and recommendation == "MERGE"
     return passed, "\n\n".join(lines)
 

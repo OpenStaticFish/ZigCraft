@@ -54,7 +54,9 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-          sparse-checkout: scripts/opencode_v2_pr.py
+          sparse-checkout: |
+            scripts/opencode_v2_pr.py
+            scripts/opencode_prose.py
           sparse-checkout-cone-mode: false
       - name: Authorize actor and collect pinned diff
         id: prepare
@@ -97,7 +99,9 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-          sparse-checkout: scripts/opencode_v2_pr.py
+          sparse-checkout: |
+            scripts/opencode_v2_pr.py
+            scripts/opencode_prose.py
           sparse-checkout-cone-mode: false
       - name: Require the current run's inference output
         env:
@@ -126,7 +130,9 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           persist-credentials: false
-          sparse-checkout: scripts/opencode_v2_pr.py
+          sparse-checkout: |
+            scripts/opencode_v2_pr.py
+            scripts/opencode_prose.py
           sparse-checkout-cone-mode: false
       - name: Require the current run's inference output
         env:
