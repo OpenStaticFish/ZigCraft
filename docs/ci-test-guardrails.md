@@ -2,7 +2,11 @@
 
 ## ReleaseSafe Unit Tests
 
-Pull requests run `zig build test` in both `Debug` and `ReleaseSafe` through the `Build` workflow. `ReleaseSafe` keeps runtime safety checks enabled while exercising optimized code paths that Debug-only CI can miss.
+Game and toolchain changes run `zig build test` in both `Debug` and `ReleaseSafe` through the `Build` workflow. `ReleaseSafe` keeps runtime safety checks enabled while exercising optimized code paths that Debug-only CI can miss.
+
+On every PR to `dev` and every `dev` push, Build classifies the full diff with `scripts/ci_changes.py`. Prose and repository automation skip the game jobs. Weston, Lavapipe and Vulkan runner configuration select graphics smoke tests; shader baselines and checker scripts select shader validation. Mixed diffs run the union of applicable checks, and unrecognized inputs select the full game suite. Manual Build dispatches always run the suite for the requested ref.
+
+The required `build` and `unit-test` checks still report on every PR. They accept skipped work only when the classifier explicitly deselected it; a failed classifier, failed check, or missing selected result blocks merge.
 
 Run locally:
 

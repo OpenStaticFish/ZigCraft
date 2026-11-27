@@ -6,6 +6,7 @@ on:
     paths:
       - ".github/workflows/**"
       - ".github/actions/**"
+      - ".github/actionlint.yaml"
       - ".github/opencode/**"
       - "scripts/*.sh"
       - "scripts/*.py"
@@ -20,6 +21,7 @@ on:
     paths:
       - ".github/workflows/**"
       - ".github/actions/**"
+      - ".github/actionlint.yaml"
       - ".github/opencode/**"
       - "scripts/*.sh"
       - "scripts/*.py"
@@ -76,6 +78,9 @@ jobs:
 
       - name: Test OpenCode discussion formatting
         run: python3 scripts/test_opencode_discussion_markdown.py
+
+      - name: Test CI routing
+        run: python3 scripts/test_ci_changes.py
 
       - name: Validate devenv configuration
         run: devenv info >/dev/null
