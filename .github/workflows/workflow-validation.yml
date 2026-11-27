@@ -9,6 +9,7 @@ on:
       - ".github/opencode/**"
       - "scripts/*.sh"
       - "scripts/*.py"
+      - "scripts/*.jq"
       - ".github/prompts/**"
       - ".shellcheckrc"
       - "devenv.nix"
@@ -22,6 +23,7 @@ on:
       - ".github/opencode/**"
       - "scripts/*.sh"
       - "scripts/*.py"
+      - "scripts/*.jq"
       - ".github/prompts/**"
       - ".shellcheckrc"
       - "devenv.nix"
@@ -71,6 +73,9 @@ jobs:
 
       - name: Run ShellCheck
         run: devenv shell --profile unit -- shellcheck scripts/*.sh
+
+      - name: Test OpenCode discussion formatting
+        run: python3 scripts/test_opencode_discussion_markdown.py
 
       - name: Validate devenv configuration
         run: devenv info >/dev/null
