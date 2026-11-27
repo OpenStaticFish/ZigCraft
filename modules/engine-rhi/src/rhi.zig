@@ -293,8 +293,8 @@ pub const RenderContext = struct {
 
     /// Begins the per-frame command recording scope.
     /// Must be paired with the matching end call and used from the render thread.
-    pub fn beginFrame(self: RenderContext) void {
-        self.render.beginFrame();
+    pub fn beginFrame(self: RenderContext) bool {
+        return self.render.beginFrame();
     }
     /// Ends the per-frame command recording scope and submits queued frame work.
     /// All commands for that scope must be recorded before this call.
@@ -1075,7 +1075,7 @@ pub const IRenderContext = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        beginFrame: *const fn (ptr: *anyopaque) void,
+        beginFrame: *const fn (ptr: *anyopaque) bool,
         endFrame: *const fn (ptr: *anyopaque) void,
         abortFrame: *const fn (ptr: *anyopaque) void,
         requestSwapchainRecreate: *const fn (ptr: *anyopaque) void,
@@ -1084,10 +1084,10 @@ pub const IRenderContext = struct {
         setClearColor: *const fn (ptr: *anyopaque, color: Vec3) void,
     };
 
-    /// Begins the per-frame command recording scope.
-    /// Must be paired with the matching end call and used from the render thread.
-    pub fn beginFrame(self: IRenderContext) void {
-        self.vtable.beginFrame(self.ptr);
+    /// Returns whether the backend opened a per-frame command recording scope.
+    /// On success, the render thread must end or abort the frame.
+    pub fn beginFrame(self: IRenderContext) bool {
+        return self.vtable.beginFrame(self.ptr);
     }
     /// Ends the per-frame command recording scope and submits queued frame work.
     /// All commands for that scope must be recorded before this call.

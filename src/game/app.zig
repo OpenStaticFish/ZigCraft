@@ -455,11 +455,10 @@ pub const App = struct {
 
         self.render_system.setViewport(window_width, window_height);
 
-        self.render_system.beginFrame();
-        var frame_open = true;
+        var frame_open = self.render_system.beginFrame();
         defer if (frame_open) self.render_system.abortFrame();
 
-        try self.render_system.updateGlobalUniforms(.{
+        if (frame_open) try self.render_system.updateGlobalUniforms(.{
             .view_proj = Mat4.identity,
             .cam_pos = Vec3.zero,
             .sun_dir = Vec3.init(0, -1, 0),
@@ -501,6 +500,13 @@ pub const App = struct {
         // diagnostic). Discard commands recorded so far instead of submitting
         // a final frame after shutdown has begun.
         if (self.input.interface().shouldQuit()) return;
+
+        if (!frame_open) {
+            try self.applyPendingScreenTransitions();
+            self.revealMenuWindowWhenReady();
+            self.limitFrameRateIfNeeded();
+            return;
+        }
 
         if (self.screen_manager.stack.items.len == 0) {
             self.render_system.endFrame();

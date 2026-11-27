@@ -316,8 +316,8 @@ pub const RenderSystem = struct {
         self.allocator.destroy(self);
     }
 
-    pub fn beginFrame(self: *RenderSystem) void {
-        self.rhi.renderContext().beginFrame();
+    pub fn beginFrame(self: *RenderSystem) bool {
+        return self.rhi.renderContext().beginFrame();
     }
 
     pub fn endFrame(self: *RenderSystem) void {

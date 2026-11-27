@@ -69,13 +69,12 @@ fn destroyBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle) void {
     ctx.resources.destroyBuffer(handle);
 }
 
-fn beginFrame(ctx_ptr: *anyopaque) void {
+fn beginFrame(ctx_ptr: *anyopaque) bool {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
 
-    if (ctx.runtime.gpu_fault_detected) return;
-    if (ctx.frames.frame_in_progress) return;
+    if (ctx.runtime.gpu_fault_detected or ctx.frames.frame_in_progress) return false;
 
     frame_orchestration.recreatePendingShadowResources(ctx);
 
@@ -90,11 +89,15 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
             log.log.errWithTrace("Failed to flush inter-frame transfers: {}", .{err});
             if (err == error.BackendError) {
                 ctx.runtime.gpu_fault_detected = true;
-                return;
+                return false;
             }
         };
         flushed_inter_frame_transfer = true;
     }
+
+    // A failed rebuild may already have destroyed resources needed to draw.
+    // A fresh resize or quality request can retry, but only success resumes rendering.
+    if (ctx.runtime.pipeline_rebuild_needed) return false;
 
     // Begin frame (acquire image, reset fences/CBs)
     const frame_started = ctx.frames.beginFrame(&ctx.swapchain) catch |err| {
@@ -103,7 +106,7 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
         } else {
             log.log.errWithTrace("beginFrame failed: {}", .{err});
         }
-        return;
+        return false;
     };
 
     if (frame_started) {
@@ -124,12 +127,13 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
     ctx.resources.setCurrentFrame(ctx.frames.current_frame);
 
     if (!frame_started) {
-        return;
+        return false;
     }
 
     ctx.runtime.transfer_barrier_needed = flushed_inter_frame_transfer;
     render_state.applyPendingDescriptorUpdates(ctx, ctx.frames.current_frame);
     frame_orchestration.prepareFrameState(ctx);
+    return true;
 }
 
 fn abortFrame(ctx_ptr: *anyopaque) void {
@@ -930,6 +934,7 @@ fn computeSsao(ctx_ptr: *anyopaque, proj: Mat4, inv_proj: Mat4) void {
 
 fn drawSkyEffect(ctx_ptr: *anyopaque, params: rhi.SkyParams) rhi.RhiError!void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    if (!ctx.frames.frame_in_progress) return error.ResourceNotReady;
     const pipeline = ctx.pipeline_manager.sky_pipeline;
     const layout = ctx.pipeline_manager.sky_pipeline_layout;
     const cmd = ctx.frames.command_buffers[ctx.frames.current_frame];

@@ -153,6 +153,14 @@ const ReplaceDuringDrawScreen = struct {
     }
 };
 
+fn skipGraphicsFrame(_: *anyopaque) bool {
+    return false;
+}
+
+fn unexpectedFrameCompletion(_: *anyopaque) void {
+    unreachable;
+}
+
 test "smoke test: launch, generate, render, exit" {
     const test_allocator = testing.allocator;
 
@@ -166,6 +174,7 @@ test "smoke test: launch, generate, render, exit" {
         return err;
     };
     defer app.deinit();
+    if (!build_options.skip_present) app.window_manager.show();
 
     const world_screen = try WorldScreen.init(test_allocator, app.engineContext(), 12345, 0);
     app.screen_manager.setScreen(world_screen.screen());
@@ -179,6 +188,7 @@ test "smoke test: launch, generate, render, exit" {
     const stats = world_screen.session.world.getStats();
 
     try testing.expect(stats.chunks_loaded > 0);
+    try testing.expect(app.render_system.getRHI().query().getDrawCallCount() > 0);
 
     // Runtime World settings are literal live controls, not display-only
     // values capped by the startup preset. Decrease by one so this remains
@@ -242,6 +252,27 @@ test "smoke test: launch, generate, render, exit" {
     // this screen's pending transfer upload. Teardown immediately follows and
     // must not leave recording command buffers referencing destroyed resources.
     active_upload_screen.quit_on_draw = true;
+
+    // Simulate a skipped acquire after successful frames. The screen still
+    // updates, but its draw and the frame-completion callbacks must not run.
+    {
+        app.render_system.waitIdle();
+        const original_vtable = app.render_system.rhi.vtable;
+        var render_vtable = original_vtable.render.?.*;
+        render_vtable.beginFrame = skipGraphicsFrame;
+        render_vtable.endFrame = unexpectedFrameCompletion;
+        render_vtable.abortFrame = unexpectedFrameCompletion;
+        var skipped_vtable = original_vtable.*;
+        skipped_vtable.render = &render_vtable;
+        app.render_system.rhi.vtable = &skipped_vtable;
+        defer app.render_system.rhi.vtable = original_vtable;
+
+        const previous_tick = active_upload_screen.tick;
+        try app.runSingleFrame();
+        try testing.expectEqual(previous_tick +% 1, active_upload_screen.tick);
+        try testing.expect(!app.input.interface().shouldQuit());
+    }
+
     const fault_count_before_late_quit = app.render_system.getRHI().query().getFaultCount();
     try app.runSingleFrame();
     try testing.expect(app.input.interface().shouldQuit());
