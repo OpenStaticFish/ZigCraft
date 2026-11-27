@@ -3,6 +3,9 @@ on: workflow_dispatch
 jobs:
   smoke:
     uses: ./.github/workflows/opencode-v2-infer.yml
+    secrets:
+      OPENCODE_PROXY_BASE_URL: ${{ secrets.OPENCODE_PROXY_BASE_URL }}
+      OPENCODE_PROXY_KEY: ${{ secrets.OPENCODE_PROXY_KEY }}
     permissions:
       contents: read
       id-token: write

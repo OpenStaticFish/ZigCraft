@@ -90,6 +90,9 @@ jobs:
       github.repository == 'OpenStaticFish/ZigCraft' && github.ref == 'refs/heads/dev' &&
       github.event.repository.default_branch == 'dev' && vars.OPENCODE_VISUAL_ENABLED == 'true'
     uses: ./.github/workflows/opencode-v2-infer.yml
+    secrets:
+      OPENCODE_PROXY_BASE_URL: ${{ secrets.OPENCODE_PROXY_BASE_URL }}
+      OPENCODE_PROXY_KEY: ${{ secrets.OPENCODE_PROXY_KEY }}
     permissions:
       contents: read
       issues: write

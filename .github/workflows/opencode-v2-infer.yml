@@ -11,11 +11,11 @@ on:
       capture-result:
         type: string
     secrets:
-      # Supplied by the job environment; callers need not forward these.
+      # Explicitly forward these names; the job environment supplies their values.
       OPENCODE_PROXY_BASE_URL:
-        required: false
+        required: true
       OPENCODE_PROXY_KEY:
-        required: false
+        required: true
       OPENCODE_PAT:
         description: Only the slash caller supplies the token that opens edit PRs
         required: false

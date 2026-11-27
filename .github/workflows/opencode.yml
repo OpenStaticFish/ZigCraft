@@ -24,5 +24,7 @@ jobs:
     uses: ./.github/workflows/opencode-v2-infer.yml
     secrets:
       OPENCODE_PAT: ${{ secrets.OPENCODE_PAT }}
+      OPENCODE_PROXY_BASE_URL: ${{ secrets.OPENCODE_PROXY_BASE_URL }}
+      OPENCODE_PROXY_KEY: ${{ secrets.OPENCODE_PROXY_KEY }}
     with:
       task: slash
