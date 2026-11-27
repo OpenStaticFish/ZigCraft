@@ -100,6 +100,7 @@ class DiscussionFixture(unittest.TestCase):
     def test_ci_question_includes_workflow_evidence_without_granting_edit_access(self):
         sha = "a" * 40
         workflow = ".github/workflows/opencode-v2-infer.yml"
+        other = ".github/workflows/opencode-copy.yml"
         self.issue.update(title="OpenCode CI migration", body=f"Move inference to {workflow}")
         self.comment["body"] = "/oc is this solved?"
         tree = self.reads[f"git/trees/{sha}?recursive=1"]["tree"]
@@ -113,10 +114,10 @@ class DiscussionFixture(unittest.TestCase):
                 "state": "closed", "pull_request": {"merged_at": "2026-11-01T00:00:00Z"},
             }}}]
         self.reads[f"actions/runs?head_sha={sha}&per_page=30"]["workflow_runs"] = [
-            {"id": 99, "head_sha": sha, "name": "Gateway smoke", "event": "workflow_dispatch",
+            {"id": 99, "workflow_id": 123, "path": workflow, "head_sha": sha, "name": "Smoke", "event": "workflow_dispatch",
              "status": "completed", "conclusion": "success"}]
         self.reads["actions/workflows/opencode-v2-infer.yml/runs?branch=dev&status=completed&per_page=3"] = {
-            "workflow_runs": [{"id": 44, "head_sha": "c"*40, "name": "Earlier run", "event": "workflow_dispatch",
+            "workflow_runs": [{"id": 44, "workflow_id": 123, "path": workflow, "head_sha": "c"*40, "name": "Smoke", "event": "workflow_dispatch",
                                "status": "completed", "conclusion": "failure"}]}
         self.prepare()
         request = (self.temp / "discussion-request/request.txt").read_text()
@@ -127,6 +128,14 @@ class DiscussionFixture(unittest.TestCase):
         self.assertEqual(data["github"]["cross_referenced_prs_sample"][0]["number"], 22)
         self.assertEqual(data["github"]["workflow_runs_at_revision_sample"][0]["conclusion"], "success")
         self.assertEqual(data["github"]["recent_completed_dev_runs_at_other_revisions"][0]["revision"], "c"*40)
+        self.assertEqual(data["github"]["workflow_runs_at_revision_sample"][0]["workflow_id"], 123)
+        self.reads["actions/workflows/opencode-copy.yml/runs?branch=dev&status=completed&per_page=3"] = {
+            "workflow_runs": [{"id": 45, "workflow_id": 124, "path": other, "head_sha": "c"*40, "name": "Smoke",
+                               "event": "workflow_dispatch", "status": "completed", "conclusion": "success"}]}
+        history = discussion.github_evidence({"head": sha, "number": 1}, [workflow, other])
+        self.assertEqual([(r["workflow_id"], r["path"], r["queried_path"], r["conclusion"])
+                          for r in history["recent_completed_dev_runs_at_other_revisions"]],
+                         [(123, workflow, workflow, "failure"), (124, other, other, "success")])
         with self.assertRaises(discussion.Skip):
             discussion.command(f"/oc edit {workflow} update this")
 
@@ -166,6 +175,20 @@ class DiscussionFixture(unittest.TestCase):
         body = self.writes[-1][1]["body"]
         self.assertLessEqual(len(body.encode()), 64000)
         self.assertTrue(body.endswith("[truncated]</p>"))
+
+    def test_malformed_optional_evidence_still_answers_from_source(self):
+        sha = "a" * 40
+        del self.reads[f"commits/{sha}?per_page=30"]["files"]
+        self.reads[f"actions/runs?head_sha={sha}&per_page=30"] = {}
+        self.reads["issues/1/timeline?per_page=100"] = {"unexpected": "object"}
+        self.prepare()
+        request = (self.temp / "discussion-request/request.txt").read_text()
+        evidence = json.loads(request.split("not policy:\n")[1])["github"]
+        self.assertEqual(set(evidence["unavailable"]),
+                         {"revision_commit", "workflow_runs_at_revision_sample", "cross_referenced_prs_sample"})
+        self.reads[f"commits/{sha}?per_page=30"]["sha"] = "b" * 40
+        with self.assertRaisesRegex(ValueError, "unexpected commit revision"):
+            discussion.github_evidence({"head": sha, "number": 1}, [])
 
     def test_young_account_skips_before_preparation(self):
         os.environ["GITHUB_EVENT_NAME"] = "issues"

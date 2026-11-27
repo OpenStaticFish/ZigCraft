@@ -7,7 +7,8 @@ import re
 def escape_text(value):
     # GitHub resolves mentions after decoding HTML entities; separate the
     # name from the @ so rendering cannot notify a user or team.
-    return html.escape(value, quote=False).replace("@", "@\u200b").replace("`", "&#96;")
+    escaped = html.escape(value, quote=False).replace("@", "@\u200b")
+    return re.sub(r"#(?=[0-9])", "#\u200b", escaped).replace("`", "&#96;")
 
 
 def paragraphs(value):

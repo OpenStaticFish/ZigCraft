@@ -188,53 +188,78 @@ def excerpt(text, limit):
     return text.encode()[:limit].decode("utf-8", errors="ignore")
 
 
-def run_summary(run):
-    return {"id": run["id"], "workflow": excerpt(run["name"] or run["path"], 128), "event": run["event"],
-            "revision": run["head_sha"], "status": run["status"], "conclusion": run["conclusion"]}
+def records(value):
+    if not isinstance(value, list) or not all(isinstance(row, dict) for row in value):
+        raise TypeError("expected a list of GitHub records")
+    return value
+
+
+def run_summaries(payload):
+    summaries = []
+    for run in records(payload["workflow_runs"]):
+        if (type(run["id"]) is not int or type(run["workflow_id"]) is not int
+                or not all(isinstance(run[k], str) for k in ("head_sha", "event", "path", "status"))
+                or not isinstance(run["name"], (str, type(None)))
+                or not isinstance(run["conclusion"], (str, type(None)))):
+            raise TypeError("invalid workflow run metadata")
+        summaries.append({"id": run["id"], "workflow_id": run["workflow_id"], "path": run["path"],
+                          "workflow": excerpt(run["name"] or run["path"], 128), "event": run["event"],
+                          "revision": run["head_sha"], "status": run["status"], "conclusion": run["conclusion"]})
+    return summaries
+
+
+def linked_prs(timeline):
+    linked = {}
+    for event in records(timeline):
+        if event["event"] != "cross-referenced":
+            continue
+        issue = event["source"]["issue"]
+        if issue["repository_url"] == API + ROOT and issue.get("pull_request"):
+            linked[issue["number"]] = {
+                "number": issue["number"], "title": excerpt(issue["title"], 256),
+                "state": issue["state"], "merged_at": issue["pull_request"].get("merged_at"),
+            }
+    return list(linked.values())[-8:]
 
 
 def github_evidence(target, workflows):
     sha = target["head"]
     unavailable = []
 
-    def lookup(field, path):
+    def lookup(field, path, parse):
         try:
-            result = repo(path, optional=True)
+            payload = repo(path, optional=True)
         except (ValueError, OSError):
-            result = None
-        if result is None:
-            unavailable.append(field)
-        return result
+            payload = None
+        if payload is not None:
+            try:
+                return parse(payload)
+            except (KeyError, TypeError, AttributeError):
+                pass  # Incomplete metadata must not prevent a source-based answer.
+        unavailable.append(field)
+        return None
 
-    commit = lookup("revision_commit", f"commits/{sha}?per_page=30")
-    revision = None
-    if commit is not None:
+    def revision_summary(commit):
+        if not isinstance(commit["sha"], str):
+            raise TypeError("invalid commit SHA")
         if commit["sha"] != sha:
             raise ValueError("unexpected commit revision")
-        revision = {"sha": sha, "subject": excerpt(commit["commit"]["message"].partition("\n")[0], 512),
-                    "changed_paths_first_30": [excerpt(f["filename"], 256) for f in commit["files"][:30]]}
-    timeline = lookup("cross_referenced_prs_sample", f"issues/{target['number']}/timeline?per_page=100")
-    linked = {}
-    for event in timeline or []:
-        issue = event.get("source", {}).get("issue", {}) if event["event"] == "cross-referenced" else {}
-        if issue.get("repository_url") == API + ROOT and issue.get("pull_request"):
-            linked[issue["number"]] = {
-                "number": issue["number"], "title": excerpt(issue["title"], 256),
-                "state": issue["state"], "merged_at": issue["pull_request"].get("merged_at"),
-            }
-    runs = lookup("workflow_runs_at_revision_sample", f"actions/runs?head_sha={sha}&per_page=30")
+        return {"sha": sha, "subject": excerpt(commit["commit"]["message"].partition("\n")[0], 512),
+                "changed_paths_first_30": [excerpt(f["filename"], 256) for f in records(commit["files"])[:30]]}
+
+    revision = lookup("revision_commit", f"commits/{sha}?per_page=30", revision_summary)
+    linked = lookup("cross_referenced_prs_sample", f"issues/{target['number']}/timeline?per_page=100", linked_prs)
+    runs = lookup("workflow_runs_at_revision_sample", f"actions/runs?head_sha={sha}&per_page=30", run_summaries)
     previous_runs = []
     for path in workflows[:4]:
         name = quote(Path(path).name, safe="")
-        history = lookup(path, f"actions/workflows/{name}/runs?branch=dev&status=completed&per_page=3")
-        if history:
-            previous_runs.extend(run_summary(r) for r in history["workflow_runs"] if r["head_sha"] != sha)
+        history = lookup(path, f"actions/workflows/{name}/runs?branch=dev&status=completed&per_page=3", run_summaries)
+        previous_runs.extend({**run, "queried_path": path} for run in history or [] if run["revision"] != sha)
     return {
         "unavailable": unavailable,
         "revision_commit": revision,
-        "cross_referenced_prs_sample": list(linked.values())[-8:],
-        "workflow_runs_at_revision_sample": [run_summary(r) for r in runs["workflow_runs"]
-                                             if r["head_sha"] == sha] if runs else [],
+        "cross_referenced_prs_sample": linked or [],
+        "workflow_runs_at_revision_sample": [r for r in runs or [] if r["revision"] == sha],
         "recent_completed_dev_runs_at_other_revisions": previous_runs,
     }
 
