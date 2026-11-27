@@ -505,12 +505,15 @@ pub const App = struct {
         if (self.input.interface().shouldQuit()) return;
 
         if (!frame_open) {
+            if (self.benchmark_runner) |runner| try runner.skipFrame();
             if (build_options.smoke_test or build_options.screenshot_path.len > 0) {
                 const timer = self.graphics_stall_timer orelse MonotonicTimer{ .start_ticks = self.frame_start_counter };
                 self.graphics_stall_timer = timer;
                 if (timer.read() >= 90 * std.time.ns_per_s) return error.GraphicsFrameTimeout;
             }
-            try self.checkScreenshotDeadline(false);
+            // Keep the previous rendered frame's readiness and capture delay.
+            // The next rendered frame rechecks readiness; the stall timer above
+            // handles the case where that frame never arrives.
             try self.applyPendingScreenTransitions();
             self.revealMenuWindowWhenReady();
             self.limitFrameRateIfNeeded();
