@@ -80,7 +80,7 @@ fn beginFrame(ctx_ptr: *anyopaque) anyerror!bool {
 
     if ((ctx.runtime.framebuffer_resized or ctx.swapchain.framebuffer_resized) and !ctx.runtime.swapchain_recreate_failed) {
         log.log.info("beginFrame: triggering recreateSwapchainInternal (resize)", .{});
-        frame_orchestration.recreateSwapchainInternal(ctx);
+        try frame_orchestration.recreateSwapchainInternal(ctx);
     }
 
     var flushed_inter_frame_transfer = false;

@@ -561,6 +561,8 @@ test "VulkanSwapchain recreation discards prior image handles" {
 }
 
 fn checkVk(result: c.VkResult) !void {
+    if (result == c.VK_ERROR_DEVICE_LOST) return error.GpuLost;
+    if (result == c.VK_ERROR_SURFACE_LOST_KHR) return error.SurfaceLost;
     if (result != c.VK_SUCCESS) return error.BackendError;
 }
 

@@ -315,6 +315,16 @@ test "smoke test: launch, generate, render, exit" {
         try testing.expectEqual(previous_tick +% 1, active_upload_screen.tick);
         try testing.expect(!app.input.interface().shouldQuit());
 
+        if (build_options.smoke_test) {
+            const now = c.SDL_GetPerformanceCounter();
+            const timeout_ticks = 90 * c.SDL_GetPerformanceFrequency();
+            if (now >= timeout_ticks) {
+                app.graphics_stall_timer = .{ .start_ticks = now - timeout_ticks };
+                try testing.expectError(error.GraphicsFrameTimeout, app.runSingleFrame());
+                app.graphics_stall_timer = null;
+            }
+        }
+
         render_vtable.beginFrame = loseGraphicsDevice;
         try testing.expectError(error.GpuLost, app.runSingleFrame());
     }

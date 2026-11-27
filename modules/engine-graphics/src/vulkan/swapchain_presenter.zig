@@ -100,6 +100,10 @@ pub const SwapchainPresenter = struct {
         } else if (result == c.VK_ERROR_VALIDATION_FAILED_EXT) {
             log.log.err("vkAcquireNextImageKHR reported validation failure", .{});
             return error.ValidationFailed;
+        } else if (result == c.VK_ERROR_DEVICE_LOST) {
+            return error.GpuLost;
+        } else if (result == c.VK_ERROR_SURFACE_LOST_KHR) {
+            return error.SurfaceLost;
         } else if (result != c.VK_SUCCESS and result != c.VK_SUBOPTIMAL_KHR) {
             log.log.err("vkAcquireNextImageKHR failed with result: {d}", .{result});
             return error.BackendError;

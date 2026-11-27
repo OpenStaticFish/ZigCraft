@@ -52,8 +52,9 @@ pub fn recreatePendingShadowResources(ctx: anytype) void {
     log.log.info("Shadow resources recreated at {}x{}", .{ ctx.shadow_runtime.shadow_resolution, ctx.shadow_runtime.shadow_resolution });
 }
 
-pub fn recreateSwapchainInternal(ctx: anytype) void {
-    _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
+pub fn recreateSwapchainInternal(ctx: anytype) !void {
+    @import("utils.zig").checkVk(c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device)) catch |err|
+        return handleSwapchainRecreateError(ctx, "device idle wait", err);
 
     var w: c_int = 0;
     var h: c_int = 0;
@@ -75,85 +76,68 @@ pub fn recreateSwapchainInternal(ctx: anytype) void {
     ctx.runtime.ssao_pass_active = false;
 
     ctx.swapchain.recreate() catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "swapchain", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "swapchain", err);
     };
 
     if (ctx.swapchain.skip_present) {
         lifecycle.transitionImagesToColorAttachment(ctx, ctx.swapchain.swapchain.images.items) catch |err| {
-            _ = markSwapchainRecreateFailed(ctx, "offscreen image layout", err);
-            return;
+            return handleSwapchainRecreateError(ctx, "offscreen image layout", err);
         };
     }
 
     lifecycle.createHDRResources(ctx) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "HDR resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "HDR resources", err);
     };
     setup.createGPassResources(ctx) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "G-Pass resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "G-Pass resources", err);
     };
     setup.createSSAOResources(ctx) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "SSAO resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "SSAO resources", err);
     };
     setup.createTAAResources(ctx) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "TAA resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "TAA resources", err);
     };
     if (ctx.water_system.reflection_texture_handle != 0) {
         ctx.resources.destroyTexture(ctx.water_system.reflection_texture_handle);
         ctx.water_system.reflection_texture_handle = 0;
     }
     ctx.render_pass_manager.createMainRenderPass(ctx.vulkan_device.vk_device, ctx.swapchain.getExtent(), ctx.options.msaa_samples) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "render pass", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "render pass", err);
     };
     ctx.pipeline_manager.createMainPipelines(ctx.allocator, ctx.vulkan_device.vk_device, ctx.render_pass_manager.hdr_render_pass, ctx.render_pass_manager.g_render_pass, ctx.options.msaa_samples) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "pipelines", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "pipelines", err);
     };
     setup.createWaterResources(ctx) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "water resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "water resources", err);
     };
 
     setup.setWaterTextureHandles(ctx);
 
     ctx.water_system.createWaterPipeline(ctx.allocator, ctx.vulkan_device.vk_device, ctx.render_pass_manager.hdr_render_pass, ctx.options.msaa_samples) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "water pipeline", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "water pipeline", err);
     };
     ctx.water_system.createReflectionTerrainPipelines(ctx.allocator, ctx.vulkan_device.vk_device, ctx.pipeline_manager.pipeline_layout) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "reflection terrain pipelines", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "reflection terrain pipelines", err);
     };
     setup.createPostProcessResources(ctx) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "post-process resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "post-process resources", err);
     };
     setup.createSwapchainUIResources(ctx) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "swapchain UI resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "swapchain UI resources", err);
     };
     ctx.fxaa.init(&ctx.vulkan_device, ctx.allocator, ctx.descriptors.descriptor_pool, ctx.swapchain.getExtent(), ctx.swapchain.getImageFormat(), ctx.post_process.sampler, ctx.swapchain.getImageViews(), final_composition.displayLayout(ctx.swapchain.skip_present)) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "FXAA resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "FXAA resources", err);
     };
     ctx.pipeline_manager.createSwapchainUIPipelines(ctx.allocator, ctx.vulkan_device.vk_device, ctx.render_pass_manager.ui_swapchain_render_pass) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "swapchain UI pipelines", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "swapchain UI pipelines", err);
     };
     ctx.bloom.init(&ctx.vulkan_device, ctx.allocator, ctx.descriptors.descriptor_pool, ctx.hdr.hdr_view, ctx.swapchain.getExtent().width, ctx.swapchain.getExtent().height, c.VK_FORMAT_R16G16B16A16_SFLOAT) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "Bloom resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "Bloom resources", err);
     };
     setup.updatePostProcessDescriptorsWithBloom(ctx);
 
     setup.createUpscaleResources(ctx) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "upscale resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "upscale resources", err);
     };
 
     ctx.dynamic_resolution.setSwapchainExtent(ctx.swapchain.getExtent());
@@ -161,11 +145,19 @@ pub fn recreateSwapchainInternal(ctx: anytype) void {
     // Swapchain recreation does not replace the shadow image. Preserve the
     // layout state maintained by the shadow passes.
     lifecycle.initializeSampledFrameImages(ctx) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "sampled image layouts", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "sampled image layouts", err);
     };
 
     markSwapchainRecreateSucceeded(ctx);
+}
+
+pub fn handleSwapchainRecreateError(ctx: anytype, stage: []const u8, err: anyerror) error{ GpuLost, SurfaceLost }!void {
+    _ = markSwapchainRecreateFailed(ctx, stage, err);
+    switch (err) {
+        error.GpuLost => return error.GpuLost,
+        error.SurfaceLost => return error.SurfaceLost,
+        else => {},
+    }
 }
 
 pub fn markSwapchainRecreateFailed(ctx: anytype, stage: []const u8, err: anyerror) bool {

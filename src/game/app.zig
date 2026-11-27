@@ -6,6 +6,7 @@ const log = @import("engine-core").log;
 const WindowManager = @import("engine-core").WindowManager;
 const Input = @import("engine-input").Input;
 const Time = @import("engine-core").Time;
+const MonotonicTimer = @import("engine-core").time.MonotonicTimer;
 const UISystemManager = @import("engine-ui").UISystemManager;
 const rmlui = @import("engine-ui").rmlui;
 const WorldStats = @import("engine-ui").WorldStats;
@@ -115,6 +116,7 @@ pub const App = struct {
     direct_launch_resize_guard_frames: u32 = 0,
     screenshot_delay_start: ?f32 = null,
     screenshot_settle_frames: u32 = 0,
+    graphics_stall_timer: ?MonotonicTimer = null,
     frame_start_counter: u64 = 0,
     reveal_window_when_menu_ready: bool = false,
 
@@ -457,6 +459,7 @@ pub const App = struct {
 
         var frame_open = try self.render_system.beginFrame();
         defer if (frame_open) self.render_system.abortFrame();
+        if (frame_open) self.graphics_stall_timer = null;
 
         if (frame_open) try self.render_system.updateGlobalUniforms(.{
             .view_proj = Mat4.identity,
@@ -502,6 +505,11 @@ pub const App = struct {
         if (self.input.interface().shouldQuit()) return;
 
         if (!frame_open) {
+            if (build_options.smoke_test or build_options.screenshot_path.len > 0) {
+                const timer = self.graphics_stall_timer orelse MonotonicTimer{ .start_ticks = self.frame_start_counter };
+                self.graphics_stall_timer = timer;
+                if (timer.read() >= 90 * std.time.ns_per_s) return error.GraphicsFrameTimeout;
+            }
             try self.checkScreenshotDeadline(false);
             try self.applyPendingScreenTransitions();
             self.revealMenuWindowWhenReady();

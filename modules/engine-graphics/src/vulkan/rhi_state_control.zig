@@ -102,7 +102,7 @@ pub fn recover(ctx: anytype) !void {
     ctx.runtime.gpu_fault_detected = false;
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
-    frame_orchestration.recreateSwapchainInternal(ctx);
+    try frame_orchestration.recreateSwapchainInternal(ctx);
 
     if (c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device) != c.VK_SUCCESS) {
         log.log.err("RHI: Device unresponsive after recovery. Recovery failed.", .{});
