@@ -1084,8 +1084,8 @@ pub const IRenderContext = struct {
         setClearColor: *const fn (ptr: *anyopaque, color: Vec3) void,
     };
 
-    /// Returns whether the backend opened a per-frame command recording scope.
-    /// On success, the render thread must end or abort the frame.
+    /// On `true`, the render thread must end or abort the frame.
+    /// On `false` or error, no recording scope was opened.
     pub fn beginFrame(self: IRenderContext) anyerror!bool {
         return self.vtable.beginFrame(self.ptr);
     }

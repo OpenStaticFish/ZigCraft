@@ -277,6 +277,8 @@ jobs:
           timeout: 5m
           log-file: presentation-test.log
           command: devenv shell --profile graphics -- zig build test-integration
+        env:
+          VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
 
       - name: Run world load smoke test (headless)
         if: needs.changes.outputs.code_changes == 'true'
