@@ -28,6 +28,7 @@ jobs:
     environment: opencode-proxy
     permissions:
       contents: read
+      id-token: write
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -62,8 +63,8 @@ jobs:
           profile: ${{ inputs.profile }}
           base-url: ${{ secrets.OPENCODE_PROXY_BASE_URL }}
           client-key: ${{ secrets.OPENCODE_PROXY_KEY }}
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          oidc-client-id: ${{ vars.TS_OIDC_CLIENT_ID }}
+          oidc-audience: ${{ vars.TS_OIDC_AUDIENCE }}
       - id: artifact
         run: echo "name=opencode-response-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

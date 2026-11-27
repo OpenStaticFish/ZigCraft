@@ -151,6 +151,7 @@ jobs:
     uses: ./.github/workflows/opencode-v2-infer.yml
     permissions:
       contents: read
+      id-token: write
     with:
       request-artifact: ${{ needs.prepare.outputs.request-artifact }}
       profile: ${{ needs.prepare.outputs.profile }}

@@ -10,11 +10,11 @@ inputs:
   client-key:
     description: Dedicated CLIProxyAPI credential
     required: true
-  oauth-client-id:
-    description: Dedicated Tailscale OAuth client ID
+  oidc-client-id:
+    description: Tailscale federated identity client ID
     required: true
-  oauth-secret:
-    description: Tag-scoped Tailscale OAuth secret
+  oidc-audience:
+    description: Audience assigned to this Tailscale federated identity
     required: true
 runs:
   using: composite
@@ -25,11 +25,11 @@ runs:
       env:
         PROFILE: ${{ inputs.profile }}
         BASE_URL: ${{ inputs.base-url }}
-        HAS_OAUTH: ${{ inputs.oauth-client-id != '' && inputs.oauth-secret != '' }}
+        HAS_OIDC: ${{ inputs.oidc-client-id != '' && inputs.oidc-audience != '' }}
         HAS_PROXY_KEY: ${{ inputs.client-key != '' }}
       run: |
         set -euo pipefail
-        [[ "$HAS_OAUTH" == true ]] || { echo "::error::Missing protected Tailscale identity"; exit 1; }
+        [[ "$HAS_OIDC" == true ]] || { echo "::error::Missing Tailscale OIDC client ID or audience"; exit 1; }
         [[ "$HAS_PROXY_KEY" == true ]] || { echo "::error::Missing protected proxy client key"; exit 1; }
         python3 "$GITHUB_ACTION_PATH/adapter.py" prepare
         archive="$RUNNER_TEMP/opencode-v2.tar.gz"
@@ -41,8 +41,8 @@ runs:
       id: join
       uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4
       with:
-        oauth-client-id: ${{ inputs.oauth-client-id }}
-        oauth-secret: ${{ inputs.oauth-secret }}
+        oauth-client-id: ${{ inputs.oidc-client-id }}
+        audience: ${{ inputs.oidc-audience }}
         tags: tag:zigcraft-opencode
         version: 1.104.4
         sha256sum: 624ea093d47d62cf56f17b8332d74b8decda4a1faa610ebc60a1de334b2b3dc9
