@@ -17,23 +17,43 @@ from test_opencode_prose import render_gfm
 
 
 class PinnedTrees(unittest.TestCase):
-    def test_worktree_missing_second_hunk_cannot_hide_committed_change(self):
+    def test_fetch_changed_pr_ref_and_reject_ambiguous_history(self):
         with tempfile.TemporaryDirectory() as tmp, chdir(tmp):
             def git(*args):
                 return subprocess.check_output(["git", "-c", "user.name=Fixture", "-c", "user.email=t@example.org", *args])
 
-            git("init", "-q")
+            git("init", "-qb", "dev")
             source = Path("file")
             middle = "unchanged\n" * 20
             source.write_text("old\n" + middle + "old\n")
             git("add", "file")
             git("commit", "-qm", "base")
+            base = git("rev-parse", "HEAD").decode().strip()
+            git("update-ref", "refs/pull/3/head", base)
+            git("clone", "-q", "--no-local", ".", "trusted")
+            git("switch", "-qc", "feature")
             source.write_text("first\n" + middle + "second\n")
             git("commit", "-qam", "head")
             source.write_text("first\n" + middle + "old\n")
-            diff = gate.pinned_diff("HEAD^", "HEAD")
-            self.assertEqual(diff.count("\n@@ "), 2)
-            self.assertIn("+second\n", diff)
+            head = git("rev-parse", "HEAD").decode().strip()
+            git("update-ref", "refs/pull/3/head", head)
+            with chdir("trusted"):
+                with self.assertRaisesRegex(gate.pr.PilotError, "refs moved"):
+                    gate.pinned_diff("3", base, base)
+                diff = gate.pinned_diff("3", base, head)
+                self.assertEqual(diff.count("\n@@ "), 2)
+                self.assertIn("+second\n", diff)
+                self.assertEqual(git("rev-parse", "HEAD").decode().strip(), base)
+            # Both merge tips change the same file relative to either parent.
+            git("add", "file")
+            tree = git("write-tree").decode().strip()
+            sibling = git("commit-tree", "dev^{tree}", "-p", base, "-m", "sibling").decode().strip()
+            left = git("commit-tree", tree, "-p", head, "-p", sibling, "-m", "left").decode().strip()
+            right = git("commit-tree", tree, "-p", sibling, "-p", head, "-m", "right").decode().strip()
+            git("update-ref", "refs/heads/dev", left)
+            git("update-ref", "refs/pull/3/head", right)
+            with chdir("trusted"), self.assertRaisesRegex(gate.pr.PilotError, "Ambiguous merge base"):
+                gate.pinned_diff("3", left, right)
 
 
 class MergeGate(unittest.TestCase):
@@ -166,6 +186,9 @@ class MergeGate(unittest.TestCase):
         self.assertEqual(self.states[-1], ("ai-merge-gate", "failure"))
         self.assertEqual(self.comments[0]["body"], previous)
         self.assertTrue(self.comments[1]["body"].startswith(gate.review_header(*self.target)))
+        for comment, base in zip(self.comments, [old_base, self.base], strict=True):
+            machine = json.loads(comment["body"].split("```json\n")[1].split("\n```")[0])
+            self.assertEqual((machine["reviewed_sha"], machine["reviewed_base"]), (self.head, base))
         self.assertIn(self.decision["verdict_reason"], self.comments[1]["body"])
 
     def test_review_search_finds_later_pages_and_reports_caps(self):
@@ -241,21 +264,6 @@ class MergeGate(unittest.TestCase):
         with self.assertRaises(adapter.StageError):
             transport(raw[:-1] + " }")
 
-    def test_optional_context_failure_keeps_complete_diff(self):
-        self.pr.update(body="Fixes #55", comments=1)
-
-        def unavailable(path, **kwargs):
-            if path.startswith(("issues/", "pulls/3/reviews")):
-                raise OSError("temporary GitHub failure")
-            return self.github(path, **kwargs)
-
-        with patch.object(gate.pr, "api", side_effect=unavailable):
-            gate.prepare(*self.target)
-        text = (self.root / "pr-input/request.txt").read_text()
-        for path in ("issues/55", "issues/3/comments?", "pulls/3/reviews?"):
-            self.assertIn(path, text.split('{"unavailable":')[1].splitlines()[0])
-        self.assertTrue(text.endswith(self.diff))
-
     def test_optional_requests_share_one_wall_clock_budget(self):
         self.pr.update(body="Fixes #1, fixes #2, fixes #3, fixes #4", comments=25)
         elapsed = 0
@@ -269,7 +277,10 @@ class MergeGate(unittest.TestCase):
                 patch("opencode_deadline.signal.setitimer") as timer, patch.object(gate.pr, "api", side_effect=delayed):
             gate.prepare(*self.target)
         self.assertEqual([call.args[1] for call in timer.call_args_list if call.args[1]], [20, 12, 4])
-        self.assertTrue((self.root / "pr-input/request.txt").read_text().endswith(self.diff))
+        text = (self.root / "pr-input/request.txt").read_text()
+        for path in ("issues/1", "issues/3/comments?", "pulls/3/reviews?"):
+            self.assertIn(path, text.split('{"unavailable":')[1].splitlines()[0])
+        self.assertTrue(text.endswith(self.diff))
 
     def test_long_formal_review_keeps_blocker_substance(self):
         finding = "**[HIGH]** `" + "path/" * 100 + "foo.zig:4` - Dangling pointer\n**Confidence:** High\n**Description:** Freed twice."
@@ -291,12 +302,6 @@ class MergeGate(unittest.TestCase):
         self.assertNotIn(self.pr["body"], text)
         self.assertIn("source.zig:10: stale handle used after free", text)
         self.assertIn("[Partial previous review: details truncated]", text)
-
-    def test_machine_verdict_distinguishes_bases_for_same_head(self):
-        for base in [self.base, "c" * 40]:
-            _, report = gate.verdict(json.dumps({**self.decision, "reviewed_base": base}), base, self.head, self.number)
-            machine = json.loads(report.split("```json\n")[1].split("\n```")[0])
-            self.assertEqual((machine["reviewed_sha"], machine["reviewed_base"]), (self.head, base))
 
     def test_documented_diff_budget_and_previous_verdict_only_boundary(self):
         header = "diff --git a/t b/t\n--- a/t\n+++ b/t\n@@ -0,0 +1 @@\n+"
@@ -380,7 +385,7 @@ class MergeGate(unittest.TestCase):
 
     def test_large_report_preserves_all_findings_and_verdict(self):
         item = {**self.finding, "impact": "`" * 1000, "description": "&" * 1000}
-        locations = ["modules/" + "nested/" * 36 + f"source.zig:{line}" for line in range(1, 13)]
+        locations = ["`" * 70 + f".zig:{line}" for line in range(1, 13)]
         self.decision.update(low=[{**item, "location": location} for location in locations], test_status="failed")
         raw = json.dumps(self.decision)
         self.assertLess(len(raw.encode()), gate.pr.OUTPUT_LIMIT)
@@ -389,18 +394,14 @@ class MergeGate(unittest.TestCase):
         self.assertIn("abbreviated", report)
         self.assertLess(len(report.encode()), 65000)
         self.assertEqual(report.count("<strong>[LOW]</strong>"), 12)
+        gate.review_comment(*self.target, report)
+        self.assertLessEqual(len(self.comments[0]["body"].encode()), 65536)
         for location in locations:
-            self.assertIn(f"<code>{location}</code>", report)
+            self.assertIn(f"<code>{gate.pr.escape_text(location)}</code>", report)
         self.assertIn("evidence: failed", report)
         machine = json.loads(report.split("```json\n")[1].split("\n```")[0])
         self.assertEqual(machine["recommendation"], "MERGE")
 
-    def test_comment_budget_includes_escaped_locations_and_markers(self):
-        path = "`" * 70 + ".zig:1"
-        self.decision["low"] = [{**self.finding, "location": path, "description": "&" * 900}] * 12
-        gate.review_comment(*self.target, gate.verdict(json.dumps(self.decision), self.base, self.head, self.number)[1])
-        self.assertLessEqual(len(self.comments[0]["body"].encode()), 65536)
-        self.assertIn(gate.pr.escape_text(path), self.comments[0]["body"])
         self.decision["low"][0]["location"] = "`" * 1000
         with self.assertRaisesRegex(gate.pr.PilotError, "Location"):
             gate.verdict(json.dumps(self.decision), self.base, self.head, self.number)

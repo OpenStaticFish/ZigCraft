@@ -4,9 +4,9 @@ Every OpenCode CI caller, including the required PR gate, requests `gpt-6.2-sol`
 
 The required gate accepts same-repository PRs only, including manual dispatches. Review history samples gate comments and formal review bodies; inline findings are not fetched. Each `ai-merge-gate` decision uses the current pinned review: matching head and base, zero unresolved critical, high or medium findings, confidence of at least 80, and a `MERGE` recommendation. Prior verdicts do not carry forward.
 
-The 96 KiB request limit includes the review instructions, revision identifiers, and the **complete UTF-8 diff**. If the full instructions no longer fit, the gate uses a compact prompt with the same response fields, report and merge criteria. This preserves the entire diff range supported by the former 1,088-byte verdict-only prompt. Optional history and metadata use only remaining space. A diff too large for either prompt is rejected before inference rather than reviewed in part.
+The 96 KiB request must fit the **complete UTF-8 diff**. Near the limit, compact instructions preserve the previous diff range, report format and merge criteria. History uses spare space. Oversized diffs fail before inference.
 
-The required status is published from the validated response artifact. [The gateway migration](https://github.com/OpenStaticFish/ZigCraft/commit/5f83ab70) removed `publish_ai_merge_gate.sh` and `evaluate_ai_merge_gate.sh` and replaced their workflow steps. The fenced verdict in the GitHub comment is a report, not an input to the required status.
+Only the validated response artifact determines the status. [The gateway migration](https://github.com/OpenStaticFish/ZigCraft/commit/5f83ab70) retired the comment parser; the fenced verdict is for readers.
 
 Only `opencode-v2-infer.yml` may join the tailnet. It runs on disposable GitHub-hosted Ubuntu. Preparation, comment/PR publication, Zig checks, visual capture, profiling and benchmarks run elsewhere. The proxy and tailnet need an operator; they do not need a self-hosted Actions runner.
 

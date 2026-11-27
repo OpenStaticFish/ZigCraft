@@ -192,10 +192,17 @@ def pack_history(entries, key, remaining, complete):
     return fields, remaining, status
 
 
-def pinned_diff(base, head):
-    # Commit-to-commit diff: no PR checkout, hooks, external diff or text conversion.
-    args = ["git", "-c", "credential.helper=!gh auth git-credential", "diff", "--no-ext-diff", "--no-textconv",
-            "--no-color", "--submodule=short", f"{base}...{head}", "--"]
+def pinned_diff(number, base, head):
+    git = ["git", "-c", "credential.helper=!gh auth git-credential"]
+    refs = ["refs/review/base", "refs/review/head"]
+    subprocess.run([*git, "fetch", "--quiet", "--atomic", "--no-tags", "--no-recurse-submodules", "origin",
+                    f"+refs/heads/dev:{refs[0]}", f"+refs/pull/{number}/head:{refs[1]}"], check=True)
+    if subprocess.check_output([*git, "rev-parse", *refs], text=True).splitlines() != [base, head]:
+        raise pr.PilotError("PR refs moved before pinned diff")
+    bases = subprocess.check_output([*git, "merge-base", "--all", base, head], text=True).splitlines()
+    if len(bases) != 1:
+        raise pr.PilotError("Ambiguous merge base")
+    args = [*git, "diff", "--no-ext-diff", "--no-textconv", "--no-color", "--submodule=short", bases[0], head, "--"]
     with subprocess.Popen(args, stdout=subprocess.PIPE) as proc:
         data = proc.stdout.read(pr.INPUT_LIMIT + 1)
         if len(data) > pr.INPUT_LIMIT:
@@ -210,7 +217,7 @@ def prepare(number, base, head):
     current = pr.api(f"pulls/{number}")
     if not pr.matches_target(current, number, base, head):
         raise pr.PilotError("PR changed before preparation")
-    diff = pinned_diff(base, head)
+    diff = pinned_diff(number, base, head)
     if (not diff.startswith("diff --git ") or "\0" in diff
             or 1 + diff.count("\ndiff --git ") != current["changed_files"]):
         raise pr.PilotError("Missing, incomplete or invalid PR diff")

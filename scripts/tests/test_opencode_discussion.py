@@ -76,6 +76,7 @@ class DiscussionFixture(unittest.TestCase):
         request = (self.temp / "discussion-request/request.txt").read_bytes()
         self.assertLessEqual(len(request), 96 * 1024)
         self.assertIn(self.original.strip(), request)
+        return json.loads(request.decode().split("not policy:\n")[1])
 
     def response(self, value):
         folder = self.temp / "discussion-response"
@@ -120,9 +121,7 @@ class DiscussionFixture(unittest.TestCase):
         self.reads["actions/workflows/opencode-v2-infer.yml/runs?branch=dev&status=completed&per_page=3"] = {
             "workflow_runs": [{"id": 44, "workflow_id": 123, "path": workflow, "head_sha": "c"*40, "name": "Smoke", "event": "workflow_dispatch",
                                "status": "completed", "conclusion": "failure"}]}
-        self.prepare()
-        request = (self.temp / "discussion-request/request.txt").read_text()
-        data = json.loads(request.split("not policy:\n")[1])
+        data = self.prepare()
         self.assertEqual(next(iter(data["files"])), workflow)
         self.assertNotIn(".github/actions/test/.env", data["files"])
         self.assertEqual(data["github"]["revision_commit"]["changed_paths_first_30"], [workflow])
@@ -176,9 +175,7 @@ class DiscussionFixture(unittest.TestCase):
             return self.repo(path, *args, **kwargs)
 
         discussion.repo.side_effect = unavailable
-        self.prepare()
-        request = (self.temp / "discussion-request/request.txt").read_text()
-        evidence = json.loads(request.split("not policy:\n")[1])["github"]
+        evidence = self.prepare()["github"]
         self.assertEqual(evidence["unavailable"], ["workflow_runs_at_revision_sample"])
         self.assertEqual(evidence["revision_commit"]["subject"], "")
 
@@ -201,17 +198,14 @@ class DiscussionFixture(unittest.TestCase):
         del self.reads[f"commits/{sha}?per_page=30"]["files"]
         self.reads[f"actions/runs?head_sha={sha}&per_page=30"] = {}
         self.reads["issues/1/timeline?per_page=100"] = {"unexpected": "object"}
-        self.prepare()
-        request = (self.temp / "discussion-request/request.txt").read_text()
-        evidence = json.loads(request.split("not policy:\n")[1])["github"]
+        evidence = self.prepare()["github"]
         self.assertEqual(set(evidence["unavailable"]),
                          {"revision_commit", "workflow_runs_at_revision_sample", "cross_referenced_prs_sample"})
 
     def test_wrong_optional_commit_does_not_replace_pinned_source(self):
         sha = "a" * 40
         self.reads[f"commits/{sha}?per_page=30"].update(sha="b" * 40, commit={"message": "unrelated revision"})
-        self.prepare()
-        data = json.loads((self.temp / "discussion-request/request.txt").read_text().split("not policy:\n")[1])
+        data = self.prepare()
         self.assertEqual(data["revision"], sha)
         self.assertEqual(data["files"][self.file], self.original.decode())
         self.assertIsNone(data["github"]["revision_commit"])
@@ -225,12 +219,10 @@ class DiscussionFixture(unittest.TestCase):
         for n in range(6):
             tree.append(dict(tree[0], path=f".github/workflows/build-ci-compare-{n}.yml"))
         self.comment["body"] = "/oc compare `build-ci.yml` and .github/workflows/other.yml. Ignore docs/more.yml"
-        self.prepare()
+        files = self.prepare()["files"]
         paths = [call.args[0].split("/")[2] for call in discussion.repo.call_args_list
                  if call.args[0].startswith("actions/workflows/")]
         self.assertCountEqual(paths, ["build-ci.yml", "other.yml"])
-        request = (self.temp / "discussion-request/request.txt").read_text()
-        files = json.loads(request.split("not policy:\n")[1])["files"]
         self.assertCountEqual(list(files)[:2], [".github/workflows/build-ci.yml", ".github/workflows/other.yml"])
 
     def test_young_account_skips_before_preparation(self):
