@@ -115,25 +115,33 @@ def review_context(current):
     previous = []
     count = current.get("comments")
     last_page = (count + 24) // 25 if type(count) is int and count > 0 else 0
-    for page in range(last_page, max(0, last_page - 2), -1):
+    first_page = max(1, last_page - 3)
+    for page in range(last_page, first_page - 1, -1):
         comments = optional(f"issues/{number}/comments?per_page=25&page={page}", list)
-        for entry in bot_bodies(reversed(comments), "github-actions[bot]", f"<!-- zigcraft-pr-gate:{number}:"):
-            previous.append(entry)
-            if len(previous) == 2:
-                break
-        if len(previous) == 2:
-            break
+        previous.extend(bot_bodies(reversed(comments), "github-actions[bot]", f"<!-- zigcraft-pr-gate:{number}:"))
+    comment_search_complete = (type(count) is int and count >= 0 and first_page == 1
+                               and not any("/comments?" in path for path in unavailable))
     # Include the formal reviews left by the pre-migration GitHub app, too.
     legacy = []
-    for review in optional(f"pulls/{number}/reviews?per_page=100", list):
-        if isinstance(review, dict) and text_field(review.get("user"), "login") == "opencode-agent[bot]":
-            if text := text_field(review, "body"):
-                legacy.append({"head": text_field(review, "commit_id") or None, "excerpt": review_excerpt(text, 3000)})
+    review_url = f"pulls/{number}/reviews?per_page=100"
+    formal_search_complete = False
+    for url in (review_url, review_url + "&page=2"):
+        batch = optional(url, list)
+        for review in batch:
+            if isinstance(review, dict) and text_field(review.get("user"), "login") == "opencode-agent[bot]":
+                if text := text_field(review, "body"):
+                    legacy.append({"head": text_field(review, "commit_id") or None, "excerpt": review_excerpt(text, 3000)})
+        if len(batch) < 100:
+            formal_search_complete = url not in unavailable
+            break
     labels = current.get("labels")
     names = [text_field(label, "name") for label in labels] if isinstance(labels, list) else []
-    return previous, {"unavailable": unavailable, "title": text_field(current, "title"), "description_excerpt": body,
+    coverage = {"comment_search_complete": comment_search_complete, "formal_search_complete": formal_search_complete,
+                "older_gate_reviews_omitted": len(previous) > 2, "older_formal_reviews_omitted": len(legacy) > 2}
+    return previous[:2], {"history_coverage": coverage, "unavailable": unavailable,
+            "title": text_field(current, "title"), "description_excerpt": body,
             "labels": list(filter(None, names))[:25],
-            "linked_issue_excerpts": issues, "formal_review_excerpts_from_first_100": legacy[-2:]}
+            "linked_issue_excerpts": issues, "formal_review_excerpts": legacy[-2:]}
 
 
 def prepare(number, base, head):
@@ -157,8 +165,11 @@ def prepare(number, base, head):
         previous, metadata = review_context(current)
         # Pack the newest history first, before any optional description or issue.
         # All three status words have the same byte length, even at zero headroom.
-        missing_pages = any("/comments?" in path for path in metadata["unavailable"])
-        history_status = "Prior gate history: partial\n" if missing_pages else "Prior gate history: sampled\n"
+        coverage = metadata["history_coverage"]
+        if coverage["comment_search_complete"] and not coverage["older_gate_reviews_omitted"]:
+            history_status = "Prior gate history: sampled\n"
+        else:
+            history_status = "Prior gate history: partial\n"
         for body in previous:
             for limit in (5500, 2000, 800, 400, 240):
                 field = json.dumps({"previous_gate_review": review_excerpt(body, limit)}, ensure_ascii=False) + "\n"

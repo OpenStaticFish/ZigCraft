@@ -75,9 +75,10 @@ Keep locations concise (maximum 384 UTF-8 bytes after HTML escaping).
   `description`, `impact`, `suggested_fix`. Use at most 12 per array; use empty arrays for no findings.
 - `fixed`: object with the same four severity keys, each an array of at most 12
   plain-text notes explaining how the current code resolves a previously reported
-  finding. Reference the relevant code. Where evidence is insufficient, say so
-  rather than claiming a fix. These notes explain your assessment. The required
-  gate evaluates the unresolved findings and verdict for the current SHA.
+  finding. Reference the relevant code. Never put uncertainty in `fixed`.
+  If the supplied evidence leaves a specific, relevant previous blocker unresolved,
+  explain what evidence is missing in `verdict_reason` and withhold `MERGE`.
+  Missing history by itself is not evidence of a defect. Assess the current SHA.
 - `solid`: object keyed by `S`, `O`, `L`, `I`, `D`. Each value has integer
   `score` (0–10) and `notes` justifying it for Single Responsibility, Open/Closed,
   Liskov Substitution, Interface Segregation and Dependency Inversion respectively.

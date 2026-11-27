@@ -133,6 +133,47 @@ class MergeGate(unittest.TestCase):
         self.assertFalse((self.root / "pr-input").exists())
         self.assertEqual(self.states, [("ai-merge-gate", "pending"), ("ai-merge-gate", "failure"), ("ai-review", "failure")])
 
+    def test_inconclusive_current_review_withholds_merge_despite_stale_passing_comment(self):
+        old_base = "c" * 40
+        _, old_report = gate.verdict(json.dumps({**self.decision, "reviewed_base": old_base}), old_base, self.head, self.number)
+        previous = gate.review_header(self.number, old_base, self.head) + old_report
+        self.comments.append({"user": {"login": "github-actions[bot]"}, "body": previous})
+        self.decision.update(recommendation="DO NOT MERGE",
+                             verdict_reason="The prior cleanup concern is relevant, but the error path is not supplied.")
+        self.response.write_text(json.dumps(self.decision))
+        gate.publish(*self.target)
+        self.assertEqual(self.states[-1], ("ai-merge-gate", "failure"))
+        self.assertEqual(self.comments[0]["body"], previous)
+        self.assertTrue(self.comments[1]["body"].startswith(gate.review_header(*self.target)))
+        self.assertIn(self.decision["verdict_reason"], self.comments[1]["body"])
+
+    def test_review_search_finds_later_pages_and_reports_caps(self):
+        gate_entry = {"user": {"login": "github-actions[bot]"}, "body": gate.review_header(*self.target) + "Prior blocker"}
+        formal_entry = {"user": {"login": "opencode-agent[bot]"}, "body": "Formal blocker"}
+        for comment_count, formal_count, complete in [(75, 101, True), (125, 200, False)]:
+            self.pr["comments"] = comment_count
+            # The gate comment is on the third page back; the formal review is record 101.
+            gate_page = (comment_count + 24) // 25 - 2
+
+            def pages(path, **kwargs):
+                if path.startswith("issues/3/comments?"):
+                    batch = [{}] * 25
+                    if path.endswith(f"page={gate_page}"):
+                        batch[-1] = gate_entry
+                    return batch
+                if path.startswith("pulls/3/reviews?"):
+                    if path.endswith("&page=2"):
+                        return [formal_entry] + [{}] * (formal_count - 101)
+                    return [{}] * 100
+                return self.github(path, **kwargs)
+
+            with self.subTest(complete=complete), patch.object(gate.pr, "api", side_effect=pages):
+                previous, context = gate.review_context(self.pr)
+                self.assertEqual(previous, [gate_entry["body"]])
+                self.assertEqual(context["formal_review_excerpts"][0]["excerpt"], formal_entry["body"])
+                self.assertEqual(context["history_coverage"]["comment_search_complete"], complete)
+                self.assertEqual(context["history_coverage"]["formal_search_complete"], complete)
+
     def test_history_keeps_blocker_after_long_summary_and_fixed_notes(self):
         self.decision["summary"] = "&" * 1000
         self.decision["fixed"]["critical"] = ["`" * 500]
@@ -207,6 +248,22 @@ class MergeGate(unittest.TestCase):
             _, report = gate.verdict(json.dumps({**self.decision, "reviewed_base": base}), base, self.head, self.number)
             machine = json.loads(report.split("```json\n")[1].split("\n```")[0])
             self.assertEqual((machine["reviewed_sha"], machine["reviewed_base"]), (self.head, base))
+
+    def test_documented_diff_budget_and_previous_verdict_only_boundary(self):
+        header = "diff --git a/t b/t\n--- a/t\n+++ b/t\n@@ -0,0 +1 @@\n+"
+        for kib in (89, 94):
+            diff = header + "x" * (kib * 1024 - len(header) - 1) + "\n"
+            with tempfile.TemporaryDirectory() as runner, patch.dict(os.environ, RUNNER_TEMP=runner), \
+                    patch.object(gate.pr, "api", side_effect=lambda path, **kw: diff if kw.get("diff") else self.github(path, **kw)):
+                request = Path(runner) / "pr-input/request.txt"
+                if kib == 89:
+                    gate.prepare(*self.target)
+                    self.assertTrue(request.read_text().endswith(diff))
+                else:
+                    # 94 KiB left 2 KiB for the former 1,088-byte prompt and revision headers.
+                    with self.assertRaisesRegex(gate.pr.PilotError, "complete diff exceed"):
+                        gate.prepare(*self.target)
+                    self.assertFalse(request.exists())
 
     def test_full_diff_with_no_context_room_marks_history_omitted(self):
         self.pr["comments"] = 1
