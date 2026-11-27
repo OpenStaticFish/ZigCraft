@@ -50,8 +50,8 @@ jobs:
           fetch-depth: 0 # Merge-base and head trees; never check out the PR head.
           persist-credentials: false
           sparse-checkout: |
+            scripts/opencode_blob.py
             scripts/opencode_deadline.py
-            scripts/opencode_prose.py
             scripts/opencode_v2_pr.py
             scripts/opencode_pr_gate.py
             .github/prompts/pr-review.md
@@ -103,7 +103,6 @@ jobs:
           persist-credentials: false
           sparse-checkout: |
             scripts/opencode_deadline.py
-            scripts/opencode_prose.py
             scripts/opencode_v2_pr.py
             scripts/opencode_pr_gate.py
           sparse-checkout-cone-mode: false

@@ -5,8 +5,10 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
+import tempfile
 from http.client import HTTPException
 
 # -I excludes the working directory. Only import from the pinned checkout.
@@ -31,7 +33,7 @@ critical,high,medium,low: ≤12 each of {location,title,confidence,description,i
 fixed: severity keys, max 12 verified fix notes each. Recheck prior findings.
 solid: S,O,L,I,D each {score:integer 0-10,notes:text}.
 confidence_breakdown: code_quality,completeness,risk_level,test_coverage integers 0-100.
-no_security_concerns:boolean; test_status:unverified.
+security_clear:boolean; test_status:unverified.
 overall_confidence_score:integer 0-100; recommendation:MERGE|MERGE WITH FIXES|DO NOT MERGE. MERGE only if score>=80, no critical/high/medium and evidence sufficient.
 Nonempty single-line plain text <=1000 chars; locations <=384 UTF-8 bytes after HTML escaping."""
 
@@ -139,11 +141,10 @@ def review_context(current):
     repo = re.escape(pr.REPO)
     refs = re.findall(r"\b(?:close[sd]?|fix(?:es|ed)?|resolve[sd]?)\s+"
                       rf"(?:(?:{repo})?#|https://github\.com/{repo}/issues/)([1-9][0-9]{{0,9}})\b", visible, re.I)
-    issues = []
+    issues = {}
     for ref in list(dict.fromkeys(refs))[:4]:
         issue = optional(f"issues/{ref}", dict)
-        if text_field(issue, "title"):
-            issues.append({"number": ref, "title": issue["title"], "body_excerpt": text_field(issue, "body")[:2000]})
+        issues[ref] = (text_field(issue, "title") + "\n" + text_field(issue, "body")[:2000]).strip()
     previous = []
     count = current.get("comments")
     last_page = (count + 24) // 25 if type(count) is int and count > 0 else 0
@@ -211,19 +212,23 @@ def pinned_diff(number, base, head):
     bases = subprocess.check_output([*git, "merge-base", "--all", base, head], text=True).splitlines()
     if len(bases) != 1:
         raise pr.PilotError("Ambiguous merge base")
-    # Ignore repository diff attributes; let Git inspect the blob bytes.
+    # Only the trusted review driver may transform a blob.
     empty_tree = subprocess.check_output([*git, "hash-object", "-t", "tree", "--stdin"], input=b"").decode().strip()
-    diff = [*git, f"--attr-source={empty_tree}", "diff", "--find-renames", "--no-ext-diff",
-            "--no-textconv", "--no-color", "--submodule=short"]
-    revisions = [bases[0], head, "--"]
-    paths = subprocess.check_output([*diff, "--name-only", "-z", *revisions])
-    with subprocess.Popen([*diff, *revisions], stdout=subprocess.PIPE) as proc:
-        data = proc.stdout.read(pr.INPUT_LIMIT + 1)
-        if len(data) > pr.INPUT_LIMIT:
-            proc.kill()
-            raise pr.PilotError("Complete diff exceeds input limit")
-        if proc.wait():
-            raise pr.PilotError("Cannot diff pinned Git trees")
+    driver = shlex.join([sys.executable, "-I", str(Path(__file__).with_name("opencode_blob.py"))])
+    with tempfile.NamedTemporaryFile() as attributes:
+        attributes.write(b"* diff=review\n")
+        attributes.flush()
+        diff = [*git, f"--attr-source={empty_tree}", "-c", f"core.attributesFile={attributes.name}",
+                "-c", f"diff.review.textconv={driver}", "diff", "--find-renames", "--no-ext-diff", "--submodule=short"]
+        revisions = [bases[0], head, "--"]
+        paths = subprocess.check_output([*diff, "--name-only", "-z", *revisions])
+        with subprocess.Popen([*diff, "--textconv", *revisions], stdout=subprocess.PIPE) as proc:
+            data = proc.stdout.read(pr.INPUT_LIMIT + 1)
+            if len(data) > pr.INPUT_LIMIT:
+                proc.kill()
+                raise pr.PilotError("Complete diff exceeds input limit")
+            if proc.wait():
+                raise pr.PilotError("Cannot diff pinned Git trees")
     return data.decode("utf-8"), paths.count(b"\0")
 
 
@@ -240,8 +245,11 @@ def collect(number, base, head):
 def smoke(number, base, head):
     try:
         collect(number, base, head)
+        result = "Verified the pinned patch and changed-file count."
     except StaleReview:
-        print("::notice::Stale or ineligible PR event; patch smoke skipped.")
+        result = "Skipped: stale or ineligible PR event."
+    with open(os.environ.get("GITHUB_STEP_SUMMARY", os.devnull), "a") as summary:
+        print(result, file=summary)
 
 
 def prepare(number, base, head):
@@ -249,10 +257,10 @@ def prepare(number, base, head):
     prompt = PROMPT.read_text(encoding="utf-8").replace("$PR_NUMBER", number).replace("$HEAD_SHA", head)
     prefix = (f"{prompt}\nBase SHA: {base}\nHead SHA: {head}\n\nOptional untrusted context (missing fields are unknown). "
               "Inline review comments are not included.\n")
-    gate_status = formal_status = "omitted"
-    status_line = "Prior gate history: {}\nFormal review history: {}\n"
+    gate_status = formal_status = issue_status = "omitted"
+    status_line = "Prior gate: {}\nFormal bodies: {}\nIssues: {}\n"
     suffix = f"\nUntrusted diff:\n{diff}"
-    framing = len(status_line.format(gate_status, formal_status)) + len(suffix.encode())
+    framing = len(status_line.format(gate_status, formal_status, issue_status)) + len(suffix.encode())
     remaining = pr.INPUT_LIMIT - len(prefix.encode()) - framing
     if remaining < 0:
         prefix = f"{COMPACT_PROMPT}\nBase SHA: {base}\nHead SHA: {head}\nUntrusted context; no inline comments:\n"
@@ -264,20 +272,31 @@ def prepare(number, base, head):
         previous, metadata = review_context(current)
         # All history status labels have the same byte length.
         coverage = metadata["history_coverage"]
-        context, remaining, gate_status = pack_history(
+        issue_status = "partial" if coverage["linked_issues_partial"] else "sampled"
+        issues = metadata.pop("linked_issue_excerpts")
+        if issues:
+            fields = [("Closing refs (missing excerpts unknown)", list(issues)), *issues.items()]
+            for key, value in fields:
+                field = json.dumps({key: value or "unavailable"}, ensure_ascii=False) + "\n"
+                if len(field.encode()) <= remaining:
+                    context.append(field)
+                    remaining -= len(field.encode())
+                else:
+                    issue_status = "partial"
+        prior, remaining, gate_status = pack_history(
             [{"body": body} for body in previous], "previous_gate_review", remaining,
             coverage["comment_search_complete"] and not coverage["older_gate_reviews_omitted"])
         formal, remaining, formal_status = pack_history(
             metadata.pop("formal_review_excerpts"), "previous_formal_review", remaining,
             coverage["formal_body_search_complete"] and not coverage["older_formal_reviews_omitted"])
-        context.extend(formal)
+        context.extend(prior + formal)
         for key, value in metadata.items():
             field = json.dumps({key: value}, ensure_ascii=False) + "\n"
             size = len(field.encode())
             if size <= remaining:
                 context.append(field)
                 remaining -= size
-    request = prefix + status_line.format(gate_status, formal_status) + "".join(context) + suffix
+    request = prefix + status_line.format(gate_status, formal_status, issue_status) + "".join(context) + suffix
     if not pr.eligible(number, base, head):
         raise pr.PilotError("PR changed or request exceeds the gateway limit")
     directory = Path(os.environ["RUNNER_TEMP"]) / "pr-input"
@@ -351,7 +370,7 @@ def verdict(raw, base, head, number):
 
 def render_verdict(obj, base, head, number, prose):
     keys(obj, {"reviewed_base", "reviewed_sha", "overall_confidence_score", "recommendation", "verdict_reason",
-               "summary", "fixed", "solid", "confidence_breakdown", "no_security_concerns",
+               "summary", "fixed", "solid", "confidence_breakdown", "security_clear",
                "test_status", *SEVERITIES})
     if obj["reviewed_base"] != base or obj["reviewed_sha"] != head:
         raise pr.PilotError("Verdict does not match the reviewed revisions")
@@ -389,10 +408,10 @@ def render_verdict(obj, base, head, number, prose):
     keys(breakdown, ("code_quality", "completeness", "risk_level", "test_coverage"))
     lines.append("\n".join(f"- **{key.replace('_', ' ').title()}:** {integer(breakdown[key], 100)}%"
                            for key in ("code_quality", "completeness", "risk_level", "test_coverage")))
-    if type(obj["no_security_concerns"]) is not bool or obj["test_status"] != "unverified":
+    if type(obj["security_clear"]) is not bool or obj["test_status"] != "unverified":
         raise pr.PilotError("Invalid readiness flag")
     checks = [(not obj["critical"], "All critical issues resolved"), (average >= 6, "SOLID average score >= 6.0"),
-              (score >= 60, "Overall confidence >= 60%"), (obj["no_security_concerns"], "No security concerns"),
+              (score >= 60, "Overall confidence >= 60%"), (obj["security_clear"], "Security assessment clear (unchecked: not established)"),
               (False, "Tests present and passing (unverified; see CI)")]
     reason = prose(obj["verdict_reason"])
     if recommendation == "MERGE" and (any(obj[s] for s in ("critical", "high", "medium")) or score < 80):

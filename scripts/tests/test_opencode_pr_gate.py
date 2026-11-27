@@ -38,6 +38,8 @@ class PinnedTrees(unittest.TestCase):
             source.write_text("first\n" + middle + "second\n")
             link.unlink()
             link.symlink_to("file")
+            Path("opaque").write_bytes(b"a" * 9000 + b"\0")
+            git("add", "opaque")
             git("commit", "-qam", "head")
             source.write_text("first\n" + middle + "old\n")
             head = git("rev-parse", "HEAD").decode().strip()
@@ -47,7 +49,8 @@ class PinnedTrees(unittest.TestCase):
                     gate.pinned_diff("3", base, base)
                 diff, count = gate.pinned_diff("3", base, head)
                 self.assertIn(b"Binary files", git("diff", base, head, "--", "file"))
-                self.assertEqual((count, diff.count("diff --git ")), (2, 3))
+                self.assertEqual((count, diff.count("diff --git ")), (3, 4))
+                self.assertIn("+Binary blob SHA-256:", diff)
                 self.assertIn("+first\n", diff)
                 self.assertIn("+second\n", diff)
                 self.assertEqual(git("rev-parse", "HEAD").decode().strip(), base)
@@ -90,7 +93,7 @@ class MergeGate(unittest.TestCase):
             "summary": "Review summary", "verdict_reason": "Ready based on the supplied changes.",
             "solid": {k: {"score": 8, "notes": "Clear responsibility"} for k in gate.PRINCIPLES},
             "confidence_breakdown": dict(code_quality=85, completeness=80, risk_level=80, test_coverage=70),
-            "fixed": {k: [] for k in gate.SEVERITIES}, "no_security_concerns": True,
+            "fixed": {k: [] for k in gate.SEVERITIES}, "security_clear": False,
             "test_status": "unverified",
         }
         self.response = self.root / "pr-output/response.txt"
@@ -293,7 +296,7 @@ class MergeGate(unittest.TestCase):
         for refs in (" " * 6000 + "Fixes #55", " ".join(f"fixes #{i}" for i in range(55, 60))):
             with patch.object(gate.pr, "api", return_value=[]):
                 self.assertTrue(gate.review_context({**self.pr, "body": refs})[1]["history_coverage"]["linked_issues_partial"])
-        self.pr.update(body="界" * 6000, comments=1)
+        self.pr.update(body="Fixes #55\n" + "界" * 6000, comments=1)
         self.comments.append({"user": {"login": "github-actions[bot]"},
                               "body": gate.review_header(self.number, self.base, self.head) + "summary" * 900
                               + "\n**High (1)**\n<pre>• source.zig:10: stale handle used after free</pre>"})
@@ -304,12 +307,13 @@ class MergeGate(unittest.TestCase):
         self.assertTrue(text.endswith(diff))
         self.assertLessEqual(len(text.encode()), gate.pr.INPUT_LIMIT)
         self.assertNotIn(self.pr["body"], text)
+        self.assertIn("Requested behavior", text)
         self.assertIn("source.zig:10: stale handle used after free", text)
         self.assertIn("[Partial previous review: details truncated]", text)
 
     def test_compact_prompt_boundary(self):
         framing = f"\nBase SHA: {self.base}\nHead SHA: {self.head}\n\nUntrusted diff:\n"
-        omitted = "Prior gate history: omitted\nFormal review history: omitted\n"
+        omitted = "Prior gate: omitted\nFormal bodies: omitted\nIssues: omitted\n"
         overhead = gate.COMPACT_PROMPT + "Untrusted context; no inline comments:\n" + omitted
         self.assertLessEqual(len(overhead.encode()), 1088)  # Former verdict-only prompt.
         size = gate.pr.INPUT_LIMIT - len((overhead + framing).encode())

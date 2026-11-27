@@ -67,7 +67,7 @@ plain text (≤1000 characters; locations ≤384 UTF-8 bytes after HTML escaping
   Open/Closed, Liskov Substitution, Interface Segregation and Dependency Inversion respectively.
 - `confidence_breakdown`: object with integer percentages (0–100) for
   `code_quality`, `completeness`, `risk_level`, `test_coverage`.
-- `no_security_concerns`: boolean, true only when supported by the review.
+- `security_clear`: informational boolean. False means clearance was not established. Report concrete concerns as findings.
 - `test_status`: `unverified`. The publisher receives no independent test results.
 - `overall_confidence_score`: integer 0–100 for readiness to merge. 0–30 signals
   major concerns, 31–60 moderate concerns, 61–80 minor concerns, 81–100 high confidence.

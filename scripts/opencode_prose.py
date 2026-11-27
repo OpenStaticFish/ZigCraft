@@ -1,14 +1,7 @@
 """Render untrusted OpenCode prose in wrapping GitHub HTML blocks."""
 
-import html
 import re
-
-
-def escape_text(value):
-    # GitHub resolves mentions after decoding HTML entities; separate the
-    # name from the @ so rendering cannot notify a user or team.
-    escaped = html.escape(value, quote=False).replace("@", "@\u200b")
-    return re.sub(r"#(?=[0-9])", "#\u200b", escaped).replace("`", "&#96;")
+from opencode_v2_pr import escape_text
 
 
 def paragraphs(value):

@@ -1,5 +1,6 @@
 """Trusted PR pilot helper. Its only mutation is an advisory issue comment."""
 
+import html
 import json
 import os
 from pathlib import Path
@@ -8,10 +9,6 @@ import sys
 import unicodedata
 from urllib.parse import quote
 from urllib.request import build_opener, HTTPRedirectHandler, Request
-
-# Isolated (-I) CI invocations import only from the pinned checkout.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from opencode_prose import escape_text
 
 
 REPO = "OpenStaticFish/ZigCraft"
@@ -158,6 +155,12 @@ def plain_text(value):
     if any(unicodedata.category(c).startswith("C") or c in "\u2028\u2029" for c in value):
         raise PilotError("Invalid review text")
     return escape_text(value)
+
+
+def escape_text(value):
+    # Neutralize references after GitHub decodes the HTML entities.
+    escaped = html.escape(value, quote=False).replace("@", "@\u200b")
+    return re.sub(r"#(?=[0-9])", "#\u200b", escaped).replace("`", "&#96;")
 
 
 def findings_list(findings):
