@@ -38,6 +38,9 @@ class DiscussionFixture(unittest.TestCase):
             ]},
             "git/blobs/blob": {"encoding": "base64", "content": base64.b64encode(self.original).decode()},
             f"git/commits/{'a'*40}": {"tree": {"sha": "base-tree"}},
+            f"commits/{'a'*40}?per_page=30": {"sha": "a"*40, "commit": {"message": "fixture change"}, "files": []},
+            "issues/1/timeline?per_page=100": [],
+            f"actions/runs?head_sha={'a'*40}&per_page=30": {"workflow_runs": []},
         }
         self.writes = []
         self.enterContext(patch.object(discussion, "repo", side_effect=self.repo))
@@ -83,14 +86,49 @@ class DiscussionFixture(unittest.TestCase):
         self.response({"before": "x", "after": "y"})
         with self.assertRaises(ValueError):
             discussion.run("respond")
-        self.response({"comment": "Look at the source. @someone ```json\n{}\n```</pre>![remote](https://example.org)"})
+        self.response({"comment": "Look at the source.\n\n@someone ```json\n{}\n```</p><img src=x>![remote](https://example.org)"})
         discussion.run("respond")
         with self.assertRaises(discussion.Skip):
             discussion.run("respond")
         self.assertEqual([w[0] for w in self.writes], ["issues/1/comments"])
         body = self.writes[0][1]["body"]
-        for forbidden in ["```", "@someone", "</pre>!"]:
+        self.assertIn("<p>Look at the source.</p><p>", body)
+        self.assertIn("&#64;&#8203;someone", body)
+        for forbidden in ["```", "@someone", "<pre>", "<img"]:
             self.assertNotIn(forbidden, body)
+
+    def test_ci_question_includes_workflow_evidence_without_granting_edit_access(self):
+        sha = "a" * 40
+        workflow = ".github/workflows/opencode-v2-infer.yml"
+        self.issue.update(title="OpenCode CI migration", body=f"Move inference to {workflow}")
+        self.comment["body"] = "/oc is this solved?"
+        tree = self.reads[f"git/trees/{sha}?recursive=1"]["tree"]
+        for path in [workflow, ".github/actions/opencode-v2/action.yml", "scripts/opencode_discussion.py",
+                     ".github/actions/test/.env"]:
+            tree.append(dict(tree[0], path=path))
+        self.reads[f"commits/{sha}?per_page=30"]["files"] = [{"filename": workflow}]
+        self.reads["issues/1/timeline?per_page=100"] = [
+            {"event": "cross-referenced", "source": {"issue": {
+                "number": 22, "repository_url": discussion.API + discussion.ROOT, "title": "Migration",
+                "state": "closed", "pull_request": {"merged_at": "2026-11-01T00:00:00Z"},
+            }}}]
+        self.reads[f"actions/runs?head_sha={sha}&per_page=30"]["workflow_runs"] = [
+            {"id": 99, "head_sha": sha, "name": "Gateway smoke", "event": "workflow_dispatch",
+             "status": "completed", "conclusion": "success"}]
+        self.reads["actions/workflows/opencode-v2-infer.yml/runs?branch=dev&status=completed&per_page=3"] = {
+            "workflow_runs": [{"id": 44, "head_sha": "c"*40, "name": "Earlier run", "event": "workflow_dispatch",
+                               "status": "completed", "conclusion": "failure"}]}
+        self.prepare()
+        request = (self.temp / "discussion-request/request.txt").read_text()
+        data = json.loads(request.split("not policy:\n")[1])
+        self.assertEqual(next(iter(data["files"])), workflow)
+        self.assertNotIn(".github/actions/test/.env", data["files"])
+        self.assertEqual(data["github"]["revision_commit"]["changed_paths_first_30"], [workflow])
+        self.assertEqual(data["github"]["cross_referenced_prs_sample"][0]["number"], 22)
+        self.assertEqual(data["github"]["workflow_runs_at_revision_sample"][0]["conclusion"], "success")
+        self.assertEqual(data["github"]["recent_completed_dev_runs_at_other_revisions"][0]["revision"], "c"*40)
+        with self.assertRaises(discussion.Skip):
+            discussion.command(f"/oc edit {workflow} update this")
 
     def test_old_account_triage(self):
         os.environ["GITHUB_EVENT_NAME"] = "issues"
