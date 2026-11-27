@@ -1,6 +1,6 @@
 # OpenCode CI
 
-The workflows use the [original Markdown prompts](../.github/prompts) with the
+The GitHub Actions workflows use the [original Markdown prompts](../.github/prompts) with the
 pinned OpenCode CLI. The [CI provider config](../.github/opencode/provider.json)
 routes `zigcraft/gpt-6.2-sol` to the private OpenAI Responses endpoint with
 medium reasoning effort. It does not change developers' local providers.
