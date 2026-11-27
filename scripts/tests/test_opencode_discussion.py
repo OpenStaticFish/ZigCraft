@@ -140,7 +140,10 @@ class DiscussionFixture(unittest.TestCase):
 
     def test_old_account_triage(self):
         os.environ["GITHUB_EVENT_NAME"] = "issues"
-        self.prepare()
+        self.issue.update(title="Flickering terrain", body="Flickers while walking")
+        tree = self.reads[f"git/trees/{'a'*40}?recursive=1"]["tree"]
+        tree.append(dict(tree[0], path=".github/workflows/ci.yml"))
+        self.assertEqual(list(self.prepare()["files"]), [self.file])
         self.response({"skip": True})
         with self.assertRaises(discussion.Skip):
             discussion.run("respond")

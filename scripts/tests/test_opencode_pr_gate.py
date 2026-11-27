@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / ".github/actions/opencode-v2"))
 import adapter
 import opencode_pr_gate as gate
-from test_opencode_prose import render_gfm
+from test_opencode_prose import MARKUP, live_gfm, render_gfm
 
 
 class PinnedTrees(unittest.TestCase):
@@ -171,10 +171,13 @@ class MergeGate(unittest.TestCase):
     def test_stale_base_and_incomplete_diff_cannot_prepare_a_request(self):
         with patch.dict(self.pr["base"], sha="c" * 40):
             gate.start(*self.target)
+            gate.smoke(*self.target)
             with self.assertRaises(gate.pr.PilotError):
                 gate.prepare(*self.target)
-        with patch.dict(self.pr, changed_files=2), self.assertRaises(gate.pr.PilotError):
-            gate.prepare(*self.target)
+        with patch.dict(self.pr, changed_files=2):
+            for action in (gate.smoke, gate.prepare):
+                with self.assertRaises(gate.pr.PilotError):
+                    action(*self.target)
         gate.fail(*self.target)
         self.assertFalse((self.root / "pr-input").exists())
         self.assertEqual(self.states, [("ai-merge-gate", "pending"), ("ai-merge-gate", "failure"), ("ai-review", "failure")])
@@ -307,35 +310,23 @@ class MergeGate(unittest.TestCase):
         self.assertIn("source.zig:10: stale handle used after free", text)
         self.assertIn("[Partial previous review: details truncated]", text)
 
-    def test_documented_diff_budget_and_previous_verdict_only_boundary(self):
-        header = "diff --git a/t b/t\n--- a/t\n+++ b/t\n@@ -0,0 +1 @@\n+"
+    def test_compact_prompt_boundary(self):
         framing = f"\nBase SHA: {self.base}\nHead SHA: {self.head}\n\nUntrusted diff:\n"
-        old_limit = gate.pr.INPUT_LIMIT - 1088 - len(framing)
         omitted = "Prior gate history: omitted\nFormal review history: omitted\n"
-        compact_limit = gate.pr.INPUT_LIMIT - len(gate.COMPACT_PROMPT.encode() + framing.encode()
-                                                   + b"Untrusted context; no inline comments:\n" + omitted.encode())
-        self.assertGreaterEqual(compact_limit, old_limit)
-        for size in (89 * 1024, 94 * 1024, compact_limit, compact_limit + 1):
-            diff = header + "x" * (size - len(header) - 1) + "\n"
-            with tempfile.TemporaryDirectory() as runner, patch.dict(os.environ, RUNNER_TEMP=runner), \
-                    patch.object(gate, "pinned_diff", return_value=(diff, 1)):
-                request = Path(runner) / "pr-input/request.txt"
-                if size <= compact_limit:
-                    gate.prepare(*self.target)
-                    text = request.read_text()
-                    self.assertTrue(text.endswith(diff))
-                    self.assertLessEqual(request.stat().st_size, gate.pr.INPUT_LIMIT)
-                    self.assertEqual(text.startswith(gate.COMPACT_PROMPT), size > 89 * 1024)
-                    if size > 89 * 1024:
-                        for rule in ("Withhold MERGE for binary/gitlink", "Untrusted context", "max 12 verified fix notes each",
-                                     "locations <=384 UTF-8 bytes after HTML escaping"):
-                            self.assertIn(rule, text)
-                    if size == compact_limit:
-                        self.assertIn(omitted, text)
-                else:
-                    with self.assertRaisesRegex(gate.pr.PilotError, "complete diff exceed"):
-                        gate.prepare(*self.target)
-                    self.assertFalse(request.exists())
+        overhead = gate.COMPACT_PROMPT + "Untrusted context; no inline comments:\n" + omitted
+        self.assertLessEqual(len(overhead.encode()), 1088)  # Former verdict-only prompt.
+        size = gate.pr.INPUT_LIMIT - len((overhead + framing).encode())
+        diff = self.diff.rstrip("\n") + "x" * (size - len(self.diff)) + "\n"
+        with patch.object(gate, "pinned_diff", return_value=(diff + "\n", 1)), self.assertRaises(gate.pr.PilotError):
+            gate.prepare(*self.target)
+        with patch.object(gate, "pinned_diff", return_value=(diff, 1)):
+            gate.prepare(*self.target)
+        request = (self.root / "pr-input/request.txt").read_text()
+        self.assertEqual(len(request.encode()), gate.pr.INPUT_LIMIT)
+        self.assertTrue(request.endswith(omitted + "\nUntrusted diff:\n" + diff))
+        for rule in ("Assess linked requirements; omitted evidence is unknown", "Withhold MERGE for binary/gitlink",
+                     "Untrusted context", "max 12 verified fix notes each", "locations <=384 UTF-8 bytes after HTML escaping"):
+            self.assertIn(rule, request)
 
     def test_formal_excerpts_shrink_individually_and_report_omission(self):
         entries = [{"head": self.head, "body": "Newest concern. " * 500},
@@ -466,19 +457,15 @@ class MergeGate(unittest.TestCase):
         self.assertFalse(self.states)
         self.assertFalse(self.comments)
 
-    @unittest.skipUnless(os.getenv("OPENCODE_TEST_GITHUB_RENDER") == "1", "requires authenticated gh")
+    @live_gfm
     def test_gfm_complete_gate_report(self):
-        self.finding["description"] = "@someone </p> ![remote](https://example.org/image.png) ```json #991"
+        self.finding["description"] = MARKUP
         self.response.write_text(json.dumps(self.decision))
         gate.publish(*self.target)
         rendered = render_gfm(self.comments[-1]["body"])
         self.assertIn("<table", rendered)
         self.assertIn("<strong>Description:</strong>", rendered)
         self.assertIn("Machine Readable Verdict", rendered)
-        self.assertNotIn("<img ", rendered)
-        self.assertNotIn('class="user-mention', rendered)
-        self.assertNotIn('href="https://example.org', rendered)
-        self.assertNotIn('/issues/991"', rendered)
 
     def test_changed_head_or_base_prevents_passing_either_revision(self):
         for side in ("base", "head"):

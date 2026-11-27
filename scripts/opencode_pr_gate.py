@@ -22,6 +22,7 @@ PRINCIPLES = dict(S="Single Responsibility", O="Open/Closed", L="Liskov Substitu
                   I="Interface Segregation", D="Dependency Inversion")
 PROMPT = Path(__file__).resolve().parents[1] / ".github/prompts/pr-review.md"
 COMPACT_PROMPT = """Review diff. No tools. Withhold MERGE for binary/gitlink changes unexplained by source.
+Assess linked requirements; omitted evidence is unknown.
 Only JSON <=32768 UTF-8 bytes:
 reviewed_base,reviewed_sha: base,head.
 summary,verdict_reason: brief text.
@@ -193,18 +194,17 @@ def pack_history(entries, key, remaining, complete):
     return fields, remaining, status
 
 
-def fetch_refs(number, base, head):
+class StaleReview(pr.PilotError):
+    pass
+
+
+def pinned_diff(number, base, head):
     git = ["git", "-c", "credential.helper=!gh auth git-credential"]
     refs = ["refs/review/base", "refs/review/head"]
     subprocess.run([*git, "fetch", "--quiet", "--atomic", "--no-tags", "--no-recurse-submodules", "origin",
                     f"+refs/heads/dev:{refs[0]}", f"+refs/pull/{number}/head:{refs[1]}"], check=True)
     if subprocess.check_output([*git, "rev-parse", *refs], text=True).splitlines() != [base, head]:
-        raise pr.PilotError("PR refs moved before pinned diff")
-    return git
-
-
-def pinned_diff(number, base, head):
-    git = fetch_refs(number, base, head)
+        raise StaleReview("PR refs moved before pinned diff")
     bases = subprocess.check_output([*git, "merge-base", "--all", base, head], text=True).splitlines()
     if len(bases) != 1:
         raise pr.PilotError("Ambiguous merge base")
@@ -221,13 +221,25 @@ def pinned_diff(number, base, head):
     return data.decode("utf-8"), paths.count(b"\0")
 
 
-def prepare(number, base, head):
+def collect(number, base, head):
     current = pr.api(f"pulls/{number}")
     if not pr.matches_target(current, number, base, head):
-        raise pr.PilotError("PR changed before preparation")
+        raise StaleReview("PR changed or is ineligible")
     diff, count = pinned_diff(number, base, head)
     if not diff.startswith("diff --git ") or "\0" in diff or count != current["changed_files"]:
         raise pr.PilotError("Missing, incomplete or invalid PR diff")
+    return current, diff
+
+
+def smoke(number, base, head):
+    try:
+        collect(number, base, head)
+    except StaleReview:
+        print("::notice::Stale or ineligible PR event; patch smoke skipped.")
+
+
+def prepare(number, base, head):
+    current, diff = collect(number, base, head)
     prompt = PROMPT.read_text(encoding="utf-8").replace("$PR_NUMBER", number).replace("$HEAD_SHA", head)
     prefix = (f"{prompt}\nBase SHA: {base}\nHead SHA: {head}\n\nOptional untrusted context (missing fields are unknown). "
               "Inline review comments are not included.\n")
@@ -434,7 +446,7 @@ def fail(number, base, head):
 
 if __name__ == "__main__":
     try:
-        {"fetch": fetch_refs, "start": start, "prepare": prepare, "publish": publish, "fail": fail}[sys.argv[1]](*pr.target())
+        {"smoke": smoke, "start": start, "prepare": prepare, "publish": publish, "fail": fail}[sys.argv[1]](*pr.target())
     except Exception as error:
         # API errors, diffs, responses and parse errors may contain untrusted data.
         sys.exit(f"PR gate failed ({type(error).__name__}).")

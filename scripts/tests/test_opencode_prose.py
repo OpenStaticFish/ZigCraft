@@ -12,10 +12,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from opencode_prose import paragraphs
 
 
+MARKUP = "#991 @someone </p> </li> ![remote](https://example.org/img) ```"
+live_gfm = unittest.skipUnless(os.getenv("OPENCODE_TEST_GITHUB_RENDER") == "1", "requires authenticated gh")
+
+
 def render_gfm(body):
     payload = {"mode": "gfm", "context": "OpenStaticFish/ZigCraft", "text": body}
-    return subprocess.check_output(["gh", "api", "markdown", "--method", "POST", "--input", "-"],
-                                   input=json.dumps(payload), text=True)
+    rendered = subprocess.check_output(["gh", "api", "markdown", "--input", "-"], input=json.dumps(payload), text=True)
+    for unsafe in ('<img ', 'class="user-mention', 'href="https://example.org', '/issues/991"'):
+        if unsafe in rendered:
+            raise AssertionError(unsafe)
+    return rendered
 
 
 class RenderingTest(unittest.TestCase):
@@ -42,7 +49,7 @@ class RenderingTest(unittest.TestCase):
                     self.assertNotIn("sparse-checkout:", workflow)
                 subprocess.run(["python3", path, *args], env=env, cwd=root, capture_output=True, check=True)
 
-    @unittest.skipUnless(os.getenv("OPENCODE_TEST_GITHUB_RENDER") == "1", "requires authenticated gh")
+    @live_gfm
     def test_gfm_wrapping_prose_with_inert_model_markup(self):
         text = "See #991 or OpenStaticFish/ZigCraft#991, @someone and https://example.org.\n\n"
         text += "    ```html\n<img src=x> ![image](https://example.org/image.png)\n```"

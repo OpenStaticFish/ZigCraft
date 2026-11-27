@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import opencode_v2_pr as pilot
-from test_opencode_prose import render_gfm
+from test_opencode_prose import MARKUP, live_gfm, render_gfm
 
 
 class PullRequestPilot(unittest.TestCase):
@@ -113,16 +113,14 @@ class PullRequestPilot(unittest.TestCase):
                 pilot.report(*self.target, advisory=True)
         self.assertFalse(self.comments)
 
-    @unittest.skipUnless(os.getenv("OPENCODE_TEST_GITHUB_RENDER") == "1", "requires authenticated gh")
+    @live_gfm
     def test_gfm_complete_advisory_review(self):
-        self.response.write_text(json.dumps({"findings": ["#991 @someone </li> ![remote](https://example.org/img) ```"],
-                                             "limitations": "Diff only."}))
+        self.response.write_text(json.dumps({"findings": [MARKUP], "limitations": "Diff only."}))
         pilot.report(*self.target, advisory=True)
         rendered = render_gfm(self.comments[-1]["body"])
         self.assertIn("<li>", rendered)
         self.assertIn("<strong>Limitations</strong>", rendered)
-        for markup in ('<pre', '<img ', 'class="user-mention', 'href="https://example.org', '/issues/991"'):
-            self.assertNotIn(markup, rendered)
+        self.assertNotIn("<pre", rendered)
 
     def test_advisory_cutover_does_not_duplicate_existing_gateway_gate_review(self):
         number, base, head = self.target

@@ -238,20 +238,12 @@ def github_evidence(target, workflows):
 
     def lookup(field, path, parse):
         try:
-            payload = fetch(repo, path, optional=True)
-        except (ValueError, OSError, HTTPException):
-            payload = None
-        if payload is not None:
-            try:
-                return parse(payload)
-            except (KeyError, TypeError, AttributeError, ValueError):
-                pass  # Incomplete metadata must not prevent a source-based answer.
-        unavailable.append(field)
-        return None
+            return parse(fetch(repo, path, optional=True))
+        except (ValueError, OSError, HTTPException, KeyError, TypeError, AttributeError):
+            unavailable.append(field)
+            return None
 
     def revision_summary(commit):
-        if not isinstance(commit["sha"], str):
-            raise TypeError("invalid commit SHA")
         if commit["sha"] != sha:
             raise ValueError("unexpected commit revision")
         return {"sha": sha, "subject": excerpt(commit["commit"]["message"].partition("\n")[0], 512),
@@ -313,7 +305,7 @@ def request_text(target):
                       'A missing item in these bounded samples means unknown, not failed or never run. '
                       'Cite relevant PR numbers and workflow run IDs. Return only JSON: '
                       '{"comment":"answer"}. No tools. Do not claim you ran tests or changed files.')
-        files = files_at(target["head"], for_discussion=True)
+        files = files_at(target["head"], for_discussion=mode == "respond")
         query = f"{data['instruction']} {data['title']} {data['issue']}".lower()
         terms = set(re.findall(r"[a-z0-9]{3,}", query))
         title_terms = set(re.findall(r"[a-z0-9]{3,}", (data["title"] + " " + data["instruction"]).lower()))
