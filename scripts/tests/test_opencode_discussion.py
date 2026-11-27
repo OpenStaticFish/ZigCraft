@@ -115,24 +115,21 @@ class DiscussionFixture(unittest.TestCase):
                 "number": 22, "repository_url": discussion.API + discussion.ROOT, "title": "Migration",
                 "state": "closed", "pull_request": {"merged_at": "2026-11-01T00:00:00Z"},
             }}}, {"event": "cross-referenced", "source": {}}, None]
-        self.reads[f"actions/runs?head_sha={sha}&per_page=30"]["workflow_runs"] = [
-            {"id": 99, "workflow_id": 123, "path": workflow, "head_sha": sha, "name": "Smoke", "event": "workflow_dispatch",
-             "status": "completed", "conclusion": "success"}]
-        self.reads["actions/workflows/opencode-v2-infer.yml/runs?branch=dev&status=completed&per_page=3"] = {
-            "workflow_runs": [{"id": 44, "workflow_id": 123, "path": workflow, "head_sha": "c"*40, "name": "Smoke", "event": "workflow_dispatch",
-                               "status": "completed", "conclusion": "failure"}]}
+        run = dict(id=99, workflow_id=123, path=workflow, head_sha=sha, name="Smoke", event="workflow_dispatch",
+                   status="completed", conclusion="success")
+        self.reads[f"actions/runs?head_sha={sha}&per_page=30"] = {"workflow_runs": [run]}
+        for path, wid, outcome in [(workflow, 123, "failure"), (other, 124, "success")]:
+            url = f"actions/workflows/{Path(path).name}/runs?branch=dev&status=completed&per_page=3"
+            self.reads[url] = {"workflow_runs": [dict(run, id=wid, workflow_id=wid, path=path, head_sha="c"*40, conclusion=outcome)]}
         data = self.prepare()
+        evidence = data["github"]
         self.assertEqual(next(iter(data["files"])), workflow)
         self.assertNotIn(".github/actions/test/.env", data["files"])
-        self.assertEqual(data["github"]["revision_commit"]["changed_paths_first_30"], [workflow])
-        self.assertEqual(data["github"]["cross_referenced_prs_sample"][0]["number"], 22)
-        self.assertTrue(data["github"]["cross_referenced_prs_partial"])
-        self.assertEqual(data["github"]["workflow_runs_at_revision_sample"][0]["conclusion"], "success")
-        self.assertEqual(data["github"]["recent_completed_dev_runs_at_other_revisions"][0]["revision"], "c"*40)
-        self.assertEqual(data["github"]["workflow_runs_at_revision_sample"][0]["workflow_id"], 123)
-        self.reads["actions/workflows/opencode-copy.yml/runs?branch=dev&status=completed&per_page=3"] = {
-            "workflow_runs": [{"id": 45, "workflow_id": 124, "path": other, "head_sha": "c"*40, "name": "Smoke",
-                               "event": "workflow_dispatch", "status": "completed", "conclusion": "success"}]}
+        self.assertEqual(evidence["revision_commit"]["changed_paths_first_30"], [workflow])
+        self.assertEqual(evidence["cross_referenced_prs_sample"][0]["number"], 22)
+        self.assertTrue(evidence["cross_referenced_prs_partial"])
+        self.assertEqual(evidence["workflow_runs_at_revision_sample"][0]["conclusion"], "success")
+        self.assertEqual(evidence["recent_completed_dev_runs_at_other_revisions"][0]["revision"], "c"*40)
         history = discussion.github_evidence({"head": sha, "number": 1}, [workflow, other])
         self.assertEqual([(r["workflow_id"], r["path"], r["queried_path"], r["conclusion"])
                           for r in history["recent_completed_dev_runs_at_other_revisions"]],
@@ -184,6 +181,10 @@ class DiscussionFixture(unittest.TestCase):
             self.prepare()
         paths = [call.args[0] for call in discussion.repo.call_args_list if call.kwargs.get("optional")]
         self.assertFalse(any(path.startswith(("actions/runs?", "issues/1/timeline?")) for path in paths))
+
+    def test_optional_evidence_packed_after_source(self):
+        with patch.object(discussion, "github_evidence", return_value={"large": "\\" * discussion.REQUEST_LIMIT, "small": 1}):
+            self.assertEqual(self.prepare()["github"], {"small": 1})
 
     def test_markup_expansion_stays_within_comment_limit(self):
         self.prepare()

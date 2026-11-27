@@ -26,13 +26,17 @@ class PinnedTrees(unittest.TestCase):
             source = Path("file")
             middle = "unchanged\n" * 20
             source.write_text("old\n" + middle + "old\n")
-            git("add", "file")
+            link = Path("link")
+            link.write_text("old\n")
+            git("add", "file", "link")
             git("commit", "-qm", "base")
             base = git("rev-parse", "HEAD").decode().strip()
             git("update-ref", "refs/pull/3/head", base)
             git("clone", "-q", "--no-local", ".", "trusted")
             git("switch", "-qc", "feature")
             source.write_text("first\n" + middle + "second\n")
+            link.unlink()
+            link.symlink_to("file")
             git("commit", "-qam", "head")
             source.write_text("first\n" + middle + "old\n")
             head = git("rev-parse", "HEAD").decode().strip()
@@ -40,8 +44,9 @@ class PinnedTrees(unittest.TestCase):
             with chdir("trusted"):
                 with self.assertRaisesRegex(gate.pr.PilotError, "refs moved"):
                     gate.pinned_diff("3", base, base)
-                diff = gate.pinned_diff("3", base, head)
-                self.assertEqual(diff.count("\n@@ "), 2)
+                diff, count = gate.pinned_diff("3", base, head)
+                self.assertEqual((count, diff.count("diff --git ")), (2, 3))
+                self.assertIn("+first\n", diff)
                 self.assertIn("+second\n", diff)
                 self.assertEqual(git("rev-parse", "HEAD").decode().strip(), base)
             # Both merge tips change the same file relative to either parent.
@@ -92,7 +97,7 @@ class MergeGate(unittest.TestCase):
         self.comments = []
         self.states = []
         self.permission = "write"
-        self.enterContext(patch.object(gate, "pinned_diff", return_value=self.diff))
+        self.enterContext(patch.object(gate, "pinned_diff", return_value=(self.diff, 1)))
         self.enterContext(patch.object(gate.pr, "api", side_effect=self.github))
 
     def github(self, path, *, diff=False, body=None, method=None, pagination=None):
@@ -196,21 +201,16 @@ class MergeGate(unittest.TestCase):
         formal_entry = {"user": {"login": "opencode-agent[bot]"}, "body": "Formal blocker"}
         for comment_count, formal_count, complete in [(75, 201, True), (125, 301, False)]:
             self.pr["comments"] = comment_count
-            # The gate comment is on the third page back. Page three holds
-            # the newest bot review even when later human reviews fill page four.
             gate_page = (comment_count + 24) // 25 - 2
 
             def pages(path, **kwargs):
                 if path.startswith("issues/3/comments?"):
-                    batch = [{}] * 25
-                    if path.endswith(f"page={gate_page}"):
-                        batch[-1] = gate_entry
-                    return batch
+                    return [gate_entry] if path.endswith(f"page={gate_page}") else [{}] * 25
                 if path.startswith("pulls/3/reviews?"):
                     if path.endswith("&page=2"):
-                        return [{**formal_entry, "body": "Older formal review"}] + [{}] * 99
+                        return [{**formal_entry, "body": "Older formal review"}]
                     if path.endswith("&page=3"):
-                        return [formal_entry] + [{}] * (min(formal_count, 300) - 201)
+                        return [formal_entry]
                     if path.endswith("&page=4"):
                         return [{}]
                     kwargs["pagination"]["last"] = (formal_count + 99) // 100
@@ -221,9 +221,10 @@ class MergeGate(unittest.TestCase):
                 previous, context = gate.review_context(self.pr)
                 self.assertEqual(previous, [gate_entry["body"]])
                 self.assertEqual(context["formal_review_excerpts"][0]["body"], formal_entry["body"])
-                self.assertEqual(context["history_coverage"]["comment_search_complete"], complete)
-                self.assertEqual(context["history_coverage"]["formal_body_search_complete"], complete)
-                self.assertFalse(context["history_coverage"]["inline_review_comments_included"])
+                coverage = context["history_coverage"]
+                self.assertEqual(coverage["comment_search_complete"], complete)
+                self.assertEqual(coverage["formal_body_search_complete"], complete)
+                self.assertFalse(coverage["inline_review_comments_included"])
 
     def test_history_keeps_blocker_after_long_summary_and_fixed_notes(self):
         self.decision["summary"] = "&" * 1000
@@ -289,12 +290,15 @@ class MergeGate(unittest.TestCase):
             self.assertIn(part, excerpt)
 
     def test_optional_context_cannot_displace_pinned_diff(self):
+        for refs in (" " * 6000 + "Fixes #55", " ".join(f"fixes #{i}" for i in range(55, 60))):
+            with patch.object(gate.pr, "api", return_value=[]):
+                self.assertTrue(gate.review_context({**self.pr, "body": refs})[1]["history_coverage"]["linked_issues_partial"])
         self.pr.update(body="界" * 6000, comments=1)
         self.comments.append({"user": {"login": "github-actions[bot]"},
                               "body": gate.review_header(self.number, self.base, self.head) + "summary" * 900
                               + "\n**High (1)**\n<pre>• source.zig:10: stale handle used after free</pre>"})
         diff = self.diff.rstrip("\n") + ("d" * (gate.pr.INPUT_LIMIT - len(gate.PROMPT.read_bytes()) - 1100)) + "\n"
-        with patch.object(gate, "pinned_diff", return_value=diff):
+        with patch.object(gate, "pinned_diff", return_value=(diff, 1)):
             gate.prepare(*self.target)
         text = (self.root / "pr-input/request.txt").read_text()
         self.assertTrue(text.endswith(diff))
@@ -309,7 +313,7 @@ class MergeGate(unittest.TestCase):
         for size in (89 * 1024, 94 * 1024, old_limit, gate.pr.INPUT_LIMIT):
             diff = header + "x" * (size - len(header) - 1) + "\n"
             with tempfile.TemporaryDirectory() as runner, patch.dict(os.environ, RUNNER_TEMP=runner), \
-                    patch.object(gate, "pinned_diff", return_value=diff):
+                    patch.object(gate, "pinned_diff", return_value=(diff, 1)):
                 request = Path(runner) / "pr-input/request.txt"
                 if size <= old_limit:
                     gate.prepare(*self.target)
@@ -317,6 +321,8 @@ class MergeGate(unittest.TestCase):
                     self.assertLessEqual(request.stat().st_size, gate.pr.INPUT_LIMIT)
                     self.assertEqual(request.read_text().startswith(gate.COMPACT_PROMPT), size > 89 * 1024)
                     if size > 89 * 1024:
+                        self.assertIn("Withhold MERGE for binary/gitlink", request.read_text())
+                        self.assertIn("Untrusted context", request.read_text())
                         self.assertIn("max 12 verified fix notes each", request.read_text())
                         self.assertIn("locations <=384 UTF-8 bytes after HTML escaping", request.read_text())
                 else:
@@ -386,7 +392,7 @@ class MergeGate(unittest.TestCase):
     def test_large_report_preserves_all_findings_and_verdict(self):
         item = {**self.finding, "impact": "`" * 1000, "description": "&" * 1000}
         locations = ["`" * 70 + f".zig:{line}" for line in range(1, 13)]
-        self.decision.update(low=[{**item, "location": location} for location in locations], test_status="failed")
+        self.decision.update(low=[{**item, "location": location} for location in locations], test_status="passed")
         raw = json.dumps(self.decision)
         self.assertLess(len(raw.encode()), gate.pr.OUTPUT_LIMIT)
         passed, report = gate.verdict(raw, self.base, self.head, self.number)
@@ -398,7 +404,7 @@ class MergeGate(unittest.TestCase):
         self.assertLessEqual(len(self.comments[0]["body"].encode()), 65536)
         for location in locations:
             self.assertIn(f"<code>{gate.pr.escape_text(location)}</code>", report)
-        self.assertIn("evidence: failed", report)
+        self.assertIn("- [ ] Tests present and passing (unverified", report)
         machine = json.loads(report.split("```json\n")[1].split("\n```")[0])
         self.assertEqual(machine["recommendation"], "MERGE")
 
