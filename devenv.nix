@@ -442,6 +442,7 @@ in
     # Activated automatically by .envrc via `use devenv --profile default`.
     default.module = { pkgs, ... }: {
       packages = [
+        pkgs.cmark
         pkgs.zls
         pkgs.mesa
         pkgs.weston
@@ -454,6 +455,7 @@ in
     # sanitize, workflow-validation, and opencode-* setup jobs.
     unit.module = { pkgs, ... }: {
       packages = [
+        pkgs.cmark
         pkgs.kcov
         pkgs.shellcheck
       ];

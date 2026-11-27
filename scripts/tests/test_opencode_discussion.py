@@ -121,7 +121,9 @@ class DiscussionFixture(unittest.TestCase):
             }}}, {"event": "cross-referenced", "source": {}}, None]
         run = dict(id=99, workflow_id=123, path=workflow, head_sha=sha, name="Smoke", event="workflow_dispatch",
                    status="completed", conclusion="success", head_repository={"full_name": discussion.REPO}, head_branch="dev")
-        self.reads[f"actions/runs?head_sha={sha}&per_page=30"] = {"workflow_runs": [run]}
+        self.reads[f"actions/runs?head_sha={sha}&per_page=30"] = {"workflow_runs": [
+            run, dict(run, id=100, head_repository={"full_name": "fork/ZigCraft"}),
+            dict(run, id=101, head_repository=None), dict(run, id=102, head_sha="d"*40)]}
         for path, wid, outcome in [(workflow, 123, "failure"), (other, 124, "success")]:
             url = f"actions/workflows/{Path(path).name}/runs?branch=dev&status=completed&per_page=3"
             upstream = dict(run, id=wid, workflow_id=wid, path=path, head_sha="c"*40, conclusion=outcome)
@@ -133,13 +135,17 @@ class DiscussionFixture(unittest.TestCase):
         queried = [c.args[0].split("/")[2] for c in discussion.repo.call_args_list if c.args[0].startswith("actions/workflows/")]
         self.assertCountEqual(queried, [Path(workflow).name, Path(other).name])
         self.assertNotIn(".github/actions/test/.env", data["files"])
-        self.assertEqual(evidence["revision_commit"]["changed_paths_first_30"], [workflow])
-        self.assertEqual(evidence["cross_referenced_prs_sample"][0]["number"], 22)
-        self.assertTrue(evidence["cross_referenced_prs_partial"])
-        self.assertEqual(evidence["workflow_runs_at_revision_sample"][0]["conclusion"], "success")
-        self.assertEqual(evidence["recent_completed_dev_runs_at_other_revisions"][0]["revision"], "c"*40)
+        self.assertEqual(evidence["revision_commit"]["data"]["changed_paths_first_30"], [workflow])
+        linked = evidence["cross_referenced_prs_sample"]
+        self.assertEqual(linked["data"][0]["number"], 22)
+        self.assertEqual(linked["status"], "partial")
+        origins = evidence["workflow_runs_at_revision_sample"]["data"]
+        self.assertEqual({k: [r["id"] for r in rows] for k, rows in origins.items()},
+                         {"upstream": [99], "fork": [100], "unknown": [101]})
+        history = evidence["recent_completed_dev_runs_at_other_revisions"]["data"]
+        self.assertEqual(history[0]["revision"], "c"*40)
         self.assertCountEqual([(r["workflow_id"], r["path"], r["queried_path"], r["conclusion"])
-                               for r in evidence["recent_completed_dev_runs_at_other_revisions"]],
+                               for r in history],
                          [(123, workflow, workflow, "failure"), (124, other, other, "success")])
         with self.assertRaises(discussion.Skip):
             discussion.command(f"/oc edit {workflow} update this")
@@ -177,8 +183,9 @@ class DiscussionFixture(unittest.TestCase):
         for count, partial in [(1, False), (100, True)]:
             self.reads[url + "&page=2"] += [{"event": "commented"}] * (count - 1)
             data = discussion.github_evidence({"head": "a" * 40, "number": 1}, [])
-            self.assertEqual([row["number"] for row in data["cross_referenced_prs_sample"]], [21])
-            self.assertEqual(data["cross_referenced_prs_partial"], partial)
+            linked = data["cross_referenced_prs_sample"]
+            self.assertEqual([row["number"] for row in linked["data"]], [21])
+            self.assertEqual(linked["status"], "partial" if partial else "sampled")
 
     def test_unavailable_actions_metadata_does_not_block_source_answer(self):
         sha = "a" * 40
@@ -192,8 +199,8 @@ class DiscussionFixture(unittest.TestCase):
 
         discussion.repo.side_effect = unavailable
         evidence = self.prepare()["github"]
-        self.assertEqual(evidence["unavailable"], ["workflow_runs_at_revision_sample"])
-        self.assertEqual(evidence["revision_commit"]["subject"], "")
+        self.assertEqual(evidence["workflow_runs_at_revision_sample"], {"status": "unavailable"})
+        self.assertEqual(evidence["revision_commit"]["data"]["subject"], "")
 
     def test_expired_optional_budget_still_supplies_source(self):
         with patch("opencode_deadline.time.monotonic", side_effect=[0, 1, 16, 17]):
@@ -220,7 +227,7 @@ class DiscussionFixture(unittest.TestCase):
         with patch.object(discussion, "lookup_budget", side_effect=lambda _: lookup_budget(0.1)):
             data = self.prepare()
         self.assertEqual(interrupted, [f"commits/{data['revision']}?per_page=30"])
-        self.assertIn("revision_commit", data["github"]["unavailable"])
+        self.assertEqual(data["github"]["revision_commit"], {"status": "unavailable"})
         self.assertEqual(data["files"][self.file], self.original.decode())
         self.assertEqual(signal.getsignal(signal.SIGALRM), handler)
         self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0, 0))
@@ -237,8 +244,27 @@ class DiscussionFixture(unittest.TestCase):
         self.assertNotIn("<pre", rendered)
 
     def test_optional_evidence_packed_after_source(self):
-        with patch.object(discussion, "github_evidence", return_value={"large": "\\" * discussion.REQUEST_LIMIT, "small": 1}):
-            self.assertEqual(self.prepare()["github"], {"small": 1})
+        issue = {"number": 23, "repository_url": discussion.API + discussion.ROOT, "title": "\\" * 256,
+                 "state": "open", "pull_request": {}}
+        self.reads["issues/1/timeline?per_page=100"] = [{"event": "cross-referenced", "source": {"issue": issue}}]
+        sha = "a" * 40
+        self.reads[f"actions/runs?head_sha={sha}&per_page=30"]["workflow_runs"] = [
+            dict(id=1, workflow_id=2, path=".github/workflows/test.yml", head_sha=sha, name="Test",
+                 event="push", status="completed", conclusion="success", head_repository={"full_name": discussion.REPO},
+                 head_branch="dev")]
+        data = self.prepare()
+        target = discussion.target_for_event()
+        prefix = (self.temp / "discussion-request/request.txt").read_text().split("not policy:\n")[0] + "not policy:\n"
+        def check_at_limit(expected):
+            text = prefix + json.dumps(expected, ensure_ascii=False)
+            with patch.object(discussion, "REQUEST_LIMIT", len(text.encode())):
+                self.assertEqual(discussion.request_text(target), text)
+
+        for key in ("cross_referenced_prs_sample", "workflow_runs_at_revision_sample"):
+            data["github"][key] = {"status": "omitted_budget"}
+        check_at_limit(data)
+        del data["github"]
+        check_at_limit(data)
 
     def test_markup_expansion_stays_within_comment_limit(self):
         self.prepare()
@@ -256,8 +282,7 @@ class DiscussionFixture(unittest.TestCase):
         data = self.prepare()
         self.assertEqual(data["revision"], sha)
         self.assertEqual(data["files"][self.file], self.original.decode())
-        self.assertIsNone(data["github"]["revision_commit"])
-        self.assertEqual(set(data["github"]["unavailable"]),
+        self.assertEqual({k for k, sample in data["github"].items() if sample["status"] == "unavailable"},
                          {"revision_commit", "workflow_runs_at_revision_sample", "cross_referenced_prs_sample"})
 
     def test_young_account_skips_before_preparation(self):

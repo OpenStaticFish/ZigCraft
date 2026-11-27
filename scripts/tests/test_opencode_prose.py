@@ -1,5 +1,6 @@
 """Opt-in GitHub GFM check; sends only a fixed, synthetic comment to /markdown."""
 
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from opencode_prose import paragraphs
+from opencode_v2_pr import findings_list
 from visual_inference import advisory
 
 
@@ -27,6 +29,22 @@ def render_gfm(body):
 
 
 class RenderingTest(unittest.TestCase):
+    def test_offline_markdown_wrappers(self):
+        paragraph = paragraphs("First.\n\n</p>\n```html\n<img src=x>\n```")
+        findings = findings_list(["</li> " + MARKUP, "Second finding"])
+        markdown = f"### Summary\n\n{paragraph}\n\n### Findings\n\n{findings}"
+        # Enable raw HTML as on GitHub; disabling it would mask broken escaping.
+        rendered = subprocess.check_output(["cmark", "--unsafe"], input=markdown, text=True)
+        tags = []
+
+        class Tags(HTMLParser):
+            def handle_starttag(self, tag, attrs):
+                tags.append(tag)
+
+        Tags().feed(rendered)
+        self.assertEqual(tags, ["h3", "p", "p", "br", "br", "br", "h3", "ul", "li", "li"])
+        self.assertIn("&lt;img src=x&gt;", rendered)
+
     @live_gfm
     def test_gfm_visual_issue(self):
         with tempfile.TemporaryDirectory() as tmp:

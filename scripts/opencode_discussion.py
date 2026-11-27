@@ -241,15 +241,16 @@ def linked_prs(timeline):
 
 def github_evidence(target, workflows):
     sha = target["head"]
-    unavailable = []
     fetch = lookup_budget(15)
 
-    def lookup(field, path, parse):
+    def lookup(path, parse):
         try:
             return parse(fetch(repo, path, optional=True))
         except (ValueError, OSError, HTTPException, KeyError, TypeError, AttributeError):
-            unavailable.append(field)
             return None
+
+    def sample(data, status="sampled"):
+        return {"status": "unavailable"} if data is None else {"status": status, "data": data}
 
     def revision_summary(commit):
         if commit["sha"] != sha:
@@ -257,15 +258,17 @@ def github_evidence(target, workflows):
         return {"sha": sha, "subject": excerpt(commit["commit"]["message"].partition("\n")[0], 512),
                 "changed_paths_first_30": [excerpt(f["filename"], 256) for f in records(commit["files"])[:30]]}
 
-    revision = lookup("revision_commit", f"commits/{sha}?per_page=30", revision_summary)
+    revision = lookup(f"commits/{sha}?per_page=30", revision_summary)
     timeline = f"issues/{target['number']}/timeline?per_page=100"
     linked = {}
     partial = False
+    timeline_available = False
     for url in (timeline, timeline + "&page=2"):
-        page = lookup("cross_referenced_prs_sample", url, linked_prs)
+        page = lookup(url, linked_prs)
         if page is None:
             partial = True
             break
+        timeline_available = True
         entries, incomplete, count = page
         linked.update((entry["number"], entry) for entry in entries)
         partial |= incomplete
@@ -273,21 +276,38 @@ def github_evidence(target, workflows):
             break
     else:
         partial = True  # The two-page budget may exclude later cross-references.
-    runs = lookup("workflow_runs_at_revision_sample", f"actions/runs?head_sha={sha}&per_page=30", run_summaries)
+    runs = lookup(f"actions/runs?head_sha={sha}&per_page=30", run_summaries)
+    by_origin = {"upstream": [], "fork": [], "unknown": []}
+    for run in runs or []:
+        if run["revision"] == sha:
+            origin = run["head_repository"]
+            group = "unknown"
+            if origin:
+                group = "upstream" if origin.casefold() == REPO.casefold() else "fork"
+            by_origin[group].append(run)
     previous_runs = []
-    for path in workflows[:4]:
+    unavailable_paths = []
+    queried_paths = workflows[:4]
+    for path in queried_paths:
         name = quote(Path(path).name, safe="")
-        history = lookup(path, f"actions/workflows/{name}/runs?branch=dev&status=completed&per_page=3", run_summaries)
+        history = lookup(f"actions/workflows/{name}/runs?branch=dev&status=completed&per_page=3", run_summaries)
+        if history is None:
+            unavailable_paths.append(path)
         previous_runs.extend({**run, "queried_path": path} for run in history or []
-                             if run["head_repository"] == REPO and run["head_branch"] == "dev"
+                             if (run["head_repository"] or "").casefold() == REPO.casefold() and run["head_branch"] == "dev"
                              and run["status"] == "completed" and run["revision"] != sha)
+    history_status = "partial" if unavailable_paths or len(workflows) > len(queried_paths) else "sampled"
+    if not queried_paths:
+        history_status = "not_requested"
+    elif unavailable_paths == queried_paths:
+        history_status = "unavailable"
     return {
-        "unavailable": unavailable,
-        "revision_commit": revision,
-        "cross_referenced_prs_sample": list(linked.values())[-8:],
-        "cross_referenced_prs_partial": partial or len(linked) > 8,
-        "workflow_runs_at_revision_sample": [r for r in runs or [] if r["revision"] == sha],
-        "recent_completed_dev_runs_at_other_revisions": previous_runs,
+        "revision_commit": sample(revision),
+        "cross_referenced_prs_sample": sample(list(linked.values())[-8:] if timeline_available else None,
+                                              "partial" if partial or len(linked) > 8 else "sampled"),
+        "workflow_runs_at_revision_sample": sample(by_origin if runs is not None else None),
+        "recent_completed_dev_runs_at_other_revisions": {
+            **sample(previous_runs, history_status), "unavailable_paths": unavailable_paths},
     }
 
 
@@ -313,6 +333,9 @@ def request_text(target):
                       'does not prove what was checked out. Without specific job or artifact evidence, report '
                       'only the observed run status, not verification of a test, checkout or acceptance criterion. '
                       'A missing item in these bounded samples means unknown, not failed or never run. '
+                      'Fork and unknown-origin runs are not upstream results, even at the same SHA. '
+                      'Upstream runs may be on another branch; check head_branch before attributing results to dev. '
+                      'If github is absent, all GitHub evidence was omitted for size. '
                       'Cite relevant PR numbers and workflow run IDs. Return only JSON: '
                       '{"comment":"answer"}. No tools. Do not claim you ran tests or changed files.')
         files = files_at(target["head"], mode)
@@ -345,14 +368,20 @@ def request_text(target):
     if len(text.encode()) > REQUEST_LIMIT:
         raise ValueError("prepared request exceeds budget")
     if mode == "respond":
-        evidence = data["github"] = {}
-        for key, value in github_evidence(target, named_workflows).items():
+        samples = github_evidence(target, named_workflows)
+        evidence = data["github"] = {key: {"status": "omitted_budget"} for key in samples}
+        manifest = serialize()
+        if len(manifest.encode()) > REQUEST_LIMIT:
+            return text
+        text = manifest
+        for key, value in samples.items():
+            omitted = evidence[key]
             evidence[key] = value
             candidate = serialize()
             if len(candidate.encode()) <= REQUEST_LIMIT:
                 text = candidate
             else:
-                del evidence[key]
+                evidence[key] = omitted
     return text
 
 
