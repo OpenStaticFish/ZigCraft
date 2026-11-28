@@ -74,7 +74,8 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Comment non-blocking coverage status
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
         uses: actions/github-script@v8
         with:
           script: |

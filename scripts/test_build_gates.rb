@@ -17,15 +17,15 @@ selectors = {
   "integration-test" => "graphics",
 }
 
-def run_gate(job, results, selected)
+def run_gate(job, results, outputs)
   raise "gate must run after failures and skips" unless job.fetch("if") == "always()"
   bindings = {}
   job.fetch("needs").each do |dependency|
     bindings["needs.#{dependency}.result"] = results.fetch(dependency)
     next unless dependency == "changes"
 
-    %w[fmt game shaders graphics].each do |flag|
-      bindings["needs.changes.outputs.#{flag}"] = selected.include?(flag).to_s
+    outputs.each do |flag, value|
+      bindings["needs.changes.outputs.#{flag}"] = value
     end
   end
   step = job.fetch("steps").fetch(0)
@@ -36,15 +36,21 @@ def run_gate(job, results, selected)
 end
 
 routes.each do |route, selected|
+  outputs = selectors.values.uniq.to_h { |flag| [flag, selected.include?(flag).to_s] }
   results = selectors.transform_values { |flag| selected.include?(flag) ? "success" : "skipped" }
   results.merge!("changes" => "success", "build" => "success")
   { "build" => %w[changes fmt compile],
     "unit-test" => %w[changes build unit-test-matrix shader-validation integration-test] }.each do |gate, inputs|
     job = jobs.fetch(gate)
-    abort "#{route}: #{gate} rejected expected results" unless run_gate(job, results, selected)
+    abort "#{route}: #{gate} rejected expected results" unless run_gate(job, results, outputs)
+    inputs.filter_map { |input| selectors[input] }.each do |flag|
+      if run_gate(job, results, outputs.merge(flag => ""))
+        abort "#{route}: #{gate} accepted missing #{flag} output"
+      end
+    end
     inputs.select { |input| results.fetch(input) == "success" }.each do |input|
       %w[failure cancelled skipped].each do |status|
-        if run_gate(job, results.merge(input => status), selected)
+        if run_gate(job, results.merge(input => status), outputs)
           abort "#{route}: #{gate} accepted #{status} from #{input}"
         end
       end
