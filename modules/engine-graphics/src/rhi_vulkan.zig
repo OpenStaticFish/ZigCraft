@@ -151,6 +151,7 @@ fn abortFrame(ctx_ptr: *anyopaque) void {
     ctx.resources.abortCurrentFrame();
     ctx.frames.abortFrame(&ctx.swapchain);
     ctx.depth_pyramid.recorded = false;
+    ctx.taa.discardFrame();
     if (ctx.screenshot_capture.staging != null) screenshot.discardCapture(ctx);
 
     ctx.runtime.draw_call_count = 0;
@@ -231,7 +232,7 @@ fn computeTAA(ctx_ptr: *anyopaque) void {
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
     if (!ctx.frames.frame_in_progress) return;
-    if (!ctx.taa.enabled) return;
+    if (!ctx.taa.enabled or ctx.taa.ran_this_frame) return;
     pass_orchestration.ensureNoRenderPassActiveInternal(ctx);
     if (!ctx.runtime.g_pass_depth_ready) {
         ctx.taa.history_valid = false;
@@ -269,7 +270,7 @@ fn upscaleDynamicResolution(ctx: *VulkanContext, command_buffer: c.VkCommandBuff
     src_barrier.dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
     src_barrier.image = taa_output_image;
     src_barrier.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
-    src_barrier.srcAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+    src_barrier.srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     src_barrier.dstAccessMask = c.VK_ACCESS_TRANSFER_READ_BIT;
 
     var dst_barrier = std.mem.zeroes(c.VkImageMemoryBarrier);
@@ -280,11 +281,12 @@ fn upscaleDynamicResolution(ctx: *VulkanContext, command_buffer: c.VkCommandBuff
     dst_barrier.dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
     dst_barrier.image = ctx.dynamic_resolution.upscale_image;
     dst_barrier.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
-    dst_barrier.srcAccessMask = 0;
+    dst_barrier.srcAccessMask = c.VK_ACCESS_SHADER_READ_BIT | c.VK_ACCESS_TRANSFER_WRITE_BIT;
     dst_barrier.dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
 
     const barriers = [_]c.VkImageMemoryBarrier{ src_barrier, dst_barrier };
-    c.vkCmdPipelineBarrier(command_buffer, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, barriers.len, &barriers[0]);
+    const producer_stages = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | c.VK_PIPELINE_STAGE_TRANSFER_BIT;
+    c.vkCmdPipelineBarrier(command_buffer, producer_stages, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, barriers.len, &barriers[0]);
 
     const native_extent = ctx.swapchain.getExtent();
 

@@ -660,22 +660,48 @@ test "smoke test: launch, generate, render, exit" {
         const quality = app.render_system.getRHI().options();
         const original_samples = vulkan.options.msaa_samples;
         const original_taa = vulkan.taa.enabled;
+        const original_bloom = vulkan.bloom.enabled;
         vulkan.taa.enabled = true;
-        for ([_]u8{ 1, 4 }) |samples| {
-            if (samples > vulkan.vulkan_device.max_msaa_samples) continue;
-            quality.setMSAA(samples);
-            for (0..2) |_| {
+        quality.setBloom(false);
+        const taa_modes = [_]struct { samples: u8, scale: f32 }{
+            .{ .samples = 1, .scale = 1 },
+            .{ .samples = 4, .scale = 1 },
+            .{ .samples = 1, .scale = 0.75 },
+        };
+        for (taa_modes) |mode| {
+            if (mode.samples > vulkan.vulkan_device.max_msaa_samples) continue;
+            quality.setMSAA(mode.samples);
+            quality.setDynamicResolution(mode.scale < 1, mode.scale, mode.scale, 60);
+            // Start at the requested scale, without waiting for the rolling timer.
+            vulkan.dynamic_resolution.current_scale = mode.scale;
+            for (0..4) |frame| {
                 if (!try render.beginFrame()) return error.TaaFrameSkipped;
                 errdefer render.abortFrame();
+                try testing.expectEqual(mode.scale < 1, vulkan.dynamic_resolution.isActive());
+                if (mode.scale < 1) try testing.expect(vulkan.dynamic_resolution.upscale_image != null);
+                const write_index = vulkan.taa.history_index;
+                const had_history = vulkan.taa.history_valid;
                 render.beginGPass();
                 render.endGPass();
                 render.beginMainPass();
                 render.endMainPass();
                 render.computeTAA();
                 try testing.expect(vulkan.taa.ran_this_frame);
+                try testing.expectEqual(write_index, vulkan.taa.history_index);
+                if (frame == 1) {
+                    render.abortFrame();
+                    try testing.expectEqual(write_index, vulkan.taa.history_index);
+                    try testing.expectEqual(had_history, vulkan.taa.history_valid);
+                    try testing.expect(!vulkan.taa.ran_this_frame);
+                    continue;
+                }
                 try render.endFrame();
+                try testing.expect(vulkan.taa.history_valid);
+                try testing.expect(write_index != vulkan.taa.history_index);
             }
         }
+        quality.setDynamicResolution(false, 0.5, 1, 60);
+        quality.setBloom(original_bloom);
         try testing.expect(try render.beginFrame());
         render.computeTAA();
         const history_valid_without_gpass = vulkan.taa.history_valid;
