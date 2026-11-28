@@ -6,13 +6,25 @@ on:
   push:
     branches: [dev]
   workflow_dispatch:
+    inputs:
+      ref:
+        description: Optional branch or ref to measure
+        type: string
+        default: ""
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: kcov-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.ref }}-${{ inputs.ref }}
   cancel-in-progress: true
 
 jobs:
+  coverage-changes:
+    uses: ./.github/workflows/ci-changes.yml
+    permissions:
+      contents: read
+
   kcov:
+    needs: coverage-changes
+    if: needs.coverage-changes.outputs.coverage == 'true'
     permissions:
       contents: read
       id-token: write
@@ -22,6 +34,8 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Setup devenv
         uses: ./.github/actions/setup-devenv
@@ -51,10 +65,13 @@ jobs:
           fi
 
       - name: Upload coverage artifact
+        id: report
         uses: actions/upload-artifact@v7
+        continue-on-error: true
         with:
           name: kcov-report
           path: coverage/kcov
+          if-no-files-found: error
           retention-days: 14
 
       - name: Upload to Codecov
@@ -68,7 +85,10 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Comment non-blocking coverage status
-        if: github.event_name == 'pull_request'
+        if: >-
+          github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
+          steps.report.outcome == 'success' && steps.report.outputs.artifact-id != ''
+        continue-on-error: true
         uses: actions/github-script@v8
         with:
           script: |

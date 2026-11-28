@@ -3,44 +3,8 @@ name: Build
 on:
   push:
     branches: [dev]
-    paths:
-      - "src/**"
-      - "modules/**"
-      - "libs/**"
-      - "assets/shaders/**"
-      - "scripts/**"
-      - "docs/benchmarks/**"
-      - "build.zig"
-      - "build.zig.zon"
-      - "devenv.nix"
-      - "devenv.yaml"
-      - "devenv.lock"
-      - ".github/actions/setup-devenv/**"
-      - ".github/actions/setup-zig-cache/**"
-      - ".github/actions/setup-lavapipe/**"
-      - ".github/vulkan/**"
-      - ".github/workflows/build.yml"
-      - ".github/workflows/benchmark.yml"
   pull_request:
     branches: [dev]
-    paths:
-      - "src/**"
-      - "modules/**"
-      - "libs/**"
-      - "assets/shaders/**"
-      - "scripts/**"
-      - "docs/benchmarks/**"
-      - "build.zig"
-      - "build.zig.zon"
-      - "devenv.nix"
-      - "devenv.yaml"
-      - "devenv.lock"
-      - ".github/actions/setup-devenv/**"
-      - ".github/actions/setup-zig-cache/**"
-      - ".github/actions/setup-lavapipe/**"
-      - ".github/vulkan/**"
-      - ".github/workflows/build.yml"
-      - ".github/workflows/benchmark.yml"
   workflow_dispatch:
     inputs:
       ref:
@@ -54,7 +18,8 @@ on:
         type: boolean
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.ref }}
+  # Pushes validate individual deltas; only PR runs supersede the full earlier diff.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.ref }}-${{ inputs.ref }}
   cancel-in-progress: true
 
 env:
@@ -64,48 +29,13 @@ env:
 
 jobs:
   changes:
+    uses: ./.github/workflows/ci-changes.yml
     permissions:
       contents: read
-      pull-requests: read
-    runs-on: ubuntu-latest
-    outputs:
-      code_changes: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code_changes }}
-      platform_changes: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.platform_changes }}
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        if: github.event_name != 'workflow_dispatch'
-
-      - name: Detect build-relevant changes
-        id: filter
-        if: github.event_name != 'workflow_dispatch'
-        uses: dorny/paths-filter@v4
-        with:
-          filters: |
-            code_changes:
-              - 'src/**'
-              - 'modules/**'
-              - 'libs/**'
-              - 'assets/shaders/**'
-              - 'scripts/**'
-              - 'docs/benchmarks/**'
-              - 'build.zig'
-              - 'build.zig.zon'
-              - 'devenv.nix'
-              - 'devenv.yaml'
-              - 'devenv.lock'
-              - '.github/actions/setup-devenv/**'
-              - '.github/actions/setup-zig-cache/**'
-              - '.github/actions/setup-lavapipe/**'
-              - '.github/vulkan/**'
-              - '.github/workflows/build.yml'
-              - '.github/workflows/benchmark.yml'
-            platform_changes:
-              - 'src/**'
-              - 'modules/**'
-              - 'build.zig'
-              - 'build.zig.zon'
 
   fmt:
+    needs: changes
+    if: needs.changes.outputs.fmt == 'true'
     permissions:
       contents: read
     runs-on: blacksmith-2vcpu-ubuntu-2404
@@ -121,46 +51,56 @@ jobs:
       - name: Check Zig formatting
         run: devenv shell --profile unit -- zig fmt --check src/ modules/
 
-  build:
+  compile:
+    needs: changes
+    if: needs.changes.outputs.game == 'true'
     permissions:
       contents: read
       id-token: write
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 30
-    needs: [changes, fmt]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ inputs.ref }}
 
-      - name: Skip build for workflow-only changes
-        if: needs.changes.outputs.code_changes != 'true'
-        run: |
-          echo "No build-relevant changes detected. Skipping binary build."
-
       - name: Setup devenv
-        if: needs.changes.outputs.code_changes == 'true'
         uses: ./.github/actions/setup-devenv
 
       - name: Build
-        if: needs.changes.outputs.code_changes == 'true'
         run: devenv shell --profile unit -- devenv tasks run zigcraft:build
 
       - name: Prepare Artifact
-        if: needs.changes.outputs.code_changes == 'true'
         run: |
           mkdir -p dist
           cp -L dist/bin/zigcraft dist/zigcraft-linux
 
       - name: Upload Artifact
-        if: needs.changes.outputs.code_changes == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: zigcraft
           path: dist/zigcraft-linux
           retention-days: 7
 
+  build:
+    needs: [changes, fmt, compile]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Verify selected build checks
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          FMT: ${{ needs.changes.outputs.fmt }}:${{ needs.fmt.result }}
+          COMPILE: ${{ needs.changes.outputs.game }}:${{ needs.compile.result }}
+        run: |
+          test "$CHANGES" = success
+          for check in "$FMT" "$COMPILE"; do
+            case "$check" in true:success|false:skipped) ;; *) echo "Unexpected build result $check"; exit 1 ;; esac
+          done
+
   unit-test-matrix:
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.changes.outputs.game == 'true' }}
     permissions:
       contents: read
       id-token: write
@@ -176,23 +116,15 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
-      - name: Skip unit tests for workflow-only changes
-        if: needs.changes.outputs.code_changes != 'true'
-        run: |
-          echo "No build-relevant changes detected. Skipping unit tests."
-
       - name: Setup devenv
-        if: needs.changes.outputs.code_changes == 'true'
         uses: ./.github/actions/setup-devenv
 
       - name: Setup Zig cache
-        if: needs.changes.outputs.code_changes == 'true'
         uses: ./.github/actions/setup-zig-cache
         with:
           cache-key-prefix: zig-ci-unit-${{ matrix.optimize }}
 
       - name: Run unit tests (${{ matrix.optimize }})
-        if: needs.changes.outputs.code_changes == 'true'
         uses: ./.github/actions/run-with-log
         with:
           name: Unit Test (${{ matrix.optimize }})
@@ -209,59 +141,71 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  unit-test:
+  shader-validation:
+    needs: changes
+    if: needs.changes.outputs.shaders == 'true'
     permissions:
       contents: read
     runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 5
-    needs: [unit-test-matrix]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: ./.github/actions/setup-devenv
+      - run: devenv shell --profile unit -- bash scripts/check_spirv_sizes.sh
+      - run: devenv shell --profile unit -- bash scripts/check_shadow_abi.sh
+
+  unit-test:
+    permissions: {}
+    runs-on: ubuntu-latest
+    needs: [changes, build, unit-test-matrix, shader-validation, integration-test]
     if: always()
     steps:
-      - name: Require unit test matrix success
+      - name: Verify selected test checks
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          BUILD: ${{ needs.build.result }}
+          MATRIX: ${{ needs.changes.outputs.game }}:${{ needs.unit-test-matrix.result }}
+          SHADERS: ${{ needs.changes.outputs.shaders }}:${{ needs.shader-validation.result }}
+          GRAPHICS: ${{ needs.changes.outputs.graphics }}:${{ needs.integration-test.result }}
         run: |
-          if [ "${{ needs.unit-test-matrix.result }}" != "success" ]; then
-            echo "Unit test matrix result: ${{ needs.unit-test-matrix.result }}" >&2
-            exit 1
-          fi
-          echo "Unit test matrix passed."
+          test "$CHANGES" = success
+          test "$BUILD" = success
+          for check in "$MATRIX" "$SHADERS" "$GRAPHICS"; do
+            case "$check" in true:success|false:skipped) ;; *) echo "Unexpected test result $check"; exit 1 ;; esac
+          done
 
   integration-test:
+    needs: [changes, build, unit-test-matrix]
+    if: >-
+      !cancelled() && needs.build.result == 'success' && needs.changes.outputs.graphics == 'true' &&
+      (needs.changes.outputs.game == 'false' || needs.unit-test-matrix.result == 'success')
     permissions:
       contents: read
       id-token: write
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 75
-    needs: [changes, unit-test]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ inputs.ref }}
 
-      - name: Skip integration tests for workflow-only changes
-        if: needs.changes.outputs.code_changes != 'true'
-        run: |
-          echo "No build-relevant changes detected. Skipping integration tests."
-
       - name: Setup devenv
-        if: needs.changes.outputs.code_changes == 'true'
         uses: ./.github/actions/setup-devenv
 
       - name: Setup Zig cache
-        if: needs.changes.outputs.code_changes == 'true'
         uses: ./.github/actions/setup-zig-cache
         with:
           cache-key-prefix: zig-ci-graphics
 
       - name: Start headless Wayland compositor
-        if: needs.changes.outputs.code_changes == 'true'
         uses: ./.github/actions/start-weston
 
       - name: Setup Lavapipe Vulkan validation
-        if: needs.changes.outputs.code_changes == 'true'
         uses: ./.github/actions/setup-lavapipe
 
       - name: Run integration smoke test
-        if: needs.changes.outputs.code_changes == 'true'
         uses: ./.github/actions/run-with-log
         with:
           name: Integration Test
@@ -270,7 +214,6 @@ jobs:
           command: devenv shell --profile graphics -- zig build test-integration -Dskip-present=true
 
       - name: Run world load smoke test (headless)
-        if: needs.changes.outputs.code_changes == 'true'
         uses: ./.github/actions/run-with-log
         with:
           name: World Smoke Test
@@ -284,7 +227,6 @@ jobs:
           ZIGCRAFT_SAFE_MODE: "1"
 
       - name: Fail on Vulkan validation log errors
-        if: needs.changes.outputs.code_changes == 'true'
         run: |
           set -euo pipefail
           if rg -n -e 'Vulkan validation error|Validation Error:|VUID-' integration-test.log world-smoke-test.log; then
@@ -294,7 +236,7 @@ jobs:
           echo "No Vulkan validation errors found in integration logs."
 
       - name: Stop headless Wayland compositor
-        if: always() && needs.changes.outputs.code_changes == 'true'
+        if: always()
         uses: ./.github/actions/stop-weston
 
       - name: Upload integration logs
@@ -322,7 +264,7 @@ jobs:
     permissions:
       contents: read
     needs: [changes]
-    if: github.event_name == 'workflow_dispatch' && inputs.enable_platform_builds == true && needs.changes.outputs.platform_changes == 'true'
+    if: github.event_name == 'workflow_dispatch' && inputs.enable_platform_builds
     strategy:
       fail-fast: false
       matrix:
