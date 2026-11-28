@@ -502,6 +502,7 @@ pub const VulkanSwapchain = struct {
 
     fn createFramebuffers(self: *VulkanSwapchain, msaa_samples: u8) !void {
         const use_msaa = msaa_samples > 1;
+        try self.framebuffers.ensureUnusedCapacity(self.allocator, self.image_views.items.len);
         for (self.image_views.items) |iv| {
             var fb: c.VkFramebuffer = null;
             var fb_info = std.mem.zeroes(c.VkFramebufferCreateInfo);
@@ -522,7 +523,7 @@ pub const VulkanSwapchain = struct {
                 fb_info.pAttachments = &attachments[0];
                 try checkVk(c.vkCreateFramebuffer(self.device.vk_device, &fb_info, null, &fb));
             }
-            try self.framebuffers.append(self.allocator, fb);
+            self.framebuffers.appendAssumeCapacity(fb);
         }
     }
 

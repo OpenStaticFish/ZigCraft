@@ -307,6 +307,12 @@ fn readUploadedByte(vulkan: *@import("engine-graphics").VulkanContext, handle: r
     return mapped.*;
 }
 
+fn createOffscreenSwapchain(allocator: std.mem.Allocator, device: *const @import("engine-graphics").VulkanDevice, window: *c.SDL_Window) !void {
+    var swapchain = try @import("engine-graphics").VulkanSwapchain.init(allocator, device, window, 1, c.VK_PRESENT_MODE_FIFO_KHR, true);
+    defer swapchain.deinit();
+    try testing.expectEqual(swapchain.image_views.items.len, swapchain.framebuffers.items.len);
+}
+
 test "smoke test: launch, generate, render, exit" {
     const test_allocator = testing.allocator;
 
@@ -328,6 +334,15 @@ test "smoke test: launch, generate, render, exit" {
     const graphics = @import("engine-graphics");
     const vulkan: *graphics.VulkanContext = @ptrCast(@alignCast(app.render_system.rhi.ptr));
     if (build_options.skip_present) {
+        var device = try graphics.VulkanDevice.init(test_allocator, app.window_manager.window);
+        {
+            defer device.deinit();
+            device.initDebugMessenger();
+            try testing.checkAllAllocationFailures(test_allocator, createOffscreenSwapchain, .{ &device, app.window_manager.window });
+        }
+        // The validation layer reports orphaned framebuffers at vkDestroyDevice.
+        try testing.expectEqual(@as(u32, 0), device.validation_error_count.load(.monotonic));
+
         for ([_]@TypeOf(vulkan.init_failure){ .resources, .frames }) |failure| {
             const partial = try graphics.rhi_vulkan.createRHI(test_allocator, app.window_manager.window, null, 256, 1, 1, true);
             defer partial.deinit();
