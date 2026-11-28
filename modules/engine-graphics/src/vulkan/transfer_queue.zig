@@ -443,7 +443,7 @@ test "staging ring distinguishes full from empty" {
 }
 
 test "aborted transfer state drops pending copies without reclaiming staging ownership" {
-    var transfer = std.mem.zeroes(TransferQueue);
+    var transfer: TransferQueue = .{};
     transfer.current_frame = 1;
     transfer.pending_copy_count[1] = 7;
     transfer.pending_staging_buffer[1] = @ptrFromInt(1);
