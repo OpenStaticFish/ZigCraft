@@ -2,7 +2,16 @@
 # starting any of the compilers or graphics runners they depend on.
 require "yaml"
 
-jobs = YAML.load_file(".github/workflows/build.yml").fetch("jobs")
+jobs = YAML.safe_load_file(".github/workflows/build.yml", aliases: true).fetch("jobs")
+router = YAML.safe_load_file(".github/workflows/ci-changes.yml", aliases: true)
+job_outputs = router.fetch("jobs").fetch("classify").fetch("outputs")
+# Psych parses the unquoted workflow trigger key `on` as boolean true.
+trigger = router.fetch("on") { router.fetch(true) }
+workflow_outputs = trigger.fetch("workflow_call").fetch("outputs")
+%w[game fmt graphics shaders coverage].each do |flag|
+  abort "Classifier job misroutes #{flag}" unless job_outputs.fetch(flag) == "${{ steps.filter.outputs.#{flag} }}"
+  abort "Reusable workflow misroutes #{flag}" unless workflow_outputs.fetch(flag).fetch("value") == "${{ jobs.classify.outputs.#{flag} }}"
+end
 routes = {
   "docs" => [],
   "game" => %w[game fmt graphics],

@@ -63,11 +63,11 @@ jobs:
 
       - name: Parse workflow YAML
         run: |
-          ruby -e 'require "yaml"; Dir[".github/workflows/*.{yml,yaml}"].sort.each { |f| YAML.load_file(f); puts "OK #{f}" }'
+          ruby -e 'require "yaml"; Dir[".github/workflows/*.{yml,yaml}"].sort.each { |f| YAML.safe_load_file(f, aliases: true); puts "OK #{f}" }'
 
       - name: Parse composite action YAML
         run: |
-          ruby -e 'require "yaml"; Dir[".github/actions/**/action.{yml,yaml}"].sort.each { |f| YAML.load_file(f); puts "OK #{f}" }'
+          ruby -e 'require "yaml"; Dir[".github/actions/**/action.{yml,yaml}"].sort.each { |f| YAML.safe_load_file(f, aliases: true); puts "OK #{f}" }'
 
       - name: Check OpenCode provider config
         run: jq -e '.providers.zigcraft.models[.model | split("/")[1]] != null' .github/opencode/provider.json

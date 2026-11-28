@@ -41,7 +41,7 @@ base, head = ARGV
 paths, status = Open3.capture2("git", "diff", "--name-only", "--no-renames", "-z", base, head, "--")
 abort "Cannot compare #{base} and #{head}" unless status.success?
 changed = paths.split("\0")
-(changed & %w[.github/workflows/build.yml .github/workflows/coverage.yml]).each do |workflow|
+(changed & %w[.github/workflows/build.yml .github/workflows/coverage.yml .github/workflows/ci-changes.yml]).each do |workflow|
   definitions = [base, head].map do |revision|
     source, result = Open3.capture2("git", "show", "#{revision}:#{workflow}")
     next unless result.success? # Added/deleted workflow: retain the changed path.

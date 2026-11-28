@@ -5,7 +5,7 @@ require "yaml"
 
 # Run the shipped Actions step, so changing the event ranges or diff flags
 # changes the code under test as well.
-workflow = YAML.load_file(".github/workflows/ci-changes.yml")
+workflow = YAML.safe_load_file(".github/workflows/ci-changes.yml", aliases: true)
 step = workflow.dig("jobs", "classify", "steps").find { |s| s["id"] == "filter" }.fetch("run")
 def git(*args)
   output, status = Open3.capture2e("git", *args)
@@ -24,6 +24,7 @@ def check_route(step, event, base, expected)
   abort "#{event}: expected #{wanted}, got #{decisions}" unless decisions == wanted
 end
 
+workflow_dir = File.expand_path(".github/workflows")
 Dir.mktmpdir do |dir|
   Dir.chdir(dir) do
     git("init", "-q", "-b", "dev")
@@ -35,6 +36,8 @@ Dir.mktmpdir do |dir|
     coverage = ".github/workflows/coverage.yml"
     File.write(coverage, "jobs:\n  kcov:\n    runs-on: ubuntu-latest\n    steps:\n      - run: kcov report zig build test\n")
     File.write(build, "jobs:\n  compile:\n    runs-on: ubuntu-latest\n    env:\n      MODE: on\n    steps:\n      - run: zig build\n")
+    classifier = ".github/workflows/ci-changes.yml"
+    FileUtils.cp(File.join(workflow_dir, "ci-changes.yml"), classifier)
     source = "src/file with\nnewline.zig"
     File.write(source, "fixture")
     git("add", ".")
@@ -74,6 +77,30 @@ Dir.mktmpdir do |dir|
     File.write(coverage, File.read(coverage).sub("ubuntu-latest", "ubuntu-24.04"))
     git("commit", "-qam", "change only coverage runner label")
     check_route(step, "push", "HEAD^", [])
+    FileUtils.mkdir_p(".github/vulkan")
+    File.write(".github/vulkan/vk_layer_settings.txt", "fixture")
+    git("add", ".github/vulkan")
+    git("commit", "-qm", "change only graphics settings")
+    check_route(step, "push", "HEAD^", %w[graphics])
+
+    # Exercise the actual gate reader with a valid alias outside the gates.
+    extra_job = <<~YAML
+      alias-fixture:
+        runs-on: ubuntu-latest
+        env:
+          FIRST: &message hello
+          SECOND: *message
+        steps:
+          - run: echo fixture
+    YAML
+    File.write(build, File.read(File.join(workflow_dir, "build.yml")) + extra_job.gsub(/^/, "  "))
+    gate_test = File.join(__dir__, "test_build_gates.rb")
+    abort "gate checks rejected valid aliases" unless system("ruby", gate_test)
+    File.write(classifier, File.read(classifier).sub("jobs.classify.outputs.graphics", "jobs.classify.outputs.game"))
+    git("add", classifier)
+    git("commit", "-qm", "misroute reusable workflow output")
+    check_route(step, "push", "HEAD^", %w[fmt game graphics shaders coverage])
+    abort "gate fixture accepted miswired graphics" if system("ruby", gate_test, err: File::NULL)
   end
 end
 puts "Git diff routing passed for diverged PRs, renames, runner labels, build commands and consecutive pushes."
