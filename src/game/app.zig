@@ -528,8 +528,8 @@ pub const App = struct {
         }
 
         if (self.screen_manager.stack.items.len == 0) {
-            self.render_system.endFrame();
             frame_open = false;
+            try self.render_system.endFrame();
             try self.applyPendingScreenTransitions();
             return;
         }
@@ -608,8 +608,8 @@ pub const App = struct {
         // Screenshot requests must reach the RHI while this frame's command
         // buffer is still open. Vulkan records the readback after its final
         // output pass and before submission/presentation.
-        self.render_system.endFrame();
         frame_open = false;
+        try self.render_system.endFrame();
         try self.applyPendingScreenTransitions();
         self.revealMenuWindowWhenReady();
 

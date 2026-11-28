@@ -167,8 +167,9 @@ pub const VulkanSwapchain = struct {
             view_info.format = self.image_format;
             view_info.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
             var view: c.VkImageView = null;
+            try self.image_views.ensureUnusedCapacity(self.allocator, 1);
             try checkVk(c.vkCreateImageView(self.device.vk_device, &view_info, null, &view));
-            try self.image_views.append(self.allocator, view);
+            self.image_views.appendAssumeCapacity(view);
             return;
         }
 
@@ -272,6 +273,7 @@ pub const VulkanSwapchain = struct {
         if (image_count == 0) return error.UnsupportedSwapchainImageCount;
         self.images.shrinkRetainingCapacity(image_count);
 
+        try self.image_views.ensureUnusedCapacity(self.allocator, image_count);
         for (self.images.items) |image| {
             var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
             view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -281,7 +283,7 @@ pub const VulkanSwapchain = struct {
             view_info.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
             var view: c.VkImageView = null;
             try checkVk(c.vkCreateImageView(self.device.vk_device, &view_info, null, &view));
-            try self.image_views.append(self.allocator, view);
+            self.image_views.appendAssumeCapacity(view);
         }
     }
 

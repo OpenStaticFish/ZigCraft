@@ -320,8 +320,8 @@ pub const RenderSystem = struct {
         return self.rhi.renderContext().beginFrame();
     }
 
-    pub fn endFrame(self: *RenderSystem) void {
-        self.rhi.renderContext().endFrame();
+    pub fn endFrame(self: *RenderSystem) !void {
+        return self.rhi.renderContext().endFrame();
     }
 
     /// Discards the active frame without submitting it to the GPU.

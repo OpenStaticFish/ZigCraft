@@ -49,7 +49,7 @@ const Mock = struct {
         self.begin_count += 1;
         return true;
     }
-    fn endFrame(_: *anyopaque) void {}
+    fn endFrame(_: *anyopaque) anyerror!void {}
     fn abortFrame(_: *anyopaque) void {}
     fn requestSwapchainRecreate(_: *anyopaque) void {}
     fn getEncoder(_: *anyopaque) rhi.IGraphicsCommandEncoder {

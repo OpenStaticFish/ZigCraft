@@ -298,8 +298,8 @@ pub const RenderContext = struct {
     }
     /// Ends the per-frame command recording scope and submits queued frame work.
     /// All commands for that scope must be recorded before this call.
-    pub fn endFrame(self: RenderContext) void {
-        self.render.endFrame();
+    pub fn endFrame(self: RenderContext) anyerror!void {
+        return self.render.endFrame();
     }
     /// Cancels the current frame after a recoverable startup or rendering failure.
     /// Use only before `endFrame`; the backend may discard recorded commands for the active frame. Must be called from the render thread that owns the backend context.
@@ -1076,7 +1076,7 @@ pub const IRenderContext = struct {
 
     pub const VTable = struct {
         beginFrame: *const fn (ptr: *anyopaque) anyerror!bool,
-        endFrame: *const fn (ptr: *anyopaque) void,
+        endFrame: *const fn (ptr: *anyopaque) anyerror!void,
         abortFrame: *const fn (ptr: *anyopaque) void,
         requestSwapchainRecreate: *const fn (ptr: *anyopaque) void,
         getEncoder: *const fn (ptr: *anyopaque) IGraphicsCommandEncoder,
@@ -1091,8 +1091,8 @@ pub const IRenderContext = struct {
     }
     /// Ends the per-frame command recording scope and submits queued frame work.
     /// All commands for that scope must be recorded before this call.
-    pub fn endFrame(self: IRenderContext) void {
-        self.vtable.endFrame(self.ptr);
+    pub fn endFrame(self: IRenderContext) anyerror!void {
+        return self.vtable.endFrame(self.ptr);
     }
     /// Cancels the current frame after a recoverable startup or rendering failure.
     /// Use only before `endFrame`; the backend may discard recorded commands for the active frame. Must be called from the render thread that owns the backend context.

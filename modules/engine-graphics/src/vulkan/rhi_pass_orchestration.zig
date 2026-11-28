@@ -441,7 +441,7 @@ pub fn ensureNoRenderPassActiveInternal(ctx: anytype) void {
     if (ctx.ui.ui_swapchain_pass_active) endUISwapchainPassInternal(ctx);
 }
 
-pub fn endFrame(ctx: anytype) void {
+pub fn endFrame(ctx: anytype) !void {
     if (!ctx.frames.frame_in_progress) return;
 
     if (ctx.runtime.main_pass_active) endMainPassInternal(ctx);
@@ -470,7 +470,9 @@ pub fn endFrame(ctx: anytype) void {
 
     // The UI path can trigger post-processing at endFrame, so append the
     // readback only after every final-color pass has completed.
+    const capture_requested = ctx.screenshot_capture.staging != null;
     screenshot.recordCapture(ctx);
+    const capture_recorded = ctx.screenshot_capture.staging != null;
 
     const transfer_cb = ctx.resources.getTransferCommandBuffer();
 
@@ -506,29 +508,21 @@ pub fn endFrame(ctx: anytype) void {
 
     const transfer_sem = ctx.resources.getTransferSemaphore();
 
-    var submitted = false;
-    if (ctx.frames.endFrame(&ctx.swapchain, transfer_cb, transfer_sem)) |_| {
-        submitted = true;
-    } else |err| {
-        log.log.errWithTrace("endFrame failed: {}", .{err});
+    defer if (transfer_cb != null) ctx.resources.resetTransferState();
+    ctx.frames.endFrame(&ctx.swapchain, transfer_cb, transfer_sem) catch |err| {
+        screenshot.discardCapture(ctx);
         if (err == error.GpuLost) {
             ctx.runtime.gpu_fault_detected = true;
         }
-    }
+        return err;
+    };
 
-    if (ctx.screenshot_capture.staging != null) {
-        if (submitted) {
-            if (!screenshot.completeCapture(ctx)) {
-                log.log.err("SCREENSHOT: Failed to encode final composed frame", .{});
-            }
-        } else {
-            screenshot.discardCapture(ctx);
-        }
-    }
-
-    if (transfer_cb != null) {
-        ctx.resources.resetTransferState();
-    }
+    // Submission owns the capture buffer independently of what WSI reports.
+    const presented = ctx.frames.presentFrame(&ctx.swapchain);
+    const captured = screenshot.completeCapture(ctx) and (!capture_requested or capture_recorded);
+    if (ctx.screenshot_capture.staging != null) ctx.frames.retirement_error = error.ScreenshotCaptureFailed;
+    try presented;
+    if (!captured) return error.ScreenshotCaptureFailed;
 
     if (ctx.render_device) |device| {
         device.setStats(ctx.resources.stats());

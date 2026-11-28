@@ -62,6 +62,7 @@ const UploadScreen = struct {
     payload: [64]u8 = [_]u8{0} ** 64,
     tick: u8 = 0,
     overwrite_upload: bool = false,
+    screenshot_path: ?[]const u8 = null,
     quit_on_draw: bool = false,
 
     pub const vtable = IScreen.VTable{
@@ -102,6 +103,9 @@ const UploadScreen = struct {
         const self: *UploadScreen = @ptrCast(@alignCast(ptr));
         ui.begin();
         ui.end();
+        if (self.screenshot_path) |path| {
+            try testing.expect(self.context.render_system.getRHI().screenshot().captureFrame(path));
+        }
         if (self.quit_on_draw) self.context.input.setShouldQuit(true);
     }
     pub fn screen(self: *UploadScreen) IScreen {
@@ -173,11 +177,19 @@ fn failGraphicsSubmit(_: *@import("engine-graphics").VulkanDevice, _: c.VkSubmit
     return error.OutOfMemory;
 }
 
+fn failPresentation(_: c.VkQueue, _: [*c]const c.VkPresentInfoKHR) callconv(.c) c.VkResult {
+    return c.VK_ERROR_SURFACE_LOST_KHR;
+}
+
 fn loseGraphicsDevice(_: *anyopaque) anyerror!bool {
     return error.GpuLost;
 }
 
 fn unexpectedFrameCompletion(_: *anyopaque) void {
+    unreachable;
+}
+
+fn unexpectedFrameSubmission(_: *anyopaque) anyerror!void {
     unreachable;
 }
 
@@ -340,7 +352,7 @@ test "smoke test: launch, generate, render, exit" {
         const original_vtable = app.render_system.rhi.vtable;
         var render_vtable = original_vtable.render.?.*;
         render_vtable.beginFrame = skipGraphicsFrame;
-        render_vtable.endFrame = unexpectedFrameCompletion;
+        render_vtable.endFrame = unexpectedFrameSubmission;
         render_vtable.abortFrame = unexpectedFrameCompletion;
         var skipped_vtable = original_vtable.*;
         skipped_vtable.render = &render_vtable;
@@ -422,15 +434,32 @@ test "smoke test: launch, generate, render, exit" {
         try testing.expectEqual(suspended_tick +% 1, try readUploadedByte(vulkan, active_upload_screen.buffer, suspended_tick % active_upload_screen.payload.len));
 
         vulkan.frames.retirement_error = error.GpuLost;
-        defer vulkan.frames.retirement_error = null;
         try testing.expectError(error.GpuLost, app.runSingleFrame());
+        vulkan.frames.retirement_error = null;
+
+        if (swapchain.screenshot_capture_supported) {
+            var capture_dir = testing.tmpDir(.{});
+            defer capture_dir.cleanup();
+            const dir = fs.Dir{ .inner = capture_dir.dir };
+            var path_buf: [fs.max_path_bytes]u8 = undefined;
+            const dir_path = try dir.realpath(".", &path_buf);
+            const capture_path = try std.fmt.allocPrint(test_allocator, "{s}/present-error.png", .{dir_path});
+            defer test_allocator.free(capture_path);
+            active_upload_screen.screenshot_path = capture_path;
+            const present = vulkan.swapchain.fp_vkQueuePresentKHR;
+            vulkan.swapchain.fp_vkQueuePresentKHR = &failPresentation;
+            defer vulkan.swapchain.fp_vkQueuePresentKHR = present;
+            try testing.expectError(error.BackendError, app.runSingleFrame());
+            try testing.expect(vulkan.screenshot_capture.staging == null);
+            try dir.access("present-error.png", .{});
+        }
     }
 
     if (build_options.skip_present) {
         app.input.interface().setShouldQuit(false);
         active_upload_screen.quit_on_draw = false;
         vulkan.frames.submit_frame = &failGraphicsSubmit;
-        try app.runSingleFrame();
+        try testing.expectError(error.OutOfMemory, app.runSingleFrame());
         try testing.expectError(error.OutOfMemory, app.runSingleFrame());
     }
 

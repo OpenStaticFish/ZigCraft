@@ -201,21 +201,16 @@ pub const FrameManager = struct {
         }
 
         self.submitFrame(submit_info) catch |err| return self.failRetirement(err);
-        defer self.current_frame = (self.current_frame + 1) % rhi.MAX_FRAMES_IN_FLIGHT;
+        self.current_frame = (self.current_frame + 1) % rhi.MAX_FRAMES_IN_FLIGHT;
+    }
 
-        if (!swapchain.skip_present) {
-            swapchain.initialized_images[self.current_image_index] = true;
-            swapchain.present(self.render_finished_semaphores[self.current_image_index], self.current_image_index) catch |err| {
-                if (err == error.OutOfDate) {
-                    swapchain.framebuffer_resized = true;
-                } else if (err == error.ValidationFailed) {
-                    log.log.err("endFrame: validation failure while presenting swapchain image", .{});
-                    return err;
-                } else {
-                    return err;
-                }
-            };
-        }
+    pub fn presentFrame(self: *FrameManager, swapchain: *SwapchainPresenter) !void {
+        if (swapchain.skip_present) return;
+        swapchain.initialized_images[self.current_image_index] = true;
+        swapchain.present(self.render_finished_semaphores[self.current_image_index], self.current_image_index) catch |err| {
+            swapchain.framebuffer_resized = true;
+            if (err != error.OutOfDate) return err;
+        };
     }
 
     fn failRetirement(self: *FrameManager, err: anyerror) anyerror!void {

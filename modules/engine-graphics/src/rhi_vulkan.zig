@@ -412,12 +412,12 @@ fn captureFrame(ctx_ptr: *anyopaque, path: []const u8) bool {
     return screenshot.requestCapture(ctx, path);
 }
 
-fn endFrame(ctx_ptr: *anyopaque) void {
+fn endFrame(ctx_ptr: *anyopaque) anyerror!void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
     if (ctx.runtime.gpu_fault_detected) return;
-    pass_orchestration.endFrame(ctx);
+    return pass_orchestration.endFrame(ctx);
 }
 
 fn setClearColor(ctx_ptr: *anyopaque, color: Vec3) void {
