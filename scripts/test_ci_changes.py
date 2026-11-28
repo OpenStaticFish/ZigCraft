@@ -11,6 +11,7 @@ class ChangeRoutingTests(unittest.TestCase):
     def test_docs_and_automation_do_not_allocate_game_runners(self):
         self.assert_jobs(["README.md", "docs/benchmarks/README.md", "docs/assets/budget.json"])
         self.assert_jobs([".github/workflows/build.yml", "scripts/opencode_review.sh"])
+        self.assert_jobs([".github/actions/load-prompt/action.yml"])
 
     def test_graphics_runner_changes_only_exercise_graphics(self):
         self.assert_jobs([".github/actions/start-weston/action.yml", "README.md"], "graphics")
@@ -22,8 +23,16 @@ class ChangeRoutingTests(unittest.TestCase):
         self.assert_jobs(["docs/guide.md", "modules/example.zig", "docs/shaders/spirv-sizes.json"],
                          "fmt", "game", "graphics")
 
-    def test_toolchain_shaders_and_unknown_inputs_select_full_game_checks(self):
-        for path in ("devenv.lock", "assets/shaders/vulkan/sky.frag", "scripts/new-check.sh",
+    def test_toolchain_changes_exercise_formatter_and_game_jobs(self):
+        for path in ("devenv.nix", "devenv.yaml", "devenv.lock",
+                     ".github/actions/setup-devenv/action.yml",
+                     ".github/actions/setup-zig-cache/action.yml"):
+            with self.subTest(path=path):
+                self.assert_jobs([path], "fmt", "game", "graphics")
+
+    def test_shaders_and_unknown_inputs_select_full_game_checks(self):
+        for path in (".github/actions/new-action/action.yml",
+                     "assets/shaders/vulkan/sky.frag", "scripts/new-check.sh",
                      "docs/future-fixture.bin"):
             with self.subTest(path=path):
                 self.assert_jobs([path], "game", "graphics")

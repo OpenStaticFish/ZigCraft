@@ -10,7 +10,7 @@ from fnmatch import fnmatchcase
 REPO_ONLY = (
     "docs/*.md",
     "docs/assets/budget.json", "docs/benchmarks/*.json", "docs/visual-test/golden/*",
-    ".github/workflows/*", ".github/actions/*", ".github/prompts/*",
+    ".github/workflows/*", ".github/actions/load-prompt/*", ".github/prompts/*",
     ".github/opencode/*", ".github/PULL_REQUEST_TEMPLATE/*", ".github/*.md",
     ".github/actionlint.yaml", ".github/CODEOWNERS", ".github/dependabot.yml",
     ".github/issue-labeler.json", ".github/labeler.yml", ".agents/*", ".opencode/*",
@@ -36,13 +36,17 @@ GRAPHICS_INPUTS = (
     ".github/actions/start-weston/", ".github/actions/stop-weston/",
     ".github/actions/setup-lavapipe/", ".github/vulkan/",
 )
+TOOLCHAIN_CONFIG = {"devenv.nix", "devenv.yaml", "devenv.lock"}
+TOOLCHAIN_ACTIONS = (".github/actions/setup-devenv/", ".github/actions/setup-zig-cache/")
 
 
 def classify(paths, full=False):
     game = fmt = graphics = full
     shaders = False
     for path in paths:
-        if path in SHADER_INPUTS:
+        if path in TOOLCHAIN_CONFIG or path.startswith(TOOLCHAIN_ACTIONS):
+            game = fmt = True
+        elif path in SHADER_INPUTS:
             shaders = True
         elif path.startswith(GRAPHICS_INPUTS):
             graphics = True
