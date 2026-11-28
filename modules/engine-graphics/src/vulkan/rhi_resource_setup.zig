@@ -365,6 +365,7 @@ pub fn createSSAOResources(ctx: anytype) !void {
         ctx.gpass.g_normal_view,
         ctx.gpass.g_depth_view,
         ctx.runtime.recovering,
+        ctx.wait_ssao_queue_idle orelse &c.vkQueueWaitIdle,
     );
 
     ctx.draw.bound_ssao_handle = try ctx.resources.registerNativeTexture(

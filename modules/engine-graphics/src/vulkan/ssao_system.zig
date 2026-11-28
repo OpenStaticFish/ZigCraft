@@ -25,6 +25,19 @@ pub const SSAOParams = extern struct {
     _padding: [2]f32 = undefined,
 };
 
+const NoiseUpload = struct {
+    pool: c.VkCommandPool,
+    cmd: c.VkCommandBuffer = null,
+    staging: VulkanBuffer,
+
+    fn deinit(self: NoiseUpload, vk: c.VkDevice) void {
+        if (self.cmd != null) c.vkFreeCommandBuffers(vk, self.pool, 1, &self.cmd);
+        if (self.staging.mapped_ptr != null) c.vkUnmapMemory(vk, self.staging.memory);
+        c.vkDestroyBuffer(vk, self.staging.buffer, null);
+        c.vkFreeMemory(vk, self.staging.memory, null);
+    }
+};
+
 pub const SSAOSystem = struct {
     pipeline: c.VkPipeline = null,
     pipeline_layout: c.VkPipelineLayout = null,
@@ -57,14 +70,18 @@ pub const SSAOSystem = struct {
     noise_memory: c.VkDeviceMemory = null,
     noise_view: c.VkImageView = null,
     noise_handle: rhi.TextureHandle = 0,
+    pending_noise_upload: ?NoiseUpload = null,
 
     kernel_ubos: [rhi.MAX_FRAMES_IN_FLIGHT]VulkanBuffer = @splat(.{}),
     params: SSAOParams = undefined,
     sampler: c.VkSampler = null,
 
-    pub fn init(self: *SSAOSystem, device: *VulkanDevice, allocator: Allocator, descriptor_pool: c.VkDescriptorPool, upload_cmd_pool: c.VkCommandPool, width: u32, height: u32, g_normal_view: c.VkImageView, g_depth_view: c.VkImageView, skip_noise_upload: bool) !void {
+    pub fn init(self: *SSAOSystem, device: *VulkanDevice, allocator: Allocator, descriptor_pool: c.VkDescriptorPool, upload_cmd_pool: c.VkCommandPool, width: u32, height: u32, g_normal_view: c.VkImageView, g_depth_view: c.VkImageView, skip_noise_upload: bool, wait_queue_idle: @TypeOf(&c.vkQueueWaitIdle)) !void {
         const vk = device.vk_device;
         const ao_format = c.VK_FORMAT_R8_UNORM;
+        // A failed completion check leaves the destination image owned here
+        // until the context can safely retire the upload and destroy SSAO.
+        errdefer if (self.pending_noise_upload == null) self.deinit(vk, allocator, descriptor_pool);
 
         // Initialize params with default values
         self.params = std.mem.zeroes(SSAOParams);
@@ -72,11 +89,10 @@ pub const SSAOSystem = struct {
         self.params.bias = DEFAULT_BIAS;
 
         try self.initRenderPasses(vk, ao_format);
-        errdefer self.deinit(vk, allocator, descriptor_pool);
 
         try self.initImages(device, width, height, ao_format);
         try self.initFramebuffers(vk, width, height);
-        try self.initNoiseTexture(device, upload_cmd_pool, skip_noise_upload);
+        try self.initNoiseTexture(device, upload_cmd_pool, skip_noise_upload, wait_queue_idle);
         try self.initKernelUBO(device);
         try self.initSampler(vk);
         try self.initDescriptorLayouts(vk);
@@ -212,7 +228,7 @@ pub const SSAOSystem = struct {
         return noise_data;
     }
 
-    fn initNoiseTexture(self: *SSAOSystem, device: *VulkanDevice, upload_cmd_pool: c.VkCommandPool, skip_upload: bool) !void {
+    fn initNoiseTexture(self: *SSAOSystem, device: *VulkanDevice, upload_cmd_pool: c.VkCommandPool, skip_upload: bool, wait_queue_idle: @TypeOf(&c.vkQueueWaitIdle)) !void {
         const vk = device.vk_device;
         var rng = std.Random.DefaultPrng.init(12345);
         const noise_data = generateNoiseData(&rng);
@@ -251,10 +267,8 @@ pub const SSAOSystem = struct {
         if (skip_upload) return;
 
         const staging = try Utils.createVulkanBuffer(device, NOISE_SIZE * NOISE_SIZE * 4, c.VK_BUFFER_USAGE_TRANSFER_SRC_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        defer {
-            c.vkDestroyBuffer(vk, staging.buffer, null);
-            c.vkFreeMemory(vk, staging.memory, null);
-        }
+        var upload = NoiseUpload{ .pool = upload_cmd_pool, .staging = staging };
+        defer if (self.pending_noise_upload == null) upload.deinit(vk);
 
         if (staging.mapped_ptr) |ptr| {
             @memcpy(@as([*]u8, @ptrCast(ptr))[0 .. NOISE_SIZE * NOISE_SIZE * 4], &noise_data);
@@ -267,8 +281,8 @@ pub const SSAOSystem = struct {
         cmd_info.commandPool = upload_cmd_pool;
         cmd_info.level = c.VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         cmd_info.commandBufferCount = 1;
-        var cmd: c.VkCommandBuffer = null;
-        try Utils.checkVk(c.vkAllocateCommandBuffers(vk, &cmd_info, &cmd));
+        try Utils.checkVk(c.vkAllocateCommandBuffers(vk, &cmd_info, &upload.cmd));
+        const cmd = upload.cmd;
 
         var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
         begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -305,8 +319,22 @@ pub const SSAOSystem = struct {
         submit_info.commandBufferCount = 1;
         submit_info.pCommandBuffers = &cmd;
         try device.submitGuarded(submit_info, null);
-        _ = c.vkQueueWaitIdle(device.queue);
-        c.vkFreeCommandBuffers(vk, upload_cmd_pool, 1, &cmd);
+
+        device.mutex.lock();
+        const result = wait_queue_idle(device.queue);
+        device.mutex.unlock();
+        if (result != c.VK_SUCCESS and result != c.VK_ERROR_DEVICE_LOST) {
+            self.pending_noise_upload = upload;
+        }
+        try Utils.checkVk(result);
+    }
+
+    /// Call only after device idle or device loss has been confirmed.
+    pub fn retireNoiseUpload(self: *SSAOSystem, vk: c.VkDevice) void {
+        if (self.pending_noise_upload) |upload| {
+            upload.deinit(vk);
+            self.pending_noise_upload = null;
+        }
     }
 
     pub fn generateKernelSamples(rng: *std.Random.DefaultPrng) [KERNEL_SIZE][4]f32 {
@@ -497,6 +525,7 @@ pub const SSAOSystem = struct {
 
     pub fn deinit(self: *SSAOSystem, vk: c.VkDevice, allocator: Allocator, descriptor_pool: c.VkDescriptorPool) void {
         _ = allocator;
+        std.debug.assert(self.pending_noise_upload == null);
         if (self.pipeline != null) c.vkDestroyPipeline(vk, self.pipeline, null);
         if (self.blur_pipeline != null) c.vkDestroyPipeline(vk, self.blur_pipeline, null);
         if (self.pipeline_layout != null) c.vkDestroyPipelineLayout(vk, self.pipeline_layout, null);

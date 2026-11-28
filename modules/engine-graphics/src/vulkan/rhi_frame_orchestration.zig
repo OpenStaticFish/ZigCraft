@@ -65,6 +65,7 @@ pub fn recreatePendingShadowResources(ctx: anytype) !void {
 pub fn recreateSwapchainInternal(ctx: anytype) !void {
     Utils.checkVk(c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device)) catch |err|
         return handleSwapchainRecreateError(ctx, "device idle wait", err);
+    ctx.ssao_system.retireNoiseUpload(ctx.vulkan_device.vk_device);
 
     var w: c_int = 0;
     var h: c_int = 0;
@@ -102,6 +103,10 @@ pub fn recreateSwapchainInternal(ctx: anytype) !void {
         return handleSwapchainRecreateError(ctx, "G-Pass resources", err);
     };
     setup.createSSAOResources(ctx) catch |err| {
+        if (ctx.ssao_system.pending_noise_upload != null) {
+            _ = markSwapchainRecreateFailed(ctx, "SSAO noise upload wait", err);
+            return err;
+        }
         return handleSwapchainRecreateError(ctx, "SSAO resources", err);
     };
     setup.createTAAResources(ctx) catch |err| {

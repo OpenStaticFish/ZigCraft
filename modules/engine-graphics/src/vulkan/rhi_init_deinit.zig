@@ -166,6 +166,7 @@ pub fn deinit(ctx: anytype) void {
 
     if (vk_device != null) {
         state_control.waitIdle(ctx);
+        ctx.ssao_system.retireNoiseUpload(vk_device);
         screenshot.discardCapture(ctx);
 
         var compute_pipeline_iter = ctx.compute_resources.pipelines.iterator();
