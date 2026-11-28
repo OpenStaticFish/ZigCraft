@@ -24,14 +24,12 @@ def workflow_definition(source)
       next unless labels
 
       values = labels.sequence? ? labels.children : [labels]
-      next unless values.all? { |v| v.scalar? && !v.tag && !v.value.include?("${{") }
+      next if values.empty? || labels.tag
+      next unless values.all? { |v| v.scalar? && !v.tag && !v.value.empty? && !v.value.include?("${{") }
 
       # Keep the runs-on mapping and its group; normalize literal labels only.
-      if labels.sequence?
-        labels.children.replace([Psych::Nodes::Scalar.new("runner-label")])
-      else
-        labels.value = "runner-label"
-      end
+      parent = runner.mapping? ? runner : job
+      parent.children[parent.children.index(labels)] = Psych::Nodes::Scalar.new("runner-label")
     end
   end
   stream.yaml
