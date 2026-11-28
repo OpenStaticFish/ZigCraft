@@ -236,7 +236,9 @@ test "smoke test: launch, generate, render, exit" {
     @import("engine-core").log.log.min_level = .err;
 
     var app = App.init(test_allocator) catch |err| {
-        if (err == error.WindowCreationFailed or err == error.SDLInitializationFailed) {
+        if (std.c.getenv("ZIGCRAFT_ALLOW_MISSING_TEST_DISPLAY") != null and
+            (err == error.WindowCreationFailed or err == error.SDLInitializationFailed))
+        {
             std.debug.print("Skipping integration test: SDL/Vulkan initialization failed (likely no display or Vulkan driver)\n", .{});
             return;
         }
@@ -289,6 +291,9 @@ test "smoke test: launch, generate, render, exit" {
     for (0..frame_count) |_| {
         try app.runSingleFrame();
     }
+    // An upload immediately after submission must not reset a pending command
+    // buffer. Use a byte outside the screen's rotating test writes.
+    try app.render_system.getRHI().resourceManager().updateBuffer(active_upload_screen.buffer, 63, &.{0xab});
 
     const resize_width: u32 = 1024;
     const resize_height: u32 = 720;
@@ -325,6 +330,7 @@ test "smoke test: launch, generate, render, exit" {
     // Simulate a skipped acquire after successful frames. The screen still
     // updates, but its draw and the frame-completion callbacks must not run.
     const vulkan: *@import("engine-graphics").VulkanContext = @ptrCast(@alignCast(app.render_system.rhi.ptr));
+    try testing.expectEqual(@as(u8, 0xab), try readUploadedByte(vulkan, active_upload_screen.buffer, 63));
     // A normal frame has submitted the upload screen's copy. A subsequent
     // upload in the same slot must not replay that batch.
     try testing.expectEqual(@as(usize, 0), vulkan.resources.transfer.pendingCopyCount());

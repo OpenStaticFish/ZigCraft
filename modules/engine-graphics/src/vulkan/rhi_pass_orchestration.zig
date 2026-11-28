@@ -507,6 +507,7 @@ pub fn endFrame(ctx: anytype) !void {
     }
 
     const transfer_sem = ctx.resources.getTransferSemaphore();
+    const frame_fence = ctx.frames.in_flight_fences[ctx.frames.current_frame];
 
     defer if (transfer_cb != null) ctx.resources.resetTransferState();
     ctx.frames.endFrame(&ctx.swapchain, transfer_cb, transfer_sem) catch |err| {
@@ -516,6 +517,7 @@ pub fn endFrame(ctx: anytype) !void {
         }
         return err;
     };
+    if (transfer_cb != null) ctx.resources.submitted_transfer_fence = frame_fence;
 
     // Submission owns the capture buffer independently of what WSI reports.
     const presented = ctx.frames.presentFrame(&ctx.swapchain);

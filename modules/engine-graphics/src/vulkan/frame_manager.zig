@@ -101,6 +101,14 @@ pub const FrameManager = struct {
         // Wait for previous frame before reusing the command buffer.
         try Utils.checkVk(c.vkWaitForFences(device, 1, &self.in_flight_fences[self.current_frame], c.VK_TRUE, std.math.maxInt(u64)));
 
+        // Complete fallible command-buffer setup before acquiring a WSI
+        // image. A failed setup must not leave an outstanding acquire signal.
+        const cb = self.command_buffers[self.current_frame];
+        try Utils.checkVk(c.vkResetCommandPool(device, self.frame_command_pools[self.current_frame], 0));
+        var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
+        begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        try Utils.checkVk(c.vkBeginCommandBuffer(cb, &begin_info));
+
         // Acquire image
         if (swapchain.skip_present) {
             // The offscreen target is a regular Vulkan image and needs no acquisition.
@@ -125,14 +133,6 @@ pub const FrameManager = struct {
             }
         }
 
-        // Reset the per-frame pool after its fence signals. This lets the driver
-        // recycle all transient command-buffer storage for the frame at once.
-        const cb = self.command_buffers[self.current_frame];
-        try Utils.checkVk(c.vkResetCommandPool(device, self.frame_command_pools[self.current_frame], 0));
-
-        var begin_info = std.mem.zeroes(c.VkCommandBufferBeginInfo);
-        begin_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        try Utils.checkVk(c.vkBeginCommandBuffer(cb, &begin_info));
         swapchain.recordInitialLayout(cb, self.current_image_index);
 
         self.frame_in_progress = true;
