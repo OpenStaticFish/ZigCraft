@@ -515,7 +515,7 @@ pub const App = struct {
             if (build_options.smoke_test or build_options.screenshot_path.len > 0) {
                 const timer = self.graphics_stall_timer orelse MonotonicTimer{ .start_ticks = self.frame_start_counter };
                 self.graphics_stall_timer = timer;
-                if (timer.read() >= 90 * std.time.ns_per_s) return error.GraphicsFrameTimeout;
+                try checkGraphicsFrameDeadline(timer.read());
             }
             // Keep the previous rendered frame's readiness and capture delay.
             // The next rendered frame rechecks readiness; the stall timer above
@@ -720,6 +720,16 @@ fn applyBenchmarkSettings(settings: *Settings, preset_name: []const u8, render_d
     if (render_distance > 0) {
         settings.render_distance = render_distance;
     }
+}
+
+fn checkGraphicsFrameDeadline(elapsed_ns: u64) error{GraphicsFrameTimeout}!void {
+    if (elapsed_ns >= 90 * std.time.ns_per_s) return error.GraphicsFrameTimeout;
+}
+
+test "skipped graphics frame deadline expires at 90 seconds" {
+    const deadline = 90 * std.time.ns_per_s;
+    try checkGraphicsFrameDeadline(deadline - 1);
+    try std.testing.expectError(error.GraphicsFrameTimeout, checkGraphicsFrameDeadline(deadline));
 }
 
 test "benchmark render distance override is retained after its preset" {
