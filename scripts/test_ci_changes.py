@@ -23,31 +23,31 @@ class ChangeRoutingTests(unittest.TestCase):
 
     def test_mixed_changes_keep_clean_checkout_shader_validation(self):
         self.assert_jobs(["docs/guide.md", "modules/example.zig", "docs/shaders/spirv-sizes.json"],
-                         "fmt", "game", "graphics", "shaders")
+                         "fmt", "game", "graphics", "shaders", "coverage")
 
     def test_committed_shadow_binaries_and_sources_select_both_checks(self):
         for shader in ("sky", "terrain"):
             for suffix in (".frag", ".frag.spv"):
                 path = f"assets/shaders/vulkan/{shader}{suffix}"
                 with self.subTest(path=path):
-                    self.assert_jobs([path], "game", "graphics", "shaders")
+                    self.assert_jobs([path], "game", "graphics", "shaders", "coverage")
 
     def test_toolchain_changes_include_clean_checkout_shader_check(self):
         for path in ("devenv.nix", "devenv.yaml", "devenv.lock",
                      ".github/actions/setup-devenv/action.yml",
                      ".github/actions/setup-zig-cache/action.yml"):
             with self.subTest(path=path):
-                self.assert_jobs([path], "fmt", "game", "graphics", "shaders")
+                self.assert_jobs([path], "fmt", "game", "graphics", "shaders", "coverage")
 
     def test_shaders_and_unknown_inputs_select_full_game_checks(self):
         for path in (".github/actions/new-action/action.yml",
                      "assets/shaders/vulkan/water.frag", "scripts/new-check.sh",
                      "scripts/new-benchmark-check.sh", "docs/future-fixture.bin"):
             with self.subTest(path=path):
-                self.assert_jobs([path], "game", "graphics")
+                self.assert_jobs([path], "game", "graphics", "coverage")
 
     def test_manual_run_is_full_even_without_a_diff(self):
-        self.assert_jobs([], "fmt", "game", "graphics", "shaders", full=True)
+        self.assert_jobs([], "fmt", "game", "graphics", "shaders", "coverage", full=True)
 
 
 if __name__ == "__main__":

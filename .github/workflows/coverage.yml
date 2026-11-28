@@ -24,7 +24,7 @@ jobs:
 
   kcov:
     needs: coverage-changes
-    if: needs.coverage-changes.outputs.game == 'true'
+    if: needs.coverage-changes.outputs.coverage == 'true'
     permissions:
       contents: read
       id-token: write

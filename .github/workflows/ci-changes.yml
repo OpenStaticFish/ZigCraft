@@ -5,6 +5,8 @@ on:
     outputs:
       game:
         value: ${{ jobs.classify.outputs.game }}
+      coverage:
+        value: ${{ jobs.classify.outputs.coverage }}
       fmt:
         value: ${{ jobs.classify.outputs.fmt }}
       graphics:
@@ -19,6 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       game: ${{ steps.filter.outputs.game }}
+      coverage: ${{ steps.filter.outputs.coverage }}
       fmt: ${{ steps.filter.outputs.fmt }}
       graphics: ${{ steps.filter.outputs.graphics }}
       shaders: ${{ steps.filter.outputs.shaders }}

@@ -49,9 +49,12 @@ TOOLCHAIN_ACTIONS = (".github/actions/setup-devenv/", ".github/actions/setup-zig
 def classify(paths, full=False):
     game = fmt = graphics = full
     shaders = full
+    coverage = False
     for path in paths:
         if path == ".github/workflows/build.yml" or path in TOOLCHAIN_CONFIG or path.startswith(TOOLCHAIN_ACTIONS):
             game = fmt = shaders = True
+        elif path == ".github/workflows/coverage.yml":
+            coverage = True
         elif path in SHADER_INPUTS:
             shaders = True
         elif path.startswith(GRAPHICS_INPUTS):
@@ -64,7 +67,7 @@ def classify(paths, full=False):
         # Compare the two shipped shadow binaries before any build regenerates them.
         if path in COMMITTED_SHADOW_INPUTS:
             shaders = True
-    return dict(game=game, fmt=fmt, graphics=graphics or game, shaders=shaders)
+    return dict(game=game, fmt=fmt, graphics=graphics or game, shaders=shaders, coverage=coverage or game)
 
 
 if __name__ == "__main__":

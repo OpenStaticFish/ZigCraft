@@ -18,7 +18,7 @@ devenv shell zig build -Doptimize=ReleaseSafe test
 
 ## Coverage
 
-`Coverage` runs independently of `Build` on PRs and pushes to `dev`. Both use the same changed-file classifier: kcov runs for game or toolchain changes and skips prose and routine automation. Coverage failures are visible on the `Coverage` run and do not affect the required Build checks. To measure a ref manually, dispatch `Coverage` for that ref.
+`Coverage` runs independently of `Build` on PRs and pushes to `dev`. Both use the same changed-file classifier: kcov runs for game or toolchain changes and skips prose and routine automation. Changes to the Coverage workflow's commands run kcov without starting game jobs; literal runner-label edits alone skip both. Coverage failures are visible on the `Coverage` run and do not affect the required Build checks. To measure a ref manually, dispatch `Coverage` for that ref.
 
 The workflow uploads the generated report to Codecov and posts a non-blocking comment on same-repository PRs when the coverage artifact is available. The report establishes a baseline before a future blocking threshold is enabled.
 
