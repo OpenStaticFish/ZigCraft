@@ -156,6 +156,7 @@ pub const TransferQueue = struct {
     command_pool: c.VkCommandPool = null,
     command_buffers: [rhi.MAX_FRAMES_IN_FLIGHT]c.VkCommandBuffer = undefined,
     fence: c.VkFence = null,
+    submit_sync: @TypeOf(&c.vkQueueSubmit) = &c.vkQueueSubmit,
     frame_fences: [rhi.MAX_FRAMES_IN_FLIGHT]c.VkFence = .{null} ** rhi.MAX_FRAMES_IN_FLIGHT,
     transfer_semaphores: [rhi.MAX_FRAMES_IN_FLIGHT]c.VkSemaphore = .{null} ** rhi.MAX_FRAMES_IN_FLIGHT,
     transfer_ready: [rhi.MAX_FRAMES_IN_FLIGHT]bool = undefined,
@@ -407,11 +408,10 @@ pub const TransferQueue = struct {
         try Utils.checkVk(c.vkResetFences(vk_device, 1, &self.fence));
 
         queue_mutex.lock();
-        const result = c.vkQueueSubmit(self.queue, 1, &submit_info, self.fence);
+        const result = self.submit_sync(self.queue, 1, &submit_info, self.fence);
         queue_mutex.unlock();
 
-        if (result == c.VK_ERROR_DEVICE_LOST) return error.GpuLost;
-        if (result != c.VK_SUCCESS) return error.BackendError;
+        try Utils.checkVk(result);
 
         const wait_result = c.vkWaitForFences(vk_device, 1, &self.fence, c.VK_TRUE, std.math.maxInt(u64));
         if (wait_result == c.VK_ERROR_DEVICE_LOST) return error.GpuLost;

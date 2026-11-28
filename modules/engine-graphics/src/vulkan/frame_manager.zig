@@ -208,8 +208,12 @@ pub const FrameManager = struct {
         if (swapchain.skip_present) return;
         swapchain.initialized_images[self.current_image_index] = true;
         swapchain.present(self.render_finished_semaphores[self.current_image_index], self.current_image_index) catch |err| {
+            if (err != error.OutOfDate) {
+                // WSI may have rejected the request before queuing the wait.
+                // The render-finished semaphore cannot safely be reused.
+                return self.failRetirement(err);
+            }
             swapchain.framebuffer_resized = true;
-            if (err != error.OutOfDate) return err;
         };
     }
 

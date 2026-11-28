@@ -91,7 +91,11 @@ fn beginFrame(ctx_ptr: *anyopaque) anyerror!bool {
         // deletion queue on a retry; the current slot's fence alone is insufficient.
         try Utils.checkVk(c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device));
     }
-    if (inter_frame_transfer) try ctx.resources.flushTransfer();
+    if (inter_frame_transfer) ctx.resources.flushTransfer() catch |err| {
+        // The transfer command buffer may already have been ended or submitted.
+        ctx.frames.retirement_error = err;
+        return err;
+    };
 
     // A failed rebuild may already have destroyed resources needed to draw.
     // A fresh resize or quality request can retry, but only success resumes rendering.

@@ -523,8 +523,8 @@ pub fn endFrame(ctx: anytype) !void {
     // Submission owns the capture buffer independently of what WSI reports.
     const presented = ctx.frames.presentFrame(&ctx.swapchain);
     const captured = screenshot.completeCapture(ctx) and (!capture_requested or capture_recorded);
-    if (ctx.screenshot_capture.staging != null) ctx.frames.retirement_error = error.ScreenshotCaptureFailed;
     try presented;
+    if (ctx.screenshot_capture.staging != null) ctx.frames.retirement_error = error.ScreenshotCaptureFailed;
     if (!captured) return error.ScreenshotCaptureFailed;
 
     if (ctx.render_device) |device| {

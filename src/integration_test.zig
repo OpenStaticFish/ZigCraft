@@ -182,6 +182,10 @@ fn failGraphicsSubmit(_: *@import("engine-graphics").VulkanDevice, _: c.VkSubmit
     return error.OutOfMemory;
 }
 
+fn failUploadSubmit(_: c.VkQueue, _: u32, _: [*c]const c.VkSubmitInfo, _: c.VkFence) callconv(.c) c.VkResult {
+    return c.VK_ERROR_OUT_OF_HOST_MEMORY;
+}
+
 fn failPresentation(_: c.VkQueue, _: [*c]const c.VkPresentInfoKHR) callconv(.c) c.VkResult {
     return c.VK_ERROR_OUT_OF_HOST_MEMORY;
 }
@@ -465,6 +469,7 @@ test "smoke test: launch, generate, render, exit" {
             try testing.expectError(error.OutOfMemory, app.runSingleFrame());
             try testing.expect(vulkan.screenshot_capture.staging == null);
             try dir.access("present-error.png", .{});
+            try testing.expectError(error.OutOfMemory, app.runSingleFrame());
         }
     }
 
@@ -472,6 +477,14 @@ test "smoke test: launch, generate, render, exit" {
         app.input.interface().setShouldQuit(false);
         active_upload_screen.quit_on_draw = false;
         vulkan.frames.submit_frame = &failGraphicsSubmit;
+        try testing.expectError(error.OutOfMemory, app.runSingleFrame());
+        try testing.expectError(error.OutOfMemory, app.runSingleFrame());
+
+        // The failed graphics submit deliberately leaves this slot terminal.
+        // Test the transfer failure on the closed frame before any fence wait.
+        vulkan.frames.retirement_error = null;
+        vulkan.resources.transfer.submit_sync = &failUploadSubmit;
+        try app.render_system.getRHI().resourceManager().updateBuffer(active_upload_screen.buffer, 63, &.{0xcd});
         try testing.expectError(error.OutOfMemory, app.runSingleFrame());
         try testing.expectError(error.OutOfMemory, app.runSingleFrame());
     }
