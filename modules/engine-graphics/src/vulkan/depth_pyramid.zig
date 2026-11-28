@@ -25,6 +25,7 @@ pub const DepthPyramidSystem = struct {
     pyramid_view: c.VkImageView = null,
     pyramid_sampler: c.VkSampler = null,
     pyramid_layout: c.VkImageLayout = c.VK_IMAGE_LAYOUT_UNDEFINED,
+    recorded: bool = false,
     mip_count: u32 = 0,
     mip_widths: [MAX_MIP_LEVELS]u32 = .{0} ** MAX_MIP_LEVELS,
     mip_heights: [MAX_MIP_LEVELS]u32 = .{0} ** MAX_MIP_LEVELS,
@@ -294,14 +295,19 @@ pub const DepthPyramidSystem = struct {
         {
             var pyramid_barrier = std.mem.zeroes(c.VkImageMemoryBarrier);
             pyramid_barrier.sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            pyramid_barrier.oldLayout = if (self.recorded) c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL else self.pyramid_layout;
+            if (pyramid_barrier.oldLayout != c.VK_IMAGE_LAYOUT_UNDEFINED) {
+                pyramid_barrier.srcAccessMask = c.VK_ACCESS_SHADER_WRITE_BIT;
+            }
             pyramid_barrier.dstAccessMask = c.VK_ACCESS_SHADER_WRITE_BIT;
-            pyramid_barrier.oldLayout = self.pyramid_layout;
             pyramid_barrier.newLayout = c.VK_IMAGE_LAYOUT_GENERAL;
             pyramid_barrier.image = self.pyramid_image;
+            pyramid_barrier.srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+            pyramid_barrier.dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
             pyramid_barrier.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = self.mip_count, .baseArrayLayer = 0, .layerCount = 1 };
             c.vkCmdPipelineBarrier(
                 command_buffer,
-                c.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                 c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 0,
                 0,
@@ -342,6 +348,8 @@ pub const DepthPyramidSystem = struct {
                 barrier.oldLayout = c.VK_IMAGE_LAYOUT_GENERAL;
                 barrier.newLayout = c.VK_IMAGE_LAYOUT_GENERAL;
                 barrier.image = self.pyramid_image;
+                barrier.srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+                barrier.dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
                 barrier.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = @intCast(mip), .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
                 c.vkCmdPipelineBarrier(
                     command_buffer,
@@ -366,6 +374,8 @@ pub const DepthPyramidSystem = struct {
             final_barrier.oldLayout = c.VK_IMAGE_LAYOUT_GENERAL;
             final_barrier.newLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             final_barrier.image = self.pyramid_image;
+            final_barrier.srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+            final_barrier.dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
             final_barrier.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = self.mip_count, .baseArrayLayer = 0, .layerCount = 1 };
             c.vkCmdPipelineBarrier(
                 command_buffer,
@@ -380,7 +390,7 @@ pub const DepthPyramidSystem = struct {
                 &final_barrier,
             );
 
-            self.pyramid_layout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            self.recorded = true;
         }
     }
 
@@ -428,6 +438,7 @@ pub const DepthPyramidSystem = struct {
         }
 
         self.pyramid_layout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+        self.recorded = false;
         self.mip_count = 0;
         self.width = 0;
         self.height = 0;

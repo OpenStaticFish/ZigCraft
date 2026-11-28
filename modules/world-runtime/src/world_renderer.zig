@@ -119,7 +119,6 @@ pub const WorldRenderer = struct {
     render_ctx: RenderContext,
     query: IDeviceQuery,
     timing: IDeviceTiming,
-    culling_screen_size: rhi_mod.RenderResolution,
 
     vertex_allocator: *GlobalVertexAllocator,
     visible_chunks: std.ArrayListUnmanaged(*ChunkData),
@@ -162,7 +161,7 @@ pub const WorldRenderer = struct {
     // Diagnostic frame counter
     render_frame_count: u64 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, rm: ResourceManager, render_ctx: RenderContext, query: IDeviceQuery, storage: *ChunkStorage, atlas: *const TextureAtlas, rhi: rhi_mod.RHI, culling_system: *?ICullingSystem, culling_screen_size: rhi_mod.RenderResolution, safe_mode_enabled: bool) !*WorldRenderer {
+    pub fn init(allocator: std.mem.Allocator, rm: ResourceManager, render_ctx: RenderContext, query: IDeviceQuery, storage: *ChunkStorage, atlas: *const TextureAtlas, rhi: rhi_mod.RHI, culling_system: *?ICullingSystem, safe_mode_enabled: bool) !*WorldRenderer {
         const renderer = try allocator.create(WorldRenderer);
 
         const strict_safe_mode = runtime_env.strictSafeModeEnabled();
@@ -239,7 +238,6 @@ pub const WorldRenderer = struct {
             .render_ctx = render_ctx,
             .query = query,
             .timing = rhi.timing(),
-            .culling_screen_size = culling_screen_size,
             .vertex_allocator = vertex_allocator,
             .visible_chunks = .empty,
             .last_render_stats = .{},
@@ -680,15 +678,9 @@ pub const WorldRenderer = struct {
         }
 
         cs.updateAABBData(fi, self.aabb_data.items);
-        // The previous-frame depth pyramid is currently too unstable during camera
-        // rotation and causes chunks to be wrongly occluded. Keep GPU frustum
-        // culling, but disable temporal occlusion until the reprojection path is fixed.
         cs.dispatch(.{
             .view_proj = view_proj,
             .chunk_count = chunk_count,
-            .screen_width = @floatFromInt(self.culling_screen_size.width),
-            .screen_height = @floatFromInt(self.culling_screen_size.height),
-            .previous_frame_valid = false,
         });
     }
 

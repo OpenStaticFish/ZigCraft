@@ -8,9 +8,6 @@ pub const ChunkCullData = extern struct {
 pub const DispatchConfig = struct {
     view_proj: Mat4,
     chunk_count: u32,
-    screen_width: f32,
-    screen_height: f32,
-    previous_frame_valid: bool,
 };
 
 pub const ICullingSystem = struct {
@@ -49,7 +46,7 @@ pub const ICullingSystem = struct {
         self.vtable.readVisibleIndices(self.ptr, frame_index, count, out);
     }
 
-    /// Dispatches GPU frustum/occlusion culling for the configured chunk set.
+    /// Dispatches GPU frustum culling for the configured chunk set.
     /// Must run on the render thread with current-frame AABB data already uploaded.
     pub fn dispatch(self: ICullingSystem, config: DispatchConfig) void {
         self.vtable.dispatch(self.ptr, config);

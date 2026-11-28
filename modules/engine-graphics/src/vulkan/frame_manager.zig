@@ -21,7 +21,7 @@ pub const FrameManager = struct {
     current_image_index: u32 = 0,
     frame_in_progress: bool = false,
     retirement_error: ?anyerror = null,
-    submit_frame: *const fn (*VulkanDevice, c.VkSubmitInfo, c.VkFence) anyerror!void = &VulkanDevice.submitGuarded,
+    submit_graphics: *const fn (*VulkanDevice, c.VkSubmitInfo, c.VkFence) anyerror!void = &VulkanDevice.submitGuarded,
 
     pub fn init(vulkan_device: *VulkanDevice) !FrameManager {
         var self = FrameManager{
@@ -225,7 +225,7 @@ pub const FrameManager = struct {
     fn submitFrame(self: *FrameManager, info: c.VkSubmitInfo) !void {
         const fence = &self.in_flight_fences[self.current_frame];
         try Utils.checkVk(c.vkResetFences(self.vulkan_device.vk_device, 1, fence));
-        try self.submit_frame(self.vulkan_device, info, fence.*);
+        try self.submit_graphics(self.vulkan_device, info, fence.*);
     }
 
     pub fn abortFrame(self: *FrameManager, swapchain: *SwapchainPresenter) void {

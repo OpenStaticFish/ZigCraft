@@ -115,9 +115,6 @@ const UploadScreen = struct {
             culling.dispatch(.{
                 .view_proj = .{ .data = .{ .{ 1, 0, 0, 0 }, .{ 0, 1, 0, 0 }, .{ 0, 0, 1, 0 }, .{ 0, 0, 0, 1 } } },
                 .chunk_count = 1,
-                .screen_width = 1,
-                .screen_height = 1,
-                .previous_frame_valid = false,
             });
         }
         // A pyramid request without a G-pass must not sample unwritten depth,
@@ -519,6 +516,16 @@ test "smoke test: launch, generate, render, exit" {
         try testing.expect(swapchain.handle == null);
         try testing.expectEqual(aborted_slot, vulkan.frames.current_frame);
 
+        const submit = vulkan.frames.submit_graphics;
+        {
+            vulkan.frames.submit_graphics = &failGraphicsSubmit;
+            defer vulkan.frames.submit_graphics = submit;
+            app.render_system.rhi.context().requestSwapchainRecreate();
+            try app.runSingleFrame();
+        }
+        try testing.expect(vulkan.runtime.swapchain_recreate_failed);
+        try testing.expectEqual(aborted_slot, vulkan.frames.current_frame);
+
         app.render_system.rhi.context().requestSwapchainRecreate();
         try app.runSingleFrame();
         try testing.expect(aborted_slot != vulkan.frames.current_frame);
@@ -550,9 +557,29 @@ test "smoke test: launch, generate, render, exit" {
     }
 
     if (build_options.skip_present) {
+        const render = app.render_system.getRHI().renderContext();
+        for (0..3) |attempt| {
+            try testing.expect(try render.beginFrame());
+            errdefer render.abortFrame();
+            render.beginGPass();
+            render.endGPass();
+            render.computeDepthPyramid();
+            try testing.expect(vulkan.depth_pyramid.recorded);
+            const expected_layout: c.VkImageLayout = if (attempt < 2) c.VK_IMAGE_LAYOUT_UNDEFINED else c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            try testing.expectEqual(expected_layout, vulkan.depth_pyramid.pyramid_layout);
+            if (attempt == 0) {
+                render.abortFrame();
+                try testing.expect(!vulkan.depth_pyramid.recorded);
+            } else {
+                try render.endFrame();
+                try testing.expectEqual(@as(c.VkImageLayout, c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), vulkan.depth_pyramid.pyramid_layout);
+            }
+        }
+        app.render_system.waitIdle();
+
         app.input.interface().setShouldQuit(false);
         active_upload_screen.quit_on_draw = false;
-        vulkan.frames.submit_frame = &failGraphicsSubmit;
+        vulkan.frames.submit_graphics = &failGraphicsSubmit;
         try testing.expectError(error.OutOfMemory, app.runSingleFrame());
         try testing.expectError(error.OutOfMemory, app.runSingleFrame());
 

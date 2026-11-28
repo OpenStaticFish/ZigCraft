@@ -149,6 +149,7 @@ fn abortFrame(ctx_ptr: *anyopaque) void {
     // an unsubmitted recording command buffer safe to destroy.
     ctx.resources.abortCurrentFrame();
     ctx.frames.abortFrame(&ctx.swapchain);
+    ctx.depth_pyramid.recorded = false;
     if (ctx.screenshot_capture.staging != null) screenshot.discardCapture(ctx);
 
     ctx.runtime.draw_call_count = 0;

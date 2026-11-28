@@ -581,7 +581,6 @@ pub const World = struct {
         world.lpv_grid_builder = LpvGridBuilder.init(&world.storage);
 
         log.log.info("World.init: initializing WorldRenderer", .{});
-        const culling_size = options.rhi.query().getRenderResolution();
         var culling_system = if (!safe_mode) blk: {
             break :blk options.rhi.cullingFactory().createCullingSystem(allocator, MAX_MDI_CHUNKS) catch |err| {
                 log.log.warn("GPU culling init failed ({}), falling back to CPU culling", .{err});
@@ -590,7 +589,7 @@ pub const World = struct {
         } else null;
         errdefer if (culling_system) |system| system.deinit();
 
-        world.renderer = try WorldRenderer.init(allocator, options.rhi.resourceManager(), options.rhi.renderContext(), options.rhi.query(), &world.storage, options.atlas, options.rhi, &culling_system, culling_size, safe_mode);
+        world.renderer = try WorldRenderer.init(allocator, options.rhi.resourceManager(), options.rhi.renderContext(), options.rhi.query(), &world.storage, options.atlas, options.rhi, &culling_system, safe_mode);
         errdefer world.renderer.deinit();
 
         world.gpu_block_buffer = world.renderer.getGpuBlockBuffer();

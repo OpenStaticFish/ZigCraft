@@ -512,6 +512,7 @@ pub fn endFrame(ctx: anytype) !void {
 
     defer if (transfer_cb != null) ctx.resources.resetTransferState();
     ctx.frames.endFrame(&ctx.swapchain, transfer_cb, transfer_sem) catch |err| {
+        ctx.depth_pyramid.recorded = false;
         screenshot.discardCapture(ctx);
         if (err == error.GpuLost) {
             ctx.runtime.gpu_fault_detected = true;
@@ -519,6 +520,10 @@ pub fn endFrame(ctx: anytype) !void {
         return err;
     };
     if (transfer_cb != null) ctx.resources.submitted_transfer_fence = frame_fence;
+    if (ctx.depth_pyramid.recorded) {
+        ctx.depth_pyramid.pyramid_layout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        ctx.depth_pyramid.recorded = false;
+    }
 
     // Submission owns the capture buffer independently of what WSI reports.
     const presented = ctx.frames.presentFrame(&ctx.swapchain);
