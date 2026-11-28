@@ -242,8 +242,14 @@ fn countTeardownValidationErrors(_: c.VkDebugUtilsMessageSeverityFlagBitsEXT, _:
     return c.VK_FALSE;
 }
 
-fn trackTeardownValidation(device: *@import("engine-graphics").VulkanDevice, count: *std.atomic.Value(u32)) !void {
-    if (device.debug_messenger == null) return;
+fn trackTeardownValidation(device: *@import("engine-graphics").VulkanDevice, count: *std.atomic.Value(u32)) !bool {
+    if (device.debug_messenger == null) {
+        // CI explicitly enables Vulkan validation for the offscreen run.
+        if (std.c.getenv("VK_LAYER_ENABLES") != null or std.c.getenv("VK_LAYER_VALIDATE_SYNC") != null)
+            return error.MissingVulkanDebugMessenger;
+        std.debug.print("Skipping SSAO teardown validation: no Vulkan debug messenger\n", .{});
+        return false;
+    }
     const create: c.PFN_vkCreateDebugUtilsMessengerEXT = @ptrCast(c.vkGetInstanceProcAddr(device.instance, "vkCreateDebugUtilsMessengerEXT"));
     const destroy: c.PFN_vkDestroyDebugUtilsMessengerEXT = @ptrCast(c.vkGetInstanceProcAddr(device.instance, "vkDestroyDebugUtilsMessengerEXT"));
     const info = c.VkDebugUtilsMessengerCreateInfoEXT{
@@ -257,6 +263,7 @@ fn trackTeardownValidation(device: *@import("engine-graphics").VulkanDevice, cou
     try @import("engine-graphics").vulkan_utils.checkVk(create.?(device.instance, &info, null, &messenger));
     destroy.?(device.instance, device.debug_messenger, null);
     device.debug_messenger = messenger;
+    return true;
 }
 
 var teardown_wait_attempts: usize = 0;
@@ -354,8 +361,9 @@ fn expectPendingNoiseUpload(context: *const @import("engine-graphics").VulkanCon
 
 fn checkNoiseUploadWaitFailures(window: *c.SDL_Window) !void {
     const graphics = @import("engine-graphics");
-    for ([_]enum { startup_oom, rebuild_oom, device_lost }{ .startup_oom, .rebuild_oom, .device_lost }) |scenario| {
+    for ([_]enum { startup_oom, device_lost }{ .startup_oom, .device_lost }) |scenario| {
         var validation_errors = std.atomic.Value(u32).init(0);
+        var validation_active = false;
         {
             const backend = try graphics.rhi_vulkan.createRHI(testing.allocator, window, null, 256, 1, 1, true);
             defer backend.deinit();
@@ -371,19 +379,6 @@ fn checkNoiseUploadWaitFailures(window: *c.SDL_Window) !void {
                     teardown_wait_attempts = 0;
                     context.frames.wait_device_idle = &failFirstTeardownWait;
                 },
-                .rebuild_oom => {
-                    try backend.init(testing.allocator, null);
-                    context.wait_ssao_queue_idle = &failLayoutWait;
-                    backend.context().requestSwapchainRecreate();
-                    try testing.expectError(error.OutOfMemory, backend.renderContext().beginFrame());
-                    try expectPendingNoiseUpload(context);
-
-                    context.wait_ssao_queue_idle = null;
-                    backend.context().requestSwapchainRecreate();
-                    try testing.expect(try backend.renderContext().beginFrame());
-                    backend.renderContext().abortFrame();
-                    try testing.expect(context.ssao_system.pending_noise_upload == null);
-                },
                 .device_lost => {
                     context.wait_ssao_queue_idle = &loseDeviceOnNoiseWait;
                     try testing.expectError(error.GpuLost, backend.init(testing.allocator, null));
@@ -394,10 +389,10 @@ fn checkNoiseUploadWaitFailures(window: *c.SDL_Window) !void {
 
             try testing.expectEqual(@as(u32, 0), context.vulkan_device.validation_error_count.load(.monotonic));
             // Keep counting through vkDestroyDevice, which checks for leaks.
-            try trackTeardownValidation(&context.vulkan_device, &validation_errors);
+            validation_active = try trackTeardownValidation(&context.vulkan_device, &validation_errors);
         }
         if (scenario == .startup_oom) try testing.expect(teardown_wait_attempts >= 2);
-        try testing.expectEqual(@as(u32, 0), validation_errors.load(.monotonic));
+        if (validation_active) try testing.expectEqual(@as(u32, 0), validation_errors.load(.monotonic));
     }
 }
 
@@ -440,6 +435,21 @@ test "smoke test: launch, generate, render, exit" {
             try testing.expect(context.vulkan_device.vk_device != null);
         }
         try checkNoiseUploadWaitFailures(app.window_manager.window);
+
+        const frame = vulkan.frames.current_frame;
+        vulkan.wait_ssao_queue_idle = &failLayoutWait;
+        app.render_system.rhi.context().requestSwapchainRecreate();
+        try app.runSingleFrame();
+        try testing.expect(vulkan.runtime.swapchain_recreate_failed);
+        try testing.expectEqual(frame, vulkan.frames.current_frame);
+        try expectPendingNoiseUpload(vulkan);
+
+        vulkan.wait_ssao_queue_idle = null;
+        app.render_system.rhi.context().requestSwapchainRecreate();
+        try app.runSingleFrame();
+        try testing.expect(!vulkan.runtime.swapchain_recreate_failed);
+        try testing.expect(frame != vulkan.frames.current_frame);
+        try testing.expect(vulkan.ssao_system.pending_noise_upload == null);
     }
 
     const world_screen = try WorldScreen.init(test_allocator, app.engineContext(), 12345, 0);
