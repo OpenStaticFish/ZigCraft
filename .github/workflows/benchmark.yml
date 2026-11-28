@@ -77,7 +77,7 @@ jobs:
 
       - name: Install Bencher CLI
         if: env.BENCHER_API_TOKEN != '' && env.BENCHER_PROJECT != ''
-        uses: bencherdev/bencher@30a740a2e4246560b1a5fd424057d84aa2b188d6
+        uses: bencherdev/bencher@7ea19403daf3e0f9285420a8b35f1b43ca341561
 
       - name: Publish Bencher trends
         if: env.BENCHER_API_TOKEN != '' && env.BENCHER_PROJECT != ''
