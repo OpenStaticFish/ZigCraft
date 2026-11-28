@@ -18,7 +18,8 @@ on:
         type: boolean
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.ref }}
+  # Pushes validate individual deltas; only PR runs supersede the full earlier diff.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.ref }}-${{ inputs.ref }}
   cancel-in-progress: true
 
 env:

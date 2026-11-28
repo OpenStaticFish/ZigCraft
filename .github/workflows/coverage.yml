@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: kcov-${{ github.workflow }}-${{ github.ref }}-${{ inputs.ref }}
+  group: kcov-${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.ref }}-${{ inputs.ref }}
   cancel-in-progress: true
 
 jobs:
