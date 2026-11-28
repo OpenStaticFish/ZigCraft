@@ -6,6 +6,7 @@ const log = @import("engine-core").log;
 const WindowManager = @import("engine-core").WindowManager;
 const Input = @import("engine-input").Input;
 const Time = @import("engine-core").Time;
+const MonotonicTimer = @import("engine-core").time.MonotonicTimer;
 const UISystemManager = @import("engine-ui").UISystemManager;
 const rmlui = @import("engine-ui").rmlui;
 const WorldStats = @import("engine-ui").WorldStats;
@@ -49,6 +50,7 @@ fn renderConfigFromSettings(settings: *const Settings) RenderSystem.Config {
     return .{
         .shadow_resolution = settings.getShadowResolution(),
         .msaa_samples = settings.msaa_samples,
+        .skip_present = build_options.skip_present,
         .anisotropic_filtering = settings.anisotropic_filtering,
         .texture_pack = settings.texture_pack,
         .max_texture_resolution = settings.max_texture_resolution,
@@ -114,6 +116,9 @@ pub const App = struct {
     direct_launch_resize_guard_frames: u32 = 0,
     screenshot_delay_start: ?f32 = null,
     screenshot_settle_frames: u32 = 0,
+    graphics_stall_timer: ?MonotonicTimer = null,
+    screenshot_readiness_timer: ?MonotonicTimer = null,
+    screenshot_capture_ready: bool = false,
     frame_start_counter: u64 = 0,
     reveal_window_when_menu_ready: bool = false,
 
@@ -397,6 +402,9 @@ pub const App = struct {
 
     pub fn runSingleFrame(self: *App) !void {
         self.frame_start_counter = c.SDL_GetPerformanceCounter();
+        if (build_options.screenshot_path.len > 0 and self.screenshot_readiness_timer == null) {
+            self.screenshot_readiness_timer = .{ .start_ticks = self.frame_start_counter };
+        }
         self.time.update();
         if (!build_options.benchmark) {
             self.audio_manager.update();
@@ -454,11 +462,11 @@ pub const App = struct {
 
         self.render_system.setViewport(window_width, window_height);
 
-        self.render_system.beginFrame();
-        var frame_open = true;
+        var frame_open = try self.render_system.beginFrame();
         defer if (frame_open) self.render_system.abortFrame();
+        if (frame_open) self.graphics_stall_timer = null;
 
-        try self.render_system.updateGlobalUniforms(.{
+        if (frame_open) try self.render_system.updateGlobalUniforms(.{
             .view_proj = Mat4.identity,
             .cam_pos = Vec3.zero,
             .sun_dir = Vec3.init(0, -1, 0),
@@ -501,9 +509,27 @@ pub const App = struct {
         // a final frame after shutdown has begun.
         if (self.input.interface().shouldQuit()) return;
 
+        if (!frame_open) {
+            if (self.benchmark_runner) |runner| try runner.skipFrame();
+            try self.checkScreenshotDeadline();
+            if (build_options.smoke_test or build_options.screenshot_path.len > 0) {
+                const timer = self.graphics_stall_timer orelse MonotonicTimer{ .start_ticks = self.frame_start_counter };
+                self.graphics_stall_timer = timer;
+                try checkGraphicsFrameDeadline(timer.read());
+            }
+            // Keep the previous rendered frame's readiness and capture delay.
+            // The next rendered frame rechecks readiness; the stall timer above
+            // handles the case where that frame never arrives.
+            try self.applyPendingScreenTransitions();
+            self.revealMenuWindowWhenReady();
+            // No presentation occurred to provide VSync pacing.
+            std.Options.debug_io.sleep(.fromMilliseconds(8), .boot) catch {};
+            return;
+        }
+
         if (self.screen_manager.stack.items.len == 0) {
-            self.render_system.endFrame();
             frame_open = false;
+            try self.render_system.endFrame();
             try self.applyPendingScreenTransitions();
             return;
         }
@@ -547,6 +573,7 @@ pub const App = struct {
             }
 
             const capture_ready = self.smoke_test_frames >= target_frames and self.screenshot_settle_frames >= 30;
+            self.screenshot_capture_ready = capture_ready;
             const screenshot_delay_ready = build_options.screenshot_path.len > 0 and build_options.screenshot_delay_seconds > 0;
             const should_finish = if (screenshot_delay_ready and capture_ready) blk: {
                 // A delay is additional settling time, not a replacement for
@@ -564,9 +591,7 @@ pub const App = struct {
             // Headless frames are intentionally unthrottled. A frame-count
             // timeout can therefore expire before generation workers receive
             // meaningful CPU time; use a wall-time bound instead.
-            if (build_options.screenshot_path.len > 0 and requires_world_ready and self.time.elapsed >= 90.0 and !capture_ready) {
-                return error.ScreenshotWorldNotReady;
-            }
+            try self.checkScreenshotDeadline();
 
             if (should_finish) {
                 if (build_options.screenshot_path.len > 0) {
@@ -583,8 +608,8 @@ pub const App = struct {
         // Screenshot requests must reach the RHI while this frame's command
         // buffer is still open. Vulkan records the readback after its final
         // output pass and before submission/presentation.
-        self.render_system.endFrame();
         frame_open = false;
+        try self.render_system.endFrame();
         try self.applyPendingScreenTransitions();
         self.revealMenuWindowWhenReady();
 
@@ -610,6 +635,15 @@ pub const App = struct {
         }
 
         self.limitFrameRateIfNeeded();
+    }
+
+    fn checkScreenshotDeadline(self: *const App) !void {
+        const requires_world_ready = build_options.shadow_test_scene or build_options.auto_world.len > 0;
+        if (requires_world_ready and !self.screenshot_capture_ready) {
+            if (self.screenshot_readiness_timer) |timer| {
+                if (timer.read() >= 90 * std.time.ns_per_s) return error.ScreenshotWorldNotReady;
+            }
+        }
     }
 
     fn revealMenuWindowWhenReady(self: *App) void {
@@ -686,6 +720,16 @@ fn applyBenchmarkSettings(settings: *Settings, preset_name: []const u8, render_d
     if (render_distance > 0) {
         settings.render_distance = render_distance;
     }
+}
+
+fn checkGraphicsFrameDeadline(elapsed_ns: u64) error{GraphicsFrameTimeout}!void {
+    if (elapsed_ns >= 90 * std.time.ns_per_s) return error.GraphicsFrameTimeout;
+}
+
+test "skipped graphics frame deadline expires at 90 seconds" {
+    const deadline = 90 * std.time.ns_per_s;
+    try checkGraphicsFrameDeadline(deadline - 1);
+    try std.testing.expectError(error.GraphicsFrameTimeout, checkGraphicsFrameDeadline(deadline));
 }
 
 test "benchmark render distance override is retained after its preset" {

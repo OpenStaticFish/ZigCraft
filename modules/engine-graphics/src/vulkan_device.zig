@@ -441,6 +441,8 @@ pub const VulkanDevice = struct {
     }
 
     pub fn deinit(self: *VulkanDevice) void {
+        // Keep validation active while the driver checks for live device objects.
+        c.vkDestroyDevice(self.vk_device, null);
         if (self.debug_messenger != null) {
             const destroy_proc = c.vkGetInstanceProcAddr(self.instance, "vkDestroyDebugUtilsMessengerEXT");
             if (destroy_proc) |proc| {
@@ -451,7 +453,6 @@ pub const VulkanDevice = struct {
             }
             self.debug_messenger = null;
         }
-        c.vkDestroyDevice(self.vk_device, null);
         c.vkDestroySurfaceKHR(self.instance, self.surface, null);
         c.vkDestroyInstance(self.instance, null);
     }

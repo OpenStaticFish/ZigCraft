@@ -44,11 +44,12 @@ const Mock = struct {
     }
     fn unmapBuffer(_: *anyopaque, _: types.BufferHandle) void {}
 
-    fn beginFrame(ptr: *anyopaque) void {
+    fn beginFrame(ptr: *anyopaque) anyerror!bool {
         const self: *Mock = @ptrCast(@alignCast(ptr));
         self.begin_count += 1;
+        return true;
     }
-    fn endFrame(_: *anyopaque) void {}
+    fn endFrame(_: *anyopaque) anyerror!void {}
     fn abortFrame(_: *anyopaque) void {}
     fn requestSwapchainRecreate(_: *anyopaque) void {}
     fn getEncoder(_: *anyopaque) rhi.IGraphicsCommandEncoder {
@@ -152,7 +153,7 @@ test "IRenderContext forwards lifecycle and state calls" {
     var mock = Mock{};
     const ctx = rhi.IRenderContext{ .ptr = &mock, .vtable = &render_vtable };
 
-    ctx.beginFrame();
+    try std.testing.expect(try ctx.beginFrame());
     ctx.setClearColor(.{ .x = 0.25, .y = 0.5, .z = 0.75 });
 
     try std.testing.expectEqual(@as(u32, 1), mock.begin_count);

@@ -99,13 +99,28 @@ pub const TAASystem = struct {
             subpass.colorAttachmentCount = 1;
             subpass.pColorAttachments = &color_ref;
 
-            var dependency = std.mem.zeroes(c.VkSubpassDependency);
-            dependency.srcSubpass = c.VK_SUBPASS_EXTERNAL;
-            dependency.dstSubpass = 0;
-            dependency.srcStageMask = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-            dependency.dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-            dependency.srcAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
-            dependency.dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            const reader_stages = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | c.VK_PIPELINE_STAGE_TRANSFER_BIT;
+            const reader_access = c.VK_ACCESS_SHADER_READ_BIT | c.VK_ACCESS_TRANSFER_READ_BIT;
+            const dependencies = [_]c.VkSubpassDependency{
+                .{
+                    .srcSubpass = c.VK_SUBPASS_EXTERNAL,
+                    .dstSubpass = 0,
+                    .srcStageMask = reader_stages | c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    .srcAccessMask = reader_access | c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    .dependencyFlags = 0,
+                },
+                .{
+                    .srcSubpass = 0,
+                    .dstSubpass = c.VK_SUBPASS_EXTERNAL,
+                    .srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    .dstStageMask = reader_stages,
+                    .srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    .dstAccessMask = reader_access,
+                    .dependencyFlags = 0,
+                },
+            };
 
             var rp_info = std.mem.zeroes(c.VkRenderPassCreateInfo);
             rp_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -113,8 +128,8 @@ pub const TAASystem = struct {
             rp_info.pAttachments = &color_attachment;
             rp_info.subpassCount = 1;
             rp_info.pSubpasses = &subpass;
-            rp_info.dependencyCount = 1;
-            rp_info.pDependencies = &dependency;
+            rp_info.dependencyCount = dependencies.len;
+            rp_info.pDependencies = &dependencies;
 
             try Utils.checkVk(c.vkCreateRenderPass(vk, &rp_info, null, &self.render_pass));
         }
@@ -371,9 +386,19 @@ pub const TAASystem = struct {
         self.pass_active = false;
 
         self.output_texture = self.history_textures[write_idx];
-        self.history_index = read_idx;
-        self.history_valid = true;
         self.ran_this_frame = true;
+    }
+
+    pub fn commitFrame(self: *TAASystem) void {
+        if (!self.ran_this_frame) return;
+        self.history_index = (self.history_index + 1) % self.history_textures.len;
+        self.history_valid = true;
+    }
+
+    pub fn discardFrame(self: *TAASystem) void {
+        if (!self.ran_this_frame) return;
+        self.output_texture = if (self.history_valid) self.history_textures[(self.history_index + 1) % self.history_textures.len] else 0;
+        self.ran_this_frame = false;
     }
 
     pub fn deinit(self: *TAASystem, vk: c.VkDevice, descriptor_pool: c.VkDescriptorPool, resources: anytype) void {

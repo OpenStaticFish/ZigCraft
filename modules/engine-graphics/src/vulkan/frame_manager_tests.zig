@@ -7,7 +7,6 @@ const testing = std.testing;
 const c = @import("c").c;
 const rhi = @import("engine-rhi").rhi;
 
-const frame_manager = @import("frame_manager.zig");
 const Utils = @import("utils.zig");
 
 test "checkVk returns success for VK_SUCCESS" {
@@ -119,12 +118,6 @@ test "FrameManager getCurrentCommandBuffer returns correct buffer by index" {
     current_frame = 1;
     const cb2 = command_buffers[current_frame];
     try testing.expect(cb2 == @as(c.VkCommandBuffer, @ptrFromInt(200)));
-}
-
-test "FrameManager DRY_RUN_ACTIVE matches build_options" {
-    const build_options = @import("engine_graphics_options");
-    const expected = if (@hasDecl(build_options, "skip_present")) build_options.skip_present else false;
-    try testing.expectEqual(expected, frame_manager.DRY_RUN_ACTIVE);
 }
 
 test "VkCommandBufferBeginInfo sType is correct" {

@@ -43,10 +43,7 @@ pub const VulkanSwapchain = struct {
     // Defaults to FIFO (VSync ON) which is guaranteed by the Vulkan spec.
     present_mode: c.VkPresentModeKHR = c.VK_PRESENT_MODE_FIFO_KHR,
 
-    pub fn init(allocator: std.mem.Allocator, device: *const VulkanDevice, window: *c.SDL_Window, msaa_samples: u8, present_mode: c.VkPresentModeKHR) !VulkanSwapchain {
-        const build_options = @import("engine_graphics_options");
-        const headless = if (@hasDecl(build_options, "skip_present")) build_options.skip_present else false;
-
+    pub fn init(allocator: std.mem.Allocator, device: *const VulkanDevice, window: *c.SDL_Window, msaa_samples: u8, present_mode: c.VkPresentModeKHR, headless: bool) !VulkanSwapchain {
         var self = VulkanSwapchain{
             .allocator = allocator,
             .device = device,
@@ -54,6 +51,7 @@ pub const VulkanSwapchain = struct {
             .headless_mode = headless,
             .present_mode = present_mode,
         };
+        errdefer self.deinit();
         try self.create(msaa_samples);
         return self;
     }
@@ -111,7 +109,7 @@ pub const VulkanSwapchain = struct {
     }
 
     pub fn recreate(self: *VulkanSwapchain, msaa_samples: u8) !void {
-        _ = c.vkDeviceWaitIdle(self.device.vk_device);
+        try checkVk(c.vkDeviceWaitIdle(self.device.vk_device));
         self.cleanup();
         try self.create(msaa_samples);
     }
@@ -169,19 +167,17 @@ pub const VulkanSwapchain = struct {
             view_info.format = self.image_format;
             view_info.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
             var view: c.VkImageView = null;
+            try self.image_views.ensureUnusedCapacity(self.allocator, 1);
             try checkVk(c.vkCreateImageView(self.device.vk_device, &view_info, null, &view));
-            try self.image_views.append(self.allocator, view);
+            self.image_views.appendAssumeCapacity(view);
             return;
         }
 
         var cap: c.VkSurfaceCapabilitiesKHR = undefined;
-        _ = c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(self.device.physical_device, self.device.surface, &cap);
+        try checkVk(c.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(self.device.physical_device, self.device.surface, &cap));
 
-        var format_count: u32 = 0;
-        _ = c.vkGetPhysicalDeviceSurfaceFormatsKHR(self.device.physical_device, self.device.surface, &format_count, null);
-        const formats = try self.allocator.alloc(c.VkSurfaceFormatKHR, format_count);
+        const formats = try self.querySurfaceFormats();
         defer self.allocator.free(formats);
-        _ = c.vkGetPhysicalDeviceSurfaceFormatsKHR(self.device.physical_device, self.device.surface, &format_count, formats.ptr);
 
         var surface_format = formats[0];
         for (formats) |f| {
@@ -267,10 +263,17 @@ pub const VulkanSwapchain = struct {
         try checkVk(c.vkCreateSwapchainKHR(self.device.vk_device, &swapchain_info, null, &self.handle));
 
         var image_count: u32 = 0;
-        _ = c.vkGetSwapchainImagesKHR(self.device.vk_device, self.handle, &image_count, null);
+        try checkVk(c.vkGetSwapchainImagesKHR(self.device.vk_device, self.handle, &image_count, null));
+        if (image_count == 0 or image_count > rhi.MAX_SWAPCHAIN_IMAGES) {
+            log.log.err("Unsupported Vulkan swapchain image count: {} (maximum {})", .{ image_count, rhi.MAX_SWAPCHAIN_IMAGES });
+            return error.UnsupportedSwapchainImageCount;
+        }
         try self.images.resize(self.allocator, image_count);
-        _ = c.vkGetSwapchainImagesKHR(self.device.vk_device, self.handle, &image_count, self.images.items.ptr);
+        try checkVk(c.vkGetSwapchainImagesKHR(self.device.vk_device, self.handle, &image_count, self.images.items.ptr));
+        if (image_count == 0) return error.UnsupportedSwapchainImageCount;
+        self.images.shrinkRetainingCapacity(image_count);
 
+        try self.image_views.ensureUnusedCapacity(self.allocator, image_count);
         for (self.images.items) |image| {
             var view_info = std.mem.zeroes(c.VkImageViewCreateInfo);
             view_info.sType = c.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -280,7 +283,26 @@ pub const VulkanSwapchain = struct {
             view_info.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
             var view: c.VkImageView = null;
             try checkVk(c.vkCreateImageView(self.device.vk_device, &view_info, null, &view));
-            try self.image_views.append(self.allocator, view);
+            self.image_views.appendAssumeCapacity(view);
+        }
+    }
+
+    fn querySurfaceFormats(self: *VulkanSwapchain) ![]c.VkSurfaceFormatKHR {
+        while (true) {
+            var count: u32 = 0;
+            try checkVk(c.vkGetPhysicalDeviceSurfaceFormatsKHR(self.device.physical_device, self.device.surface, &count, null));
+            if (count == 0) return error.FormatNotSupported;
+
+            const formats = try self.allocator.alloc(c.VkSurfaceFormatKHR, count);
+            errdefer self.allocator.free(formats);
+            const result = c.vkGetPhysicalDeviceSurfaceFormatsKHR(self.device.physical_device, self.device.surface, &count, formats.ptr);
+            if (result == c.VK_INCOMPLETE) {
+                self.allocator.free(formats);
+                continue;
+            }
+            try checkVk(result);
+            if (count == 0) return error.FormatNotSupported;
+            return self.allocator.realloc(formats, count);
         }
     }
 
@@ -480,6 +502,7 @@ pub const VulkanSwapchain = struct {
 
     fn createFramebuffers(self: *VulkanSwapchain, msaa_samples: u8) !void {
         const use_msaa = msaa_samples > 1;
+        try self.framebuffers.ensureUnusedCapacity(self.allocator, self.image_views.items.len);
         for (self.image_views.items) |iv| {
             var fb: c.VkFramebuffer = null;
             var fb_info = std.mem.zeroes(c.VkFramebufferCreateInfo);
@@ -500,7 +523,7 @@ pub const VulkanSwapchain = struct {
                 fb_info.pAttachments = &attachments[0];
                 try checkVk(c.vkCreateFramebuffer(self.device.vk_device, &fb_info, null, &fb));
             }
-            try self.framebuffers.append(self.allocator, fb);
+            self.framebuffers.appendAssumeCapacity(fb);
         }
     }
 
@@ -564,6 +587,8 @@ test "VulkanSwapchain recreation discards prior image handles" {
 }
 
 fn checkVk(result: c.VkResult) !void {
+    if (result == c.VK_ERROR_DEVICE_LOST) return error.GpuLost;
+    if (result == c.VK_ERROR_SURFACE_LOST_KHR) return error.SurfaceLost;
     if (result != c.VK_SUCCESS) return error.BackendError;
 }
 

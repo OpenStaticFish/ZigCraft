@@ -50,7 +50,6 @@ pub fn beginGPassInternal(ctx: anytype) void {
 
     ensureNoRenderPassActiveInternal(ctx);
 
-    ctx.runtime.g_pass_active = true;
     const current_frame = ctx.frames.current_frame;
     const command_buffer = ctx.frames.command_buffers[current_frame];
 
@@ -79,6 +78,7 @@ pub fn beginGPassInternal(ctx: anytype) void {
     render_pass_info.pClearValues = &clear_values[0];
 
     c.vkCmdBeginRenderPass(command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
+    ctx.runtime.g_pass_active = true;
     c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_manager.g_pipeline);
 
     const viewport = c.VkViewport{ .x = 0, .y = 0, .width = @floatFromInt(g_extent.width), .height = @floatFromInt(g_extent.height), .minDepth = 0, .maxDepth = 1 };
@@ -97,6 +97,7 @@ pub fn endGPassInternal(ctx: anytype) void {
     const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
     c.vkCmdEndRenderPass(command_buffer);
     ctx.runtime.g_pass_active = false;
+    ctx.runtime.g_pass_depth_ready = true;
 }
 
 pub fn beginFXAAPassInternal(ctx: anytype) void {
@@ -441,7 +442,7 @@ pub fn ensureNoRenderPassActiveInternal(ctx: anytype) void {
     if (ctx.ui.ui_swapchain_pass_active) endUISwapchainPassInternal(ctx);
 }
 
-pub fn endFrame(ctx: anytype) void {
+pub fn endFrame(ctx: anytype) !void {
     if (!ctx.frames.frame_in_progress) return;
 
     if (ctx.runtime.main_pass_active) endMainPassInternal(ctx);
@@ -470,7 +471,9 @@ pub fn endFrame(ctx: anytype) void {
 
     // The UI path can trigger post-processing at endFrame, so append the
     // readback only after every final-color pass has completed.
+    const capture_requested = ctx.screenshot_capture.staging != null;
     screenshot.recordCapture(ctx);
+    const capture_recorded = ctx.screenshot_capture.staging != null;
 
     const transfer_cb = ctx.resources.getTransferCommandBuffer();
 
@@ -505,30 +508,31 @@ pub fn endFrame(ctx: anytype) void {
     }
 
     const transfer_sem = ctx.resources.getTransferSemaphore();
+    const frame_fence = ctx.frames.in_flight_fences[ctx.frames.current_frame];
 
-    var submitted = false;
-    if (ctx.frames.endFrame(&ctx.swapchain, transfer_cb, transfer_sem)) |_| {
-        submitted = true;
-    } else |err| {
-        log.log.errWithTrace("endFrame failed: {}", .{err});
+    defer if (transfer_cb != null) ctx.resources.resetTransferState();
+    ctx.frames.endFrame(&ctx.swapchain, transfer_cb, transfer_sem) catch |err| {
+        ctx.depth_pyramid.recorded = false;
+        ctx.taa.discardFrame();
+        screenshot.discardCapture(ctx);
         if (err == error.GpuLost) {
             ctx.runtime.gpu_fault_detected = true;
         }
+        return err;
+    };
+    if (transfer_cb != null) ctx.resources.submitted_transfer_fence = frame_fence;
+    ctx.taa.commitFrame();
+    if (ctx.depth_pyramid.recorded) {
+        ctx.depth_pyramid.pyramid_layout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        ctx.depth_pyramid.recorded = false;
     }
 
-    if (ctx.screenshot_capture.staging != null) {
-        if (submitted) {
-            if (!screenshot.completeCapture(ctx)) {
-                log.log.err("SCREENSHOT: Failed to encode final composed frame", .{});
-            }
-        } else {
-            screenshot.discardCapture(ctx);
-        }
-    }
-
-    if (transfer_cb != null) {
-        ctx.resources.resetTransferState();
-    }
+    // Submission owns the capture buffer independently of what WSI reports.
+    const presented = ctx.frames.presentFrame(&ctx.swapchain);
+    const captured = screenshot.completeCapture(ctx) and (!capture_requested or capture_recorded);
+    try presented;
+    if (ctx.screenshot_capture.staging != null) ctx.frames.retirement_error = error.ScreenshotCaptureFailed;
+    if (!captured) return error.ScreenshotCaptureFailed;
 
     if (ctx.render_device) |device| {
         device.setStats(ctx.resources.stats());

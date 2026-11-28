@@ -203,8 +203,6 @@ pub fn recordCapture(ctx: anytype) void {
 pub fn completeCapture(ctx: anytype) bool {
     const capture = &ctx.screenshot_capture;
     const staging = capture.staging orelse return true;
-    defer discardCapture(ctx);
-
     const vk = ctx.vulkan_device.vk_device;
     const fence = ctx.frames.in_flight_fences[capture.frame_index];
     const fence_result = c.vkWaitForFences(vk, 1, &fence, c.VK_TRUE, 5_000_000_000);
@@ -212,6 +210,7 @@ pub fn completeCapture(ctx: anytype) bool {
         log.log.err("screenshot: fence wait failed or timed out ({})", .{fence_result});
         return false;
     }
+    defer discardCapture(ctx);
 
     const mapped_ptr = staging.mapped_ptr orelse {
         log.log.err("screenshot: staging buffer not mapped", .{});

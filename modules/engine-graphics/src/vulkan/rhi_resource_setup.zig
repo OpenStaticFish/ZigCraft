@@ -350,19 +350,6 @@ pub fn createGPassResources(ctx: anytype) !void {
 
     ctx.gpass.g_pass_extent = extent;
 
-    // Depth pyramid samples the G-Pass depth view, so keep it in sync here.
-    if (ctx.gpass.g_depth_view != null) {
-        ctx.depth_pyramid.init(
-            &ctx.vulkan_device,
-            ctx.allocator,
-            ctx.gpass.g_depth_view,
-            extent.width,
-            extent.height,
-        ) catch |err| {
-            log.log.warn("DepthPyramidSystem init failed (non-fatal): {}", .{err});
-        };
-    }
-
     log.log.debug("G-Pass resources created ({}x{}) with velocity buffer", .{ extent.width, extent.height });
 }
 
@@ -438,6 +425,15 @@ pub fn createWaterResources(ctx: anytype) !void {
         ctx.water_system.reflection_view,
         ctx.water_system.reflection_sampler,
     );
+}
+
+pub fn setWaterTextureHandles(ctx: anytype) void {
+    // Water shares the frame descriptor set with earlier scene draws. Select
+    // these swapchain-owned textures before the set is bound for any pass.
+    const reflection = ctx.water_system.reflection_texture_handle;
+    const depth = ctx.gpass.g_depth_handle;
+    ctx.draw.current_water_reflection_texture = if (reflection != 0) reflection else ctx.draw.dummy_texture;
+    ctx.draw.current_scene_depth_texture = if (depth != 0) depth else ctx.draw.dummy_texture;
 }
 
 pub fn createPostProcessResources(ctx: anytype) !void {

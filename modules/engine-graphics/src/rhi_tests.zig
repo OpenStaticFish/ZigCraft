@@ -5,6 +5,10 @@ const c = @import("c").c;
 const Mat4 = @import("engine-math").Mat4;
 const Vec3 = @import("engine-math").Vec3;
 
+test {
+    _ = @import("vulkan/rhi_frame_orchestration_tests.zig");
+}
+
 const MockContext = struct {
     bind_texture_called: bool = false,
     draw_called: bool = false,

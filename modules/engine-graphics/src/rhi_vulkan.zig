@@ -69,42 +69,49 @@ fn destroyBuffer(ctx_ptr: *anyopaque, handle: rhi.BufferHandle) void {
     ctx.resources.destroyBuffer(handle);
 }
 
-fn beginFrame(ctx_ptr: *anyopaque) void {
+fn beginFrame(ctx_ptr: *anyopaque) anyerror!bool {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
 
-    if (ctx.runtime.gpu_fault_detected) return;
-    if (ctx.frames.frame_in_progress) return;
+    if (ctx.frames.retirement_error) |err| return err;
+    if (ctx.runtime.gpu_fault_detected or ctx.frames.frame_in_progress) return false;
 
-    frame_orchestration.recreatePendingShadowResources(ctx);
+    try frame_orchestration.recreatePendingShadowResources(ctx);
 
     if ((ctx.runtime.framebuffer_resized or ctx.swapchain.framebuffer_resized) and !ctx.runtime.swapchain_recreate_failed) {
         log.log.info("beginFrame: triggering recreateSwapchainInternal (resize)", .{});
-        frame_orchestration.recreateSwapchainInternal(ctx);
+        try frame_orchestration.recreateSwapchainInternal(ctx);
+        if (ctx.frames.retirement_error) |err| return err;
     }
 
-    var flushed_inter_frame_transfer = false;
-    if (ctx.resources.transfer.transfer_ready[ctx.resources.transfer.current_frame]) {
-        ctx.resources.flushTransfer() catch |err| {
-            log.log.errWithTrace("Failed to flush inter-frame transfers: {}", .{err});
-            if (err == error.BackendError) {
-                ctx.runtime.gpu_fault_detected = true;
-                return;
-            }
-        };
-        flushed_inter_frame_transfer = true;
+    const inter_frame_transfer = ctx.resources.transfer.transfer_ready[ctx.resources.transfer.current_frame];
+    if (inter_frame_transfer or ctx.runtime.previous_frame_skipped) {
+        // Updates outside a recording frame can touch resources referenced by
+        // either graphics slot. Wait before copying into them or draining a
+        // deletion queue on a retry; the current slot's fence alone is insufficient.
+        try Utils.checkVk(c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device));
+    }
+    if (inter_frame_transfer) ctx.resources.flushTransfer() catch |err| {
+        // The transfer command buffer may already have been ended or submitted.
+        ctx.frames.retirement_error = err;
+        return err;
+    };
+
+    // A failed rebuild may already have destroyed resources needed to draw.
+    // A fresh resize or quality request can retry, but only success resumes rendering.
+    if (ctx.runtime.pipeline_rebuild_needed or ctx.swapchain.framebuffer_resized) {
+        if (ctx.resources.staging_ring.allocated() > 0) {
+            // Retire the entire FIFO only after every outstanding copy is
+            // complete. Leave graphics deletion queues and frame slots alone.
+            try Utils.checkVk(c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device));
+            ctx.resources.staging_ring.reclaimAll();
+        }
+        return false;
     }
 
     // Begin frame (acquire image, reset fences/CBs)
-    const frame_started = ctx.frames.beginFrame(&ctx.swapchain) catch |err| {
-        if (err == error.GpuLost) {
-            ctx.runtime.gpu_fault_detected = true;
-        } else {
-            log.log.errWithTrace("beginFrame failed: {}", .{err});
-        }
-        return;
-    };
+    const frame_started = try ctx.frames.beginFrame(&ctx.swapchain);
 
     if (frame_started) {
         processTimingResults(ctx);
@@ -122,14 +129,16 @@ fn beginFrame(ctx_ptr: *anyopaque) void {
     }
 
     ctx.resources.setCurrentFrame(ctx.frames.current_frame);
+    ctx.runtime.previous_frame_skipped = !frame_started;
 
     if (!frame_started) {
-        return;
+        return false;
     }
 
-    ctx.runtime.transfer_barrier_needed = flushed_inter_frame_transfer;
+    ctx.runtime.transfer_barrier_needed = inter_frame_transfer;
     render_state.applyPendingDescriptorUpdates(ctx, ctx.frames.current_frame);
     frame_orchestration.prepareFrameState(ctx);
+    return true;
 }
 
 fn abortFrame(ctx_ptr: *anyopaque) void {
@@ -140,21 +149,10 @@ fn abortFrame(ctx_ptr: *anyopaque) void {
     // vkDeviceWaitIdle only covers submitted work and cannot make references in
     // an unsubmitted recording command buffer safe to destroy.
     ctx.resources.abortCurrentFrame();
-    ctx.frames.abortFrame();
+    ctx.frames.abortFrame(&ctx.swapchain);
+    ctx.depth_pyramid.recorded = false;
+    ctx.taa.discardFrame();
     if (ctx.screenshot_capture.staging != null) screenshot.discardCapture(ctx);
-
-    // Recreate semaphores
-    const device = ctx.vulkan_device.vk_device;
-    const frame = ctx.frames.current_frame;
-
-    c.vkDestroySemaphore(device, ctx.frames.image_available_semaphores[frame], null);
-    var semaphore_info = std.mem.zeroes(c.VkSemaphoreCreateInfo);
-    semaphore_info.sType = c.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    _ = c.vkCreateSemaphore(device, &semaphore_info, null, &ctx.frames.image_available_semaphores[frame]);
-
-    const image_idx = ctx.frames.current_image_index;
-    c.vkDestroySemaphore(device, ctx.frames.render_finished_semaphores[image_idx], null);
-    _ = c.vkCreateSemaphore(device, &semaphore_info, null, &ctx.frames.render_finished_semaphores[image_idx]);
 
     ctx.runtime.draw_call_count = 0;
     ctx.runtime.main_pass_active = false;
@@ -234,8 +232,12 @@ fn computeTAA(ctx_ptr: *anyopaque) void {
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
     if (!ctx.frames.frame_in_progress) return;
-    if (!ctx.taa.enabled) return;
+    if (!ctx.taa.enabled or ctx.taa.ran_this_frame) return;
     pass_orchestration.ensureNoRenderPassActiveInternal(ctx);
+    if (!ctx.runtime.g_pass_depth_ready) {
+        ctx.taa.history_valid = false;
+        return;
+    }
 
     const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
     const render_extent = ctx.dynamic_resolution.getRenderExtent();
@@ -268,7 +270,7 @@ fn upscaleDynamicResolution(ctx: *VulkanContext, command_buffer: c.VkCommandBuff
     src_barrier.dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
     src_barrier.image = taa_output_image;
     src_barrier.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
-    src_barrier.srcAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
+    src_barrier.srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     src_barrier.dstAccessMask = c.VK_ACCESS_TRANSFER_READ_BIT;
 
     var dst_barrier = std.mem.zeroes(c.VkImageMemoryBarrier);
@@ -279,11 +281,12 @@ fn upscaleDynamicResolution(ctx: *VulkanContext, command_buffer: c.VkCommandBuff
     dst_barrier.dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
     dst_barrier.image = ctx.dynamic_resolution.upscale_image;
     dst_barrier.subresourceRange = .{ .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = 1, .baseArrayLayer = 0, .layerCount = 1 };
-    dst_barrier.srcAccessMask = 0;
+    dst_barrier.srcAccessMask = c.VK_ACCESS_SHADER_READ_BIT | c.VK_ACCESS_TRANSFER_WRITE_BIT;
     dst_barrier.dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
 
     const barriers = [_]c.VkImageMemoryBarrier{ src_barrier, dst_barrier };
-    c.vkCmdPipelineBarrier(command_buffer, c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, barriers.len, &barriers[0]);
+    const producer_stages = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | c.VK_PIPELINE_STAGE_TRANSFER_BIT;
+    c.vkCmdPipelineBarrier(command_buffer, producer_stages, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, null, 0, null, barriers.len, &barriers[0]);
 
     const native_extent = ctx.swapchain.getExtent();
 
@@ -332,8 +335,19 @@ fn computeDepthPyramid(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
-    if (!ctx.frames.frame_in_progress) return;
-    if (ctx.depth_pyramid.pipeline == null) return;
+    if (!ctx.frames.frame_in_progress or !ctx.runtime.g_pass_depth_ready) return;
+    if (!ctx.depth_pyramid.isValid()) {
+        ctx.depth_pyramid.init(
+            &ctx.vulkan_device,
+            ctx.allocator,
+            ctx.gpass.g_depth_view,
+            ctx.gpass.g_pass_extent.width,
+            ctx.gpass.g_pass_extent.height,
+        ) catch |err| {
+            log.log.warn("DepthPyramidSystem init failed (non-fatal): {}", .{err});
+            return;
+        };
+    }
     pass_orchestration.ensureNoRenderPassActiveInternal(ctx);
 
     const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
@@ -421,12 +435,12 @@ fn captureFrame(ctx_ptr: *anyopaque, path: []const u8) bool {
     return screenshot.requestCapture(ctx, path);
 }
 
-fn endFrame(ctx_ptr: *anyopaque) void {
+fn endFrame(ctx_ptr: *anyopaque) anyerror!void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
     if (ctx.runtime.gpu_fault_detected) return;
-    pass_orchestration.endFrame(ctx);
+    return pass_orchestration.endFrame(ctx);
 }
 
 fn setClearColor(ctx_ptr: *anyopaque, color: Vec3) void {
@@ -918,9 +932,18 @@ fn getNativeSwapchainImageCount(ctx_ptr: *anyopaque) u32 {
 }
 fn computeSsao(ctx_ptr: *anyopaque, proj: Mat4, inv_proj: Mat4) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
+    if (!ctx.frames.frame_in_progress) return;
+    const cmd = ctx.frames.command_buffers[ctx.frames.current_frame];
+    pass_orchestration.ensureNoRenderPassActiveInternal(ctx);
+    if (!ctx.runtime.g_pass_depth_ready) {
+        ctx.ssao_system.finishAO(cmd, ctx.swapchain.getExtent(), null);
+        return;
+    }
     ctx.ssao_system.compute(
         ctx.vulkan_device.vk_device,
-        ctx.frames.command_buffers[ctx.frames.current_frame],
+        cmd,
         ctx.frames.current_frame,
         ctx.dynamic_resolution.getRenderExtent(),
         proj,
@@ -930,6 +953,7 @@ fn computeSsao(ctx_ptr: *anyopaque, proj: Mat4, inv_proj: Mat4) void {
 
 fn drawSkyEffect(ctx_ptr: *anyopaque, params: rhi.SkyParams) rhi.RhiError!void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    if (!ctx.frames.frame_in_progress) return error.ResourceNotReady;
     const pipeline = ctx.pipeline_manager.sky_pipeline;
     const layout = ctx.pipeline_manager.sky_pipeline_layout;
     const cmd = ctx.frames.command_buffers[ctx.frames.current_frame];
@@ -1554,7 +1578,7 @@ fn processTimingResults(ctx: *VulkanContext) void {
     timing.processTimingResults(ctx);
 }
 
-pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_device: ?*RenderDevice, shadow_resolution: u32, msaa_samples: u8, anisotropic_filtering: u8) !rhi.RHI {
+pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_device: ?*RenderDevice, shadow_resolution: u32, msaa_samples: u8, anisotropic_filtering: u8, skip_present: bool) !rhi.RHI {
     return context_factory.createRHI(
         VulkanContext,
         allocator,
@@ -1563,6 +1587,7 @@ pub fn createRHI(allocator: std.mem.Allocator, window: *c.SDL_Window, render_dev
         shadow_resolution,
         msaa_samples,
         anisotropic_filtering,
+        skip_present,
         &VULKAN_RHI_VTABLE,
     );
 }

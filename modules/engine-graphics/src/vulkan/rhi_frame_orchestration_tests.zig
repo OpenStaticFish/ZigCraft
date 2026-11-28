@@ -41,6 +41,14 @@ test "markSwapchainRecreateFailed sets explicit retry state" {
     try testing.expect(ctx.runtime.pipeline_rebuild_needed);
 }
 
+test "swapchain rebuild distinguishes terminal failures from retryable failures" {
+    var ctx = MockSwapchainContext{};
+    try frame_orchestration.handleSwapchainRecreateError(&ctx, "sampled image layouts", error.OutOfMemory);
+    try testing.expect(ctx.runtime.pipeline_rebuild_needed);
+    try testing.expectError(error.GpuLost, frame_orchestration.handleSwapchainRecreateError(&ctx, "device idle wait", error.GpuLost));
+    try testing.expectError(error.SurfaceLost, frame_orchestration.handleSwapchainRecreateError(&ctx, "swapchain", error.SurfaceLost));
+}
+
 test "markSwapchainRecreateFailed logs only first failure" {
     var ctx = MockSwapchainContext{};
 

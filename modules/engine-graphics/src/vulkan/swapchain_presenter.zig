@@ -23,13 +23,15 @@ pub const SwapchainPresenter = struct {
 
     // State
     framebuffer_resized: bool = false,
+    initialized_images: [rhi_types.MAX_SWAPCHAIN_IMAGES]bool = @splat(false),
 
     // Dynamic function pointers for extensions
     fp_vkQueuePresentKHR: c.PFN_vkQueuePresentKHR = null,
+    acquire_image: @TypeOf(&c.vkAcquireNextImageKHR) = &c.vkAcquireNextImageKHR,
     skip_present: bool = false,
 
-    pub fn init(allocator: std.mem.Allocator, vulkan_device: *VulkanDevice, window: *c.SDL_Window, msaa_samples: u8, present_mode: c.VkPresentModeKHR) !SwapchainPresenter {
-        const swapchain = try VulkanSwapchain.init(allocator, vulkan_device, window, msaa_samples, present_mode);
+    pub fn init(allocator: std.mem.Allocator, vulkan_device: *VulkanDevice, window: *c.SDL_Window, msaa_samples: u8, present_mode: c.VkPresentModeKHR, skip_present: bool) !SwapchainPresenter {
+        const swapchain = try VulkanSwapchain.init(allocator, vulkan_device, window, msaa_samples, present_mode, skip_present);
 
         // Load vkQueuePresentKHR dynamically to avoid linking issues or NULL symbols
         const fp_present = c.vkGetDeviceProcAddr(vulkan_device.vk_device, "vkQueuePresentKHR");
@@ -38,10 +40,7 @@ pub const SwapchainPresenter = struct {
             return error.ExtensionNotPresent;
         }
 
-        const build_options = @import("engine_graphics_options");
-        const skip = if (@hasDecl(build_options, "skip_present")) build_options.skip_present else false;
-
-        if (skip) log.log.warn("Headless/DryRun mode: Skipping vkQueuePresentKHR", .{});
+        if (skip_present) log.log.info("Offscreen mode: skipping swapchain acquisition and presentation", .{});
 
         return SwapchainPresenter{
             .allocator = allocator,
@@ -51,7 +50,7 @@ pub const SwapchainPresenter = struct {
             .msaa_samples = msaa_samples,
             .present_mode = present_mode,
             .fp_vkQueuePresentKHR = @ptrCast(fp_present),
-            .skip_present = skip,
+            .skip_present = skip_present,
         };
     }
 
@@ -61,6 +60,7 @@ pub const SwapchainPresenter = struct {
 
     pub fn recreate(self: *SwapchainPresenter) !void {
         try self.swapchain.recreate(self.msaa_samples);
+        self.initialized_images = @splat(false);
         self.framebuffer_resized = false;
     }
 
@@ -91,7 +91,7 @@ pub const SwapchainPresenter = struct {
     pub fn acquireNextImage(self: *SwapchainPresenter, semaphore: c.VkSemaphore) !u32 {
         var image_index: u32 = 0;
         // Timeout: 2 seconds
-        const result = c.vkAcquireNextImageKHR(self.vulkan_device.vk_device, self.swapchain.handle, 2_000_000_000, semaphore, null, &image_index);
+        const result = self.acquire_image(self.vulkan_device.vk_device, self.swapchain.handle, 2_000_000_000, semaphore, null, &image_index);
 
         if (result == c.VK_ERROR_OUT_OF_DATE_KHR) {
             return error.OutOfDate;
@@ -101,12 +101,39 @@ pub const SwapchainPresenter = struct {
         } else if (result == c.VK_ERROR_VALIDATION_FAILED_EXT) {
             log.log.err("vkAcquireNextImageKHR reported validation failure", .{});
             return error.ValidationFailed;
+        } else if (result == c.VK_ERROR_DEVICE_LOST) {
+            return error.GpuLost;
+        } else if (result == c.VK_ERROR_SURFACE_LOST_KHR) {
+            return error.SurfaceLost;
         } else if (result != c.VK_SUCCESS and result != c.VK_SUBOPTIMAL_KHR) {
             log.log.err("vkAcquireNextImageKHR failed with result: {d}", .{result});
             return error.BackendError;
         }
 
         return image_index;
+    }
+
+    pub fn recordInitialLayout(self: *SwapchainPresenter, command_buffer: c.VkCommandBuffer, image_index: u32) void {
+        if (self.skip_present or self.initialized_images[image_index]) return;
+
+        // WSI images start undefined and may only be transitioned after
+        // acquisition. Match the acquire semaphore's color-output wait stage.
+        var barrier = std.mem.zeroes(c.VkImageMemoryBarrier);
+        barrier.sType = c.VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = c.VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = c.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        barrier.srcQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = c.VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = self.swapchain.images.items[image_index];
+        barrier.subresourceRange = .{
+            .aspectMask = c.VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        };
+        const stage = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        c.vkCmdPipelineBarrier(command_buffer, stage, stage, 0, 0, null, 0, null, 1, &barrier);
     }
 
     pub fn present(self: *SwapchainPresenter, wait_semaphore: c.VkSemaphore, image_index: u32) !void {
@@ -124,21 +151,20 @@ pub const SwapchainPresenter = struct {
         present_info.pImageIndices = &image_index;
 
         self.vulkan_device.mutex.lock();
+        defer self.vulkan_device.mutex.unlock();
         // Use dynamically loaded function pointer
         const result = if (self.fp_vkQueuePresentKHR) |func|
             func(self.vulkan_device.queue, &present_info)
         else
             return error.ExtensionNotPresent;
-        self.vulkan_device.mutex.unlock();
-
-        if (result == c.VK_ERROR_OUT_OF_DATE_KHR or result == c.VK_SUBOPTIMAL_KHR or self.framebuffer_resized) {
+        if (result == c.VK_ERROR_OUT_OF_DATE_KHR or result == c.VK_SUBOPTIMAL_KHR) {
             return error.OutOfDate;
         } else if (result == c.VK_ERROR_VALIDATION_FAILED_EXT) {
             log.log.err("vkQueuePresentKHR reported validation failure", .{});
             return error.ValidationFailed;
-        } else if (result != c.VK_SUCCESS) {
-            return error.BackendError;
         }
+        try Utils.checkVk(result);
+        if (self.framebuffer_resized) return error.OutOfDate;
     }
 
     pub fn getExtent(self: *SwapchainPresenter) c.VkExtent2D {

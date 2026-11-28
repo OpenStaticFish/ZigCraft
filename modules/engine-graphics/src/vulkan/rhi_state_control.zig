@@ -5,8 +5,17 @@ const frame_orchestration = @import("rhi_frame_orchestration.zig");
 const log = @import("engine-core").log;
 
 pub fn waitIdle(ctx: anytype) void {
-    if (!ctx.frames.dry_run and ctx.vulkan_device.vk_device != null) {
-        _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
+    const device = ctx.vulkan_device.vk_device orelse return;
+    const wait_device_idle = ctx.frames.wait_device_idle orelse &c.vkDeviceWaitIdle;
+    var result = wait_device_idle(device);
+    if (result == c.VK_SUCCESS or result == c.VK_ERROR_DEVICE_LOST) return;
+
+    // A transient allocation failure does not tell us whether work retired.
+    // Retry before callers release GPU resources; fail closed if still unknown.
+    log.log.warn("Vulkan device idle wait failed ({}); retrying", .{result});
+    result = wait_device_idle(device);
+    if (result != c.VK_SUCCESS and result != c.VK_ERROR_DEVICE_LOST) {
+        std.debug.panic("Cannot safely retire Vulkan resources: vkDeviceWaitIdle returned {}", .{result});
     }
 }
 
@@ -73,7 +82,7 @@ pub fn recover(ctx: anytype) !void {
     log.log.info("RHI: Attempting GPU recovery (Attempt {d}/{d})...", .{ ctx.vulkan_device.recovery_count, ctx.vulkan_device.max_recovery_attempts });
 
     if (ctx.frames.frame_in_progress) {
-        ctx.frames.abortFrame();
+        ctx.frames.abortFrame(&ctx.swapchain);
     }
     ctx.runtime.main_pass_active = false;
     ctx.shadow_system.pass_active = false;
@@ -102,7 +111,7 @@ pub fn recover(ctx: anytype) !void {
     ctx.runtime.gpu_fault_detected = false;
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
-    frame_orchestration.recreateSwapchainInternal(ctx);
+    try frame_orchestration.recreateSwapchainInternal(ctx);
 
     if (c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device) != c.VK_SUCCESS) {
         log.log.err("RHI: Device unresponsive after recovery. Recovery failed.", .{});
@@ -138,6 +147,7 @@ pub fn setVSync(ctx: anytype, enabled: bool) void {
     if (ctx.options.vsync_enabled == enabled) return;
 
     ctx.options.vsync_enabled = enabled;
+    if (ctx.swapchain.skip_present) return;
 
     var mode_count: u32 = 0;
     _ = c.vkGetPhysicalDeviceSurfacePresentModesKHR(ctx.vulkan_device.physical_device, ctx.vulkan_device.surface, &mode_count, null);

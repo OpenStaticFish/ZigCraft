@@ -244,6 +244,14 @@ pub const BenchmarkRunner = struct {
         return self.sampled_s >= self.duration_s or self.warmup_timed_out or wallElapsedSeconds(self) >= self.duration_s + self.warmup_s + 90.0;
     }
 
+    pub fn skipFrame(self: *BenchmarkRunner) !void {
+        // A skipped iteration breaks a consecutive rendered-frame sample.
+        // Fail the run rather than silently excluding the stall from its FPS.
+        if (self.warmup_ready) return error.BenchmarkFrameSkipped;
+        if (wallElapsedSeconds(self) > 90.0) return error.BenchmarkWarmupTimeout;
+        self.settled_warmup_s = 0;
+    }
+
     pub fn writeResults(self: *const BenchmarkRunner) !void {
         const results = try self.makeResults();
         try validateResults(results);
@@ -321,6 +329,23 @@ pub const BenchmarkRunner = struct {
         return values;
     }
 };
+
+test "skipping a benchmark frame resets warmup or invalidates sampling" {
+    var runner = try BenchmarkRunner.init(std.testing.allocator, "low", "stationary", 6, 5, 1, "Debug", "overworld", "unused.json");
+    defer runner.deinit();
+
+    runner.settled_warmup_s = 0.75;
+    try runner.skipFrame();
+    try std.testing.expectEqual(@as(f32, 0), runner.settled_warmup_s);
+    try runner.skipFrame();
+    try std.testing.expectEqual(@as(usize, 0), runner.samples.items.len);
+
+    runner.start_ms -= 91 * std.time.ms_per_s;
+    try std.testing.expectError(error.BenchmarkWarmupTimeout, runner.skipFrame());
+
+    runner.warmup_ready = true;
+    try std.testing.expectError(error.BenchmarkFrameSkipped, runner.skipFrame());
+}
 
 pub fn thresholdsForPreset(preset: []const u8) SloThresholds {
     if (std.ascii.eqlIgnoreCase(preset, "low")) return .{ .fps_p1_min = 12, .max_frame_ms = 260, .draw_calls_max = 700, .vertices_max = 3_500_000, .gpu_memory_mb_max = 2200 };

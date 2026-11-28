@@ -170,11 +170,11 @@ pub const RenderPassManager = struct {
                 .{
                     .srcSubpass = c.VK_SUBPASS_EXTERNAL,
                     .dstSubpass = 0,
-                    .srcStageMask = c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                    .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    .srcAccessMask = c.VK_ACCESS_MEMORY_READ_BIT,
-                    .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                    .dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT,
+                    .srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | c.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                    .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | c.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                    .srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_SHADER_READ_BIT,
+                    .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                    .dependencyFlags = 0,
                 },
                 .{
                     .srcSubpass = 0,
@@ -183,7 +183,8 @@ pub const RenderPassManager = struct {
                     .dstStageMask = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                     .srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                     .dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT,
-                    .dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT,
+                    // TAA samples neighboring HDR texels.
+                    .dependencyFlags = 0,
                 },
             };
 
@@ -239,11 +240,11 @@ pub const RenderPassManager = struct {
                 .{
                     .srcSubpass = c.VK_SUBPASS_EXTERNAL,
                     .dstSubpass = 0,
-                    .srcStageMask = c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                    .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    .srcAccessMask = c.VK_ACCESS_MEMORY_READ_BIT,
-                    .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                    .dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT,
+                    .srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | c.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                    .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | c.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                    .srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_SHADER_READ_BIT,
+                    .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                    .dependencyFlags = 0,
                 },
                 .{
                     .srcSubpass = 0,
@@ -252,7 +253,7 @@ pub const RenderPassManager = struct {
                     .dstStageMask = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                     .srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                     .dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT,
-                    .dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT,
+                    .dependencyFlags = 0,
                 },
             };
 
@@ -331,20 +332,23 @@ pub const RenderPassManager = struct {
         deps[0] = std.mem.zeroes(c.VkSubpassDependency);
         deps[0].srcSubpass = c.VK_SUBPASS_EXTERNAL;
         deps[0].dstSubpass = 0;
-        deps[0].srcStageMask = c.VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-        deps[0].dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        deps[0].srcAccessMask = c.VK_ACCESS_MEMORY_READ_BIT;
-        deps[0].dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        deps[0].dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT;
+        // The attachments are shared across frame slots, and shader reads can
+        // sample outside the framebuffer region being cleared.
+        const attachment_stages = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | c.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        const attachment_writes = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        const sampling_stages = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        deps[0].srcStageMask = attachment_stages | sampling_stages;
+        deps[0].dstStageMask = attachment_stages;
+        deps[0].srcAccessMask = attachment_writes | c.VK_ACCESS_SHADER_READ_BIT;
+        deps[0].dstAccessMask = attachment_writes;
 
         deps[1] = std.mem.zeroes(c.VkSubpassDependency);
         deps[1].srcSubpass = 0;
         deps[1].dstSubpass = c.VK_SUBPASS_EXTERNAL;
-        deps[1].srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | c.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-        deps[1].dstStageMask = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-        deps[1].srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        deps[1].srcStageMask = attachment_stages;
+        deps[1].dstStageMask = sampling_stages;
+        deps[1].srcAccessMask = attachment_writes;
         deps[1].dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT;
-        deps[1].dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT;
 
         var rp_info = std.mem.zeroes(c.VkRenderPassCreateInfo);
         rp_info.sType = c.VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -432,7 +436,7 @@ pub const RenderPassManager = struct {
         dependency.srcSubpass = c.VK_SUBPASS_EXTERNAL;
         dependency.dstSubpass = 0;
         dependency.srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dependency.srcAccessMask = 0;
+        dependency.srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
         dependency.dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         dependency.dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
         dependency.dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT;

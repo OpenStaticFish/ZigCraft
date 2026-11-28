@@ -212,6 +212,18 @@ jobs:
           timeout: 25m
           log-file: integration-test.log
           command: devenv shell --profile graphics -- zig build test-integration -Dskip-present=true
+        env:
+          VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_BEST_PRACTICES_EXT,VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
+
+      - name: Run presentation smoke test
+        uses: ./.github/actions/run-with-log
+        with:
+          name: Presentation Test
+          timeout: 5m
+          log-file: presentation-test.log
+          command: devenv shell --profile graphics -- zig build test-integration
+        env:
+          VK_LAYER_ENABLES: VK_VALIDATION_FEATURE_ENABLE_BEST_PRACTICES_EXT,VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT
 
       - name: Run world load smoke test (headless)
         uses: ./.github/actions/run-with-log
@@ -229,7 +241,7 @@ jobs:
       - name: Fail on Vulkan validation log errors
         run: |
           set -euo pipefail
-          if rg -n -e 'Vulkan validation error|Validation Error:|VUID-' integration-test.log world-smoke-test.log; then
+          if rg -n -e 'Vulkan validation error|Validation Error:|VUID-' integration-test.log presentation-test.log world-smoke-test.log; then
             echo "Vulkan validation errors were found in integration logs." >&2
             exit 1
           fi
@@ -246,6 +258,7 @@ jobs:
           name: integration-test-logs
           path: |
             integration-test.log
+            presentation-test.log
             world-smoke-test.log
             weston.log
           if-no-files-found: ignore

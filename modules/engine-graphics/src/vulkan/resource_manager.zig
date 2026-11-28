@@ -63,6 +63,7 @@ pub const ResourceManager = struct {
 
     // Transfer queue (dedicated or shared with graphics)
     transfer: TransferQueue,
+    submitted_transfer_fence: c.VkFence = null,
 
     current_frame_index: usize = 0,
     textures_enabled: bool = true,
@@ -87,6 +88,7 @@ pub const ResourceManager = struct {
         }
 
         self.staging_ring = try StagingRing.init(vulkan_device, transfer_queue.DEFAULT_STAGING_CAPACITY);
+        errdefer self.staging_ring.deinit(vulkan_device.vk_device);
         log.log.info("Staging ring initialized: {}MB", .{transfer_queue.DEFAULT_STAGING_CAPACITY / (1024 * 1024)});
 
         // Buffer resources use exclusive sharing and are consumed by graphics.
@@ -154,6 +156,8 @@ pub const ResourceManager = struct {
     }
 
     pub fn setCurrentFrame(self: *ResourceManager, frame_index: usize) void {
+        // The graphics frame manager already waited for the selected slot.
+        self.submitted_transfer_fence = null;
         self.current_frame_index = frame_index;
         self.transfer.setCurrentFrame(frame_index);
 
@@ -214,6 +218,11 @@ pub const ResourceManager = struct {
     }
 
     pub fn prepareTransfer(self: *ResourceManager) !c.VkCommandBuffer {
+        if (self.submitted_transfer_fence != null) {
+            try Utils.checkVk(c.vkWaitForFences(self.vulkan_device.vk_device, 1, &self.submitted_transfer_fence, c.VK_TRUE, std.math.maxInt(u64)));
+            self.submitted_transfer_fence = null;
+        }
+        self.transfer.pending_staging_buffer[self.transfer.current_frame] = self.staging_ring.buffer;
         return self.transfer.prepareTransfer();
     }
 

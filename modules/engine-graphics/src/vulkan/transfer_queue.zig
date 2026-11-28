@@ -82,6 +82,14 @@ pub const StagingRing = struct {
         self.frame_used[frame_index] = 0;
     }
 
+    /// All submitted transfers have completed and no copies remain queued.
+    pub fn reclaimAll(self: *StagingRing) void {
+        self.head = 0;
+        self.tail = 0;
+        self.used_total = 0;
+        @memset(&self.frame_used, 0);
+    }
+
     pub fn allocated(self: *StagingRing) u64 {
         return self.used_total;
     }
@@ -148,6 +156,7 @@ pub const TransferQueue = struct {
     command_pool: c.VkCommandPool = null,
     command_buffers: [rhi.MAX_FRAMES_IN_FLIGHT]c.VkCommandBuffer = undefined,
     fence: c.VkFence = null,
+    submit_sync: @TypeOf(&c.vkQueueSubmit) = &c.vkQueueSubmit,
     frame_fences: [rhi.MAX_FRAMES_IN_FLIGHT]c.VkFence = .{null} ** rhi.MAX_FRAMES_IN_FLIGHT,
     transfer_semaphores: [rhi.MAX_FRAMES_IN_FLIGHT]c.VkSemaphore = .{null} ** rhi.MAX_FRAMES_IN_FLIGHT,
     transfer_ready: [rhi.MAX_FRAMES_IN_FLIGHT]bool = undefined,
@@ -164,6 +173,7 @@ pub const TransferQueue = struct {
             .family_index = transfer_family,
             .is_dedicated = is_dedicated,
         };
+        errdefer self.deinit(device.vk_device);
         @memset(&self.transfer_ready, false);
         @memset(&self.transfer_submitted, false);
         @memset(&self.pending_copy_count, 0);
@@ -226,16 +236,53 @@ pub const TransferQueue = struct {
     pub fn recordPendingCopies(self: *TransferQueue, cmd: c.VkCommandBuffer) void {
         const idx = self.current_frame;
         const staging = self.pending_staging_buffer[idx];
-        if (staging == null or self.pending_copy_count[idx] == 0) return;
+        if (self.pending_copy_count[idx] == 0) return;
+        std.debug.assert(staging != null);
 
-        for (0..self.pending_copy_count[idx]) |i| {
-            const pc = self.pending_copies[idx][i];
+        const copies = self.pending_copies[idx][0..self.pending_copy_count[idx]];
+        if (!self.is_dedicated) {
+            // Mutable buffers can still be read by a preceding graphics or
+            // compute submission on this queue. Order those reads before any
+            // overwrite and make prior writes available to the new batch.
+            const barrier = c.VkMemoryBarrier{
+                .sType = c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .srcAccessMask = c.VK_ACCESS_MEMORY_WRITE_BIT,
+                .dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
+            };
+            c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, null, 0, null);
+        }
+        var unordered_start: usize = 0;
+        for (copies, 0..) |pc, i| {
+            // Bound the overlap search even for full batches of disjoint writes.
+            if (i - unordered_start == 32) {
+                orderTransferWrites(cmd);
+                unordered_start = i;
+            }
+            for (copies[unordered_start..i]) |earlier| {
+                if (pc.dst_buffer != earlier.dst_buffer or
+                    pc.dst_offset >= earlier.dst_offset + earlier.size or
+                    earlier.dst_offset >= pc.dst_offset + pc.size) continue;
+
+                // Overlapping destination ranges must observe submission order.
+                orderTransferWrites(cmd);
+                unordered_start = i;
+                break;
+            }
             var region = std.mem.zeroes(c.VkBufferCopy);
             region.srcOffset = pc.src_offset;
             region.dstOffset = pc.dst_offset;
             region.size = pc.size;
             c.vkCmdCopyBuffer(cmd, staging, pc.dst_buffer, 1, &region);
         }
+    }
+
+    fn orderTransferWrites(cmd: c.VkCommandBuffer) void {
+        const barrier = c.VkMemoryBarrier{
+            .sType = c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            .srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
+            .dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
+        };
+        c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, null, 0, null);
     }
 
     pub fn getPendingDstAccessMask(self: *TransferQueue) c.VkAccessFlags {
@@ -304,6 +351,8 @@ pub const TransferQueue = struct {
     pub fn resetTransferState(self: *TransferQueue) void {
         self.transfer_ready[self.current_frame] = false;
         self.transfer_submitted[self.current_frame] = false;
+        self.pending_copy_count[self.current_frame] = 0;
+        self.pending_dst_access_mask[self.current_frame] = 0;
     }
 
     fn discardPendingState(self: *TransferQueue, frame_index: usize) void {
@@ -347,9 +396,17 @@ pub const TransferQueue = struct {
         if (!self.transfer_ready[self.current_frame]) return;
 
         const cb = self.command_buffers[self.current_frame];
+        if (self.hasPendingCopies()) {
+            self.recordPendingCopies(cb);
+
+            var barrier = std.mem.zeroes(c.VkMemoryBarrier);
+            barrier.sType = c.VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            barrier.srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = c.VK_ACCESS_MEMORY_READ_BIT;
+            c.vkCmdPipelineBarrier(cb, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier, 0, null, 0, null);
+        }
         const end_result = c.vkEndCommandBuffer(cb);
         if (end_result != c.VK_SUCCESS) {
-            self.transfer_ready[self.current_frame] = false;
             if (end_result == c.VK_ERROR_DEVICE_LOST) return error.GpuLost;
             return error.BackendError;
         }
@@ -362,17 +419,16 @@ pub const TransferQueue = struct {
         try Utils.checkVk(c.vkResetFences(vk_device, 1, &self.fence));
 
         queue_mutex.lock();
-        const result = c.vkQueueSubmit(self.queue, 1, &submit_info, self.fence);
+        const result = self.submit_sync(self.queue, 1, &submit_info, self.fence);
         queue_mutex.unlock();
 
-        if (result == c.VK_ERROR_DEVICE_LOST) return error.GpuLost;
-        if (result != c.VK_SUCCESS) return error.BackendError;
+        try Utils.checkVk(result);
 
         const wait_result = c.vkWaitForFences(vk_device, 1, &self.fence, c.VK_TRUE, std.math.maxInt(u64));
         if (wait_result == c.VK_ERROR_DEVICE_LOST) return error.GpuLost;
         try Utils.checkVk(wait_result);
 
-        self.transfer_ready[self.current_frame] = false;
+        self.resetTransferState();
     }
 
     pub fn flushSync(self: *TransferQueue, vk_device: c.VkDevice, queue_mutex: *sync.Mutex) !void {
@@ -398,7 +454,7 @@ test "staging ring distinguishes full from empty" {
 }
 
 test "aborted transfer state drops pending copies without reclaiming staging ownership" {
-    var transfer = std.mem.zeroes(TransferQueue);
+    var transfer: TransferQueue = .{};
     transfer.current_frame = 1;
     transfer.pending_copy_count[1] = 7;
     transfer.pending_staging_buffer[1] = @ptrFromInt(1);

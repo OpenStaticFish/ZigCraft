@@ -7,13 +7,14 @@ const bindings = @import("descriptor_bindings.zig");
 const lifecycle = @import("rhi_resource_lifecycle.zig");
 const final_composition = @import("final_composition.zig");
 const setup = @import("rhi_resource_setup.zig");
+const Utils = @import("utils.zig");
 
-pub fn recreatePendingShadowResources(ctx: anytype) void {
+pub fn recreatePendingShadowResources(ctx: anytype) !void {
     const requested = ctx.shadow_runtime.pending_shadow_resolution orelse return;
     ctx.shadow_runtime.pending_shadow_resolution = null;
     if (requested == ctx.shadow_runtime.shadow_resolution) return;
 
-    _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
+    try Utils.checkVk(c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device));
     const previous = ctx.shadow_runtime.shadow_resolution;
     var previous_system = ctx.shadow_system;
     const previous_handles = ctx.shadow_runtime.shadow_map_handles;
@@ -28,17 +29,26 @@ pub fn recreatePendingShadowResources(ctx: anytype) void {
         ctx.shadow_system = previous_system;
         ctx.shadow_runtime.shadow_resolution = previous;
         ctx.shadow_runtime.shadow_map_handles = previous_handles;
+        if (err == error.GpuLost) return error.GpuLost;
         return;
     };
 
     if (ctx.shadow_system.shadow_image != null) {
         lifecycle.transitionImagesToShaderRead(ctx, &[_]c.VkImage{ctx.shadow_system.shadow_image}, true, rhi.SHADOW_CASCADE_COUNT) catch |err| {
             log.log.err("Failed to transition recreated shadow array: {}", .{err});
+            if (ctx.frames.retirement_error != null) {
+                // The replacement may still be in use by the layout command.
+                // Only the old system, drained before recreation, can be freed.
+                for (previous_handles) |handle| if (handle != 0) ctx.resources.destroyTexture(handle);
+                previous_system.deinit(ctx.vulkan_device.vk_device);
+                return err;
+            }
             for (ctx.shadow_runtime.shadow_map_handles) |handle| if (handle != 0) ctx.resources.destroyTexture(handle);
             ctx.shadow_system.deinit(ctx.vulkan_device.vk_device);
             ctx.shadow_system = previous_system;
             ctx.shadow_runtime.shadow_resolution = previous;
             ctx.shadow_runtime.shadow_map_handles = previous_handles;
+            if (err == error.GpuLost) return error.GpuLost;
             return;
         };
         for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
@@ -52,13 +62,14 @@ pub fn recreatePendingShadowResources(ctx: anytype) void {
     log.log.info("Shadow resources recreated at {}x{}", .{ ctx.shadow_runtime.shadow_resolution, ctx.shadow_runtime.shadow_resolution });
 }
 
-pub fn recreateSwapchainInternal(ctx: anytype) void {
-    _ = c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device);
+pub fn recreateSwapchainInternal(ctx: anytype) !void {
+    Utils.checkVk(c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device)) catch |err|
+        return handleSwapchainRecreateError(ctx, "device idle wait", err);
 
     var w: c_int = 0;
     var h: c_int = 0;
     _ = c.SDL_GetWindowSizeInPixels(ctx.window, &w, &h);
-    if (w == 0 or h == 0) return;
+    if (!ctx.swapchain.skip_present and (w == 0 or h == 0)) return;
 
     setup.destroyMainRenderPassAndPipelines(ctx);
     lifecycle.destroyHDRResources(ctx);
@@ -75,129 +86,88 @@ pub fn recreateSwapchainInternal(ctx: anytype) void {
     ctx.runtime.ssao_pass_active = false;
 
     ctx.swapchain.recreate() catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "swapchain", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "swapchain", err);
     };
 
-    if (!ctx.swapchain.skip_present) {
-        lifecycle.transitionImagesToPresent(ctx, ctx.swapchain.swapchain.images.items) catch |err| {
-            log.log.warn("Failed to transition swapchain images to PRESENT: {}", .{err});
-        };
-    } else {
+    if (ctx.swapchain.skip_present) {
         lifecycle.transitionImagesToColorAttachment(ctx, ctx.swapchain.swapchain.images.items) catch |err| {
-            log.log.warn("Failed to transition headless image to COLOR_ATTACHMENT: {}", .{err});
+            return handleSwapchainRecreateError(ctx, "offscreen image layout", err);
         };
     }
 
     lifecycle.createHDRResources(ctx) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "HDR resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "HDR resources", err);
     };
     setup.createGPassResources(ctx) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "G-Pass resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "G-Pass resources", err);
     };
     setup.createSSAOResources(ctx) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "SSAO resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "SSAO resources", err);
     };
     setup.createTAAResources(ctx) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "TAA resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "TAA resources", err);
     };
     if (ctx.water_system.reflection_texture_handle != 0) {
         ctx.resources.destroyTexture(ctx.water_system.reflection_texture_handle);
         ctx.water_system.reflection_texture_handle = 0;
     }
     ctx.render_pass_manager.createMainRenderPass(ctx.vulkan_device.vk_device, ctx.swapchain.getExtent(), ctx.options.msaa_samples) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "render pass", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "render pass", err);
     };
     ctx.pipeline_manager.createMainPipelines(ctx.allocator, ctx.vulkan_device.vk_device, ctx.render_pass_manager.hdr_render_pass, ctx.render_pass_manager.g_render_pass, ctx.options.msaa_samples) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "pipelines", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "pipelines", err);
     };
     setup.createWaterResources(ctx) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "water resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "water resources", err);
     };
 
-    ctx.draw.current_water_reflection_texture = if (ctx.water_system.reflection_texture_handle != 0)
-        ctx.water_system.reflection_texture_handle
-    else
-        ctx.draw.dummy_texture;
-    ctx.draw.current_scene_depth_texture = if (ctx.gpass.g_depth_handle != 0)
-        ctx.gpass.g_depth_handle
-    else
-        ctx.draw.dummy_texture;
+    setup.setWaterTextureHandles(ctx);
 
-    ctx.water_system.createWaterPipeline(ctx.allocator, ctx.vulkan_device.vk_device, ctx.render_pass_manager.hdr_render_pass) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "water pipeline", err);
-        return;
+    ctx.water_system.createWaterPipeline(ctx.allocator, ctx.vulkan_device.vk_device, ctx.render_pass_manager.hdr_render_pass, ctx.options.msaa_samples) catch |err| {
+        return handleSwapchainRecreateError(ctx, "water pipeline", err);
     };
     ctx.water_system.createReflectionTerrainPipelines(ctx.allocator, ctx.vulkan_device.vk_device, ctx.pipeline_manager.pipeline_layout) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "reflection terrain pipelines", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "reflection terrain pipelines", err);
     };
     setup.createPostProcessResources(ctx) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "post-process resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "post-process resources", err);
     };
     setup.createSwapchainUIResources(ctx) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "swapchain UI resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "swapchain UI resources", err);
     };
     ctx.fxaa.init(&ctx.vulkan_device, ctx.allocator, ctx.descriptors.descriptor_pool, ctx.swapchain.getExtent(), ctx.swapchain.getImageFormat(), ctx.post_process.sampler, ctx.swapchain.getImageViews(), final_composition.displayLayout(ctx.swapchain.skip_present)) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "FXAA resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "FXAA resources", err);
     };
     ctx.pipeline_manager.createSwapchainUIPipelines(ctx.allocator, ctx.vulkan_device.vk_device, ctx.render_pass_manager.ui_swapchain_render_pass) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "swapchain UI pipelines", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "swapchain UI pipelines", err);
     };
     ctx.bloom.init(&ctx.vulkan_device, ctx.allocator, ctx.descriptors.descriptor_pool, ctx.hdr.hdr_view, ctx.swapchain.getExtent().width, ctx.swapchain.getExtent().height, c.VK_FORMAT_R16G16B16A16_SFLOAT) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "Bloom resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "Bloom resources", err);
     };
     setup.updatePostProcessDescriptorsWithBloom(ctx);
 
     setup.createUpscaleResources(ctx) catch |err| {
-        _ = markSwapchainRecreateFailed(ctx, "upscale resources", err);
-        return;
+        return handleSwapchainRecreateError(ctx, "upscale resources", err);
     };
 
     ctx.dynamic_resolution.setSwapchainExtent(ctx.swapchain.getExtent());
 
-    if (!ctx.options.safe_mode) {
-        var list: [32]c.VkImage = undefined;
-        var count: usize = 0;
-        const candidates = [_]c.VkImage{ ctx.hdr.hdr_image, ctx.gpass.g_normal_image, ctx.ssao_system.image, ctx.ssao_system.blur_image, ctx.ssao_system.noise_image, ctx.velocity.velocity_image };
-        for (candidates) |img| {
-            if (img != null) {
-                list[count] = img;
-                count += 1;
-            }
-        }
-        for (ctx.bloom.mip_images) |img| {
-            if (img != null) {
-                list[count] = img;
-                count += 1;
-            }
-        }
-
-        if (count > 0) {
-            lifecycle.transitionImagesToShaderRead(ctx, list[0..count], false, 1) catch |err| log.log.warn("Failed to transition images: {}", .{err});
-        }
-
-        if (ctx.shadow_system.shadow_image != null) {
-            lifecycle.transitionImagesToShaderRead(ctx, &[_]c.VkImage{ctx.shadow_system.shadow_image}, true, rhi.SHADOW_CASCADE_COUNT) catch |err| log.log.warn("Failed to transition Shadow image: {}", .{err});
-            for (0..rhi.SHADOW_CASCADE_COUNT) |i| {
-                ctx.shadow_system.shadow_image_layouts[i] = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-            }
-        }
-    }
+    // Swapchain recreation does not replace the shadow image. Preserve the
+    // layout state maintained by the shadow passes.
+    lifecycle.initializeSampledFrameImages(ctx) catch |err| {
+        return handleSwapchainRecreateError(ctx, "sampled image layouts", err);
+    };
 
     markSwapchainRecreateSucceeded(ctx);
+}
+
+pub fn handleSwapchainRecreateError(ctx: anytype, stage: []const u8, err: anyerror) error{ GpuLost, SurfaceLost }!void {
+    _ = markSwapchainRecreateFailed(ctx, stage, err);
+    switch (err) {
+        error.GpuLost => return error.GpuLost,
+        error.SurfaceLost => return error.SurfaceLost,
+        else => {},
+    }
 }
 
 pub fn markSwapchainRecreateFailed(ctx: anytype, stage: []const u8, err: anyerror) bool {
@@ -228,6 +198,7 @@ pub fn prepareFrameState(ctx: anytype) void {
     ctx.runtime.first_main_pass_draw_logged = false;
     ctx.runtime.main_pass_active = false;
     ctx.shadow_system.pass_active = false;
+    ctx.runtime.g_pass_depth_ready = false;
     ctx.runtime.post_process_ran_this_frame = false;
     ctx.runtime.fxaa_ran_this_frame = false;
     ctx.runtime.direct_ui_composed_this_frame = false;
@@ -240,7 +211,6 @@ pub fn prepareFrameState(ctx: anytype) void {
     ctx.draw.terrain_pipeline_bound = false;
     ctx.shadow_system.pipeline_bound = false;
     ctx.draw.descriptors_updated = false;
-    ctx.draw.bound_texture = 0;
 
     const command_buffer = ctx.frames.getCurrentCommandBuffer();
 

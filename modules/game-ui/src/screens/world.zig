@@ -449,7 +449,6 @@ pub const WorldScreen = struct {
                 .env_map_handle = env_map_handle,
                 .shadow = frame_params.shadow,
                 .ssao_enabled = ssao_enabled,
-                .gpu_culling_enabled = self.world.isGpuCullingEnabled(),
                 .shadow_draw_enabled = shadow_sandbox_active,
                 .fxaa_enabled = ctx.settings.fxaa_enabled and !ctx.settings.taa_enabled,
                 .bloom_enabled = ctx.settings.bloom_enabled and !startup_light_render,

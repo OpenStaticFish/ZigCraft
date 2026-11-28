@@ -23,6 +23,7 @@ pub const RenderSystem = struct {
     pub const Config = struct {
         shadow_resolution: u32,
         msaa_samples: u8,
+        skip_present: bool = false,
         anisotropic_filtering: u8,
         texture_pack: []const u8,
         max_texture_resolution: u32,
@@ -61,7 +62,6 @@ pub const RenderSystem = struct {
     shadow_passes: [4]render_graph_pkg.ShadowPass,
     g_pass: render_graph_pkg.GPass,
     ssao_pass: render_graph_pkg.SSAOPass,
-    depth_pyramid_pass: render_graph_pkg.DepthPyramidPass,
     mesh_build_pass: render_graph_pkg.MeshBuildPass,
     sky_pass: render_graph_pkg.SkyPass,
     cloud_pass: render_graph_pkg.CloudPass,
@@ -130,6 +130,7 @@ pub const RenderSystem = struct {
         var rhi = try backend_dispatcher.createRHI(allocator, window, .vulkan, .{
             .shadow_resolution = config.shadow_resolution,
             .msaa_samples = config.msaa_samples,
+            .skip_present = config.skip_present,
             .anisotropic_filtering = config.anisotropic_filtering,
         });
         errdefer rhi.deinit();
@@ -215,7 +216,6 @@ pub const RenderSystem = struct {
             .shadow_passes = undefined,
             .g_pass = undefined,
             .ssao_pass = .{},
-            .depth_pyramid_pass = .{},
             .mesh_build_pass = .{},
             .sky_pass = .{},
             .cloud_pass = .{},
@@ -248,7 +248,6 @@ pub const RenderSystem = struct {
         self.g_pass = render_graph_pkg.GPass.init(material_system);
         self.g_pass.enabled = !disable_gpass_draw;
         self.ssao_pass.enabled = !disable_ssao;
-        self.depth_pyramid_pass.enabled = !disable_gpass_draw;
         self.opaque_pass = render_graph_pkg.OpaquePass.init(material_system);
         self.water_reflection_pass = render_graph_pkg.WaterReflectionPass.init(material_system);
         self.water_reflection_pass.enabled = !disable_water;
@@ -271,9 +270,6 @@ pub const RenderSystem = struct {
             try self.render_graph.addPass(self.mesh_build_pass.pass());
             try self.render_graph.addPass(self.g_pass.pass());
             try self.render_graph.addPass(self.ssao_pass.pass());
-            if (!safe_mode) {
-                try self.render_graph.addPass(self.depth_pyramid_pass.pass());
-            }
             if (self.water_reflection_pass.enabled) {
                 try self.render_graph.addPass(self.water_reflection_pass.pass());
             }
@@ -314,12 +310,12 @@ pub const RenderSystem = struct {
         self.allocator.destroy(self);
     }
 
-    pub fn beginFrame(self: *RenderSystem) void {
-        self.rhi.renderContext().beginFrame();
+    pub fn beginFrame(self: *RenderSystem) !bool {
+        return self.rhi.renderContext().beginFrame();
     }
 
-    pub fn endFrame(self: *RenderSystem) void {
-        self.rhi.renderContext().endFrame();
+    pub fn endFrame(self: *RenderSystem) !void {
+        return self.rhi.renderContext().endFrame();
     }
 
     /// Discards the active frame without submitting it to the GPU.

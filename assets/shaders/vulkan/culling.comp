@@ -28,13 +28,8 @@ layout(std430, binding = 2) coherent buffer VisibleCountBuffer {
 
 layout(push_constant) uniform CullingData {
     vec4 planes[6];
-    mat4 view_proj;
-    vec2 screen_size;
-    float previous_frame_valid;
     uint chunk_count;
 } cull;
-
-layout(binding = 3) uniform sampler2D depth_pyramid;
 
 bool frustumTest(vec3 aabb_min, vec3 aabb_max) {
     for (int i = 0; i < 6; i++) {
@@ -54,71 +49,6 @@ bool frustumTest(vec3 aabb_min, vec3 aabb_max) {
     return true;
 }
 
-bool occlusionTest(vec3 aabb_min, vec3 aabb_max) {
-    if (cull.previous_frame_valid == 0.0) return false;
-
-    vec4 corners[8] = vec4[8](
-        vec4(aabb_min.x, aabb_min.y, aabb_min.z, 1.0),
-        vec4(aabb_max.x, aabb_min.y, aabb_min.z, 1.0),
-        vec4(aabb_min.x, aabb_max.y, aabb_min.z, 1.0),
-        vec4(aabb_max.x, aabb_max.y, aabb_min.z, 1.0),
-        vec4(aabb_min.x, aabb_min.y, aabb_max.z, 1.0),
-        vec4(aabb_max.x, aabb_min.y, aabb_max.z, 1.0),
-        vec4(aabb_min.x, aabb_max.y, aabb_max.z, 1.0),
-        vec4(aabb_max.x, aabb_max.y, aabb_max.z, 1.0)
-    );
-
-    float min_depth = 1.0;
-    float max_ndc_x = -1.0;
-    float min_ndc_x = 1.0;
-    float max_ndc_y = -1.0;
-    float min_ndc_y = 1.0;
-
-    for (int i = 0; i < 8; i++) {
-        vec4 clip = cull.view_proj * corners[i];
-        if (clip.w <= 0.0) clip.w = 0.0001;
-        vec3 ndc = clip.xyz / clip.w;
-        min_depth = min(min_depth, ndc.z);
-        max_ndc_x = max(max_ndc_x, ndc.x);
-        min_ndc_x = min(min_ndc_x, ndc.x);
-        max_ndc_y = max(max_ndc_y, ndc.y);
-        min_ndc_y = min(min_ndc_y, ndc.y);
-    }
-
-    if (min_ndc_x > 1.0 || max_ndc_x < -1.0 || min_ndc_y > 1.0 || max_ndc_y < -1.0) {
-        return false;
-    }
-
-    float coverage_x = max_ndc_x - min_ndc_x;
-    float coverage_y = max_ndc_y - min_ndc_y;
-    float max_coverage = max(coverage_x, coverage_y);
-
-    int mip_level = 0;
-    if (max_coverage < 0.25) mip_level = 2;
-    else if (max_coverage < 0.5) mip_level = 1;
-
-    vec2 pyramid_size = vec2(textureSize(depth_pyramid, mip_level));
-    vec2 uv_min = vec2((min_ndc_x + 1.0) * 0.5, (min_ndc_y + 1.0) * 0.5);
-    vec2 uv_max = vec2((max_ndc_x + 1.0) * 0.5, (max_ndc_y + 1.0) * 0.5);
-
-    vec2 coord_min = uv_min * pyramid_size;
-    vec2 coord_max = uv_max * pyramid_size;
-
-    ivec2 base_coord = clamp(ivec2(coord_min), ivec2(0), ivec2(pyramid_size) - 1);
-    ivec2 end_coord = clamp(ivec2(coord_max), ivec2(0), ivec2(pyramid_size) - 1);
-
-    float pyramid_max_depth = 0.0;
-    for (int y = base_coord.y; y <= end_coord.y; y++) {
-        for (int x = base_coord.x; x <= end_coord.x; x++) {
-            ivec2 coord = ivec2(x, y);
-            float d = texelFetch(depth_pyramid, coord, mip_level).r;
-            pyramid_max_depth = max(pyramid_max_depth, d);
-        }
-    }
-
-    return min_depth > pyramid_max_depth;
-}
-
 void main() {
     uint idx = gl_GlobalInvocationID.x;
 
@@ -130,8 +60,6 @@ void main() {
     vec3 aabb_max = aabb_buffer.chunks[idx].max_point.xyz;
 
     if (!frustumTest(aabb_min, aabb_max)) return;
-
-    if (occlusionTest(aabb_min, aabb_max)) return;
 
     uint slot = atomicAdd(visible_counter.count, 1);
 

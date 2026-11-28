@@ -139,24 +139,27 @@ pub const WaterSystem = struct {
         rp_info.subpassCount = 1;
         rp_info.pSubpasses = &subpass;
 
-        var dependencies = [_]c.VkSubpassDependency{
+        const attachment_stages = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | c.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        const attachment_writes = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        // Distorted reflection UVs can sample outside the current pixel region.
+        const dependencies = [_]c.VkSubpassDependency{
             .{
                 .srcSubpass = c.VK_SUBPASS_EXTERNAL,
                 .dstSubpass = 0,
-                .srcStageMask = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                .dstStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-                .srcAccessMask = c.VK_ACCESS_SHADER_READ_BIT,
-                .dstAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                .dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT,
+                .srcStageMask = attachment_stages | c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                .dstStageMask = attachment_stages,
+                .srcAccessMask = attachment_writes | c.VK_ACCESS_SHADER_READ_BIT,
+                .dstAccessMask = attachment_writes,
+                .dependencyFlags = 0,
             },
             .{
                 .srcSubpass = 0,
                 .dstSubpass = c.VK_SUBPASS_EXTERNAL,
-                .srcStageMask = c.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | c.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                .srcStageMask = attachment_stages,
                 .dstStageMask = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                .srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | c.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                .srcAccessMask = attachment_writes,
                 .dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT,
-                .dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT,
+                .dependencyFlags = 0,
             },
         };
         rp_info.dependencyCount = dependencies.len;
@@ -278,7 +281,7 @@ pub const WaterSystem = struct {
         log.log.info("WaterSystem: reflection target created ({}x{})", .{ half_w, half_h });
     }
 
-    pub fn createWaterPipeline(self: *WaterSystem, allocator: std.mem.Allocator, device: c.VkDevice, main_render_pass: c.VkRenderPass) !void {
+    pub fn createWaterPipeline(self: *WaterSystem, allocator: std.mem.Allocator, device: c.VkDevice, main_render_pass: c.VkRenderPass, msaa_samples: u8) !void {
         if (self.water_pipeline_layout == null) return;
         if (main_render_pass == null) return error.InvalidRenderPass;
 
@@ -334,7 +337,7 @@ pub const WaterSystem = struct {
 
         var multisampling = std.mem.zeroes(c.VkPipelineMultisampleStateCreateInfo);
         multisampling.sType = c.VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-        multisampling.rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT;
+        multisampling.rasterizationSamples = @import("render_pass_manager.zig").getMSAASampleCountFlag(msaa_samples);
 
         var depth_stencil = std.mem.zeroes(c.VkPipelineDepthStencilStateCreateInfo);
         depth_stencil.sType = c.VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;

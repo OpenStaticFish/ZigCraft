@@ -130,6 +130,7 @@ pub fn createTerrainPipeline(
 
         var g_multisampling = multisampling.*;
         g_multisampling.rasterizationSamples = c.VK_SAMPLE_COUNT_1_BIT;
+        g_multisampling.alphaToCoverageEnable = c.VK_FALSE;
 
         var g_pipeline_info = pipeline_info;
         g_pipeline_info.stageCount = 2;
