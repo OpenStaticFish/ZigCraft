@@ -32,7 +32,7 @@ Dir.mktmpdir do |dir|
     FileUtils.mkdir_p(["scripts", "src", ".github/workflows"])
     FileUtils.cp(%w[ci_changes.py ci_changed_paths.rb].map { |f| File.join(__dir__, f) }, "scripts")
     build = ".github/workflows/build.yml"
-    File.write(build, "jobs:\n  compile:\n    runs-on: ubuntu-latest\n    steps:\n      - run: zig build\n")
+    File.write(build, "jobs:\n  compile:\n    runs-on: ubuntu-latest\n    env:\n      MODE: on\n    steps:\n      - run: zig build\n")
     source = "src/file with\nnewline.zig"
     File.write(source, "fixture")
     git("add", ".")
@@ -54,6 +54,18 @@ Dir.mktmpdir do |dir|
     File.write("README.md", "docs only")
     git("commit", "-qam", "docs after game changes")
     check_route(step, "push", "HEAD^", [])
+    File.write(build, File.read(build).sub("MODE: on", "MODE: yes"))
+    git("commit", "-qam", "change executable environment string")
+    check_route(step, "push", "HEAD^", %w[fmt game graphics shaders])
+    File.write(build, File.read(build).sub("runs-on: ubuntu-24.04", "runs-on:\n      group: standard\n      labels: [linux, x64]"))
+    git("commit", "-qam", "select runner group")
+    check_route(step, "push", "HEAD^", %w[fmt game graphics shaders])
+    File.write(build, File.read(build).sub("[linux, x64]", "[linux, arm64]"))
+    git("commit", "-qam", "change labels within group")
+    check_route(step, "push", "HEAD^", [])
+    File.write(build, File.read(build).sub("group: standard", "group: dedicated"))
+    git("commit", "-qam", "change runner group")
+    check_route(step, "push", "HEAD^", %w[fmt game graphics shaders])
   end
 end
 puts "Git diff routing passed for diverged PRs, renames, runner labels, build commands and consecutive pushes."
