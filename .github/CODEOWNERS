@@ -2,6 +2,9 @@
 modules/engine-graphics/**   @OpenStaticFish
 modules/world-persistence/** @OpenStaticFish
 .github/workflows/**         @OpenStaticFish
+scripts/ci_changes.py        @OpenStaticFish
+scripts/test_ci_changes.py   @OpenStaticFish
+scripts/test_build_gates.rb  @OpenStaticFish
 .github/opencode/**          @OpenStaticFish
 .github/prompts/**           @OpenStaticFish
 scripts/opencode*.sh         @OpenStaticFish

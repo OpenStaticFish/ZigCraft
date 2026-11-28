@@ -57,10 +57,13 @@ jobs:
           fi
 
       - name: Upload coverage artifact
+        id: report
         uses: actions/upload-artifact@v7
+        continue-on-error: true
         with:
           name: kcov-report
           path: coverage/kcov
+          if-no-files-found: error
           retention-days: 14
 
       - name: Upload to Codecov
@@ -74,7 +77,9 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Comment non-blocking coverage status
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        if: >-
+          github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository &&
+          steps.report.outcome == 'success' && steps.report.outputs.artifact-id != ''
         continue-on-error: true
         uses: actions/github-script@v8
         with:

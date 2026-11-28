@@ -12,6 +12,8 @@ class ChangeRoutingTests(unittest.TestCase):
         self.assert_jobs(["README.md", "docs/benchmarks/README.md", "docs/assets/budget.json"])
         self.assert_jobs([".github/workflows/build.yml", "scripts/opencode_review.sh"])
         self.assert_jobs([".github/actions/load-prompt/action.yml"])
+        self.assert_jobs(["scripts/run_benchmark.sh", "scripts/benchmark_baseline.py",
+                          "scripts/compare_benchmarks.sh", "scripts/validate_benchmark_artifact.sh"])
 
     def test_graphics_runner_changes_only_exercise_graphics(self):
         self.assert_jobs([".github/actions/start-weston/action.yml", "README.md"], "graphics")
@@ -33,7 +35,7 @@ class ChangeRoutingTests(unittest.TestCase):
     def test_shaders_and_unknown_inputs_select_full_game_checks(self):
         for path in (".github/actions/new-action/action.yml",
                      "assets/shaders/vulkan/sky.frag", "scripts/new-check.sh",
-                     "docs/future-fixture.bin"):
+                     "scripts/new-benchmark-check.sh", "docs/future-fixture.bin"):
             with self.subTest(path=path):
                 self.assert_jobs([path], "game", "graphics")
 
