@@ -21,7 +21,7 @@ REPO_ONLY = (
     "scripts/*generated_tests.sh", "scripts/authorize_source_task.sh",
     "scripts/capture_*.sh", "scripts/check_asset_budget.sh",
     "scripts/check_existing_test_prs.sh", "scripts/ci_changes.py",
-    "scripts/test_ci_changes.py", "scripts/codebase_report.sh",
+    "scripts/test_ci_changes.py", "scripts/test_build_gates.rb", "scripts/codebase_report.sh",
     "scripts/compare_visual_golden.sh", "scripts/configure*git_identity.sh",
     "scripts/ensure_label.sh", "scripts/github_actions_common.sh",
     "scripts/process_textures.sh", "scripts/select_*_module.sh",

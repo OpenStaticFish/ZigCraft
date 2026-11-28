@@ -40,7 +40,12 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-          sparse-checkout: scripts
+          sparse-checkout: |
+            scripts
+            .github/workflows
+
+      - name: Verify required gates against representative job results
+        run: ruby scripts/test_build_gates.rb
 
       - name: Select checks for the full diff
         id: filter
@@ -54,6 +59,11 @@ jobs:
           else
             if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
               BASE=$(git merge-base "$BASE" "$HEAD")
+            elif ! git cat-file -e "${BASE}^{commit}"; then
+              git fetch --no-tags --depth=1 origin "$BASE" || {
+                echo "::error::Cannot classify push: previous commit $BASE is unavailable"
+                exit 1
+              }
             fi
             git diff --name-only --no-renames -z "$BASE" "$HEAD" |
               python3 scripts/ci_changes.py >> "$GITHUB_OUTPUT"
