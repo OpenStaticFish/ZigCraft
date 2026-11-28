@@ -16,6 +16,7 @@ const lifecycle = @import("rhi_resource_lifecycle.zig");
 const setup = @import("rhi_resource_setup.zig");
 const rhi_timing = @import("rhi_timing.zig");
 const screenshot = @import("screenshot.zig");
+const state_control = @import("rhi_state_control.zig");
 const final_composition = @import("final_composition.zig");
 const build_options = @import("engine_graphics_options");
 
@@ -162,7 +163,7 @@ pub fn deinit(ctx: anytype) void {
     const vk_device: c.VkDevice = ctx.vulkan_device.vk_device;
 
     if (vk_device != null) {
-        _ = c.vkDeviceWaitIdle(vk_device);
+        state_control.waitIdle(ctx);
         screenshot.discardCapture(ctx);
 
         var compute_pipeline_iter = ctx.compute_resources.pipelines.iterator();

@@ -23,6 +23,7 @@ pub const FrameManager = struct {
     retirement_error: ?anyerror = null,
     submit_graphics: *const fn (*VulkanDevice, c.VkSubmitInfo, c.VkFence) anyerror!void = &VulkanDevice.submitGuarded,
     wait_layout_queue_idle: @TypeOf(&c.vkQueueWaitIdle) = &c.vkQueueWaitIdle,
+    wait_device_idle: @TypeOf(&c.vkDeviceWaitIdle) = &c.vkDeviceWaitIdle,
 
     pub fn init(vulkan_device: *VulkanDevice) !FrameManager {
         var self = FrameManager{

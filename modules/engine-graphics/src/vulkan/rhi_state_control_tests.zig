@@ -31,6 +31,7 @@ const MockShadowRuntime = struct {
 };
 
 const MockFrames = struct {
+    wait_device_idle: @TypeOf(&c.vkDeviceWaitIdle) = &c.vkDeviceWaitIdle,
     current_frame: u32 = 0,
     frame_in_progress: bool = false,
     command_buffers: [3]c.VkCommandBuffer = .{ null, null, null },

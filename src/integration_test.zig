@@ -229,6 +229,14 @@ fn failLayoutWait(_: c.VkQueue) callconv(.c) c.VkResult {
     return c.VK_ERROR_OUT_OF_HOST_MEMORY;
 }
 
+var teardown_wait_attempts: usize = 0;
+
+fn failFirstTeardownWait(device: c.VkDevice) callconv(.c) c.VkResult {
+    teardown_wait_attempts += 1;
+    if (teardown_wait_attempts == 1) return c.VK_ERROR_OUT_OF_HOST_MEMORY;
+    return c.vkDeviceWaitIdle(device);
+}
+
 fn failPresentation(_: c.VkQueue, _: [*c]const c.VkPresentInfoKHR) callconv(.c) c.VkResult {
     return c.VK_ERROR_OUT_OF_HOST_MEMORY;
 }
@@ -282,8 +290,19 @@ fn readUploadedByte(vulkan: *@import("engine-graphics").VulkanContext, handle: r
     c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host_read, 0, null, 0, null);
     try utils.checkVk(c.vkEndCommandBuffer(cmd));
     const submit = c.VkSubmitInfo{ .sType = c.VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
-    try vulkan.vulkan_device.submitGuarded(submit, null);
-    try utils.checkVk(c.vkQueueWaitIdle(vulkan.vulkan_device.queue));
+    const fence_info = c.VkFenceCreateInfo{ .sType = c.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    var fence: c.VkFence = null;
+    try utils.checkVk(c.vkCreateFence(device, &fence_info, null, &fence));
+    defer c.vkDestroyFence(device, fence, null);
+    try vulkan.vulkan_device.submitGuarded(submit, fence);
+    const waited = c.vkWaitForFences(device, 1, &fence, c.VK_TRUE, std.math.maxInt(u64));
+    if (waited != c.VK_SUCCESS and waited != c.VK_ERROR_DEVICE_LOST) {
+        const drained = c.vkDeviceWaitIdle(device);
+        if (drained != c.VK_SUCCESS and drained != c.VK_ERROR_DEVICE_LOST) {
+            std.debug.panic("Cannot safely retire test readback: Vulkan returned {}", .{drained});
+        }
+    }
+    try utils.checkVk(waited);
     const mapped: *const u8 = @ptrCast(dst.mapped_ptr.?);
     return mapped.*;
 }
@@ -302,7 +321,8 @@ test "smoke test: launch, generate, render, exit" {
         }
         return err;
     };
-    defer app.deinit();
+    var app_deinitialized = false;
+    defer if (!app_deinitialized) app.deinit();
     if (!build_options.skip_present) app.window_manager.show();
 
     const world_screen = try WorldScreen.init(test_allocator, app.engineContext(), 12345, 0);
@@ -607,6 +627,30 @@ test "smoke test: launch, generate, render, exit" {
         }
         app.render_system.waitIdle();
 
+        const quality = app.render_system.getRHI().options();
+        const original_samples = vulkan.options.msaa_samples;
+        const original_taa = vulkan.taa.enabled;
+        vulkan.taa.enabled = true;
+        for ([_]u8{ 1, 4 }) |samples| {
+            if (samples > vulkan.vulkan_device.max_msaa_samples) continue;
+            quality.setMSAA(samples);
+            for (0..2) |_| {
+                if (!try render.beginFrame()) return error.TaaFrameSkipped;
+                errdefer render.abortFrame();
+                render.beginGPass();
+                render.endGPass();
+                render.beginMainPass();
+                render.endMainPass();
+                render.computeTAA();
+                try testing.expect(vulkan.taa.ran_this_frame);
+                try render.endFrame();
+            }
+        }
+        vulkan.taa.enabled = original_taa;
+        quality.setMSAA(original_samples);
+        if (!try render.beginFrame()) return error.MsaaRestoreFrameSkipped;
+        render.abortFrame();
+
         app.input.interface().setShouldQuit(false);
         active_upload_screen.quit_on_draw = false;
         const submit_graphics = vulkan.frames.submit_graphics;
@@ -633,7 +677,8 @@ test "smoke test: launch, generate, render, exit" {
         try testing.expect(vulkan.shadow_system.shadow_image != null);
         try testing.expect(vulkan.shadow_system.shadow_image != old_shadow_image);
         try testing.expectError(error.OutOfMemory, app.runSingleFrame());
-        app.render_system.waitIdle();
+        teardown_wait_attempts = 0;
+        vulkan.frames.wait_device_idle = &failFirstTeardownWait;
     }
 
     const val_count = app.render_system.getRHI().query().getValidationErrorCount();
@@ -641,6 +686,11 @@ test "smoke test: launch, generate, render, exit" {
         std.debug.print("Integration test finished with {} Vulkan validation errors\n", .{val_count});
     }
     try testing.expectEqual(@as(u32, 0), val_count);
+    if (build_options.skip_present) {
+        app.deinit();
+        app_deinitialized = true;
+        try testing.expect(teardown_wait_attempts >= 2);
+    }
 }
 
 test "end-to-end edited terrain survives save reload" {

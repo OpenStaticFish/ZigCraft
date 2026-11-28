@@ -183,7 +183,8 @@ pub const RenderPassManager = struct {
                     .dstStageMask = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                     .srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                     .dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT,
-                    .dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT,
+                    // TAA samples neighboring HDR texels.
+                    .dependencyFlags = 0,
                 },
             };
 
@@ -252,7 +253,7 @@ pub const RenderPassManager = struct {
                     .dstStageMask = c.VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                     .srcAccessMask = c.VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                     .dstAccessMask = c.VK_ACCESS_SHADER_READ_BIT,
-                    .dependencyFlags = c.VK_DEPENDENCY_BY_REGION_BIT,
+                    .dependencyFlags = 0,
                 },
             };
 
