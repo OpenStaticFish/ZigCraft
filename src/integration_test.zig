@@ -62,6 +62,9 @@ const UploadScreen = struct {
     payload: [64]u8 = [_]u8{0} ** 64,
     tick: u8 = 0,
     overwrite_upload: bool = false,
+    indirect_draw: ?struct { vertices: rhi.BufferHandle, command: rhi.BufferHandle } = null,
+    overwrite_indirect: ?rhi.BufferHandle = null,
+    culling: ?rhi.ICullingSystem = null,
     screenshot_path: ?[]const u8 = null,
     resize_during_draw: bool = false,
     quit_on_draw: bool = false,
@@ -98,13 +101,33 @@ const UploadScreen = struct {
             self.payload[offset] +%= 100;
             try self.context.render_system.getRHI().resourceManager().updateBuffer(self.buffer, offset, self.payload[offset..][0..1]);
         }
+        if (self.overwrite_indirect) |command| {
+            try self.context.render_system.getRHI().resourceManager().updateBuffer(command, 0, &.{0xcd});
+        }
     }
 
     fn draw(ptr: *anyopaque, ui: *UISystem) !void {
         const self: *UploadScreen = @ptrCast(@alignCast(ptr));
+        const vk: *@import("engine-graphics").VulkanContext = @ptrCast(@alignCast(self.context.render_system.rhi.ptr));
+        const slot = vk.frames.current_frame;
+        if (self.culling) |culling| {
+            culling.updateAABBData(slot, &.{.{ .min_point = .{ 0, 0, 0, 0 }, .max_point = .{ 0, 0, 0, 0 } }});
+            culling.dispatch(.{
+                .view_proj = .{ .data = .{ .{ 1, 0, 0, 0 }, .{ 0, 1, 0, 0 }, .{ 0, 0, 1, 0 }, .{ 0, 0, 0, 1 } } },
+                .chunk_count = 1,
+                .screen_width = 1,
+                .screen_height = 1,
+                .previous_frame_valid = false,
+            });
+        }
         // A pyramid request without a G-pass must not sample unwritten depth,
         // including on the first frame after swapchain recreation.
         self.context.render_system.getRHI().postProcess().computeDepthPyramid();
+        if (self.indirect_draw) |indirect| {
+            const render = self.context.render_system.getRHI().renderContext();
+            render.setInstanceBuffer(self.buffer);
+            render.drawIndirect(indirect.vertices, indirect.command, 0, 1, @sizeOf(c.VkDrawIndirectCommand));
+        }
         ui.begin();
         ui.end();
         if (self.screenshot_path) |path| {
@@ -223,6 +246,12 @@ fn readUploadedByte(vulkan: *@import("engine-graphics").VulkanContext, handle: r
     defer c.vkFreeCommandBuffers(device, pool, 1, &cmd);
     const begin = c.VkCommandBufferBeginInfo{ .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     try utils.checkVk(c.vkBeginCommandBuffer(cmd, &begin));
+    const upload_to_copy = c.VkMemoryBarrier{
+        .sType = c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+        .srcAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
+        .dstAccessMask = c.VK_ACCESS_TRANSFER_READ_BIT,
+    };
+    c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_TRANSFER_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &upload_to_copy, 0, null, 0, null);
     const region = c.VkBufferCopy{ .srcOffset = offset, .dstOffset = 0, .size = 1 };
     c.vkCmdCopyBuffer(cmd, src.buffer, dst.buffer, 1, &region);
     const host_read = c.VkMemoryBarrier{
@@ -292,6 +321,7 @@ test "smoke test: launch, generate, render, exit" {
     const fault_count_before_replace = app.render_system.getRHI().query().getFaultCount();
     try app.runSingleFrame();
     const active_upload_screen = upload_screen.?;
+    const vulkan: *@import("engine-graphics").VulkanContext = @ptrCast(@alignCast(app.render_system.rhi.ptr));
     try testing.expectEqual(@as(usize, 1), app.screen_manager.stack.items.len);
     try testing.expect(app.screen_manager.stack.items[0].ptr == @as(*anyopaque, @ptrCast(active_upload_screen)));
     try testing.expectEqual(fault_count_before_replace, app.render_system.getRHI().query().getFaultCount());
@@ -303,6 +333,53 @@ test "smoke test: launch, generate, render, exit" {
     // An upload immediately after submission must not reset a pending command
     // buffer. Use a byte outside the screen's rotating test writes.
     try app.render_system.getRHI().resourceManager().updateBuffer(active_upload_screen.buffer, 63, &.{0xab});
+
+    {
+        const culling = (try app.render_system.getRHI().createCullingSystem(test_allocator, 1)) orelse return error.MissingCullingSystem;
+        defer culling.deinit();
+        defer app.render_system.waitIdle();
+        active_upload_screen.culling = culling;
+        defer active_upload_screen.culling = null;
+
+        const dispatch_frame = vulkan.runtime.frame_index;
+        const slot_before = vulkan.frames.current_frame;
+        try app.runSingleFrame();
+        try testing.expectEqual(dispatch_frame + 1, vulkan.runtime.frame_index);
+        app.render_system.getRHI().context().requestSwapchainRecreate();
+        const slot_after = vulkan.frames.current_frame;
+        try app.runSingleFrame();
+        try testing.expectEqual(dispatch_frame + 2, vulkan.runtime.frame_index);
+        app.render_system.waitIdle();
+        try testing.expectEqual(@as(u32, 1), culling.readVisibleCount(slot_before));
+        try testing.expectEqual(@as(u32, 1), culling.readVisibleCount(slot_after));
+    }
+    try testing.expectEqual(@as(u8, 0xab), try readUploadedByte(vulkan, active_upload_screen.buffer, 63));
+
+    // Read from one frame's graphics submission, then overwrite the same
+    // range in the next frame's transfer batch without draining the queue.
+    {
+        const resources = app.render_system.getRHI().resourceManager();
+        const vertices = try resources.createBuffer(64, .vertex);
+        defer resources.destroyBuffer(vertices);
+        const command = try resources.createBuffer(@sizeOf(c.VkDrawIndirectCommand), .indirect);
+        defer resources.destroyBuffer(command);
+        defer app.render_system.waitIdle();
+        defer active_upload_screen.indirect_draw = null;
+        defer active_upload_screen.overwrite_indirect = null;
+
+        // Zero vertices: the GPU still fetches the indirect command.
+        const empty_draw: [@sizeOf(c.VkDrawIndirectCommand)]u8 = @splat(0);
+        try resources.updateBuffer(command, 0, &empty_draw);
+        const read_frame = vulkan.runtime.frame_index;
+        active_upload_screen.indirect_draw = .{ .vertices = vertices, .command = command };
+        try app.runSingleFrame();
+        try testing.expectEqual(read_frame + 1, vulkan.runtime.frame_index);
+        active_upload_screen.indirect_draw = null;
+        active_upload_screen.overwrite_indirect = command;
+        try app.runSingleFrame();
+        try testing.expectEqual(read_frame + 2, vulkan.runtime.frame_index);
+        try testing.expectEqual(@as(u8, 0xcd), try readUploadedByte(vulkan, command, 0));
+    }
 
     const resize_width: u32 = 1024;
     const resize_height: u32 = 720;
@@ -338,8 +415,6 @@ test "smoke test: launch, generate, render, exit" {
 
     // Simulate a skipped acquire after successful frames. The screen still
     // updates, but its draw and the frame-completion callbacks must not run.
-    const vulkan: *@import("engine-graphics").VulkanContext = @ptrCast(@alignCast(app.render_system.rhi.ptr));
-    try testing.expectEqual(@as(u8, 0xab), try readUploadedByte(vulkan, active_upload_screen.buffer, 63));
     // A normal frame has submitted the upload screen's copy. A subsequent
     // upload in the same slot must not replay that batch.
     try testing.expectEqual(@as(usize, 0), vulkan.resources.transfer.pendingCopyCount());

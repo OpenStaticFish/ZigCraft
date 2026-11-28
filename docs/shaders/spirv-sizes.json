@@ -5,7 +5,7 @@
     "assets/shaders/vulkan/bloom_downsample.vert": 1160,
     "assets/shaders/vulkan/bloom_upsample.frag": 3956,
     "assets/shaders/vulkan/bloom_upsample.vert": 1160,
-    "assets/shaders/vulkan/culling.comp": 11348,
+    "assets/shaders/vulkan/culling.comp": 4792,
     "assets/shaders/vulkan/debug_shadow.frag": 836,
     "assets/shaders/vulkan/debug_shadow.vert": 1344,
     "assets/shaders/vulkan/depth_pyramid.comp": 2936,

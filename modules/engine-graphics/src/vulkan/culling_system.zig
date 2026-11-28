@@ -17,9 +17,6 @@ pub const ChunkCullData = culling.ChunkCullData;
 
 const CullingPushConstants = extern struct {
     planes: [6][4]f32,
-    view_proj: [4][4]f32,
-    screen_size: [2]f32,
-    previous_frame_valid: f32,
     chunk_count: u32,
 };
 
@@ -136,9 +133,6 @@ pub const CullingSystem = struct {
         self: *CullingSystem,
         view_proj: Mat4,
         chunk_count: u32,
-        screen_width: f32,
-        screen_height: f32,
-        previous_frame_valid: bool,
     ) void {
         if (chunk_count == 0) return;
         const fi = self.vk_ctx.frames.current_frame;
@@ -181,8 +175,6 @@ pub const CullingSystem = struct {
             null,
         );
 
-        self.cached_planes.screen_size = .{ screen_width, screen_height };
-        self.cached_planes.previous_frame_valid = if (previous_frame_valid) 1.0 else 0.0;
         self.cached_planes.chunk_count = @min(chunk_count, @as(u32, @intCast(self.max_chunks)));
 
         if (!self.planes_cached or !mat4Equal(self.cached_view_proj, view_proj)) {
@@ -190,7 +182,6 @@ pub const CullingSystem = struct {
             self.cached_view_proj = view_proj;
             self.planes_cached = true;
         }
-        self.cached_planes.view_proj = view_proj.data;
         const push = self.cached_planes;
 
         c.vkCmdBindPipeline(cmd, c.VK_PIPELINE_BIND_POINT_COMPUTE, self.pipeline);
@@ -293,7 +284,6 @@ pub const CullingSystem = struct {
 
         var pool_sizes = [_]c.VkDescriptorPoolSize{
             .{ .type = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 3 * MAX_FRAMES_IN_FLIGHT },
-            .{ .type = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_FRAMES_IN_FLIGHT },
         };
 
         var pool_info = std.mem.zeroes(c.VkDescriptorPoolCreateInfo);
@@ -307,7 +297,6 @@ pub const CullingSystem = struct {
             .{ .binding = 0, .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT, .pImmutableSamplers = null },
             .{ .binding = 1, .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT, .pImmutableSamplers = null },
             .{ .binding = 2, .descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT, .pImmutableSamplers = null },
-            .{ .binding = 3, .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = c.VK_SHADER_STAGE_COMPUTE_BIT, .pImmutableSamplers = null },
         };
 
         var layout_info = std.mem.zeroes(c.VkDescriptorSetLayoutCreateInfo);
@@ -361,11 +350,10 @@ pub const CullingSystem = struct {
         const vk = self.vk_ctx.vulkan_device.vk_device;
         const aabb_range = self.max_chunks * @sizeOf(ChunkCullData);
 
-        var writes: [4 * MAX_FRAMES_IN_FLIGHT]c.VkWriteDescriptorSet = undefined;
+        var writes: [3 * MAX_FRAMES_IN_FLIGHT]c.VkWriteDescriptorSet = undefined;
         var aabb_infos: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorBufferInfo = undefined;
         var index_infos: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorBufferInfo = undefined;
         var counter_infos: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorBufferInfo = undefined;
-        var pyramid_infos: [MAX_FRAMES_IN_FLIGHT]c.VkDescriptorImageInfo = undefined;
         var n: usize = 0;
 
         for (0..MAX_FRAMES_IN_FLIGHT) |i| {
@@ -383,11 +371,6 @@ pub const CullingSystem = struct {
                 .buffer = self.counter_buffers[i].buffer,
                 .offset = 0,
                 .range = @sizeOf(u32),
-            };
-            pyramid_infos[i] = c.VkDescriptorImageInfo{
-                .sampler = self.vk_ctx.depth_pyramid.getPyramidSampler(),
-                .imageView = self.vk_ctx.depth_pyramid.getPyramidImageView(),
-                .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             };
 
             writes[n] = std.mem.zeroes(c.VkWriteDescriptorSet);
@@ -415,15 +398,6 @@ pub const CullingSystem = struct {
             writes[n].descriptorType = c.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[n].descriptorCount = 1;
             writes[n].pBufferInfo = &counter_infos[i];
-            n += 1;
-
-            writes[n] = std.mem.zeroes(c.VkWriteDescriptorSet);
-            writes[n].sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[n].dstSet = self.descriptor_sets[i];
-            writes[n].dstBinding = 3;
-            writes[n].descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[n].descriptorCount = 1;
-            writes[n].pImageInfo = &pyramid_infos[i];
             n += 1;
         }
 
@@ -491,7 +465,7 @@ fn interfaceReadVisibleIndices(ptr: *anyopaque, frame_index: usize, count: u32, 
 
 fn interfaceDispatch(ptr: *anyopaque, config: culling.DispatchConfig) void {
     const self: *CullingSystem = @ptrCast(@alignCast(ptr));
-    self.dispatch(config.view_proj, config.chunk_count, config.screen_width, config.screen_height, config.previous_frame_valid);
+    self.dispatch(config.view_proj, config.chunk_count);
 }
 
 fn mat4Equal(a: Mat4, b: Mat4) bool {
