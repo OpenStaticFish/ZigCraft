@@ -16,7 +16,9 @@ devenv shell zig build -Doptimize=ReleaseSafe test
 
 ## Coverage
 
-The `Coverage` workflow runs kcov against the unit suite, uploads the generated report to Codecov, and posts a non-blocking PR comment pointing reviewers to the coverage artifact. This is a Phase 1 signal: upload/comment failures do not fail the PR, and the report is intended to establish a stable baseline before a future blocking threshold is enabled.
+`Coverage` runs independently of `Build` on PRs and pushes to `dev`. Both use the same changed-file classifier: kcov runs for game or toolchain changes and skips prose and routine automation. Coverage failures are visible on the `Coverage` run and do not affect the required Build checks. To measure a ref manually, dispatch `Coverage` for that ref.
+
+The workflow uploads the generated report to Codecov and posts a non-blocking comment on same-repository PRs when the coverage artifact is available. The report establishes a baseline before a future blocking threshold is enabled.
 
 Run locally:
 

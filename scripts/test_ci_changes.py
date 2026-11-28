@@ -21,9 +21,16 @@ class ChangeRoutingTests(unittest.TestCase):
     def test_shader_baseline_and_checker_use_standalone_validation(self):
         self.assert_jobs(["docs/shaders/spirv-sizes.json", "scripts/check_shadow_abi.sh"], "shaders")
 
-    def test_mixed_changes_preserve_full_suite_without_duplicate_shader_job(self):
+    def test_mixed_changes_keep_clean_checkout_shader_validation(self):
         self.assert_jobs(["docs/guide.md", "modules/example.zig", "docs/shaders/spirv-sizes.json"],
-                         "fmt", "game", "graphics")
+                         "fmt", "game", "graphics", "shaders")
+
+    def test_committed_shadow_binaries_and_sources_select_both_checks(self):
+        for shader in ("sky", "terrain"):
+            for suffix in (".frag", ".frag.spv"):
+                path = f"assets/shaders/vulkan/{shader}{suffix}"
+                with self.subTest(path=path):
+                    self.assert_jobs([path], "game", "graphics", "shaders")
 
     def test_toolchain_changes_exercise_formatter_and_game_jobs(self):
         for path in ("devenv.nix", "devenv.yaml", "devenv.lock",
@@ -34,13 +41,13 @@ class ChangeRoutingTests(unittest.TestCase):
 
     def test_shaders_and_unknown_inputs_select_full_game_checks(self):
         for path in (".github/actions/new-action/action.yml",
-                     "assets/shaders/vulkan/sky.frag", "scripts/new-check.sh",
+                     "assets/shaders/vulkan/water.frag", "scripts/new-check.sh",
                      "scripts/new-benchmark-check.sh", "docs/future-fixture.bin"):
             with self.subTest(path=path):
                 self.assert_jobs([path], "game", "graphics")
 
     def test_manual_run_is_full_even_without_a_diff(self):
-        self.assert_jobs([], "fmt", "game", "graphics", full=True)
+        self.assert_jobs([], "fmt", "game", "graphics", "shaders", full=True)
 
 
 if __name__ == "__main__":

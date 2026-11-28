@@ -7,6 +7,7 @@ routes = {
   "docs" => [],
   "game" => %w[game fmt graphics],
   "shader baseline" => %w[shaders],
+  "game and shader checker" => %w[game fmt graphics shaders],
   "graphics runner" => %w[graphics],
 }
 selectors = {

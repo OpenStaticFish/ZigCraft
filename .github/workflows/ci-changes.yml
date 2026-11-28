@@ -1,0 +1,56 @@
+name: Classify CI changes
+
+on:
+  workflow_call:
+    outputs:
+      game:
+        value: ${{ jobs.classify.outputs.game }}
+      fmt:
+        value: ${{ jobs.classify.outputs.fmt }}
+      graphics:
+        value: ${{ jobs.classify.outputs.graphics }}
+      shaders:
+        value: ${{ jobs.classify.outputs.shaders }}
+
+jobs:
+  classify:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      game: ${{ steps.filter.outputs.game }}
+      fmt: ${{ steps.filter.outputs.fmt }}
+      graphics: ${{ steps.filter.outputs.graphics }}
+      shaders: ${{ steps.filter.outputs.shaders }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          sparse-checkout: |
+            scripts
+            .github/workflows
+
+      - name: Verify required gates against representative job results
+        run: ruby scripts/test_build_gates.rb
+
+      - name: Select checks for the full diff
+        id: filter
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch || "$BASE" =~ ^0+$ ]]; then
+            python3 scripts/ci_changes.py --all </dev/null >> "$GITHUB_OUTPUT"
+          else
+            if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+              BASE=$(git merge-base "$BASE" "$HEAD")
+            elif ! git cat-file -e "${BASE}^{commit}"; then
+              git fetch --no-tags --depth=1 origin "$BASE" || {
+                echo "::error::Cannot classify push: previous commit $BASE is unavailable"
+                exit 1
+              }
+            fi
+            git diff --name-only --no-renames -z "$BASE" "$HEAD" |
+              python3 scripts/ci_changes.py >> "$GITHUB_OUTPUT"
+          fi

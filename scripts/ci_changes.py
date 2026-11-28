@@ -33,6 +33,10 @@ SHADER_INPUTS = {
     "docs/shaders/spirv-sizes.json", "scripts/check_spirv_sizes.sh",
     "scripts/update_spirv_baseline.sh", "scripts/check_shadow_abi.sh",
 }
+COMMITTED_SHADOW_INPUTS = {
+    "assets/shaders/vulkan/sky.frag", "assets/shaders/vulkan/sky.frag.spv",
+    "assets/shaders/vulkan/terrain.frag", "assets/shaders/vulkan/terrain.frag.spv",
+}
 GRAPHICS_INPUTS = (
     ".github/actions/start-weston/", ".github/actions/stop-weston/",
     ".github/actions/setup-lavapipe/", ".github/vulkan/",
@@ -43,7 +47,7 @@ TOOLCHAIN_ACTIONS = (".github/actions/setup-devenv/", ".github/actions/setup-zig
 
 def classify(paths, full=False):
     game = fmt = graphics = full
-    shaders = False
+    shaders = full
     for path in paths:
         if path in TOOLCHAIN_CONFIG or path.startswith(TOOLCHAIN_ACTIONS):
             game = fmt = True
@@ -56,8 +60,10 @@ def classify(paths, full=False):
         elif not any(fnmatchcase(path, pattern) for pattern in REPO_ONLY):
             game = True
             fmt |= path.endswith(".zig")
-    # Both unit matrix legs already run the shader checks.
-    return dict(game=game, fmt=fmt, graphics=graphics or game, shaders=shaders and not game)
+        # Compare the two shipped shadow binaries before any build regenerates them.
+        if path in COMMITTED_SHADOW_INPUTS:
+            shaders = True
+    return dict(game=game, fmt=fmt, graphics=graphics or game, shaders=shaders)
 
 
 if __name__ == "__main__":
