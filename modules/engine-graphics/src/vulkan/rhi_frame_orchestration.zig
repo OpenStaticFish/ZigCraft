@@ -65,6 +65,7 @@ pub fn recreatePendingShadowResources(ctx: anytype) !void {
 pub fn recreateSwapchainInternal(ctx: anytype) !void {
     Utils.checkVk(c.vkDeviceWaitIdle(ctx.vulkan_device.vk_device)) catch |err|
         return handleSwapchainRecreateError(ctx, "device idle wait", err);
+    ctx.ssao_system.retireNoiseUpload(ctx.vulkan_device.vk_device);
 
     var w: c_int = 0;
     var h: c_int = 0;

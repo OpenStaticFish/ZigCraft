@@ -229,6 +229,43 @@ fn failLayoutWait(_: c.VkQueue) callconv(.c) c.VkResult {
     return c.VK_ERROR_OUT_OF_HOST_MEMORY;
 }
 
+fn loseDeviceOnNoiseWait(queue: c.VkQueue) callconv(.c) c.VkResult {
+    // This test's device is healthy, so drain it before simulating device loss.
+    const result = c.vkQueueWaitIdle(queue);
+    return if (result == c.VK_SUCCESS) c.VK_ERROR_DEVICE_LOST else result;
+}
+
+fn countTeardownValidationErrors(_: c.VkDebugUtilsMessageSeverityFlagBitsEXT, _: c.VkDebugUtilsMessageTypeFlagsEXT, data: [*c]const c.VkDebugUtilsMessengerCallbackDataEXT, user_data: ?*anyopaque) callconv(.c) c.VkBool32 {
+    const count: *std.atomic.Value(u32) = @ptrCast(@alignCast(user_data.?));
+    _ = count.fetchAdd(1, .monotonic);
+    std.debug.print("Vulkan teardown validation: {s}\n", .{data.*.pMessage});
+    return c.VK_FALSE;
+}
+
+fn trackTeardownValidation(device: *@import("engine-graphics").VulkanDevice, count: *std.atomic.Value(u32)) !bool {
+    if (device.debug_messenger == null) {
+        // CI explicitly enables Vulkan validation for the offscreen run.
+        if (std.c.getenv("VK_LAYER_ENABLES") != null or std.c.getenv("VK_LAYER_VALIDATE_SYNC") != null)
+            return error.MissingVulkanDebugMessenger;
+        std.debug.print("Skipping SSAO teardown validation: no Vulkan debug messenger\n", .{});
+        return false;
+    }
+    const create: c.PFN_vkCreateDebugUtilsMessengerEXT = @ptrCast(c.vkGetInstanceProcAddr(device.instance, "vkCreateDebugUtilsMessengerEXT"));
+    const destroy: c.PFN_vkDestroyDebugUtilsMessengerEXT = @ptrCast(c.vkGetInstanceProcAddr(device.instance, "vkDestroyDebugUtilsMessengerEXT"));
+    const info = c.VkDebugUtilsMessengerCreateInfoEXT{
+        .sType = c.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+        .messageSeverity = c.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+        .messageType = c.VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | c.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | c.VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+        .pfnUserCallback = countTeardownValidationErrors,
+        .pUserData = count,
+    };
+    var messenger: c.VkDebugUtilsMessengerEXT = null;
+    try @import("engine-graphics").vulkan_utils.checkVk(create.?(device.instance, &info, null, &messenger));
+    destroy.?(device.instance, device.debug_messenger, null);
+    device.debug_messenger = messenger;
+    return true;
+}
+
 var teardown_wait_attempts: usize = 0;
 
 fn failFirstTeardownWait(device: c.VkDevice) callconv(.c) c.VkResult {
@@ -313,6 +350,52 @@ fn createOffscreenSwapchain(allocator: std.mem.Allocator, device: *const @import
     try testing.expectEqual(swapchain.image_views.items.len, swapchain.framebuffers.items.len);
 }
 
+fn expectPendingNoiseUpload(context: *const @import("engine-graphics").VulkanContext) !void {
+    const ssao = &context.ssao_system;
+    const upload = ssao.pending_noise_upload orelse return error.MissingPendingNoiseUpload;
+    try testing.expectEqual(context.frames.command_pool, upload.pool);
+    try testing.expect(upload.cmd != null);
+    try testing.expect(upload.staging.buffer != null and upload.staging.memory != null);
+    try testing.expect(ssao.noise_image != null and ssao.noise_memory != null);
+}
+
+fn checkNoiseUploadWaitFailures(window: *c.SDL_Window) !void {
+    const graphics = @import("engine-graphics");
+    for ([_]enum { startup_oom, device_lost }{ .startup_oom, .device_lost }) |scenario| {
+        var validation_errors = std.atomic.Value(u32).init(0);
+        var validation_active = false;
+        {
+            const backend = try graphics.rhi_vulkan.createRHI(testing.allocator, window, null, 256, 1, 1, true);
+            defer backend.deinit();
+            const context: *graphics.VulkanContext = @ptrCast(@alignCast(backend.ptr));
+
+            switch (scenario) {
+                .startup_oom => {
+                    // The production copy is submitted; the injected wait does
+                    // not drain the queue before the startup error unwinds.
+                    context.wait_ssao_queue_idle = &failLayoutWait;
+                    try testing.expectError(error.OutOfMemory, backend.init(testing.allocator, null));
+                    try expectPendingNoiseUpload(context);
+                    teardown_wait_attempts = 0;
+                    context.frames.wait_device_idle = &failFirstTeardownWait;
+                },
+                .device_lost => {
+                    context.wait_ssao_queue_idle = &loseDeviceOnNoiseWait;
+                    try testing.expectError(error.GpuLost, backend.init(testing.allocator, null));
+                    try testing.expect(context.ssao_system.pending_noise_upload == null);
+                    try testing.expect(context.ssao_system.noise_image == null);
+                },
+            }
+
+            try testing.expectEqual(@as(u32, 0), context.vulkan_device.validation_error_count.load(.monotonic));
+            // Keep counting through vkDestroyDevice, which checks for leaks.
+            validation_active = try trackTeardownValidation(&context.vulkan_device, &validation_errors);
+        }
+        if (scenario == .startup_oom) try testing.expect(teardown_wait_attempts >= 2);
+        if (validation_active) try testing.expectEqual(@as(u32, 0), validation_errors.load(.monotonic));
+    }
+}
+
 test "smoke test: launch, generate, render, exit" {
     const test_allocator = testing.allocator;
 
@@ -351,6 +434,22 @@ test "smoke test: launch, generate, render, exit" {
             try testing.expectError(error.OutOfMemory, partial.init(test_allocator, null));
             try testing.expect(context.vulkan_device.vk_device != null);
         }
+        try checkNoiseUploadWaitFailures(app.window_manager.window);
+
+        const frame = vulkan.frames.current_frame;
+        vulkan.wait_ssao_queue_idle = &failLayoutWait;
+        app.render_system.rhi.context().requestSwapchainRecreate();
+        try app.runSingleFrame();
+        try testing.expect(vulkan.runtime.swapchain_recreate_failed);
+        try testing.expectEqual(frame, vulkan.frames.current_frame);
+        try expectPendingNoiseUpload(vulkan);
+
+        vulkan.wait_ssao_queue_idle = null;
+        app.render_system.rhi.context().requestSwapchainRecreate();
+        try app.runSingleFrame();
+        try testing.expect(!vulkan.runtime.swapchain_recreate_failed);
+        try testing.expect(frame != vulkan.frames.current_frame);
+        try testing.expect(vulkan.ssao_system.pending_noise_upload == null);
     }
 
     const world_screen = try WorldScreen.init(test_allocator, app.engineContext(), 12345, 0);

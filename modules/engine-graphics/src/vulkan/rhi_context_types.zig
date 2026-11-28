@@ -247,6 +247,7 @@ pub const VulkanContext = struct {
 
     shadow_system: ShadowSystem,
     ssao_system: SSAOSystem = .{},
+    wait_ssao_queue_idle: ?@TypeOf(&c.vkQueueWaitIdle) = null,
     shadow_runtime: ShadowRuntime,
     runtime: RuntimeState,
     mutex: sync.Mutex = .{},
