@@ -2,7 +2,13 @@
 
 ## ReleaseSafe Unit Tests
 
-Pull requests run `zig build test` in both `Debug` and `ReleaseSafe` through the `Build` workflow. `ReleaseSafe` keeps runtime safety checks enabled while exercising optimized code paths that Debug-only CI can miss.
+Game and toolchain changes run `zig build test` in both `Debug` and `ReleaseSafe` through the `Build` workflow. `ReleaseSafe` keeps runtime safety checks enabled while exercising optimized code paths that Debug-only CI can miss.
+
+On every PR to `dev` and every `dev` push, Build classifies the full diff with `scripts/ci_changes.py`. Prose and repository automation skip the game jobs. Weston, Lavapipe and Vulkan runner configuration select graphics smoke tests; shader baselines and checker scripts select shader validation. Mixed diffs run the union of applicable checks, and unrecognized inputs select the full game suite. Manual Build dispatches always run the suite for the requested ref.
+
+Changing the Build workflow itself runs the full suite to exercise its commands. Edits limited to runner labels, comments, or YAML formatting still use the lightweight route.
+
+The required `build` and `unit-test` checks still report on every PR. `build` verifies compilation and formatting, including formatter compatibility on shared toolchain changes. `unit-test` verifies the unit matrix, shader validation, and graphics smoke results. Both gates accept skipped work only when the classifier explicitly deselected it. Coverage remains advisory.
 
 Run locally:
 
@@ -12,7 +18,9 @@ devenv shell zig build -Doptimize=ReleaseSafe test
 
 ## Coverage
 
-The `Coverage` workflow runs kcov against the unit suite, uploads the generated report to Codecov, and posts a non-blocking PR comment pointing reviewers to the coverage artifact. This is a Phase 1 signal: upload/comment failures do not fail the PR, and the report is intended to establish a stable baseline before a future blocking threshold is enabled.
+`Coverage` runs independently of `Build` on PRs and pushes to `dev`. Both use the same changed-file classifier: kcov runs for game or toolchain changes and skips prose and routine automation. Changes to the Coverage workflow's commands run kcov without starting game jobs; literal runner-label edits alone skip both. Coverage failures are visible on the `Coverage` run and do not affect the required Build checks. To measure a ref manually, dispatch `Coverage` for that ref.
+
+The workflow uploads the generated report to Codecov and posts a non-blocking comment on same-repository PRs when the coverage artifact is available. The report establishes a baseline before a future blocking threshold is enabled.
 
 Run locally:
 

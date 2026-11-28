@@ -58,6 +58,8 @@ if [[ ! $suffix =~ ^edit([[:space:]]|$) ]]; then
         fi
     } > "$tmp/request"
     infer
+    prepare_reply
+    already_commented && exit 0
     check_discussion
     post_reply
     exit 0

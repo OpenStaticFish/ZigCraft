@@ -83,10 +83,7 @@ gh api --paginate "$repo/pulls/$number/reviews?per_page=100" > "$tmp/reviews"
         gh api "$repo/issues/$issue" --jq '{number,title,body}'
     done < "$tmp/links"
     echo 'Previous automated reviews:'
-    jq -s '[.[][] | select(.user.login | IN("github-actions[bot]","opencode-agent[bot]"))
-        | select(.submitted_at or ((.body // "") | test("^<!-- zigcraft-(pr-gate|v2-advisory|static-review)|```json[\\s\\S]*\"reviewed_sha\"")))
-        | {date:(.submitted_at // .created_at),body}] | sort_by(.date) | reverse | .[:3]
-        | map(.body |= .[:3500])' "$tmp/comments" "$tmp/reviews"
+    jq -s -f scripts/opencode_review_history.jq "$tmp/comments" "$tmp/reviews"
     if [[ -n $diff_dir ]]; then
         printf 'The complete pinned diff (%s lines) is at %s/pr.diff. Use the read tool with line offsets to review every page. If coverage is incomplete, do not recommend MERGE.\n' \
             "$(wc -l < "$diff_dir/pr.diff")" "$diff_dir"

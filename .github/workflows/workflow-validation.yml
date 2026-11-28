@@ -6,9 +6,12 @@ on:
     paths:
       - ".github/workflows/**"
       - ".github/actions/**"
+      - ".github/actionlint.yaml"
       - ".github/opencode/**"
       - "scripts/*.sh"
       - "scripts/*.py"
+      - "scripts/*.jq"
+      - "scripts/*.rb"
       - ".github/prompts/**"
       - ".shellcheckrc"
       - "devenv.nix"
@@ -19,9 +22,12 @@ on:
     paths:
       - ".github/workflows/**"
       - ".github/actions/**"
+      - ".github/actionlint.yaml"
       - ".github/opencode/**"
       - "scripts/*.sh"
       - "scripts/*.py"
+      - "scripts/*.jq"
+      - "scripts/*.rb"
       - ".github/prompts/**"
       - ".shellcheckrc"
       - "devenv.nix"
@@ -57,11 +63,11 @@ jobs:
 
       - name: Parse workflow YAML
         run: |
-          ruby -e 'require "yaml"; Dir[".github/workflows/*.{yml,yaml}"].sort.each { |f| YAML.load_file(f); puts "OK #{f}" }'
+          ruby -e 'require "yaml"; Dir[".github/workflows/*.{yml,yaml}"].sort.each { |f| YAML.safe_load_file(f, aliases: true); puts "OK #{f}" }'
 
       - name: Parse composite action YAML
         run: |
-          ruby -e 'require "yaml"; Dir[".github/actions/**/action.{yml,yaml}"].sort.each { |f| YAML.load_file(f); puts "OK #{f}" }'
+          ruby -e 'require "yaml"; Dir[".github/actions/**/action.{yml,yaml}"].sort.each { |f| YAML.safe_load_file(f, aliases: true); puts "OK #{f}" }'
 
       - name: Check OpenCode provider config
         run: jq -e '.providers.zigcraft.models[.model | split("/")[1]] != null' .github/opencode/provider.json
@@ -71,6 +77,14 @@ jobs:
 
       - name: Run ShellCheck
         run: devenv shell --profile unit -- shellcheck scripts/*.sh
+
+      - name: Test OpenCode discussion formatting
+        run: python3 scripts/test_opencode_discussion_markdown.py
+
+      - name: Test CI routing
+        run: |
+          python3 scripts/test_ci_changes.py
+          ruby scripts/test_ci_diff.rb
 
       - name: Validate devenv configuration
         run: devenv info >/dev/null
