@@ -50,7 +50,7 @@ def classify(paths, full=False):
     shaders = full
     for path in paths:
         if path in TOOLCHAIN_CONFIG or path.startswith(TOOLCHAIN_ACTIONS):
-            game = fmt = True
+            game = fmt = shaders = True
         elif path in SHADER_INPUTS:
             shaders = True
         elif path.startswith(GRAPHICS_INPUTS):

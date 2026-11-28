@@ -32,12 +32,12 @@ class ChangeRoutingTests(unittest.TestCase):
                 with self.subTest(path=path):
                     self.assert_jobs([path], "game", "graphics", "shaders")
 
-    def test_toolchain_changes_exercise_formatter_and_game_jobs(self):
+    def test_toolchain_changes_include_clean_checkout_shader_check(self):
         for path in ("devenv.nix", "devenv.yaml", "devenv.lock",
                      ".github/actions/setup-devenv/action.yml",
                      ".github/actions/setup-zig-cache/action.yml"):
             with self.subTest(path=path):
-                self.assert_jobs([path], "fmt", "game", "graphics")
+                self.assert_jobs([path], "fmt", "game", "graphics", "shaders")
 
     def test_shaders_and_unknown_inputs_select_full_game_checks(self):
         for path in (".github/actions/new-action/action.yml",
