@@ -63,6 +63,7 @@ const UploadScreen = struct {
     tick: u8 = 0,
     overwrite_upload: bool = false,
     screenshot_path: ?[]const u8 = null,
+    resize_during_draw: bool = false,
     quit_on_draw: bool = false,
 
     pub const vtable = IScreen.VTable{
@@ -101,11 +102,15 @@ const UploadScreen = struct {
 
     fn draw(ptr: *anyopaque, ui: *UISystem) !void {
         const self: *UploadScreen = @ptrCast(@alignCast(ptr));
+        // A pyramid request without a G-pass must not sample unwritten depth,
+        // including on the first frame after swapchain recreation.
+        self.context.render_system.getRHI().postProcess().computeDepthPyramid();
         ui.begin();
         ui.end();
         if (self.screenshot_path) |path| {
             try testing.expect(self.context.render_system.getRHI().screenshot().captureFrame(path));
         }
+        if (self.resize_during_draw) self.context.render_system.getRHI().context().requestSwapchainRecreate();
         if (self.quit_on_draw) self.context.input.setShouldQuit(true);
     }
     pub fn screen(self: *UploadScreen) IScreen {
@@ -178,7 +183,7 @@ fn failGraphicsSubmit(_: *@import("engine-graphics").VulkanDevice, _: c.VkSubmit
 }
 
 fn failPresentation(_: c.VkQueue, _: [*c]const c.VkPresentInfoKHR) callconv(.c) c.VkResult {
-    return c.VK_ERROR_SURFACE_LOST_KHR;
+    return c.VK_ERROR_OUT_OF_HOST_MEMORY;
 }
 
 fn loseGraphicsDevice(_: *anyopaque) anyerror!bool {
@@ -455,7 +460,9 @@ test "smoke test: launch, generate, render, exit" {
             const present = vulkan.swapchain.fp_vkQueuePresentKHR;
             vulkan.swapchain.fp_vkQueuePresentKHR = &failPresentation;
             defer vulkan.swapchain.fp_vkQueuePresentKHR = present;
-            try testing.expectError(error.BackendError, app.runSingleFrame());
+            // Mark resize during draw, after successful frame acquisition.
+            active_upload_screen.resize_during_draw = true;
+            try testing.expectError(error.OutOfMemory, app.runSingleFrame());
             try testing.expect(vulkan.screenshot_capture.staging == null);
             try dir.access("present-error.png", .{});
         }

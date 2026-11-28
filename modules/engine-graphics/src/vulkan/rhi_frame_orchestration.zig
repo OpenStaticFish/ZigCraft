@@ -191,6 +191,7 @@ pub fn prepareFrameState(ctx: anytype) void {
     ctx.runtime.first_main_pass_draw_logged = false;
     ctx.runtime.main_pass_active = false;
     ctx.shadow_system.pass_active = false;
+    ctx.runtime.g_pass_depth_ready = false;
     ctx.runtime.post_process_ran_this_frame = false;
     ctx.runtime.fxaa_ran_this_frame = false;
     ctx.runtime.direct_ui_composed_this_frame = false;

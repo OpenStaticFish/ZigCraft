@@ -181,6 +181,7 @@ const RuntimeState = struct {
     draw_call_count: u32,
     main_pass_active: bool = false,
     g_pass_active: bool = false,
+    g_pass_depth_ready: bool = false,
     ssao_pass_active: bool = false,
     post_process_ran_this_frame: bool = false,
     fxaa_ran_this_frame: bool = false,

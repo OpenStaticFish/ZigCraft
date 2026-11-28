@@ -151,21 +151,20 @@ pub const SwapchainPresenter = struct {
         present_info.pImageIndices = &image_index;
 
         self.vulkan_device.mutex.lock();
+        defer self.vulkan_device.mutex.unlock();
         // Use dynamically loaded function pointer
         const result = if (self.fp_vkQueuePresentKHR) |func|
             func(self.vulkan_device.queue, &present_info)
         else
             return error.ExtensionNotPresent;
-        self.vulkan_device.mutex.unlock();
-
-        if (result == c.VK_ERROR_OUT_OF_DATE_KHR or result == c.VK_SUBOPTIMAL_KHR or self.framebuffer_resized) {
+        if (result == c.VK_ERROR_OUT_OF_DATE_KHR or result == c.VK_SUBOPTIMAL_KHR) {
             return error.OutOfDate;
         } else if (result == c.VK_ERROR_VALIDATION_FAILED_EXT) {
             log.log.err("vkQueuePresentKHR reported validation failure", .{});
             return error.ValidationFailed;
-        } else if (result != c.VK_SUCCESS) {
-            return error.BackendError;
         }
+        try Utils.checkVk(result);
+        if (self.framebuffer_resized) return error.OutOfDate;
     }
 
     pub fn getExtent(self: *SwapchainPresenter) c.VkExtent2D {

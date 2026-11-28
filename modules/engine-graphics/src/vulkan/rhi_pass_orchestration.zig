@@ -50,7 +50,6 @@ pub fn beginGPassInternal(ctx: anytype) void {
 
     ensureNoRenderPassActiveInternal(ctx);
 
-    ctx.runtime.g_pass_active = true;
     const current_frame = ctx.frames.current_frame;
     const command_buffer = ctx.frames.command_buffers[current_frame];
 
@@ -79,6 +78,7 @@ pub fn beginGPassInternal(ctx: anytype) void {
     render_pass_info.pClearValues = &clear_values[0];
 
     c.vkCmdBeginRenderPass(command_buffer, &render_pass_info, c.VK_SUBPASS_CONTENTS_INLINE);
+    ctx.runtime.g_pass_active = true;
     c.vkCmdBindPipeline(command_buffer, c.VK_PIPELINE_BIND_POINT_GRAPHICS, ctx.pipeline_manager.g_pipeline);
 
     const viewport = c.VkViewport{ .x = 0, .y = 0, .width = @floatFromInt(g_extent.width), .height = @floatFromInt(g_extent.height), .minDepth = 0, .maxDepth = 1 };
@@ -97,6 +97,7 @@ pub fn endGPassInternal(ctx: anytype) void {
     const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
     c.vkCmdEndRenderPass(command_buffer);
     ctx.runtime.g_pass_active = false;
+    ctx.runtime.g_pass_depth_ready = true;
 }
 
 pub fn beginFXAAPassInternal(ctx: anytype) void {

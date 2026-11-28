@@ -323,7 +323,7 @@ fn computeDepthPyramid(ctx_ptr: *anyopaque) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
-    if (!ctx.frames.frame_in_progress) return;
+    if (!ctx.frames.frame_in_progress or !ctx.runtime.g_pass_depth_ready) return;
     if (ctx.depth_pyramid.pipeline == null) return;
     pass_orchestration.ensureNoRenderPassActiveInternal(ctx);
 
