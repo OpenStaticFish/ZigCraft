@@ -36,6 +36,13 @@ pub fn recreatePendingShadowResources(ctx: anytype) !void {
     if (ctx.shadow_system.shadow_image != null) {
         lifecycle.transitionImagesToShaderRead(ctx, &[_]c.VkImage{ctx.shadow_system.shadow_image}, true, rhi.SHADOW_CASCADE_COUNT) catch |err| {
             log.log.err("Failed to transition recreated shadow array: {}", .{err});
+            if (ctx.frames.retirement_error != null) {
+                // The replacement may still be in use by the layout command.
+                // Only the old system, drained before recreation, can be freed.
+                for (previous_handles) |handle| if (handle != 0) ctx.resources.destroyTexture(handle);
+                previous_system.deinit(ctx.vulkan_device.vk_device);
+                return err;
+            }
             for (ctx.shadow_runtime.shadow_map_handles) |handle| if (handle != 0) ctx.resources.destroyTexture(handle);
             ctx.shadow_system.deinit(ctx.vulkan_device.vk_device);
             ctx.shadow_system = previous_system;

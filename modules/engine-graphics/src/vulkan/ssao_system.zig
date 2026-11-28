@@ -58,7 +58,7 @@ pub const SSAOSystem = struct {
     noise_view: c.VkImageView = null,
     noise_handle: rhi.TextureHandle = 0,
 
-    kernel_ubo: VulkanBuffer = .{},
+    kernel_ubos: [rhi.MAX_FRAMES_IN_FLIGHT]VulkanBuffer = @splat(.{}),
     params: SSAOParams = undefined,
     sampler: c.VkSampler = null,
 
@@ -337,7 +337,9 @@ pub const SSAOSystem = struct {
     }
 
     fn initKernelUBO(self: *SSAOSystem, device: *const VulkanDevice) !void {
-        self.kernel_ubo = try Utils.createVulkanBuffer(device, @sizeOf(SSAOParams), c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        for (&self.kernel_ubos) |*ubo| {
+            ubo.* = try Utils.createVulkanBuffer(device, @sizeOf(SSAOParams), c.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, c.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | c.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        }
 
         var rng = std.Random.DefaultPrng.init(67890);
         self.params.samples = generateKernelSamples(&rng);
@@ -477,7 +479,7 @@ pub const SSAOSystem = struct {
             var depth_info = c.VkDescriptorImageInfo{ .imageLayout = c.VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, .imageView = g_depth_view, .sampler = self.sampler };
             var norm_info = c.VkDescriptorImageInfo{ .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, .imageView = g_normal_view, .sampler = self.sampler };
             var noise_info = c.VkDescriptorImageInfo{ .imageLayout = c.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, .imageView = self.noise_view, .sampler = self.sampler };
-            var buffer_info_ds = c.VkDescriptorBufferInfo{ .buffer = self.kernel_ubo.buffer, .offset = 0, .range = @sizeOf(SSAOParams) };
+            var buffer_info_ds = c.VkDescriptorBufferInfo{ .buffer = self.kernel_ubos[i].buffer, .offset = 0, .range = @sizeOf(SSAOParams) };
 
             var writes = [_]c.VkWriteDescriptorSet{
                 .{ .sType = c.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = self.descriptor_sets[i], .dstBinding = 0, .descriptorType = c.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .pImageInfo = &depth_info },
@@ -527,8 +529,11 @@ pub const SSAOSystem = struct {
         if (self.noise_view != null) c.vkDestroyImageView(vk, self.noise_view, null);
         if (self.noise_image != null) c.vkDestroyImage(vk, self.noise_image, null);
         if (self.noise_memory != null) c.vkFreeMemory(vk, self.noise_memory, null);
-        if (self.kernel_ubo.buffer != null) c.vkDestroyBuffer(vk, self.kernel_ubo.buffer, null);
-        if (self.kernel_ubo.memory != null) c.vkFreeMemory(vk, self.kernel_ubo.memory, null);
+        for (self.kernel_ubos) |ubo| {
+            if (ubo.mapped_ptr != null) c.vkUnmapMemory(vk, ubo.memory);
+            if (ubo.buffer != null) c.vkDestroyBuffer(vk, ubo.buffer, null);
+            if (ubo.memory != null) c.vkFreeMemory(vk, ubo.memory, null);
+        }
         if (self.sampler != null) c.vkDestroySampler(vk, self.sampler, null);
         self.* = std.mem.zeroes(SSAOSystem);
     }
@@ -537,7 +542,7 @@ pub const SSAOSystem = struct {
         _ = vk;
         self.params.projection = proj;
         self.params.invProjection = inv_proj;
-        if (self.kernel_ubo.mapped_ptr) |ptr| {
+        if (self.kernel_ubos[frame_index].mapped_ptr) |ptr| {
             @memcpy(@as([*]u8, @ptrCast(ptr))[0..@sizeOf(SSAOParams)], std.mem.asBytes(&self.params));
         }
 

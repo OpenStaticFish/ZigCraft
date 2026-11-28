@@ -65,6 +65,7 @@ const UploadScreen = struct {
     indirect_draw: ?struct { vertices: rhi.BufferHandle, command: rhi.BufferHandle } = null,
     overwrite_indirect: ?rhi.BufferHandle = null,
     culling: ?rhi.ICullingSystem = null,
+    water_vertices: ?rhi.BufferHandle = null,
     screenshot_path: ?[]const u8 = null,
     resize_during_draw: bool = false,
     quit_on_draw: bool = false,
@@ -125,6 +126,23 @@ const UploadScreen = struct {
             const render = self.context.render_system.getRHI().renderContext();
             render.setInstanceBuffer(self.buffer);
             render.drawIndirect(indirect.vertices, indirect.command, 0, 1, @sizeOf(c.VkDrawIndirectCommand));
+        }
+        if (self.water_vertices) |vertices| {
+            const gpu = self.context.render_system.getRHI();
+            const render = gpu.renderContext();
+            const water = gpu.water();
+            render.beginGPass();
+            render.endGPass();
+            gpu.ssao().compute(.identity, .identity);
+            water.beginReflectionPass();
+            water.endReflectionPass();
+            render.setInstanceBuffer(self.buffer);
+            render.beginMainPass();
+            try testing.expect(render.beginWaterDraw(water.getReflectionTextureHandle(), water.getSceneDepthTextureHandle()));
+            render.setModelMatrix(.identity, .one);
+            render.draw(vertices, 3, .triangles);
+            render.endWaterDraw();
+            render.endMainPass();
         }
         ui.begin();
         ui.end();
@@ -204,6 +222,10 @@ fn failGraphicsSubmit(_: *@import("engine-graphics").VulkanDevice, _: c.VkSubmit
 }
 
 fn failUploadSubmit(_: c.VkQueue, _: u32, _: [*c]const c.VkSubmitInfo, _: c.VkFence) callconv(.c) c.VkResult {
+    return c.VK_ERROR_OUT_OF_HOST_MEMORY;
+}
+
+fn failLayoutWait(_: c.VkQueue) callconv(.c) c.VkResult {
     return c.VK_ERROR_OUT_OF_HOST_MEMORY;
 }
 
@@ -377,6 +399,24 @@ test "smoke test: launch, generate, render, exit" {
         try app.runSingleFrame();
         try testing.expectEqual(read_frame + 2, vulkan.runtime.frame_index);
         try testing.expectEqual(@as(u8, 0xcd), try readUploadedByte(vulkan, command, 0));
+    }
+
+    {
+        const resources = app.render_system.getRHI().resourceManager();
+        const positions = [_][3]f32{ .{ -0.8, -0.8, 0.5 }, .{ 0.8, -0.8, 0.5 }, .{ 0, 0.8, 0.5 } };
+        var water_triangle: [positions.len]rhi.Vertex = undefined;
+        for (&water_triangle, positions) |*vertex, position| {
+            vertex.* = rhi.Vertex.init(position, .{ 1, 1, 1 }, .{ 0, 1, 0 }, .{ 0, 0 }, 0, 1, .{ 0, 0, 0 }, 1);
+        }
+        const vertices = try resources.createBuffer(@sizeOf(@TypeOf(water_triangle)), .vertex);
+        defer resources.destroyBuffer(vertices);
+        try resources.updateBuffer(vertices, 0, std.mem.asBytes(&water_triangle));
+        active_upload_screen.water_vertices = vertices;
+        defer active_upload_screen.water_vertices = null;
+        const first_frame = vulkan.runtime.frame_index;
+        try app.runSingleFrame();
+        try app.runSingleFrame();
+        try testing.expectEqual(first_frame + 2, vulkan.runtime.frame_index);
     }
 
     const resize_width: u32 = 1024;
@@ -569,6 +609,7 @@ test "smoke test: launch, generate, render, exit" {
 
         app.input.interface().setShouldQuit(false);
         active_upload_screen.quit_on_draw = false;
+        const submit_graphics = vulkan.frames.submit_graphics;
         vulkan.frames.submit_graphics = &failGraphicsSubmit;
         try testing.expectError(error.OutOfMemory, app.runSingleFrame());
         try testing.expectError(error.OutOfMemory, app.runSingleFrame());
@@ -580,6 +621,19 @@ test "smoke test: launch, generate, render, exit" {
         try app.render_system.getRHI().resourceManager().updateBuffer(active_upload_screen.buffer, 63, &.{0xcd});
         try testing.expectError(error.OutOfMemory, app.runSingleFrame());
         try testing.expectError(error.OutOfMemory, app.runSingleFrame());
+
+        // Shadow recreation runs before any frame fence wait. Submit its
+        // actual transition, then fail only the completion check.
+        vulkan.frames.retirement_error = null;
+        vulkan.frames.submit_graphics = submit_graphics;
+        const old_shadow_image = vulkan.shadow_system.shadow_image;
+        vulkan.shadow_runtime.pending_shadow_resolution = if (vulkan.shadow_runtime.shadow_resolution == 256) 512 else 256;
+        vulkan.frames.wait_layout_queue_idle = &failLayoutWait;
+        try testing.expectError(error.OutOfMemory, app.runSingleFrame());
+        try testing.expect(vulkan.shadow_system.shadow_image != null);
+        try testing.expect(vulkan.shadow_system.shadow_image != old_shadow_image);
+        try testing.expectError(error.OutOfMemory, app.runSingleFrame());
+        app.render_system.waitIdle();
     }
 
     const val_count = app.render_system.getRHI().query().getValidationErrorCount();

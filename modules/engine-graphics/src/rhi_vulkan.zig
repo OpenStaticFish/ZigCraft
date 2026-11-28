@@ -82,6 +82,7 @@ fn beginFrame(ctx_ptr: *anyopaque) anyerror!bool {
     if ((ctx.runtime.framebuffer_resized or ctx.swapchain.framebuffer_resized) and !ctx.runtime.swapchain_recreate_failed) {
         log.log.info("beginFrame: triggering recreateSwapchainInternal (resize)", .{});
         try frame_orchestration.recreateSwapchainInternal(ctx);
+        if (ctx.frames.retirement_error) |err| return err;
     }
 
     const inter_frame_transfer = ctx.resources.transfer.transfer_ready[ctx.resources.transfer.current_frame];

@@ -276,7 +276,10 @@ fn transitionImagesFromUndefined(ctx: anytype, images: []const c.VkImage, layout
     submit_info.pCommandBuffers = &cmd;
     try ctx.frames.submit_graphics(&ctx.vulkan_device, submit_info, null);
     pending = true;
-    try Utils.checkVk(c.vkQueueWaitIdle(ctx.vulkan_device.queue));
+    Utils.checkVk(ctx.frames.wait_layout_queue_idle(ctx.vulkan_device.queue)) catch |err| {
+        ctx.frames.retirement_error = err;
+        return err;
+    };
     pending = false;
 }
 
