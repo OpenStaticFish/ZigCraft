@@ -51,6 +51,6 @@ jobs:
                 exit 1
               }
             fi
-            git diff --name-only --no-renames -z "$BASE" "$HEAD" |
+            ruby scripts/ci_changed_paths.rb "$BASE" "$HEAD" |
               python3 scripts/ci_changes.py >> "$GITHUB_OUTPUT"
           fi

@@ -6,6 +6,8 @@ Game and toolchain changes run `zig build test` in both `Debug` and `ReleaseSafe
 
 On every PR to `dev` and every `dev` push, Build classifies the full diff with `scripts/ci_changes.py`. Prose and repository automation skip the game jobs. Weston, Lavapipe and Vulkan runner configuration select graphics smoke tests; shader baselines and checker scripts select shader validation. Mixed diffs run the union of applicable checks, and unrecognized inputs select the full game suite. Manual Build dispatches always run the suite for the requested ref.
 
+Changing the Build workflow itself runs the full suite to exercise its commands. Edits limited to runner labels, comments, or YAML formatting still use the lightweight route.
+
 The required `build` and `unit-test` checks still report on every PR. `build` verifies compilation and formatting, including formatter compatibility on shared toolchain changes. `unit-test` verifies the unit matrix, shader validation, and graphics smoke results. Both gates accept skipped work only when the classifier explicitly deselected it. Coverage remains advisory.
 
 Run locally:

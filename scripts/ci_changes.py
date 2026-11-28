@@ -21,7 +21,8 @@ REPO_ONLY = (
     "scripts/compare_benchmarks.sh", "scripts/run_benchmark.sh", "scripts/validate_benchmark_artifact.sh",
     "scripts/*generated_tests.sh", "scripts/authorize_source_task.sh",
     "scripts/capture_*.sh", "scripts/check_asset_budget.sh",
-    "scripts/check_existing_test_prs.sh", "scripts/ci_changes.py",
+    "scripts/check_existing_test_prs.sh", "scripts/ci_changes.py", "scripts/ci_changed_paths.rb",
+    "scripts/test_ci_diff.rb",
     "scripts/test_ci_changes.py", "scripts/test_build_gates.rb", "scripts/codebase_report.sh",
     "scripts/compare_visual_golden.sh", "scripts/configure*git_identity.sh",
     "scripts/ensure_label.sh", "scripts/github_actions_common.sh",
@@ -49,7 +50,7 @@ def classify(paths, full=False):
     game = fmt = graphics = full
     shaders = full
     for path in paths:
-        if path in TOOLCHAIN_CONFIG or path.startswith(TOOLCHAIN_ACTIONS):
+        if path == ".github/workflows/build.yml" or path in TOOLCHAIN_CONFIG or path.startswith(TOOLCHAIN_ACTIONS):
             game = fmt = shaders = True
         elif path in SHADER_INPUTS:
             shaders = True

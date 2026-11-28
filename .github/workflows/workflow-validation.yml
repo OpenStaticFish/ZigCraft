@@ -11,6 +11,7 @@ on:
       - "scripts/*.sh"
       - "scripts/*.py"
       - "scripts/*.jq"
+      - "scripts/*.rb"
       - ".github/prompts/**"
       - ".shellcheckrc"
       - "devenv.nix"
@@ -26,6 +27,7 @@ on:
       - "scripts/*.sh"
       - "scripts/*.py"
       - "scripts/*.jq"
+      - "scripts/*.rb"
       - ".github/prompts/**"
       - ".shellcheckrc"
       - "devenv.nix"
@@ -80,7 +82,9 @@ jobs:
         run: python3 scripts/test_opencode_discussion_markdown.py
 
       - name: Test CI routing
-        run: python3 scripts/test_ci_changes.py
+        run: |
+          python3 scripts/test_ci_changes.py
+          ruby scripts/test_ci_diff.rb
 
       - name: Validate devenv configuration
         run: devenv info >/dev/null

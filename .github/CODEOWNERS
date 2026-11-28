@@ -3,6 +3,8 @@ modules/engine-graphics/**   @OpenStaticFish
 modules/world-persistence/** @OpenStaticFish
 .github/workflows/**         @OpenStaticFish
 scripts/ci_changes.py        @OpenStaticFish
+scripts/ci_changed_paths.rb   @OpenStaticFish
+scripts/test_ci_diff.rb       @OpenStaticFish
 scripts/test_ci_changes.py   @OpenStaticFish
 scripts/test_build_gates.rb  @OpenStaticFish
 .github/opencode/**          @OpenStaticFish

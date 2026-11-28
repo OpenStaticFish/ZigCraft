@@ -10,7 +10,7 @@ class ChangeRoutingTests(unittest.TestCase):
 
     def test_docs_and_automation_do_not_allocate_game_runners(self):
         self.assert_jobs(["README.md", "docs/benchmarks/README.md", "docs/assets/budget.json"])
-        self.assert_jobs([".github/workflows/build.yml", "scripts/opencode_review.sh"])
+        self.assert_jobs([".github/workflows/repo-automation.yml", "scripts/opencode_review.sh"])
         self.assert_jobs([".github/actions/load-prompt/action.yml"])
         self.assert_jobs(["scripts/run_benchmark.sh", "scripts/benchmark_baseline.py",
                           "scripts/compare_benchmarks.sh", "scripts/validate_benchmark_artifact.sh"])
