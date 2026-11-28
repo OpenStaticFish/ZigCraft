@@ -239,7 +239,17 @@ pub const TransferQueue = struct {
         std.debug.assert(staging != null);
 
         const copies = self.pending_copies[idx][0..self.pending_copy_count[idx]];
-        if (!self.is_dedicated) orderTransferWrites(cmd);
+        if (!self.is_dedicated) {
+            // Mutable buffers can still be read by a preceding graphics or
+            // compute submission on this queue. Order those reads before any
+            // overwrite and make prior writes available to the new batch.
+            const barrier = c.VkMemoryBarrier{
+                .sType = c.VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+                .srcAccessMask = c.VK_ACCESS_MEMORY_WRITE_BIT,
+                .dstAccessMask = c.VK_ACCESS_TRANSFER_WRITE_BIT,
+            };
+            c.vkCmdPipelineBarrier(cmd, c.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, c.VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, null, 0, null);
+        }
         var unordered_start: usize = 0;
         for (copies, 0..) |pc, i| {
             // Bound the overlap search even for full batches of disjoint writes.
