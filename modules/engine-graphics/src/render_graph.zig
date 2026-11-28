@@ -339,7 +339,7 @@ pub const GPass = struct {
 
     fn execute(ptr: *anyopaque, ctx: SceneContext) anyerror!void {
         const self: *GPass = @ptrCast(@alignCast(ptr));
-        if (!self.enabled or !ctx.ssao_enabled) return;
+        if (!self.enabled or (!ctx.ssao_enabled and !ctx.taa_enabled)) return;
 
         ctx.render_ctx.beginGPass();
         const atlas = self.material_system.getAtlasHandles(ctx.env_map_handle);

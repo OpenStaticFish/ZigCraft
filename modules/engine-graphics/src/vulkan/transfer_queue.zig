@@ -173,6 +173,7 @@ pub const TransferQueue = struct {
             .family_index = transfer_family,
             .is_dedicated = is_dedicated,
         };
+        errdefer self.deinit(device.vk_device);
         @memset(&self.transfer_ready, false);
         @memset(&self.transfer_submitted, false);
         @memset(&self.pending_copy_count, 0);

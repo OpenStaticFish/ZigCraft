@@ -6,13 +6,14 @@ const log = @import("engine-core").log;
 
 pub fn waitIdle(ctx: anytype) void {
     const device = ctx.vulkan_device.vk_device orelse return;
-    var result = ctx.frames.wait_device_idle(device);
+    const wait_device_idle = ctx.frames.wait_device_idle orelse &c.vkDeviceWaitIdle;
+    var result = wait_device_idle(device);
     if (result == c.VK_SUCCESS or result == c.VK_ERROR_DEVICE_LOST) return;
 
     // A transient allocation failure does not tell us whether work retired.
     // Retry before callers release GPU resources; fail closed if still unknown.
     log.log.warn("Vulkan device idle wait failed ({}); retrying", .{result});
-    result = ctx.frames.wait_device_idle(device);
+    result = wait_device_idle(device);
     if (result != c.VK_SUCCESS and result != c.VK_ERROR_DEVICE_LOST) {
         std.debug.panic("Cannot safely retire Vulkan resources: vkDeviceWaitIdle returned {}", .{result});
     }

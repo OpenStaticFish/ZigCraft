@@ -233,6 +233,7 @@ pub const VulkanContext = struct {
     vulkan_device: VulkanDevice,
     resources: ResourceManager,
     frames: FrameManager,
+    init_failure: enum { none, resources, frames } = .none,
     swapchain: SwapchainPresenter,
     descriptors: DescriptorManager,
 

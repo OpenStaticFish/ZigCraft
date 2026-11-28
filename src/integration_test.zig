@@ -325,6 +325,19 @@ test "smoke test: launch, generate, render, exit" {
     defer if (!app_deinitialized) app.deinit();
     if (!build_options.skip_present) app.window_manager.show();
 
+    const graphics = @import("engine-graphics");
+    const vulkan: *graphics.VulkanContext = @ptrCast(@alignCast(app.render_system.rhi.ptr));
+    if (build_options.skip_present) {
+        for ([_]@TypeOf(vulkan.init_failure){ .resources, .frames }) |failure| {
+            const partial = try graphics.rhi_vulkan.createRHI(test_allocator, app.window_manager.window, null, 256, 1, 1, true);
+            defer partial.deinit();
+            const context: *graphics.VulkanContext = @ptrCast(@alignCast(partial.ptr));
+            context.init_failure = failure;
+            try testing.expectError(error.OutOfMemory, partial.init(test_allocator, null));
+            try testing.expect(context.vulkan_device.vk_device != null);
+        }
+    }
+
     const world_screen = try WorldScreen.init(test_allocator, app.engineContext(), 12345, 0);
     app.screen_manager.setScreen(world_screen.screen());
 
@@ -348,6 +361,24 @@ test "smoke test: launch, generate, render, exit" {
     try app.runSingleFrame();
     try testing.expectEqual(requested_detail, world_screen.session.world.render_distance);
 
+    if (build_options.skip_present and app.render_system.g_pass.enabled) {
+        const old_taa = settings.taa_enabled;
+        const old_ssao = settings.ssao_enabled;
+        const old_taa_pass = app.render_system.taa_pass.enabled;
+        defer settings.taa_enabled = old_taa;
+        defer settings.ssao_enabled = old_ssao;
+        defer app.render_system.taa_pass.enabled = old_taa_pass;
+        settings.taa_enabled = true;
+        settings.ssao_enabled = false;
+        app.render_system.taa_pass.enabled = true;
+        for (0..3) |frame| {
+            if (frame == 1) app.render_system.rhi.context().requestSwapchainRecreate();
+            try app.runSingleFrame();
+            try testing.expect(vulkan.runtime.g_pass_depth_ready);
+            try testing.expect(vulkan.taa.ran_this_frame);
+        }
+    }
+
     var upload_screen: ?*UploadScreen = null;
     const upload_factory = try Screen.makeScreenFactory(UploadScreenFactory, test_allocator, .{ .context = app.engineContext(), .result = &upload_screen });
     const replace_during_draw = try ReplaceDuringDrawScreen.init(test_allocator, app.engineContext(), upload_factory);
@@ -361,7 +392,6 @@ test "smoke test: launch, generate, render, exit" {
     const fault_count_before_replace = app.render_system.getRHI().query().getFaultCount();
     try app.runSingleFrame();
     const active_upload_screen = upload_screen.?;
-    const vulkan: *@import("engine-graphics").VulkanContext = @ptrCast(@alignCast(app.render_system.rhi.ptr));
     try testing.expectEqual(@as(usize, 1), app.screen_manager.stack.items.len);
     try testing.expect(app.screen_manager.stack.items[0].ptr == @as(*anyopaque, @ptrCast(active_upload_screen)));
     try testing.expectEqual(fault_count_before_replace, app.render_system.getRHI().query().getFaultCount());
@@ -646,6 +676,13 @@ test "smoke test: launch, generate, render, exit" {
                 try render.endFrame();
             }
         }
+        try testing.expect(try render.beginFrame());
+        render.computeTAA();
+        const history_valid_without_gpass = vulkan.taa.history_valid;
+        const taa_ran_without_gpass = vulkan.taa.ran_this_frame;
+        render.abortFrame();
+        try testing.expect(!history_valid_without_gpass);
+        try testing.expect(!taa_ran_without_gpass);
         vulkan.taa.enabled = original_taa;
         quality.setMSAA(original_samples);
         if (!try render.beginFrame()) return error.MsaaRestoreFrameSkipped;

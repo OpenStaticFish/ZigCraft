@@ -131,6 +131,7 @@ pub fn createRHI(
         ctx.debug_shadow.descriptor_next = .{ 0, 0 };
     }
     ctx.post_process = .{};
+    ctx.taa = .{};
     ctx.descriptors.descriptor_pool = null;
     ctx.descriptors.descriptor_set_layout = null;
     ctx.runtime.memory_type_index = 0;

@@ -23,7 +23,7 @@ pub const FrameManager = struct {
     retirement_error: ?anyerror = null,
     submit_graphics: *const fn (*VulkanDevice, c.VkSubmitInfo, c.VkFence) anyerror!void = &VulkanDevice.submitGuarded,
     wait_layout_queue_idle: @TypeOf(&c.vkQueueWaitIdle) = &c.vkQueueWaitIdle,
-    wait_device_idle: @TypeOf(&c.vkDeviceWaitIdle) = &c.vkDeviceWaitIdle,
+    wait_device_idle: ?@TypeOf(&c.vkDeviceWaitIdle) = null,
 
     pub fn init(vulkan_device: *VulkanDevice) !FrameManager {
         var self = FrameManager{
@@ -31,10 +31,11 @@ pub const FrameManager = struct {
             .command_pool = null,
             .frame_command_pools = [_]c.VkCommandPool{null} ** rhi.MAX_FRAMES_IN_FLIGHT,
             .command_buffers = undefined,
-            .image_available_semaphores = undefined,
-            .render_finished_semaphores = undefined,
-            .in_flight_fences = undefined,
+            .image_available_semaphores = @splat(null),
+            .render_finished_semaphores = @splat(null),
+            .in_flight_fences = @splat(null),
         };
+        errdefer self.deinit();
 
         var pool_info = std.mem.zeroes(c.VkCommandPoolCreateInfo);
         pool_info.sType = c.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -76,7 +77,6 @@ pub const FrameManager = struct {
 
     pub fn deinit(self: *FrameManager) void {
         const device = self.vulkan_device.vk_device;
-        _ = c.vkDeviceWaitIdle(device);
 
         for (0..rhi.MAX_FRAMES_IN_FLIGHT) |i| {
             c.vkDestroySemaphore(device, self.image_available_semaphores[i], null);

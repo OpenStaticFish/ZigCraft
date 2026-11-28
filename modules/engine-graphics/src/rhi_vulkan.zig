@@ -233,6 +233,10 @@ fn computeTAA(ctx_ptr: *anyopaque) void {
     if (!ctx.frames.frame_in_progress) return;
     if (!ctx.taa.enabled) return;
     pass_orchestration.ensureNoRenderPassActiveInternal(ctx);
+    if (!ctx.runtime.g_pass_depth_ready) {
+        ctx.taa.history_valid = false;
+        return;
+    }
 
     const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
     const render_extent = ctx.dynamic_resolution.getRenderExtent();

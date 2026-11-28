@@ -88,6 +88,7 @@ pub const ResourceManager = struct {
         }
 
         self.staging_ring = try StagingRing.init(vulkan_device, transfer_queue.DEFAULT_STAGING_CAPACITY);
+        errdefer self.staging_ring.deinit(vulkan_device.vk_device);
         log.log.info("Staging ring initialized: {}MB", .{transfer_queue.DEFAULT_STAGING_CAPACITY / (1024 * 1024)});
 
         // Buffer resources use exclusive sharing and are consumed by graphics.

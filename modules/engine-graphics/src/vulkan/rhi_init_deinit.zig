@@ -29,7 +29,9 @@ pub fn initContext(ctx: anytype, allocator: std.mem.Allocator, render_device: ?*
 
     ctx.vulkan_device = try VulkanDevice.init(allocator, ctx.window);
     ctx.vulkan_device.initDebugMessenger();
+    if (ctx.init_failure == .resources) return error.OutOfMemory;
     ctx.resources = try ResourceManager.init(allocator, &ctx.vulkan_device);
+    if (ctx.init_failure == .frames) return error.OutOfMemory;
     ctx.frames = try FrameManager.init(&ctx.vulkan_device);
     ctx.swapchain = try SwapchainPresenter.init(allocator, &ctx.vulkan_device, ctx.window, ctx.options.msaa_samples, ctx.options.present_mode, ctx.swapchain.skip_present);
     ctx.dynamic_resolution = .{};
@@ -249,10 +251,10 @@ pub fn deinit(ctx: anytype) void {
 
         ctx.shadow_system.deinit(ctx.vulkan_device.vk_device);
 
-        ctx.descriptors.deinit();
+        if (ctx.descriptors.descriptor_pool != null) ctx.descriptors.deinit();
         ctx.swapchain.deinit();
-        ctx.frames.deinit();
-        ctx.resources.deinit();
+        if (ctx.frames.command_pool != null) ctx.frames.deinit();
+        if (ctx.resources.staging_ring.buffer != null) ctx.resources.deinit();
 
         if (ctx.timing.query_pool != null) {
             c.vkDestroyQueryPool(ctx.vulkan_device.vk_device, ctx.timing.query_pool, null);
