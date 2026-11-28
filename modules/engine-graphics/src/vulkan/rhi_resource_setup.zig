@@ -350,19 +350,6 @@ pub fn createGPassResources(ctx: anytype) !void {
 
     ctx.gpass.g_pass_extent = extent;
 
-    // Depth pyramid samples the G-Pass depth view, so keep it in sync here.
-    if (ctx.gpass.g_depth_view != null) {
-        ctx.depth_pyramid.init(
-            &ctx.vulkan_device,
-            ctx.allocator,
-            ctx.gpass.g_depth_view,
-            extent.width,
-            extent.height,
-        ) catch |err| {
-            log.log.warn("DepthPyramidSystem init failed (non-fatal): {}", .{err});
-        };
-    }
-
     log.log.debug("G-Pass resources created ({}x{}) with velocity buffer", .{ extent.width, extent.height });
 }
 

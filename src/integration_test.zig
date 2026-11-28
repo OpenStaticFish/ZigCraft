@@ -123,6 +123,7 @@ const UploadScreen = struct {
         // A pyramid request without a G-pass must not sample unwritten depth,
         // including on the first frame after swapchain recreation.
         self.context.render_system.getRHI().postProcess().computeDepthPyramid();
+        self.context.render_system.getRHI().ssao().compute(.identity, .identity);
         if (self.indirect_draw) |indirect| {
             const render = self.context.render_system.getRHI().renderContext();
             render.setInstanceBuffer(self.buffer);

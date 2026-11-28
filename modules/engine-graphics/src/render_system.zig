@@ -62,7 +62,6 @@ pub const RenderSystem = struct {
     shadow_passes: [4]render_graph_pkg.ShadowPass,
     g_pass: render_graph_pkg.GPass,
     ssao_pass: render_graph_pkg.SSAOPass,
-    depth_pyramid_pass: render_graph_pkg.DepthPyramidPass,
     mesh_build_pass: render_graph_pkg.MeshBuildPass,
     sky_pass: render_graph_pkg.SkyPass,
     cloud_pass: render_graph_pkg.CloudPass,
@@ -217,7 +216,6 @@ pub const RenderSystem = struct {
             .shadow_passes = undefined,
             .g_pass = undefined,
             .ssao_pass = .{},
-            .depth_pyramid_pass = .{},
             .mesh_build_pass = .{},
             .sky_pass = .{},
             .cloud_pass = .{},
@@ -250,7 +248,6 @@ pub const RenderSystem = struct {
         self.g_pass = render_graph_pkg.GPass.init(material_system);
         self.g_pass.enabled = !disable_gpass_draw;
         self.ssao_pass.enabled = !disable_ssao;
-        self.depth_pyramid_pass.enabled = !disable_gpass_draw;
         self.opaque_pass = render_graph_pkg.OpaquePass.init(material_system);
         self.water_reflection_pass = render_graph_pkg.WaterReflectionPass.init(material_system);
         self.water_reflection_pass.enabled = !disable_water;
@@ -273,9 +270,6 @@ pub const RenderSystem = struct {
             try self.render_graph.addPass(self.mesh_build_pass.pass());
             try self.render_graph.addPass(self.g_pass.pass());
             try self.render_graph.addPass(self.ssao_pass.pass());
-            if (!safe_mode) {
-                try self.render_graph.addPass(self.depth_pyramid_pass.pass());
-            }
             if (self.water_reflection_pass.enabled) {
                 try self.render_graph.addPass(self.water_reflection_pass.pass());
             }

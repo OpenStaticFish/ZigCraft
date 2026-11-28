@@ -328,7 +328,18 @@ fn computeDepthPyramid(ctx_ptr: *anyopaque) void {
     ctx.mutex.lock();
     defer ctx.mutex.unlock();
     if (!ctx.frames.frame_in_progress or !ctx.runtime.g_pass_depth_ready) return;
-    if (ctx.depth_pyramid.pipeline == null) return;
+    if (!ctx.depth_pyramid.isValid()) {
+        ctx.depth_pyramid.init(
+            &ctx.vulkan_device,
+            ctx.allocator,
+            ctx.gpass.g_depth_view,
+            ctx.gpass.g_pass_extent.width,
+            ctx.gpass.g_pass_extent.height,
+        ) catch |err| {
+            log.log.warn("DepthPyramidSystem init failed (non-fatal): {}", .{err});
+            return;
+        };
+    }
     pass_orchestration.ensureNoRenderPassActiveInternal(ctx);
 
     const command_buffer = ctx.frames.command_buffers[ctx.frames.current_frame];
@@ -913,9 +924,18 @@ fn getNativeSwapchainImageCount(ctx_ptr: *anyopaque) u32 {
 }
 fn computeSsao(ctx_ptr: *anyopaque, proj: Mat4, inv_proj: Mat4) void {
     const ctx: *VulkanContext = @ptrCast(@alignCast(ctx_ptr));
+    ctx.mutex.lock();
+    defer ctx.mutex.unlock();
+    if (!ctx.frames.frame_in_progress) return;
+    const cmd = ctx.frames.command_buffers[ctx.frames.current_frame];
+    pass_orchestration.ensureNoRenderPassActiveInternal(ctx);
+    if (!ctx.runtime.g_pass_depth_ready) {
+        ctx.ssao_system.finishAO(cmd, ctx.swapchain.getExtent(), null);
+        return;
+    }
     ctx.ssao_system.compute(
         ctx.vulkan_device.vk_device,
-        ctx.frames.command_buffers[ctx.frames.current_frame],
+        cmd,
         ctx.frames.current_frame,
         ctx.dynamic_resolution.getRenderExtent(),
         proj,
